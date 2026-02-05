@@ -1,0 +1,316 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color: #1a1a2e;
+  background-color: #f8f9fa;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header */
+.header {
+  text-align: center;
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin: 0;
+  color: #2d3748;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.subtitle {
+  color: #718096;
+  margin: 0.5rem 0 0 0;
+  font-size: 1.1rem;
+}
+
+/* Sections */
+section {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+section h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.25rem;
+  color: #2d3748;
+  font-weight: 600;
+}
+
+/* Configuration Section */
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.config-row label {
+  font-weight: 500;
+  color: #4a5568;
+  min-width: 120px;
+}
+
+.config-row .path {
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.9rem;
+  background: #edf2f7;
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  color: #2d3748;
+  flex: 1;
+}
+
+.config-row .not-set {
+  color: #a0aec0;
+  font-style: italic;
+  flex: 1;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.status-row label {
+  font-weight: 500;
+  color: #4a5568;
+  min-width: 120px;
+}
+
+.status {
+  font-weight: 500;
+}
+
+.status.ready {
+  color: #38a169;
+}
+
+.status.pending {
+  color: #d69e2e;
+}
+
+.error {
+  background: #fed7d7;
+  color: #c53030;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.executables {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.executables label {
+  display: block;
+  font-weight: 500;
+  color: #4a5568;
+  margin-bottom: 0.75rem;
+}
+
+.exe-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.exe-tag {
+  background: #e6fffa;
+  color: #234e52;
+  padding: 0.25rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+/* Buttons */
+button {
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  font-family: inherit;
+  color: #2d3748;
+  background-color: white;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: #4299e1;
+  color: #4299e1;
+}
+
+button:active:not(:disabled) {
+  background-color: #ebf8ff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Action Grid */
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.action-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  min-height: 120px;
+  background: #f7fafc;
+  border: 2px dashed #e2e8f0;
+  border-radius: 12px;
+  transition: all 0.2s ease;
+}
+
+.action-btn:hover:not(:disabled) {
+  border-color: #4299e1;
+  background: #ebf8ff;
+}
+
+.action-icon {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #4299e1;
+  margin-bottom: 0.5rem;
+}
+
+.action-label {
+  font-weight: 600;
+  color: #2d3748;
+  margin-bottom: 0.25rem;
+}
+
+.action-hint {
+  font-size: 0.75rem;
+  color: #a0aec0;
+}
+
+/* Footer */
+.footer {
+  margin-top: auto;
+  padding-top: 2rem;
+  text-align: center;
+  color: #a0aec0;
+  font-size: 0.85rem;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #e2e8f0;
+    background-color: #1a202c;
+  }
+
+  .header h1 {
+    color: #f7fafc;
+  }
+
+  .subtitle {
+    color: #a0aec0;
+  }
+
+  section {
+    background: #2d3748;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+
+  section h2 {
+    color: #f7fafc;
+  }
+
+  .config-row label,
+  .status-row label,
+  .executables label {
+    color: #a0aec0;
+  }
+
+  .config-row .path {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
+  button {
+    background-color: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  button:hover:not(:disabled) {
+    border-color: #63b3ed;
+    color: #63b3ed;
+  }
+
+  button:active:not(:disabled) {
+    background-color: #2c5282;
+  }
+
+  .exe-tag {
+    background: #2c7a7b;
+    color: #b2f5ea;
+  }
+
+  .action-btn {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .action-btn:hover:not(:disabled) {
+    border-color: #63b3ed;
+    background: #2c5282;
+  }
+
+  .action-icon {
+    color: #63b3ed;
+  }
+
+  .action-label {
+    color: #f7fafc;
+  }
+
+  .error {
+    background: #742a2a;
+    color: #feb2b2;
+  }
+}
