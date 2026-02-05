@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import { SCFWizard } from "./components/SCFWizard";
+
+type AppView = "home" | "scf-wizard";
 
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("Not configured");
   const [error, setError] = useState<string | null>(null);
+  const [currentView, setCurrentView] = useState<AppView>("home");
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -38,11 +43,15 @@ function App() {
 
   async function selectQEPath() {
     try {
-      // For now, use a prompt - in full version we'd use Tauri's dialog
-      const path = prompt("Enter path to QE bin directory:", "/path/to/qe-7.5/bin");
-      if (path) {
-        await invoke("set_qe_path", { path });
-        setQePath(path);
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select Quantum ESPRESSO bin directory",
+      });
+
+      if (selected && typeof selected === "string") {
+        await invoke("set_qe_path", { path: selected });
+        setQePath(selected);
         await loadExecutables();
         setStatus("Ready");
         setError(null);
@@ -50,6 +59,10 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  if (currentView === "scf-wizard" && qePath) {
+    return <SCFWizard qePath={qePath} onBack={() => setCurrentView("home")} />;
   }
 
   return (
@@ -103,10 +116,10 @@ function App() {
               <span className="action-label">New Project</span>
               <span className="action-hint">Coming soon</span>
             </button>
-            <button className="action-btn" disabled>
+            <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
               <span className="action-icon">SCF</span>
               <span className="action-label">SCF Calculation</span>
-              <span className="action-hint">Coming soon</span>
+              <span className="action-hint">Import CIF & run</span>
             </button>
             <button className="action-btn" disabled>
               <span className="action-icon">Band</span>
