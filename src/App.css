@@ -1573,50 +1573,46 @@ h3 .tooltip-text::after {
   flex: 1;
 }
 
-.project-view-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.75rem;
+/* Floating Settings Button */
+.floating-settings {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 100;
 }
 
-/* Settings Gear Dropdown */
-.settings-dropdown {
-  position: relative;
-}
-
-.settings-gear-btn {
+.floating-settings-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 48px;
+  height: 48px;
   padding: 0;
-  background: #f7fafc;
+  background: white;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border-radius: 50%;
   color: #718096;
   cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   transition: all 0.15s ease;
 }
 
-.settings-gear-btn:hover {
-  background: #edf2f7;
-  border-color: #cbd5e0;
+.floating-settings-btn:hover {
+  background: #f7fafc;
   color: #4a5568;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
-.settings-menu {
+.floating-settings-menu {
   position: absolute;
-  top: 100%;
+  bottom: 100%;
   right: 0;
-  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
   min-width: 160px;
   background: white;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   overflow: hidden;
 }
 
@@ -1919,19 +1915,18 @@ h3 .tooltip-text::after {
     background: #1a202c;
   }
 
-  .settings-gear-btn {
+  .floating-settings-btn {
     background: #4a5568;
     border-color: #4a5568;
     color: #a0aec0;
   }
 
-  .settings-gear-btn:hover {
+  .floating-settings-btn:hover {
     background: #718096;
-    border-color: #718096;
     color: #e2e8f0;
   }
 
-  .settings-menu {
+  .floating-settings-menu {
     background: #2d3748;
     border-color: #4a5568;
   }
