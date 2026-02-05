@@ -7,6 +7,7 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
+import { SaveToProjectDialog } from "./SaveToProjectDialog";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -36,10 +37,17 @@ type WizardStep = "import" | "configure" | "run" | "results";
 export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
   const [step, setStep] = useState<WizardStep>("import");
   const [crystalData, setCrystalData] = useState<CrystalData | null>(null);
-  const [_cifFilename, setCifFilename] = useState<string>("");
+  const [cifFilename, setCifFilename] = useState<string>("");
+  const [cifContent, setCifContent] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [pseudopotentials, setPseudopotentials] = useState<string[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+
+  // Save dialog state
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [calcStartTime, setCalcStartTime] = useState<string>("");
+  const [calcEndTime, setCalcEndTime] = useState<string>("");
+  const [generatedInput, setGeneratedInput] = useState<string>("");
 
   const [config, setConfig] = useState<SCFConfig>({
     ecutwfc: 40,
@@ -177,6 +185,7 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
         const parsed = parseCIF(content);
         setCrystalData(parsed);
         setCifFilename(selected.split("/").pop() || "structure.cif");
+        setCifContent(content);
         setError(null);
         setStep("configure");
       }
@@ -204,6 +213,10 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
     setOutput("");
     setResult(null);
     setStep("run");
+
+    // Track calculation start time
+    const startTime = new Date().toISOString();
+    setCalcStartTime(startTime);
 
     try {
       const elements = getUniqueElements();
@@ -263,6 +276,7 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
 
       // Generate and display the input file
       const inputText = await invoke<string>("generate_input", { calculation });
+      setGeneratedInput(inputText);
       setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running... ===\n`);
 
       // Run the calculation
@@ -270,6 +284,10 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
         calculation,
         workingDir: "/tmp/qcortado_work",
       });
+
+      // Track calculation end time
+      const endTime = new Date().toISOString();
+      setCalcEndTime(endTime);
 
       setResult(calcResult);
       setOutput((prev) => prev + "\n=== Calculation Complete ===\n" + calcResult.raw_output);
@@ -622,14 +640,55 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
                 ← Back to Configure
               </button>
               {result && (
-                <button onClick={() => setStep("import")} className="new-calc-btn">
-                  New Calculation
-                </button>
+                <>
+                  <button
+                    onClick={() => setShowSaveDialog(true)}
+                    className="save-project-btn"
+                  >
+                    Save to Project
+                  </button>
+                  <button onClick={() => setStep("import")} className="new-calc-btn">
+                    New Calculation
+                  </button>
+                </>
               )}
             </div>
           </div>
         )}
       </div>
+
+      {/* Save to Project Dialog */}
+      {showSaveDialog && crystalData && result && (
+        <SaveToProjectDialog
+          isOpen={showSaveDialog}
+          onClose={() => setShowSaveDialog(false)}
+          onSaved={() => {
+            setShowSaveDialog(false);
+          }}
+          calculationData={{
+            calc_type: "scf",
+            parameters: {
+              ecutwfc: config.ecutwfc,
+              ecutrho: config.ecutrho,
+              kgrid: config.kgrid,
+              conv_thr: config.conv_thr,
+              mixing_beta: config.mixing_beta,
+            },
+            result: result,
+            started_at: calcStartTime,
+            completed_at: calcEndTime,
+            input_content: generatedInput,
+            output_content: result.raw_output || "",
+          }}
+          cifData={{
+            filename: cifFilename,
+            formula: crystalData.formula_sum || crystalData.formula_structural || "Unknown",
+            content: cifContent,
+            crystal_data: crystalData,
+          }}
+          workingDir="/tmp/qcortado_work"
+        />
+      )}
     </div>
   );
 }

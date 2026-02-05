@@ -966,3 +966,553 @@ h3 .tooltip-text::after {
     color: #c6f6d5;
   }
 }
+
+/* ============================================
+   Save to Project Dialog Styles
+   ============================================ */
+
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog-content {
+  background: white;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  color: #2d3748;
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: #a0aec0;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.dialog-close:hover {
+  color: #4a5568;
+}
+
+.dialog-body {
+  padding: 1.5rem;
+}
+
+.dialog-error {
+  background: #fed7d7;
+  color: #c53030;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.save-mode-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  border: 2px solid #e2e8f0;
+  background: white;
+  border-radius: 8px;
+  font-weight: 500;
+  color: #4a5568;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-tab:hover:not(:disabled) {
+  border-color: #4299e1;
+  color: #4299e1;
+}
+
+.mode-tab.active {
+  border-color: #4299e1;
+  background: #ebf8ff;
+  color: #2b6cb0;
+}
+
+.mode-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.save-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.form-group label {
+  font-weight: 500;
+  color: #4a5568;
+  font-size: 0.9rem;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: #4299e1;
+  box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.15);
+}
+
+.form-group textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+.cif-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.radio-option:hover {
+  background: #f7fafc;
+}
+
+.radio-option input[type="radio"] {
+  margin: 0;
+}
+
+.calculation-summary {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #f7fafc;
+  border-radius: 8px;
+}
+
+.calculation-summary h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.85rem;
+  color: #4a5568;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.4rem 1rem;
+  font-size: 0.9rem;
+}
+
+.summary-label {
+  color: #718096;
+}
+
+.summary-value {
+  color: #2d3748;
+  font-weight: 500;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.dialog-btn {
+  padding: 0.6rem 1.25rem;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.dialog-btn.cancel {
+  background: white;
+  border: 1px solid #e2e8f0;
+  color: #4a5568;
+}
+
+.dialog-btn.cancel:hover {
+  border-color: #cbd5e0;
+  background: #f7fafc;
+}
+
+.dialog-btn.save {
+  background: #4299e1;
+  border: 1px solid #4299e1;
+  color: white;
+}
+
+.dialog-btn.save:hover:not(:disabled) {
+  background: #3182ce;
+  border-color: #3182ce;
+}
+
+.dialog-btn.save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   Project Browser Styles
+   ============================================ */
+
+.browser-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
+  overflow: hidden;
+}
+
+.browser-header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.browser-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  color: #2d3748;
+  flex: 1;
+}
+
+.new-project-btn {
+  background: #4299e1;
+  color: white;
+  border: none;
+  padding: 0.6rem 1.25rem;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.new-project-btn:hover {
+  background: #3182ce;
+  color: white;
+}
+
+.browser-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.loading-state,
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+  color: #718096;
+}
+
+.empty-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+}
+
+.empty-state h3 {
+  margin: 0 0 0.5rem 0;
+  color: #2d3748;
+}
+
+.empty-state p {
+  margin: 0 0 1.5rem 0;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.project-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 1.25rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.project-card:hover {
+  border-color: #4299e1;
+  box-shadow: 0 4px 12px rgba(66, 153, 225, 0.15);
+}
+
+.project-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.project-name {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #2d3748;
+  font-weight: 600;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: #a0aec0;
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0.25rem;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+.delete-btn:hover:not(:disabled) {
+  color: #e53e3e;
+  background: #fed7d7;
+}
+
+.delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.project-description {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.85rem;
+  color: #718096;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.project-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.project-formula {
+  background: #e6fffa;
+  color: #234e52;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.project-stats {
+  font-size: 0.85rem;
+  color: #718096;
+}
+
+.project-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #a0aec0;
+  padding-top: 0.75rem;
+  border-top: 1px solid #edf2f7;
+}
+
+/* Save to Project Button in SCFWizard */
+.save-project-btn {
+  background: #38a169;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+}
+
+.save-project-btn:hover {
+  background: #2f855a;
+  color: white;
+}
+
+/* Dark mode for dialog and browser */
+@media (prefers-color-scheme: dark) {
+  .dialog-content {
+    background: #2d3748;
+  }
+
+  .dialog-header {
+    border-color: #4a5568;
+  }
+
+  .dialog-header h2 {
+    color: #f7fafc;
+  }
+
+  .dialog-close {
+    color: #718096;
+  }
+
+  .dialog-close:hover {
+    color: #e2e8f0;
+  }
+
+  .mode-tab {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #a0aec0;
+  }
+
+  .mode-tab:hover:not(:disabled) {
+    border-color: #63b3ed;
+    color: #63b3ed;
+  }
+
+  .mode-tab.active {
+    border-color: #63b3ed;
+    background: #2c5282;
+    color: #e2e8f0;
+  }
+
+  .form-group label {
+    color: #a0aec0;
+  }
+
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    background: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .radio-option {
+    border-color: #4a5568;
+  }
+
+  .radio-option:hover {
+    background: #4a5568;
+  }
+
+  .calculation-summary {
+    background: #4a5568;
+  }
+
+  .calculation-summary h4 {
+    color: #a0aec0;
+  }
+
+  .summary-label {
+    color: #a0aec0;
+  }
+
+  .summary-value {
+    color: #e2e8f0;
+  }
+
+  .dialog-footer {
+    border-color: #4a5568;
+  }
+
+  .dialog-btn.cancel {
+    background: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .dialog-btn.cancel:hover {
+    border-color: #718096;
+    background: #718096;
+  }
+
+  .browser-header h2 {
+    color: #f7fafc;
+  }
+
+  .empty-state h3 {
+    color: #f7fafc;
+  }
+
+  .project-card {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .project-card:hover {
+    border-color: #63b3ed;
+    box-shadow: 0 4px 12px rgba(99, 179, 237, 0.15);
+  }
+
+  .project-name {
+    color: #f7fafc;
+  }
+
+  .project-formula {
+    background: #2c7a7b;
+    color: #b2f5ea;
+  }
+
+  .project-footer {
+    border-color: #4a5568;
+  }
+}

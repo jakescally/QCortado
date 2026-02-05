@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
+import { ProjectBrowser } from "./components/ProjectBrowser";
 
-type AppView = "home" | "scf-wizard";
+type AppView = "home" | "scf-wizard" | "project-browser";
 
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
@@ -65,6 +66,22 @@ function App() {
     return <SCFWizard qePath={qePath} onBack={() => setCurrentView("home")} />;
   }
 
+  if (currentView === "project-browser") {
+    return (
+      <ProjectBrowser
+        onBack={() => setCurrentView("home")}
+        onCreateProject={() => {
+          // For now, just show the project browser (it has a new project button)
+          // In the future, this could open a dedicated create project dialog
+        }}
+        onSelectProject={(projectId) => {
+          // Placeholder: In the future, navigate to project dashboard
+          console.log("Selected project:", projectId);
+        }}
+      />
+    );
+  }
+
   return (
     <main className="container">
       <header className="header">
@@ -108,31 +125,39 @@ function App() {
       </section>
 
       {qePath && (
-        <section className="actions-section">
-          <h2>Quick Actions</h2>
-          <div className="action-grid">
-            <button className="action-btn" disabled>
-              <span className="action-icon">+</span>
-              <span className="action-label">New Project</span>
-              <span className="action-hint">Coming soon</span>
-            </button>
-            <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
-              <span className="action-icon">SCF</span>
-              <span className="action-label">SCF Calculation</span>
-              <span className="action-hint">Import CIF & run</span>
-            </button>
-            <button className="action-btn" disabled>
-              <span className="action-icon">Band</span>
-              <span className="action-label">Band Structure</span>
-              <span className="action-hint">Coming soon</span>
-            </button>
-            <button className="action-btn" disabled>
-              <span className="action-icon">DOS</span>
-              <span className="action-label">Density of States</span>
-              <span className="action-hint">Coming soon</span>
-            </button>
-          </div>
-        </section>
+        <>
+          <section className="actions-section">
+            <h2>Projects</h2>
+            <div className="action-grid">
+              <button className="action-btn" onClick={() => setCurrentView("project-browser")}>
+                <span className="action-icon">+</span>
+                <span className="action-label">New Project</span>
+                <span className="action-hint">Create or browse</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="actions-section">
+            <h2>Quick Calculations</h2>
+            <div className="action-grid">
+              <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
+                <span className="action-icon">SCF</span>
+                <span className="action-label">SCF Calculation</span>
+                <span className="action-hint">Import CIF & run</span>
+              </button>
+              <button className="action-btn" disabled>
+                <span className="action-icon">Band</span>
+                <span className="action-label">Band Structure</span>
+                <span className="action-hint">Coming soon</span>
+              </button>
+              <button className="action-btn" disabled>
+                <span className="action-icon">DOS</span>
+                <span className="action-label">Density of States</span>
+                <span className="action-hint">Coming soon</span>
+              </button>
+            </div>
+          </section>
+        </>
       )}
 
       <footer className="footer">

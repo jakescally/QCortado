@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
+pub mod projects;
 pub mod qe;
 
 use qe::{generate_pw_input, parse_pw_output, QECalculation, QEResult, QERunner};
@@ -285,6 +286,13 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .setup(|app| {
+            // Initialize projects directory on startup
+            if let Err(e) = projects::ensure_projects_dir(&app.handle()) {
+                eprintln!("Warning: Failed to initialize projects directory: {}", e);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             set_qe_path,
             get_qe_path,
@@ -297,6 +305,13 @@ pub fn run() {
             get_project_dir,
             list_pseudopotentials,
             load_sssp_data,
+            // Project management commands
+            projects::list_projects,
+            projects::create_project,
+            projects::get_project,
+            projects::add_cif_to_project,
+            projects::save_calculation,
+            projects::delete_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
