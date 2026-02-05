@@ -215,7 +215,7 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
         outdir: "./tmp",
         pseudo_dir: qePath.replace("/bin", "/pseudo"),
         system: {
-          ibrav: 0, // Free lattice - use CELL_PARAMETERS
+          ibrav: "free", // Free lattice - use CELL_PARAMETERS
           celldm: null,
           cell_parameters: [
             [crystalData.cell_length_a.value, 0, 0],
@@ -235,7 +235,7 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
             pseudopotential: selectedPseudos[el],
           })),
           atoms: crystalData.atom_sites.map((site) => ({
-            symbol: site.type_symbol,
+            symbol: getBaseElement(site.type_symbol),
             position: [site.fract_x, site.fract_y, site.fract_z],
             if_pos: [true, true, true],
           })),
