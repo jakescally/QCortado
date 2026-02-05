@@ -1,6 +1,6 @@
 // Project View - Display project details, CIF variants, and calculations
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 interface QEResult {
@@ -43,17 +43,37 @@ interface ProjectViewProps {
   onDeleted: () => void;
 }
 
+const CONFIRM_TEXT = "delete my project for good";
+
 export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+
+  // Settings menu state
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const settingsRef = useRef<HTMLDivElement>(null);
+
+  // Delete confirmation dialog state
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     loadProject();
   }, [projectId]);
+
+  // Close settings menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
+        setShowSettingsMenu(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   async function loadProject() {
     setIsLoading(true);
@@ -69,12 +89,14 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
     }
   }
 
-  async function handleDelete() {
-    if (!project) return;
+  function openDeleteDialog() {
+    setShowSettingsMenu(false);
+    setDeleteConfirmText("");
+    setShowDeleteDialog(true);
+  }
 
-    if (!confirm(`Delete project "${project.name}"?\n\nThis will permanently delete all structures, calculations, and data. This action cannot be undone.`)) {
-      return;
-    }
+  async function handleConfirmDelete() {
+    if (deleteConfirmText !== CONFIRM_TEXT) return;
 
     setIsDeleting(true);
     try {
@@ -84,6 +106,7 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
       console.error("Failed to delete project:", e);
       setError(String(e));
       setIsDeleting(false);
+      setShowDeleteDialog(false);
     }
   }
 
@@ -150,16 +173,39 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
             <p className="project-view-description">{project.description}</p>
           )}
         </div>
-        <div className="project-view-meta">
-          <span className="meta-item">
-            Created {formatDate(project.created_at)}
-          </span>
-          <span className="meta-item">
-            {project.cif_variants.length} structure{project.cif_variants.length !== 1 ? "s" : ""}
-          </span>
-          <span className="meta-item">
-            {getTotalCalculations()} calculation{getTotalCalculations() !== 1 ? "s" : ""}
-          </span>
+        <div className="project-view-actions">
+          <div className="project-view-meta">
+            <span className="meta-item">
+              Created {formatDate(project.created_at)}
+            </span>
+            <span className="meta-item">
+              {project.cif_variants.length} structure{project.cif_variants.length !== 1 ? "s" : ""}
+            </span>
+            <span className="meta-item">
+              {getTotalCalculations()} calculation{getTotalCalculations() !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          {/* Settings gear */}
+          <div className="settings-dropdown" ref={settingsRef}>
+            <button
+              className="settings-gear-btn"
+              onClick={() => setShowSettingsMenu(!showSettingsMenu)}
+              title="Project settings"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+              </svg>
+            </button>
+
+            {showSettingsMenu && (
+              <div className="settings-menu">
+                <button className="settings-menu-item danger" onClick={openDeleteDialog}>
+                  Delete Project
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -273,39 +319,72 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
             ))}
           </div>
         )}
+      </div>
 
-        {/* Project Settings */}
-        <div className="project-settings">
-          <button
-            className="settings-toggle"
-            onClick={() => setShowSettings(!showSettings)}
-          >
-            <span>Project Settings</span>
-            <span className="expand-icon">{showSettings ? "▼" : "▶"}</span>
-          </button>
+      {/* Delete Confirmation Dialog */}
+      {showDeleteDialog && (
+        <div className="dialog-overlay" onClick={() => !isDeleting && setShowDeleteDialog(false)}>
+          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>Delete Project</h2>
+              <button
+                className="dialog-close"
+                onClick={() => setShowDeleteDialog(false)}
+                disabled={isDeleting}
+              >
+                &times;
+              </button>
+            </div>
 
-          {showSettings && (
-            <div className="settings-content">
-              <div className="danger-zone">
-                <h4>Danger Zone</h4>
-                <div className="danger-action">
-                  <div className="danger-info">
-                    <strong>Delete this project</strong>
-                    <p>Once deleted, all structures and calculations will be permanently removed.</p>
-                  </div>
-                  <button
-                    className="delete-project-btn"
-                    onClick={handleDelete}
-                    disabled={isDeleting}
-                  >
-                    {isDeleting ? "Deleting..." : "Delete Project"}
-                  </button>
-                </div>
+            <div className="dialog-body">
+              <div className="delete-warning">
+                <p>
+                  You are about to permanently delete <strong>{project.name}</strong> and all of its data:
+                </p>
+                <ul>
+                  <li>{project.cif_variants.length} structure{project.cif_variants.length !== 1 ? "s" : ""}</li>
+                  <li>{getTotalCalculations()} calculation{getTotalCalculations() !== 1 ? "s" : ""}</li>
+                  <li>All input/output files</li>
+                </ul>
+                <p className="delete-warning-emphasis">
+                  This action cannot be undone.
+                </p>
+              </div>
+
+              <div className="form-group">
+                <label>
+                  Type <code>{CONFIRM_TEXT}</code> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  placeholder={CONFIRM_TEXT}
+                  disabled={isDeleting}
+                  autoFocus
+                />
               </div>
             </div>
-          )}
+
+            <div className="dialog-footer">
+              <button
+                className="dialog-btn cancel"
+                onClick={() => setShowDeleteDialog(false)}
+                disabled={isDeleting}
+              >
+                Cancel
+              </button>
+              <button
+                className="dialog-btn delete"
+                onClick={handleConfirmDelete}
+                disabled={deleteConfirmText !== CONFIRM_TEXT || isDeleting}
+              >
+                {isDeleting ? "Deleting..." : "Delete Project"}
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
