@@ -26,7 +26,6 @@ export function ProjectBrowser({
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
 
   useEffect(() => {
@@ -44,23 +43,6 @@ export function ProjectBrowser({
       setError(String(e));
     } finally {
       setIsLoading(false);
-    }
-  }
-
-  async function handleDelete(projectId: string, projectName: string) {
-    if (!confirm(`Delete project "${projectName}"?\n\nThis will permanently delete all calculations and data.`)) {
-      return;
-    }
-
-    setDeletingId(projectId);
-    try {
-      await invoke("delete_project", { projectId });
-      await loadProjects();
-    } catch (e) {
-      console.error("Failed to delete project:", e);
-      setError(String(e));
-    } finally {
-      setDeletingId(null);
     }
   }
 
@@ -131,17 +113,6 @@ export function ProjectBrowser({
               >
                 <div className="project-card-header">
                   <h3 className="project-name">{project.name}</h3>
-                  <button
-                    className="delete-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(project.id, project.name);
-                    }}
-                    disabled={deletingId === project.id}
-                    title="Delete project"
-                  >
-                    {deletingId === project.id ? "..." : "×"}
-                  </button>
                 </div>
 
                 {project.description && (

@@ -114,6 +114,11 @@ function App() {
           setCurrentView("project-browser");
           setSelectedProjectId(null);
         }}
+        onDeleted={() => {
+          setCurrentView("project-browser");
+          setSelectedProjectId(null);
+          loadProjectCount();
+        }}
       />
     );
   }

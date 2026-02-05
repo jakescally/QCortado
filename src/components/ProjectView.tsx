@@ -40,13 +40,16 @@ interface Project {
 interface ProjectViewProps {
   projectId: string;
   onBack: () => void;
+  onDeleted: () => void;
 }
 
-export function ProjectView({ projectId, onBack }: ProjectViewProps) {
+export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     loadProject();
@@ -63,6 +66,24 @@ export function ProjectView({ projectId, onBack }: ProjectViewProps) {
       setError(String(e));
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!project) return;
+
+    if (!confirm(`Delete project "${project.name}"?\n\nThis will permanently delete all structures, calculations, and data. This action cannot be undone.`)) {
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      await invoke("delete_project", { projectId });
+      onDeleted();
+    } catch (e) {
+      console.error("Failed to delete project:", e);
+      setError(String(e));
+      setIsDeleting(false);
     }
   }
 
@@ -252,6 +273,38 @@ export function ProjectView({ projectId, onBack }: ProjectViewProps) {
             ))}
           </div>
         )}
+
+        {/* Project Settings */}
+        <div className="project-settings">
+          <button
+            className="settings-toggle"
+            onClick={() => setShowSettings(!showSettings)}
+          >
+            <span>Project Settings</span>
+            <span className="expand-icon">{showSettings ? "▼" : "▶"}</span>
+          </button>
+
+          {showSettings && (
+            <div className="settings-content">
+              <div className="danger-zone">
+                <h4>Danger Zone</h4>
+                <div className="danger-action">
+                  <div className="danger-info">
+                    <strong>Delete this project</strong>
+                    <p>Once deleted, all structures and calculations will be permanently removed.</p>
+                  </div>
+                  <button
+                    className="delete-project-btn"
+                    onClick={handleDelete}
+                    disabled={isDeleting}
+                  >
+                    {isDeleting ? "Deleting..." : "Delete Project"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
