@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
+import { ProjectView } from "./components/ProjectView";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 
 interface ProjectSummary {
@@ -16,7 +17,7 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "project-browser";
+type AppView = "home" | "scf-wizard" | "project-browser" | "project-view";
 
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
@@ -26,6 +27,7 @@ function App() {
   const [currentView, setCurrentView] = useState<AppView>("home");
   const [projectCount, setProjectCount] = useState<number>(0);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -97,8 +99,20 @@ function App() {
           loadProjectCount(); // Refresh count in case projects were added/deleted
         }}
         onSelectProject={(projectId) => {
-          // Placeholder: In the future, navigate to project dashboard
-          console.log("Selected project:", projectId);
+          setSelectedProjectId(projectId);
+          setCurrentView("project-view");
+        }}
+      />
+    );
+  }
+
+  if (currentView === "project-view" && selectedProjectId) {
+    return (
+      <ProjectView
+        projectId={selectedProjectId}
+        onBack={() => {
+          setCurrentView("project-browser");
+          setSelectedProjectId(null);
         }}
       />
     );

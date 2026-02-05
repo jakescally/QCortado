@@ -1520,3 +1520,283 @@ h3 .tooltip-text::after {
     border-color: #4a5568;
   }
 }
+
+/* ============================================
+   Project View Styles
+   ============================================ */
+
+.project-view-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
+  overflow: hidden;
+}
+
+.project-view-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.project-view-title {
+  flex: 1;
+}
+
+.project-view-title h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  color: #2d3748;
+}
+
+.project-view-description {
+  margin: 0.5rem 0 0 0;
+  color: #718096;
+  font-size: 0.9rem;
+}
+
+.project-view-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.meta-item {
+  font-size: 0.8rem;
+  color: #718096;
+}
+
+.project-view-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.cif-variants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.cif-variant-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.cif-variant-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  background: #f7fafc;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.cif-variant-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.cif-formula {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #2d3748;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.cif-filename {
+  font-size: 0.85rem;
+  color: #718096;
+}
+
+.cif-added {
+  font-size: 0.8rem;
+  color: #a0aec0;
+}
+
+.no-calculations {
+  padding: 1.5rem;
+  text-align: center;
+  color: #a0aec0;
+  font-style: italic;
+}
+
+.calculations-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.calculation-item {
+  border-bottom: 1px solid #edf2f7;
+}
+
+.calculation-item:last-child {
+  border-bottom: none;
+}
+
+.calculation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.875rem 1.25rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.calculation-header:hover {
+  background: #f7fafc;
+}
+
+.calculation-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.calc-type {
+  font-weight: 600;
+  color: #2d3748;
+  background: #e2e8f0;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.calc-status {
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.calc-status.converged {
+  color: #38a169;
+}
+
+.calc-status.failed {
+  color: #e53e3e;
+}
+
+.calc-energy {
+  font-size: 0.85rem;
+  color: #4a5568;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.calculation-meta {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.calc-date {
+  font-size: 0.8rem;
+  color: #a0aec0;
+}
+
+.expand-icon {
+  color: #a0aec0;
+  font-size: 0.75rem;
+}
+
+.calculation-details {
+  padding: 1rem 1.25rem;
+  background: #f7fafc;
+  border-top: 1px solid #edf2f7;
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.detail-item label {
+  font-size: 0.75rem;
+  color: #718096;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.detail-item span {
+  font-size: 0.9rem;
+  color: #2d3748;
+  font-weight: 500;
+}
+
+.detail-item.parameters {
+  grid-column: 1 / -1;
+}
+
+.detail-item.parameters pre {
+  margin: 0;
+  padding: 0.75rem;
+  background: #2d3748;
+  color: #e2e8f0;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  overflow-x: auto;
+  max-height: 200px;
+}
+
+/* Dark mode for project view */
+@media (prefers-color-scheme: dark) {
+  .project-view-title h2 {
+    color: #f7fafc;
+  }
+
+  .cif-variant-card {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .cif-variant-header {
+    background: #4a5568;
+    border-color: #4a5568;
+  }
+
+  .cif-formula {
+    color: #f7fafc;
+  }
+
+  .calculation-item {
+    border-color: #4a5568;
+  }
+
+  .calculation-header:hover {
+    background: #4a5568;
+  }
+
+  .calc-type {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .calc-energy {
+    color: #e2e8f0;
+  }
+
+  .calculation-details {
+    background: #4a5568;
+    border-color: #4a5568;
+  }
+
+  .detail-item span {
+    color: #e2e8f0;
+  }
+
+  .detail-item.parameters pre {
+    background: #1a202c;
+  }
+}
