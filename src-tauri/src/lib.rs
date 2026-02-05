@@ -233,6 +233,46 @@ fn list_pseudopotentials(pseudo_dir: String) -> Result<Vec<String>, String> {
     Ok(pseudos)
 }
 
+/// SSSP element data from JSON
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct SSSPElementData {
+    pub filename: String,
+    pub md5: Option<String>,
+    pub pseudopotential: Option<String>,
+    pub cutoff_wfc: f64,
+    pub cutoff_rho: f64,
+}
+
+/// Loads SSSP JSON data from the pseudo directory.
+/// Looks for any file matching SSSP*.json pattern.
+#[tauri::command]
+fn load_sssp_data(pseudo_dir: String) -> Result<std::collections::HashMap<String, SSSPElementData>, String> {
+    let path = PathBuf::from(&pseudo_dir);
+    if !path.exists() {
+        return Err(format!("Directory not found: {}", pseudo_dir));
+    }
+
+    // Find SSSP JSON file
+    let mut sssp_file: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("SSSP") && name.ends_with(".json") {
+            sssp_file = Some(entry.path());
+            break;
+        }
+    }
+
+    let sssp_path = sssp_file.ok_or("No SSSP JSON file found in pseudo directory")?;
+    let content = std::fs::read_to_string(&sssp_path)
+        .map_err(|e| format!("Failed to read SSSP file: {}", e))?;
+
+    let data: std::collections::HashMap<String, SSSPElementData> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse SSSP JSON: {}", e))?;
+
+    Ok(data)
+}
+
 // ============================================================================
 // Application Entry Point
 // ============================================================================
@@ -256,6 +296,7 @@ pub fn run() {
             set_project_dir,
             get_project_dir,
             list_pseudopotentials,
+            load_sssp_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

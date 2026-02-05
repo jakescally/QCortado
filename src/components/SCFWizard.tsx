@@ -8,6 +8,16 @@ import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 
+// Tooltip component for help icons
+function Tooltip({ text }: { text: string }) {
+  return (
+    <span className="tooltip-container">
+      <span className="tooltip-icon">?</span>
+      <span className="tooltip-text">{text}</span>
+    </span>
+  );
+}
+
 interface SCFWizardProps {
   onBack: () => void;
   qePath: string;
@@ -42,33 +52,97 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState<string>("");
   const [result, setResult] = useState<any>(null);
+  const [pseudoDir, setPseudoDir] = useState<string>("");
+  const [pseudoError, setPseudoError] = useState<string | null>(null);
 
-  // Load available pseudopotentials
+  // SSSP data for recommended cutoffs and pseudopotentials
+  interface SSSPElementData {
+    filename: string;
+    md5?: string;
+    pseudopotential?: string;
+    cutoff_wfc: number;
+    cutoff_rho: number;
+  }
+  const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
+  const [ssspMissing, setSsspMissing] = useState(false);
+
+  // Load available pseudopotentials and SSSP data
   useEffect(() => {
     async function loadPseudos() {
       try {
-        const pseudoDir = qePath.replace("/bin", "/pseudo");
+        // Compute pseudo directory from QE path
+        const computedPseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+        setPseudoDir(computedPseudoDir);
+
         const pseudos = await invoke<string[]>("list_pseudopotentials", {
-          pseudoDir,
+          pseudoDir: computedPseudoDir,
         });
         setPseudopotentials(pseudos);
+        setPseudoError(null);
+
+        // Try to load SSSP data
+        try {
+          const sssp = await invoke<Record<string, SSSPElementData>>("load_sssp_data", {
+            pseudoDir: computedPseudoDir,
+          });
+          setSsspData(sssp);
+          setSsspMissing(false);
+        } catch {
+          setSsspData(null);
+          setSsspMissing(true);
+        }
       } catch (e) {
         console.error("Failed to load pseudopotentials:", e);
+        setPseudoError(String(e));
+        setPseudopotentials([]);
       }
     }
     loadPseudos();
   }, [qePath]);
 
-  // Auto-select pseudopotentials when crystal data changes
+  // Strip oxidation state from element symbol (e.g., "Ni0+" -> "Ni", "Fe3+" -> "Fe")
+  function getBaseElement(symbol: string): string {
+    return symbol.replace(/[\d+-]+$/, "");
+  }
+
+  // Helper to check if a pseudopotential file matches an element
+  // Matches patterns like: Si.pbe-..., Si_ONCV_..., Si-pbe-..., etc.
+  function pseudoMatchesElement(filename: string, element: string): boolean {
+    const lowerFile = filename.toLowerCase();
+    const lowerEl = getBaseElement(element).toLowerCase();
+    // Match element followed by dot, underscore, or hyphen
+    return (
+      lowerFile.startsWith(lowerEl + ".") ||
+      lowerFile.startsWith(lowerEl + "_") ||
+      lowerFile.startsWith(lowerEl + "-")
+    );
+  }
+
+  // Auto-select pseudopotentials and set cutoffs when crystal data or SSSP data changes
   useEffect(() => {
     if (crystalData && pseudopotentials.length > 0) {
       const selected: Record<string, string> = {};
-      const elements = [...new Set(crystalData.atom_sites.map((a) => a.type_symbol))];
+      const elements = [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
+
+      let maxWfc = 0;
+      let maxRho = 0;
 
       for (const element of elements) {
-        // Try to find a matching pseudopotential
+        // First, try to use SSSP recommended pseudopotential
+        if (ssspData && ssspData[element]) {
+          const ssspEntry = ssspData[element];
+          // Check if the SSSP recommended file exists in our pseudopotentials
+          if (pseudopotentials.some((p) => p.toLowerCase() === ssspEntry.filename.toLowerCase())) {
+            selected[element] = ssspEntry.filename;
+            maxWfc = Math.max(maxWfc, ssspEntry.cutoff_wfc);
+            maxRho = Math.max(maxRho, ssspEntry.cutoff_rho);
+            continue;
+          }
+        }
+
+        // Fallback: find a matching pseudopotential by element name
         const matches = pseudopotentials.filter((p) =>
-          p.toLowerCase().startsWith(element.toLowerCase() + ".")
+          pseudoMatchesElement(p, element)
         );
         if (matches.length > 0) {
           // Prefer PBE pseudopotentials
@@ -76,9 +150,19 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
           selected[element] = pbe || matches[0];
         }
       }
+
       setSelectedPseudos(selected);
+
+      // Update cutoffs if we got SSSP values
+      if (maxWfc > 0 && maxRho > 0) {
+        setConfig((prev) => ({
+          ...prev,
+          ecutwfc: maxWfc,
+          ecutrho: maxRho,
+        }));
+      }
     }
-  }, [crystalData, pseudopotentials]);
+  }, [crystalData, pseudopotentials, ssspData]);
 
   async function handleImportCIF() {
     try {
@@ -103,7 +187,8 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
 
   function getUniqueElements(): string[] {
     if (!crystalData) return [];
-    return [...new Set(crystalData.atom_sites.map((a) => a.type_symbol))];
+    // Strip oxidation states and get unique base elements
+    return [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
   }
 
   function canRun(): boolean {
@@ -285,68 +370,119 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
 
                 {/* Pseudopotentials */}
                 <section className="config-section">
-                  <h3>Pseudopotentials</h3>
+                  <h3>
+                    Pseudopotentials
+                    <Tooltip text="Pseudopotentials approximate the effect of core electrons (those tightly bound to the nucleus) so the calculation only needs to explicitly handle valence electrons. This dramatically reduces computation cost while maintaining accuracy for chemical bonding and material properties. Each element needs its own pseudopotential file, typically generated with a specific exchange-correlation functional (like PBE)." />
+                  </h3>
+                  <p className="pseudo-dir-info">
+                    Directory: <code>{pseudoDir}</code>
+                    {pseudopotentials.length > 0 && (
+                      <span className="pseudo-count"> ({pseudopotentials.length} files)</span>
+                    )}
+                  </p>
+                  {pseudoError && (
+                    <div className="pseudo-error">{pseudoError}</div>
+                  )}
                   <div className="pseudo-list">
-                    {getUniqueElements().map((el) => (
-                      <div key={el} className="pseudo-row">
-                        <label>{el}</label>
-                        <select
-                          value={selectedPseudos[el] || ""}
-                          onChange={(e) =>
-                            setSelectedPseudos((prev) => ({
-                              ...prev,
-                              [el]: e.target.value,
-                            }))
-                          }
-                        >
-                          <option value="">Select...</option>
-                          {pseudopotentials
-                            .filter((p) =>
-                              p.toLowerCase().startsWith(el.toLowerCase() + ".")
-                            )
-                            .map((p) => (
+                    {getUniqueElements().map((el) => {
+                      const matchingPseudos = pseudopotentials.filter((p) =>
+                        pseudoMatchesElement(p, el)
+                      );
+                      return (
+                        <div key={el} className="pseudo-row">
+                          <label>{el}</label>
+                          <select
+                            value={selectedPseudos[el] || ""}
+                            onChange={(e) =>
+                              setSelectedPseudos((prev) => ({
+                                ...prev,
+                                [el]: e.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">
+                              {matchingPseudos.length === 0
+                                ? `No ${el} pseudopotentials found`
+                                : "Select..."}
+                            </option>
+                            {matchingPseudos.map((p) => (
                               <option key={p} value={p}>
                                 {p}
                               </option>
                             ))}
-                        </select>
-                      </div>
-                    ))}
+                          </select>
+                        </div>
+                      );
+                    })}
                   </div>
+                  {getUniqueElements().some(
+                    (el) =>
+                      !pseudopotentials.some((p) => pseudoMatchesElement(p, el))
+                  ) && (
+                    <p className="pseudo-hint">
+                      Missing pseudopotentials? Download them from the{" "}
+                      <a
+                        href="https://www.materialscloud.org/discover/sssp/table/precision"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        SSSP Precision Library
+                      </a>{" "}
+                      and place them in your QE pseudo directory.
+                    </p>
+                  )}
                 </section>
 
                 {/* SCF Parameters */}
                 <section className="config-section">
-                  <h3>SCF Parameters</h3>
+                  <h3>
+                    SCF Parameters
+                    <Tooltip text="Self-Consistent Field (SCF) calculations iteratively solve the Kohn-Sham equations until the electron density converges. These parameters control the accuracy and computational cost of the calculation." />
+                  </h3>
                   <div className="param-grid">
                     <div className="param-row">
-                      <label>ecutwfc (Ry)</label>
-                      <input
-                        type="number"
-                        value={config.ecutwfc}
-                        onChange={(e) =>
-                          setConfig((prev) => ({
-                            ...prev,
-                            ecutwfc: parseFloat(e.target.value),
-                          }))
-                        }
-                      />
+                      <label>
+                        Wavefunction Cutoff
+                        <Tooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher values = more accurate but slower. Typical range: 30-80 Ry. Start with your pseudopotential's recommended value. Doubling this roughly 8x the computation time." />
+                      </label>
+                      <div className="param-input-group">
+                        <input
+                          type="number"
+                          value={config.ecutwfc}
+                          onChange={(e) =>
+                            setConfig((prev) => ({
+                              ...prev,
+                              ecutwfc: parseFloat(e.target.value),
+                            }))
+                          }
+                        />
+                        <span className="param-unit">Ry</span>
+                      </div>
                     </div>
                     <div className="param-row">
-                      <label>ecutrho (Ry)</label>
-                      <input
-                        type="number"
-                        value={config.ecutrho}
-                        onChange={(e) =>
-                          setConfig((prev) => ({
-                            ...prev,
-                            ecutrho: parseFloat(e.target.value),
-                          }))
-                        }
-                      />
+                      <label>
+                        Charge Density Cutoff
+                        <Tooltip text="Energy cutoff for charge density and potential (in Rydberg). Should be 4x wavefunction cutoff for norm-conserving pseudopotentials, or 8-12x for ultrasoft/PAW. Higher values improve accuracy of forces and stress." />
+                      </label>
+                      <div className="param-input-group">
+                        <input
+                          type="number"
+                          value={config.ecutrho}
+                          onChange={(e) =>
+                            setConfig((prev) => ({
+                              ...prev,
+                              ecutrho: parseFloat(e.target.value),
+                            }))
+                          }
+                        />
+                        <span className="param-unit">Ry</span>
+                      </div>
                     </div>
                     <div className="param-row">
-                      <label>K-grid</label>
+                      <label>
+                        K-point Grid
+                        <Tooltip text="Sampling grid for the Brillouin zone (reciprocal space). Denser grids = more accurate but slower. Metals need denser grids than insulators. For cubic cells, use equal values. Doubling each dimension = 8x more k-points = ~8x slower." />
+                      </label>
                       <div className="kgrid-inputs">
                         <input
                           type="number"
@@ -383,19 +519,43 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
                       </div>
                     </div>
                     <div className="param-row">
-                      <label>conv_thr</label>
-                      <input
-                        type="text"
-                        value={config.conv_thr}
-                        onChange={(e) =>
-                          setConfig((prev) => ({
-                            ...prev,
-                            conv_thr: parseFloat(e.target.value),
-                          }))
-                        }
-                      />
+                      <label>
+                        Convergence Threshold
+                        <Tooltip text="SCF iteration stops when energy change falls below this value (in Rydberg). Smaller = more accurate but more iterations. 1e-6 is good for most calculations. Use 1e-8 or smaller for phonons or precise forces." />
+                      </label>
+                      <div className="param-input-group">
+                        <input
+                          type="text"
+                          value={config.conv_thr}
+                          onChange={(e) =>
+                            setConfig((prev) => ({
+                              ...prev,
+                              conv_thr: parseFloat(e.target.value),
+                            }))
+                          }
+                        />
+                        <span className="param-unit">Ry</span>
+                      </div>
                     </div>
                   </div>
+                  {ssspMissing && (
+                    <p className="sssp-hint">
+                      Cutoff values are defaults. For optimized values, download the{" "}
+                      <a
+                        href="https://www.materialscloud.org/discover/sssp/table/precision"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        SSSP library
+                      </a>{" "}
+                      and place the JSON file in your pseudo directory.
+                    </p>
+                  )}
+                  {!ssspMissing && ssspData && (
+                    <p className="sssp-success">
+                      Cutoffs auto-configured from SSSP library (max values for all elements).
+                    </p>
+                  )}
                 </section>
 
                 <button

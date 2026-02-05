@@ -507,6 +507,171 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+.pseudo-dir-info {
+  font-size: 0.8rem;
+  color: #718096;
+  margin-bottom: 0.75rem;
+}
+
+.pseudo-dir-info code {
+  background: #edf2f7;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.pseudo-count {
+  color: #48bb78;
+  font-weight: 500;
+}
+
+.pseudo-error {
+  background: #fed7d7;
+  color: #c53030;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+.pseudo-hint {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: #ebf8ff;
+  border-left: 3px solid #4299e1;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.85rem;
+  color: #2b6cb0;
+}
+
+.pseudo-hint a {
+  color: #2b6cb0;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.pseudo-hint a:hover {
+  color: #1a4971;
+}
+
+.sssp-hint {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: #fefcbf;
+  border-left: 3px solid #d69e2e;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.85rem;
+  color: #744210;
+}
+
+.sssp-hint a {
+  color: #744210;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.sssp-hint a:hover {
+  color: #5c3d0e;
+}
+
+.sssp-success {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  background: #c6f6d5;
+  border-left: 3px solid #38a169;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.85rem;
+  color: #276749;
+}
+
+/* Tooltip styles */
+.tooltip-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.4rem;
+}
+
+.tooltip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  background: #cbd5e0;
+  color: #4a5568;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: help;
+  transition: background 0.15s;
+}
+
+.tooltip-icon:hover {
+  background: #a0aec0;
+}
+
+.tooltip-text {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  padding: 0.75rem;
+  background: #1a202c;
+  color: #f7fafc;
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.5;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  z-index: 100;
+  transition: opacity 0.2s, visibility 0.2s;
+}
+
+.tooltip-text::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #1a202c;
+}
+
+.tooltip-container:hover .tooltip-text {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* Better positioning for tooltips near edges */
+h3 .tooltip-container {
+  vertical-align: middle;
+}
+
+h3 .tooltip-text {
+  left: 0;
+  transform: translateX(0);
+}
+
+h3 .tooltip-text::after {
+  left: 12px;
+  transform: translateX(0);
+}
+
+.param-row .tooltip-container .tooltip-text {
+  left: 0;
+  transform: translateX(0);
+  width: 260px;
+}
+
+.param-row .tooltip-container .tooltip-text::after {
+  left: 12px;
+  transform: translateX(0);
+}
+
 .pseudo-list {
   display: flex;
   flex-direction: column;
@@ -544,12 +709,27 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.param-input-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.param-unit {
+  font-size: 0.8rem;
+  color: #718096;
+  font-weight: 500;
 }
 
 .param-row label {
-  font-weight: 500;
-  color: #718096;
-  min-width: 100px;
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  color: #1a202c;
+  min-width: 180px;
   font-size: 0.85rem;
 }
 
@@ -736,9 +916,17 @@ button:disabled {
     color: #f7fafc;
   }
 
+  .info-item label,
   .info-item span,
-  .pseudo-row label {
+  .pseudo-row label,
+  .param-row label,
+  .pseudo-dir-info,
+  .pseudo-dir-info code {
     color: #e2e8f0;
+  }
+
+  .pseudo-dir-info code {
+    background: #4a5568;
   }
 
   .pseudo-row select,
@@ -746,6 +934,10 @@ button:disabled {
     background: #4a5568;
     border-color: #4a5568;
     color: #e2e8f0;
+  }
+
+  .param-unit {
+    color: #a0aec0;
   }
 
   .results-panel {
@@ -758,5 +950,19 @@ button:disabled {
 
   .result-item span {
     color: #e2e8f0;
+  }
+
+  .sssp-hint {
+    background: #744210;
+    color: #fefcbf;
+  }
+
+  .sssp-hint a {
+    color: #fefcbf;
+  }
+
+  .sssp-success {
+    background: #276749;
+    color: #c6f6d5;
   }
 }
