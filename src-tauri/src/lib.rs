@@ -8,8 +8,9 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
+pub mod config;
 pub mod projects;
 pub mod qe;
 
@@ -38,18 +39,23 @@ impl Default for AppState {
 
 /// Sets the path to the Quantum ESPRESSO bin directory.
 #[tauri::command]
-fn set_qe_path(path: String, state: State<AppState>) -> Result<(), String> {
-    let path = PathBuf::from(&path);
+fn set_qe_path(app: AppHandle, path: String, state: State<AppState>) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
 
     // Verify pw.x exists
-    if !path.join("pw.x").exists() {
+    if !path_buf.join("pw.x").exists() {
         return Err(format!(
             "pw.x not found in {}. Please select the QE bin directory.",
-            path.display()
+            path_buf.display()
         ));
     }
 
-    *state.qe_bin_dir.lock().unwrap() = Some(path);
+    // Update in-memory state
+    *state.qe_bin_dir.lock().unwrap() = Some(path_buf);
+
+    // Persist to disk
+    config::update_qe_path(&app, Some(path))?;
+
     Ok(())
 }
 
@@ -285,12 +291,35 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::default())
         .setup(|app| {
             // Initialize projects directory on startup
             if let Err(e) = projects::ensure_projects_dir(&app.handle()) {
                 eprintln!("Warning: Failed to initialize projects directory: {}", e);
             }
+
+            // Load saved configuration
+            let mut qe_bin_dir: Option<PathBuf> = None;
+            match config::load_config(&app.handle()) {
+                Ok(cfg) => {
+                    if let Some(path) = cfg.qe_bin_dir {
+                        let path_buf = PathBuf::from(&path);
+                        // Only use if pw.x still exists
+                        if path_buf.join("pw.x").exists() {
+                            qe_bin_dir = Some(path_buf);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load config: {}", e);
+                }
+            }
+
+            // Initialize AppState with loaded config
+            app.manage(AppState {
+                qe_bin_dir: Mutex::new(qe_bin_dir),
+                project_dir: Mutex::new(None),
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
