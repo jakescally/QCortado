@@ -994,6 +994,10 @@ h3 .tooltip-text::after {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
 }
 
+.dialog-content.dialog-small {
+  max-width: 400px;
+}
+
 .dialog-header {
   display: flex;
   align-items: center;

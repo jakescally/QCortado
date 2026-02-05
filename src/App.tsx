@@ -70,10 +70,6 @@ function App() {
     return (
       <ProjectBrowser
         onBack={() => setCurrentView("home")}
-        onCreateProject={() => {
-          // For now, just show the project browser (it has a new project button)
-          // In the future, this could open a dedicated create project dialog
-        }}
         onSelectProject={(projectId) => {
           // Placeholder: In the future, navigate to project dashboard
           console.log("Selected project:", projectId);

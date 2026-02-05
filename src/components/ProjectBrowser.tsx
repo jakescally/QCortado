@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CreateProjectDialog } from "./CreateProjectDialog";
 
 interface ProjectSummary {
   id: string;
@@ -15,19 +16,18 @@ interface ProjectSummary {
 
 interface ProjectBrowserProps {
   onBack: () => void;
-  onCreateProject: () => void;
   onSelectProject?: (projectId: string) => void;
 }
 
 export function ProjectBrowser({
   onBack,
-  onCreateProject,
   onSelectProject,
 }: ProjectBrowserProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
 
   useEffect(() => {
     loadProjects();
@@ -102,7 +102,7 @@ export function ProjectBrowser({
           ← Back
         </button>
         <h2>Projects</h2>
-        <button className="new-project-btn" onClick={onCreateProject}>
+        <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
           + New Project
         </button>
       </div>
@@ -117,7 +117,7 @@ export function ProjectBrowser({
             <div className="empty-icon">📁</div>
             <h3>No Projects Yet</h3>
             <p>Create a project to organize your calculations</p>
-            <button className="new-project-btn" onClick={onCreateProject}>
+            <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
               Create Your First Project
             </button>
           </div>
@@ -171,6 +171,15 @@ export function ProjectBrowser({
           </div>
         )}
       </div>
+
+      <CreateProjectDialog
+        isOpen={showCreateDialog}
+        onClose={() => setShowCreateDialog(false)}
+        onCreated={() => {
+          setShowCreateDialog(false);
+          loadProjects();
+        }}
+      />
     </div>
   );
 }
