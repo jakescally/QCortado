@@ -4,6 +4,17 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
+import { CreateProjectDialog } from "./components/CreateProjectDialog";
+
+interface ProjectSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  formula: string | null;
+  calculation_count: number;
+  last_activity: string;
+}
 
 type AppView = "home" | "scf-wizard" | "project-browser";
 
@@ -13,11 +24,23 @@ function App() {
   const [status, setStatus] = useState<string>("Not configured");
   const [error, setError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("home");
+  const [projectCount, setProjectCount] = useState<number>(0);
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
     checkQEPath();
+    loadProjectCount();
   }, []);
+
+  async function loadProjectCount() {
+    try {
+      const projects = await invoke<ProjectSummary[]>("list_projects");
+      setProjectCount(projects.length);
+    } catch (e) {
+      console.log("Failed to load project count:", e);
+    }
+  }
 
   async function checkQEPath() {
     try {
@@ -69,7 +92,10 @@ function App() {
   if (currentView === "project-browser") {
     return (
       <ProjectBrowser
-        onBack={() => setCurrentView("home")}
+        onBack={() => {
+          setCurrentView("home");
+          loadProjectCount(); // Refresh count in case projects were added/deleted
+        }}
         onSelectProject={(projectId) => {
           // Placeholder: In the future, navigate to project dashboard
           console.log("Selected project:", projectId);
@@ -125,10 +151,23 @@ function App() {
           <section className="actions-section">
             <h2>Projects</h2>
             <div className="action-grid">
-              <button className="action-btn" onClick={() => setCurrentView("project-browser")}>
+              <button className="action-btn" onClick={() => setShowCreateDialog(true)}>
                 <span className="action-icon">+</span>
                 <span className="action-label">New Project</span>
-                <span className="action-hint">Create or browse</span>
+                <span className="action-hint">Create a project</span>
+              </button>
+              <button
+                className="action-btn"
+                onClick={() => setCurrentView("project-browser")}
+                disabled={projectCount === 0}
+              >
+                <span className="action-icon">{projectCount}</span>
+                <span className="action-label">
+                  {projectCount === 1 ? "View Project" : "View Projects"}
+                </span>
+                <span className="action-hint">
+                  {projectCount === 0 ? "No projects yet" : "Browse & manage"}
+                </span>
               </button>
             </div>
           </section>
@@ -159,6 +198,15 @@ function App() {
       <footer className="footer">
         <p>QCortado v0.1.0 - Quantum ESPRESSO 7.5 Interface</p>
       </footer>
+
+      <CreateProjectDialog
+        isOpen={showCreateDialog}
+        onClose={() => setShowCreateDialog(false)}
+        onCreated={() => {
+          setShowCreateDialog(false);
+          loadProjectCount();
+        }}
+      />
     </main>
   );
 }
