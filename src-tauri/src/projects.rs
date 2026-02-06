@@ -22,6 +22,9 @@ pub struct Project {
     pub description: Option<String>,
     pub created_at: String,
     pub cif_variants: Vec<CifVariant>,
+    /// ID of the last opened CIF variant (for restoring view state)
+    #[serde(default)]
+    pub last_opened_cif_id: Option<String>,
 }
 
 /// A CIF structure variant within a project
@@ -269,6 +272,7 @@ pub fn create_project(
         description,
         created_at: now_iso(),
         cif_variants: Vec::new(),
+        last_opened_cif_id: None,
     };
 
     // Save project.json
@@ -471,4 +475,90 @@ pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> 
         .map_err(|e| format!("Failed to delete project: {}", e))?;
 
     Ok(())
+}
+
+/// Sets the last opened CIF variant for a project
+#[tauri::command]
+pub fn set_last_opened_cif(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+) -> Result<(), String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    // Load existing project
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Verify CIF exists
+    if !project.cif_variants.iter().any(|v| v.id == cif_id) {
+        return Err(format!("CIF variant not found: {}", cif_id));
+    }
+
+    // Update and save
+    project.last_opened_cif_id = Some(cif_id);
+
+    let project_json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, project_json)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    Ok(())
+}
+
+/// Gets the parsed crystal data for a CIF variant
+#[tauri::command]
+pub fn get_cif_crystal_data(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+) -> Result<serde_json::Value, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let crystal_json_path = project_dir.join("structures").join(format!("{}.json", cif_id));
+    if !crystal_json_path.exists() {
+        return Err(format!("Crystal data not found for CIF: {}", cif_id));
+    }
+
+    let content = fs::read_to_string(&crystal_json_path)
+        .map_err(|e| format!("Failed to read crystal data: {}", e))?;
+
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse crystal data: {}", e))
+}
+
+/// Gets the raw CIF content for a CIF variant
+#[tauri::command]
+pub fn get_cif_content(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+) -> Result<String, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let cif_path = project_dir.join("structures").join(format!("{}.cif", cif_id));
+    if !cif_path.exists() {
+        return Err(format!("CIF file not found: {}", cif_id));
+    }
+
+    fs::read_to_string(&cif_path)
+        .map_err(|e| format!("Failed to read CIF file: {}", e))
 }

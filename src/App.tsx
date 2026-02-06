@@ -4,8 +4,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
-import { ProjectView } from "./components/ProjectView";
+import { ProjectDashboard } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
+import { CrystalData } from "./lib/types";
 
 interface ProjectSummary {
   id: string;
@@ -17,7 +18,15 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "project-browser" | "project-view";
+type AppView = "home" | "scf-wizard" | "project-browser" | "project-dashboard";
+
+interface SCFContext {
+  cifId: string;
+  crystalData: CrystalData;
+  cifContent: string;
+  filename: string;
+  projectId: string;
+}
 
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
@@ -28,6 +37,9 @@ function App() {
   const [projectCount, setProjectCount] = useState<number>(0);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+
+  // Context for running SCF from a project
+  const [scfContext, setScfContext] = useState<SCFContext | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -88,7 +100,21 @@ function App() {
   }
 
   if (currentView === "scf-wizard" && qePath) {
-    return <SCFWizard qePath={qePath} onBack={() => setCurrentView("home")} />;
+    return (
+      <SCFWizard
+        qePath={qePath}
+        onBack={() => {
+          // If we came from a project dashboard, go back there
+          if (scfContext) {
+            setCurrentView("project-dashboard");
+            setScfContext(null);
+          } else {
+            setCurrentView("home");
+          }
+        }}
+        initialCif={scfContext || undefined}
+      />
+    );
   }
 
   if (currentView === "project-browser") {
@@ -100,15 +126,15 @@ function App() {
         }}
         onSelectProject={(projectId) => {
           setSelectedProjectId(projectId);
-          setCurrentView("project-view");
+          setCurrentView("project-dashboard");
         }}
       />
     );
   }
 
-  if (currentView === "project-view" && selectedProjectId) {
+  if (currentView === "project-dashboard" && selectedProjectId) {
     return (
-      <ProjectView
+      <ProjectDashboard
         projectId={selectedProjectId}
         onBack={() => {
           setCurrentView("project-browser");
@@ -118,6 +144,16 @@ function App() {
           setCurrentView("project-browser");
           setSelectedProjectId(null);
           loadProjectCount();
+        }}
+        onRunSCF={(cifId, crystalData, cifContent, filename) => {
+          setScfContext({
+            cifId,
+            crystalData,
+            cifContent,
+            filename,
+            projectId: selectedProjectId,
+          });
+          setCurrentView("scf-wizard");
         }}
       />
     );

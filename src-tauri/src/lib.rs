@@ -341,6 +341,9 @@ pub fn run() {
             projects::add_cif_to_project,
             projects::save_calculation,
             projects::delete_project,
+            projects::set_last_opened_cif,
+            projects::get_cif_crystal_data,
+            projects::get_cif_content,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

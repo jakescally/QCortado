@@ -19,9 +19,19 @@ function Tooltip({ text }: { text: string }) {
   );
 }
 
+interface InitialCifData {
+  cifId: string;
+  crystalData: CrystalData;
+  cifContent: string;
+  filename: string;
+  projectId: string;
+}
+
 interface SCFWizardProps {
   onBack: () => void;
   qePath: string;
+  /** Pre-loaded CIF data from project dashboard */
+  initialCif?: InitialCifData;
 }
 
 interface SCFConfig {
@@ -34,12 +44,18 @@ interface SCFConfig {
 
 type WizardStep = "import" | "configure" | "run" | "results";
 
-export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
-  const [step, setStep] = useState<WizardStep>("import");
-  const [crystalData, setCrystalData] = useState<CrystalData | null>(null);
-  const [cifFilename, setCifFilename] = useState<string>("");
-  const [cifContent, setCifContent] = useState<string>("");
+export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
+  // If we have initial CIF data, skip to configure step
+  const [step, setStep] = useState<WizardStep>(initialCif ? "configure" : "import");
+  const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
+  const [cifFilename, setCifFilename] = useState<string>(initialCif?.filename || "");
+  const [cifContent, setCifContent] = useState<string>(initialCif?.cifContent || "");
   const [error, setError] = useState<string | null>(null);
+
+  // Track project context for saving
+  const [projectContext] = useState<{ projectId: string; cifId: string } | null>(
+    initialCif ? { projectId: initialCif.projectId, cifId: initialCif.cifId } : null
+  );
   const [pseudopotentials, setPseudopotentials] = useState<string[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
 
@@ -687,6 +703,7 @@ export function SCFWizard({ onBack, qePath }: SCFWizardProps) {
             crystal_data: crystalData,
           }}
           workingDir="/tmp/qcortado_work"
+          projectContext={projectContext || undefined}
         />
       )}
     </div>

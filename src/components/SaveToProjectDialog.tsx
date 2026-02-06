@@ -54,6 +54,8 @@ interface SaveToProjectDialogProps {
   calculationData: CalculationData;
   cifData: CifData;
   workingDir?: string;
+  /** Pre-selected project/CIF context (from dashboard) */
+  projectContext?: { projectId: string; cifId: string };
 }
 
 type SaveMode = "new" | "existing";
@@ -65,13 +67,15 @@ export function SaveToProjectDialog({
   calculationData,
   cifData,
   workingDir,
+  projectContext,
 }: SaveToProjectDialogProps) {
-  const [mode, setMode] = useState<SaveMode>("new");
+  // If we have a project context, default to existing mode
+  const [mode, setMode] = useState<SaveMode>(projectContext ? "existing" : "new");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(projectContext?.projectId || "");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [selectedCifId, setSelectedCifId] = useState<string>("");
-  const [addNewCif, setAddNewCif] = useState(true);
+  const [selectedCifId, setSelectedCifId] = useState<string>(projectContext?.cifId || "");
+  const [addNewCif, setAddNewCif] = useState(!projectContext);
 
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDescription, setNewProjectDescription] = useState("");
@@ -83,8 +87,15 @@ export function SaveToProjectDialog({
   useEffect(() => {
     if (isOpen) {
       loadProjects();
+      // Reset state based on context
+      if (projectContext) {
+        setMode("existing");
+        setSelectedProjectId(projectContext.projectId);
+        setSelectedCifId(projectContext.cifId);
+        setAddNewCif(false);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, projectContext]);
 
   // Load full project when selection changes
   useEffect(() => {
