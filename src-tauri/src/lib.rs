@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
 pub mod projects;
@@ -197,6 +197,75 @@ async fn run_calculation(
         .map_err(|e| e.to_string())
 }
 
+/// Runs a pw.x calculation with streaming output via events.
+#[tauri::command]
+async fn run_calculation_streaming(
+    app: AppHandle,
+    calculation: QECalculation,
+    working_dir: String,
+    state: State<'_, AppState>,
+) -> Result<QEResult, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt};
+
+    // Clone the path out of the guard before any await points
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+
+    let input = generate_pw_input(&calculation);
+    let work_path = PathBuf::from(&working_dir);
+
+    // Ensure working directory exists
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    let exe_path = bin_dir.join("pw.x");
+    if !exe_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    // Spawn the process
+    let mut child = tokio::process::Command::new(&exe_path)
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start pw.x: {}", e))?;
+
+    // Write input to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes()).await
+            .map_err(|e| format!("Failed to write input: {}", e))?;
+    }
+
+    // Stream stdout line by line
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_output = String::new();
+
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        full_output.push_str(&line);
+        full_output.push('\n');
+        // Emit event to frontend
+        let _ = app.emit("qe-output-line", &line);
+    }
+
+    // Wait for process to complete
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    if !status.success() {
+        // Emit the error
+        let _ = app.emit("qe-output-line", format!("\nProcess exited with code: {:?}", status.code()));
+        return Err(format!("pw.x failed with exit code: {:?}", status.code()));
+    }
+
+    // Parse and return the result
+    Ok(parse_pw_output(&full_output))
+}
+
 /// Sets the current project directory.
 #[tauri::command]
 fn set_project_dir(path: String, state: State<AppState>) -> Result<(), String> {
@@ -330,6 +399,7 @@ pub fn run() {
             validate_calculation,
             parse_output,
             run_calculation,
+            run_calculation_streaming,
             set_project_dir,
             get_project_dir,
             list_pseudopotentials,

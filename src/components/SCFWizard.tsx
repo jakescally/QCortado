@@ -1,7 +1,8 @@
 // SCF Calculation Wizard - Import CIF, configure, and run SCF calculations
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
@@ -65,6 +66,9 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [calcEndTime, setCalcEndTime] = useState<string>("");
   const [generatedInput, setGeneratedInput] = useState<string>("");
 
+  // Ref for auto-scrolling output
+  const outputRef = useRef<HTMLPreElement>(null);
+
   const [config, setConfig] = useState<SCFConfig>({
     ecutwfc: 40,
     ecutrho: 320,
@@ -123,6 +127,13 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     }
     loadPseudos();
   }, [qePath]);
+
+  // Auto-scroll output when it changes
+  useEffect(() => {
+    if (outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [output]);
 
   // Strip oxidation state from element symbol (e.g., "Ni0+" -> "Ni", "Fe3+" -> "Fe")
   function getBaseElement(symbol: string): string {
@@ -234,6 +245,9 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     const startTime = new Date().toISOString();
     setCalcStartTime(startTime);
 
+    // Set up event listener for streaming output
+    let unlisten: UnlistenFn | null = null;
+
     try {
       const elements = getUniqueElements();
 
@@ -293,10 +307,15 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       // Generate and display the input file
       const inputText = await invoke<string>("generate_input", { calculation });
       setGeneratedInput(inputText);
-      setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running... ===\n`);
+      setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running pw.x ===\n`);
 
-      // Run the calculation
-      const calcResult = await invoke<any>("run_calculation", {
+      // Listen for streaming output
+      unlisten = await listen<string>("qe-output-line", (event) => {
+        setOutput((prev) => prev + event.payload + "\n");
+      });
+
+      // Run the calculation with streaming
+      const calcResult = await invoke<any>("run_calculation_streaming", {
         calculation,
         workingDir: "/tmp/qcortado_work",
       });
@@ -306,12 +325,16 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       setCalcEndTime(endTime);
 
       setResult(calcResult);
-      setOutput((prev) => prev + "\n=== Calculation Complete ===\n" + calcResult.raw_output);
+      setOutput((prev) => prev + "\n=== Calculation Complete ===\n");
       setStep("results");
     } catch (e) {
       setError(`Calculation failed: ${e}`);
       setOutput((prev) => prev + `\n\nERROR: ${e}`);
     } finally {
+      // Clean up event listener
+      if (unlisten) {
+        unlisten();
+      }
       setIsRunning(false);
     }
   }
@@ -615,7 +638,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             <div className="run-layout">
               <div className="output-panel">
                 <h3>{isRunning ? "Running..." : "Output"}</h3>
-                <pre className="output-text">{output}</pre>
+                <pre className="output-text" ref={outputRef}>{output}</pre>
               </div>
 
               {result && (
