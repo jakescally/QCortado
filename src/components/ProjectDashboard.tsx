@@ -70,10 +70,15 @@ export function ProjectDashboard({
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
 
-  // Delete confirmation dialog state
+  // Delete project confirmation dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Delete calculation confirmation dialog state
+  const [showDeleteCalcDialog, setShowDeleteCalcDialog] = useState(false);
+  const [calcToDelete, setCalcToDelete] = useState<{ calcId: string; calcType: string } | null>(null);
+  const [isDeletingCalc, setIsDeletingCalc] = useState(false);
 
   // Import state
   const [isImporting, setIsImporting] = useState(false);
@@ -202,6 +207,33 @@ export function ProjectDashboard({
       setError(String(e));
       setIsDeleting(false);
       setShowDeleteDialog(false);
+    }
+  }
+
+  function openDeleteCalcDialog(calcId: string, calcType: string) {
+    setCalcToDelete({ calcId, calcType });
+    setShowDeleteCalcDialog(true);
+  }
+
+  async function handleConfirmDeleteCalc() {
+    if (!calcToDelete || !selectedCifId) return;
+
+    setIsDeletingCalc(true);
+    try {
+      await invoke("delete_calculation", {
+        projectId,
+        cifId: selectedCifId,
+        calcId: calcToDelete.calcId,
+      });
+      // Reload project to reflect changes
+      await loadProject();
+      setShowDeleteCalcDialog(false);
+      setCalcToDelete(null);
+    } catch (e) {
+      console.error("Failed to delete calculation:", e);
+      setError(String(e));
+    } finally {
+      setIsDeletingCalc(false);
     }
   }
 
@@ -517,6 +549,17 @@ export function ProjectDashboard({
                         <label>Parameters</label>
                         <pre>{JSON.stringify(calc.parameters, null, 2)}</pre>
                       </div>
+                      <div className="calc-actions">
+                        <button
+                          className="delete-calc-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                          }}
+                        >
+                          Delete Calculation
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -547,8 +590,52 @@ export function ProjectDashboard({
         )}
       </div>
 
-      {/* Delete Dialog */}
+      {/* Delete Project Dialog */}
       {showDeleteDialog && renderDeleteDialog()}
+
+      {/* Delete Calculation Dialog */}
+      {showDeleteCalcDialog && (
+        <div className="dialog-overlay" onClick={() => !isDeletingCalc && setShowDeleteCalcDialog(false)}>
+          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>Delete Calculation</h2>
+              <button
+                className="dialog-close"
+                onClick={() => setShowDeleteCalcDialog(false)}
+                disabled={isDeletingCalc}
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="dialog-body">
+              <p className="exit-warning">
+                Are you sure you want to delete this {calcToDelete?.calcType.toUpperCase()} calculation?
+              </p>
+              <p className="exit-hint">
+                This will permanently remove the calculation results and all associated input/output files.
+              </p>
+            </div>
+
+            <div className="dialog-footer">
+              <button
+                className="dialog-btn cancel"
+                onClick={() => setShowDeleteCalcDialog(false)}
+                disabled={isDeletingCalc}
+              >
+                Cancel
+              </button>
+              <button
+                className="dialog-btn delete"
+                onClick={handleConfirmDeleteCalc}
+                disabled={isDeletingCalc}
+              >
+                {isDeletingCalc ? "Deleting..." : "Delete Calculation"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 

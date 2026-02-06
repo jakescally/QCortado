@@ -2397,3 +2397,48 @@ h3 .tooltip-text::after {
     color: #a0aec0;
   }
 }
+
+/* ============================================
+   Calculation Actions Styles
+   ============================================ */
+
+.calc-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.delete-calc-btn {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  background: transparent;
+  border: 1px solid #e53e3e;
+  color: #e53e3e;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.delete-calc-btn:hover {
+  background: #e53e3e;
+  color: white;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .calc-actions {
+    border-top-color: #4a5568;
+  }
+
+  .delete-calc-btn {
+    border-color: #fc8181;
+    color: #fc8181;
+  }
+
+  .delete-calc-btn:hover {
+    background: #fc8181;
+    color: #1a202c;
+  }
+}

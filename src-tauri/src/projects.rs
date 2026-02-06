@@ -477,6 +477,55 @@ pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Deletes a calculation from a project
+#[tauri::command]
+pub fn delete_calculation(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    calc_id: String,
+) -> Result<(), String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    // Load existing project
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Find the CIF variant and remove the calculation
+    let variant = project.cif_variants.iter_mut()
+        .find(|v| v.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+
+    let calc_index = variant.calculations.iter()
+        .position(|c| c.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    variant.calculations.remove(calc_index);
+
+    // Save updated project
+    let project_json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, project_json)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Delete calculation directory
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    if calc_dir.exists() {
+        fs::remove_dir_all(&calc_dir)
+            .map_err(|e| format!("Failed to delete calculation files: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Sets the last opened CIF variant for a project
 #[tauri::command]
 pub fn set_last_opened_cif(
