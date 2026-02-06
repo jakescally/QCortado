@@ -347,6 +347,7 @@ export function ProjectDashboard({
           <h2>{project.name}</h2>
         </div>
         <div className="structure-selector">
+          <label className="structure-selector-label">Structure</label>
           <select
             value={selectedCifId || ""}
             onChange={(e) => selectCif(e.target.value)}
@@ -361,7 +362,7 @@ export function ProjectDashboard({
             className="add-structure-inline-btn"
             onClick={handleImportCIF}
             disabled={isImporting}
-            title="Add another structure"
+            title="Add new structure"
           >
             +
           </button>

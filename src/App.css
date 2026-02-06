@@ -2051,6 +2051,14 @@ h3 .tooltip-text::after {
   margin-left: auto;
 }
 
+.structure-selector-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #718096;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
 .structure-selector select {
   padding: 0.5rem 1rem;
   font-size: 0.9rem;
@@ -2069,6 +2077,7 @@ h3 .tooltip-text::after {
 .add-structure-inline-btn {
   width: 32px;
   height: 32px;
+  margin-left: 0.25rem;
   padding: 0;
   font-size: 1.25rem;
   font-weight: 500;
@@ -2213,6 +2222,10 @@ h3 .tooltip-text::after {
   }
 
   .dashboard-description {
+    color: #a0aec0;
+  }
+
+  .structure-selector-label {
     color: #a0aec0;
   }
 
