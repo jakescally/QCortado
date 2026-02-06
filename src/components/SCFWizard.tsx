@@ -65,6 +65,11 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [calcStartTime, setCalcStartTime] = useState<string>("");
   const [calcEndTime, setCalcEndTime] = useState<string>("");
   const [generatedInput, setGeneratedInput] = useState<string>("");
+  const [resultSaved, setResultSaved] = useState(false);
+
+  // Exit confirmation dialog
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [pendingExitAction, setPendingExitAction] = useState<(() => void) | null>(null);
 
   // Ref for auto-scrolling output
   const outputRef = useRef<HTMLPreElement>(null);
@@ -364,6 +369,29 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     }
   }
 
+  // Handle exit attempts - show confirmation if results not saved
+  function handleExitAttempt(action: () => void) {
+    if (result && !resultSaved) {
+      setPendingExitAction(() => action);
+      setShowExitConfirm(true);
+    } else {
+      action();
+    }
+  }
+
+  function confirmExit() {
+    if (pendingExitAction) {
+      pendingExitAction();
+    }
+    setShowExitConfirm(false);
+    setPendingExitAction(null);
+  }
+
+  function cancelExit() {
+    setShowExitConfirm(false);
+    setPendingExitAction(null);
+  }
+
   function calculateCVector(data: CrystalData): [number, number, number] {
     const c = data.cell_length_c.value;
     const alpha = (data.cell_angle_alpha.value * Math.PI) / 180;
@@ -380,7 +408,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   return (
     <div className="wizard-container">
       <div className="wizard-header">
-        <button className="back-btn" onClick={onBack}>
+        <button className="back-btn" onClick={() => handleExitAttempt(onBack)}>
           ← Back
         </button>
         <h2>SCF Calculation Wizard</h2>
@@ -755,7 +783,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             </div>
 
             <div className="run-actions">
-              <button onClick={() => setStep("configure")} disabled={isRunning}>
+              <button onClick={() => handleExitAttempt(() => setStep("configure"))} disabled={isRunning}>
                 ← Back to Configure
               </button>
               {result && (
@@ -764,9 +792,9 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                     onClick={() => setShowSaveDialog(true)}
                     className="save-project-btn"
                   >
-                    Save to Project
+                    {resultSaved ? "Saved" : "Save to Project"}
                   </button>
-                  <button onClick={() => setStep("import")} className="new-calc-btn">
+                  <button onClick={() => handleExitAttempt(() => setStep("import"))} className="new-calc-btn">
                     New Calculation
                   </button>
                 </>
@@ -783,6 +811,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
           onClose={() => setShowSaveDialog(false)}
           onSaved={() => {
             setShowSaveDialog(false);
+            setResultSaved(true);
           }}
           calculationData={{
             calc_type: "scf",
@@ -808,6 +837,39 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
           workingDir="/tmp/qcortado_work"
           projectContext={projectContext || undefined}
         />
+      )}
+
+      {/* Exit Confirmation Dialog */}
+      {showExitConfirm && (
+        <div className="dialog-overlay" onClick={cancelExit}>
+          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>Unsaved Results</h2>
+              <button className="dialog-close" onClick={cancelExit}>
+                &times;
+              </button>
+            </div>
+
+            <div className="dialog-body">
+              <p className="exit-warning">
+                Your calculation results have not been saved to a project.
+                If you leave now, the results will be lost.
+              </p>
+              <p className="exit-hint">
+                Click "Save to Project" to keep your results, or "Leave Anyway" to discard them.
+              </p>
+            </div>
+
+            <div className="dialog-footer">
+              <button className="dialog-btn cancel" onClick={cancelExit}>
+                Stay Here
+              </button>
+              <button className="dialog-btn delete" onClick={confirmExit}>
+                Leave Anyway
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

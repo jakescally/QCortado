@@ -2370,3 +2370,30 @@ h3 .tooltip-text::after {
     color: #fde68a;
   }
 }
+
+/* ============================================
+   Exit Confirmation Styles
+   ============================================ */
+
+.exit-warning {
+  font-size: 1rem;
+  color: #2d3748;
+  margin-bottom: 1rem;
+}
+
+.exit-hint {
+  font-size: 0.9rem;
+  color: #718096;
+  margin: 0;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .exit-warning {
+    color: #e2e8f0;
+  }
+
+  .exit-hint {
+    color: #a0aec0;
+  }
+}
