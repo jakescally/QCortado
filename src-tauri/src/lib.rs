@@ -14,7 +14,7 @@ pub mod config;
 pub mod projects;
 pub mod qe;
 
-use qe::{generate_pw_input, parse_pw_output, QECalculation, QEResult, QERunner};
+use qe::{generate_pw_input, parse_pw_output, QECalculation, QEResult, QERunner, BandData, BandsXConfig, KPathPoint, generate_bands_x_input, read_bands_gnu_file};
 
 /// Application state shared across commands.
 pub struct AppState {
@@ -404,6 +404,222 @@ fn load_sssp_data(pseudo_dir: String) -> Result<std::collections::HashMap<String
 }
 
 // ============================================================================
+// Band Structure Commands
+// ============================================================================
+
+/// Configuration for a bands NSCF calculation
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BandsCalculationConfig {
+    /// Base SCF calculation to derive system settings from
+    pub base_calculation: QECalculation,
+    /// K-path for band structure
+    pub k_path: Vec<KPathPoint>,
+    /// Optional number of bands (auto if None)
+    pub nbnd: Option<u32>,
+}
+
+/// Runs a band structure calculation (NSCF + bands.x) with streaming output.
+#[tauri::command]
+async fn run_bands_calculation(
+    app: AppHandle,
+    config: BandsCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    state: State<'_, AppState>,
+) -> Result<BandData, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt};
+
+    // Clone the path out of the guard before any await points
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+
+    let work_path = PathBuf::from(&working_dir);
+
+    // Ensure working directory exists
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    // Step 1: Create bands calculation from base SCF
+    let mut bands_calc = config.base_calculation.clone();
+    bands_calc.calculation = qe::CalculationType::Bands;
+    bands_calc.verbosity = Some("high".to_string());
+
+    // Convert k_path to KPoints::CrystalB
+    let band_path: Vec<qe::BandPathPoint> = config.k_path
+        .iter()
+        .map(|p| qe::BandPathPoint {
+            k: p.coords,
+            npoints: p.npoints,
+            label: Some(p.label.clone()),
+        })
+        .collect();
+    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+
+    // Generate input
+    let input = generate_pw_input(&bands_calc);
+
+    // Save input file for reference
+    std::fs::write(work_path.join("bands.in"), &input)
+        .map_err(|e| format!("Failed to write input file: {}", e))?;
+
+    let _ = app.emit("qe-output-line", "=== Starting Band Structure Calculation ===");
+    let _ = app.emit("qe-output-line", "Step 1/2: Running NSCF calculation along k-path...");
+
+    // Step 2: Run pw.x for bands
+    let exe_path = bin_dir.join("pw.x");
+    if !exe_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    // Build the command - with or without MPI
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            let _ = app.emit("qe-output-line", format!("Using MPI with {} processes", mpi.nprocs));
+            tokio::process::Command::new("mpirun")
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio::process::Command::new(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        tokio::process::Command::new(&exe_path)
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
+
+    // Write input to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes()).await
+            .map_err(|e| format!("Failed to write input: {}", e))?;
+    }
+
+    // Stream stdout
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_output = String::new();
+    let mut fermi_energy: Option<f64> = None;
+
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        full_output.push_str(&line);
+        full_output.push('\n');
+        let _ = app.emit("qe-output-line", &line);
+
+        // Try to extract Fermi energy from output
+        if line.contains("the Fermi energy is") {
+            if let Some(idx) = line.find("the Fermi energy is") {
+                let rest = &line[idx + 19..];
+                if let Some(ev_idx) = rest.find("ev") {
+                    if let Ok(ef) = rest[..ev_idx].trim().parse::<f64>() {
+                        fermi_energy = Some(ef);
+                    }
+                }
+            }
+        }
+    }
+
+    // Wait for process to complete
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("pw.x failed with exit code: {:?}", status.code()));
+    }
+
+    // Save output
+    std::fs::write(work_path.join("bands.out"), &full_output)
+        .map_err(|e| format!("Failed to write output file: {}", e))?;
+
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "Step 2/2: Running bands.x post-processing...");
+
+    // Step 3: Run bands.x
+    let bands_x_path = bin_dir.join("bands.x");
+    if !bands_x_path.exists() {
+        return Err("bands.x not found. Make sure your QE installation includes bands.x".to_string());
+    }
+
+    let bands_x_config = BandsXConfig {
+        prefix: bands_calc.prefix.clone(),
+        outdir: bands_calc.outdir.clone(),
+        filband: "bands.dat".to_string(),
+        lsym: true,
+    };
+    let bands_x_input = generate_bands_x_input(&bands_x_config);
+
+    // Save bands.x input for reference
+    std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
+        .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
+
+    let mut bands_child = tokio::process::Command::new(&bands_x_path)
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start bands.x: {}", e))?;
+
+    if let Some(mut stdin) = bands_child.stdin.take() {
+        stdin.write_all(bands_x_input.as_bytes()).await
+            .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
+    }
+
+    // Stream bands.x output
+    let bands_stdout = bands_child.stdout.take().ok_or("Failed to capture bands.x stdout")?;
+    let mut bands_reader = BufReader::new(bands_stdout).lines();
+
+    while let Some(line) = bands_reader.next_line().await.map_err(|e| e.to_string())? {
+        let _ = app.emit("qe-output-line", &line);
+    }
+
+    let bands_status = bands_child.wait().await.map_err(|e| e.to_string())?;
+    if !bands_status.success() {
+        return Err(format!("bands.x failed with exit code: {:?}", bands_status.code()));
+    }
+
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "Parsing band structure data...");
+
+    // Step 4: Parse the output
+    let gnu_file = work_path.join("bands.dat.gnu");
+    if !gnu_file.exists() {
+        return Err("bands.dat.gnu not found. bands.x may have failed.".to_string());
+    }
+
+    let ef = fermi_energy.unwrap_or(0.0);
+    let mut band_data = read_bands_gnu_file(&gnu_file, ef)
+        .map_err(|e| format!("Failed to parse band data: {}", e))?;
+
+    // Add high-symmetry point markers
+    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+
+    let _ = app.emit("qe-output-line", format!("=== Band Structure Complete ==="));
+    let _ = app.emit("qe-output-line", format!("  {} bands, {} k-points", band_data.n_bands, band_data.n_kpoints));
+    if let Some(ref gap) = band_data.band_gap {
+        let gap_type = if gap.is_direct { "direct" } else { "indirect" };
+        let _ = app.emit("qe-output-line", format!("  Band gap: {:.3} eV ({})", gap.value, gap_type));
+    }
+
+    Ok(band_data)
+}
+
+// ============================================================================
 // Application Entry Point
 // ============================================================================
 
@@ -456,6 +672,7 @@ pub fn run() {
             check_mpi_available,
             run_calculation,
             run_calculation_streaming,
+            run_bands_calculation,
             set_project_dir,
             get_project_dir,
             list_pseudopotentials,

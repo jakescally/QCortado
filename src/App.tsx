@@ -3,8 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
+import { BandStructureWizard } from "./components/BandStructureWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
-import { ProjectDashboard } from "./components/ProjectDashboard";
+import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { CrystalData } from "./lib/types";
 
@@ -18,7 +19,7 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "project-browser" | "project-dashboard";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "project-browser" | "project-dashboard";
 
 interface SCFContext {
   cifId: string;
@@ -26,6 +27,13 @@ interface SCFContext {
   cifContent: string;
   filename: string;
   projectId: string;
+}
+
+interface BandsContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  scfCalculations: CalculationRun[];
 }
 
 function App() {
@@ -40,6 +48,9 @@ function App() {
 
   // Context for running SCF from a project
   const [scfContext, setScfContext] = useState<SCFContext | null>(null);
+
+  // Context for running Bands from a project
+  const [bandsContext, setBandsContext] = useState<BandsContext | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -99,6 +110,22 @@ function App() {
     }
   }
 
+  if (currentView === "bands-wizard" && qePath && bandsContext) {
+    return (
+      <BandStructureWizard
+        qePath={qePath}
+        onBack={() => {
+          setCurrentView("project-dashboard");
+          setBandsContext(null);
+        }}
+        projectId={bandsContext.projectId}
+        cifId={bandsContext.cifId}
+        crystalData={bandsContext.crystalData}
+        scfCalculations={bandsContext.scfCalculations}
+      />
+    );
+  }
+
   if (currentView === "scf-wizard" && qePath) {
     return (
       <SCFWizard
@@ -154,6 +181,15 @@ function App() {
             projectId: selectedProjectId,
           });
           setCurrentView("scf-wizard");
+        }}
+        onRunBands={(cifId, crystalData, scfCalculations) => {
+          setBandsContext({
+            cifId,
+            crystalData,
+            projectId: selectedProjectId,
+            scfCalculations,
+          });
+          setCurrentView("bands-wizard");
         }}
       />
     );

@@ -16,10 +16,10 @@ interface QEResult {
   raw_output: string;
 }
 
-interface CalculationRun {
+export interface CalculationRun {
   id: string;
   calc_type: string;
-  parameters: unknown;
+  parameters: any;
   result: QEResult | null;
   started_at: string;
   completed_at: string | null;
@@ -47,6 +47,7 @@ interface ProjectDashboardProps {
   onBack: () => void;
   onDeleted: () => void;
   onRunSCF: (cifId: string, crystalData: CrystalData, cifContent: string, filename: string) => void;
+  onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
 }
 
 const CONFIRM_TEXT = "delete my project for good";
@@ -56,6 +57,7 @@ export function ProjectDashboard({
   onBack,
   onDeleted,
   onRunSCF,
+  onRunBands,
 }: ProjectDashboardProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -242,6 +244,20 @@ export function ProjectDashboard({
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     onRunSCF(selectedCifId, crystalData, cifContent, variant.filename);
+  }
+
+  function handleRunBands() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    // Pass all calculations for this CIF - the wizard will filter for SCF
+    onRunBands(selectedCifId, crystalData, variant.calculations);
+  }
+
+  function hasConvergedSCF(): boolean {
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(c => c.calc_type === "scf" && c.result?.converged);
   }
 
   function formatDate(isoString: string): string {
@@ -457,10 +473,16 @@ export function ProjectDashboard({
               <span className="calc-action-label">Self-Consistent Field</span>
               <span className="calc-action-hint">Ground state energy</span>
             </button>
-            <button className="calc-action-btn" disabled>
+            <button
+              className="calc-action-btn"
+              onClick={handleRunBands}
+              disabled={!hasConvergedSCF()}
+            >
               <span className="calc-action-icon">Band</span>
               <span className="calc-action-label">Band Structure</span>
-              <span className="calc-action-hint">Coming soon</span>
+              <span className="calc-action-hint">
+                {hasConvergedSCF() ? "Electronic bands" : "Requires SCF"}
+              </span>
             </button>
             <button className="calc-action-btn" disabled>
               <span className="calc-action-icon">DOS</span>
