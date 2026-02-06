@@ -1696,6 +1696,52 @@ h3 .tooltip-text::after {
   gap: 1rem;
 }
 
+.structures-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.structures-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #4a5568;
+  font-weight: 600;
+}
+
+.add-structure-btn {
+  padding: 0.5rem 1rem;
+  background: white;
+  border: 1px solid #4299e1;
+  color: #4299e1;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-structure-btn:hover:not(:disabled) {
+  background: #ebf8ff;
+}
+
+.add-structure-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.add-structure-btn.primary {
+  background: #4299e1;
+  color: white;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+}
+
+.add-structure-btn.primary:hover:not(:disabled) {
+  background: #3182ce;
+}
+
 .cif-variant-card {
   background: white;
   border: 1px solid #e2e8f0;

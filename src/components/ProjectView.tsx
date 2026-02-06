@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { readTextFile } from "@tauri-apps/plugin-fs";
+import { parseCIF } from "../lib/cifParser";
 
 interface QEResult {
   converged: boolean;
@@ -60,6 +63,9 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Import state
+  const [isImporting, setIsImporting] = useState(false);
+
   useEffect(() => {
     loadProject();
   }, [projectId]);
@@ -86,6 +92,44 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
       setError(String(e));
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleImportCIF() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "CIF Files", extensions: ["cif"] }],
+        title: "Select CIF File",
+      });
+
+      if (selected && typeof selected === "string") {
+        setIsImporting(true);
+        setError(null);
+
+        const content = await readTextFile(selected);
+        const crystalData = parseCIF(content);
+        const filename = selected.split("/").pop() || "structure.cif";
+        const formula = crystalData.formula_sum || crystalData.formula_structural || "Unknown";
+
+        await invoke("add_cif_to_project", {
+          projectId,
+          cifData: {
+            filename,
+            formula,
+            content,
+            crystal_data: crystalData,
+          },
+        });
+
+        // Reload the project to show the new structure
+        await loadProject();
+      }
+    } catch (e) {
+      console.error("Failed to import CIF:", e);
+      setError(`Failed to import CIF: ${e}`);
+    } finally {
+      setIsImporting(false);
     }
   }
 
@@ -191,10 +235,27 @@ export function ProjectView({ projectId, onBack, onDeleted }: ProjectViewProps) 
           <div className="empty-state">
             <div className="empty-icon">📄</div>
             <h3>No Structures Yet</h3>
-            <p>Run a calculation and save it to this project to add structures</p>
+            <p>Import a CIF file to add a crystal structure to this project</p>
+            <button
+              className="add-structure-btn primary"
+              onClick={handleImportCIF}
+              disabled={isImporting}
+            >
+              {isImporting ? "Importing..." : "Import CIF File"}
+            </button>
           </div>
         ) : (
           <div className="cif-variants-list">
+            <div className="structures-header">
+              <h3>Structures</h3>
+              <button
+                className="add-structure-btn"
+                onClick={handleImportCIF}
+                disabled={isImporting}
+              >
+                {isImporting ? "Importing..." : "+ Add Structure"}
+              </button>
+            </div>
             {project.cif_variants.map((variant) => (
               <div key={variant.id} className="cif-variant-card">
                 <div className="cif-variant-header">
