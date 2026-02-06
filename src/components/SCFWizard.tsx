@@ -82,6 +82,9 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     mixing_beta: 0.7,
   });
 
+  // Local string state for conv_thr input (to allow typing scientific notation)
+  const [convThrInput, setConvThrInput] = useState("1e-6");
+
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState<string>("");
   const [result, setResult] = useState<any>(null);
@@ -636,13 +639,22 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                       <div className="param-input-group">
                         <input
                           type="text"
-                          value={config.conv_thr}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              conv_thr: parseFloat(e.target.value),
-                            }))
-                          }
+                          value={convThrInput}
+                          onChange={(e) => setConvThrInput(e.target.value)}
+                          onBlur={() => {
+                            const parsed = parseFloat(convThrInput);
+                            if (!isNaN(parsed) && parsed > 0) {
+                              setConfig((prev) => ({ ...prev, conv_thr: parsed }));
+                            } else {
+                              // Reset to current config value if invalid
+                              setConvThrInput(config.conv_thr.toString());
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.currentTarget.blur();
+                            }
+                          }}
                         />
                         <span className="param-unit">Ry</span>
                       </div>
