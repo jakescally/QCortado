@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { CrystalData } from "../lib/types";
+import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { detectBravaisLattice, getBravaisLatticeName, BravaisLattice } from "../lib/brillouinZone";
 import {
   getStandardKPath,
@@ -95,22 +95,71 @@ export function BandStructureWizard({
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
 
-  // Load MPI info
+  // Pseudopotentials (pseudopotentials list used internally for auto-selection)
+  const [, setPseudopotentials] = useState<string[]>([]);
+  const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+
+  // Helper functions
+  function getBaseElement(symbol: string): string {
+    return symbol.replace(/[\d+-]+$/, "");
+  }
+
+  function pseudoMatchesElement(filename: string, element: string): boolean {
+    const lowerFile = filename.toLowerCase();
+    const lowerEl = getBaseElement(element).toLowerCase();
+    return (
+      lowerFile.startsWith(lowerEl + ".") ||
+      lowerFile.startsWith(lowerEl + "_") ||
+      lowerFile.startsWith(lowerEl + "-")
+    );
+  }
+
+  function calculateCVector(data: CrystalData): [number, number, number] {
+    const c = data.cell_length_c.value;
+    const alpha = (data.cell_angle_alpha.value * Math.PI) / 180;
+    const beta = (data.cell_angle_beta.value * Math.PI) / 180;
+    const gamma = (data.cell_angle_gamma.value * Math.PI) / 180;
+
+    const cx = c * Math.cos(beta);
+    const cy = (c * (Math.cos(alpha) - Math.cos(beta) * Math.cos(gamma))) / Math.sin(gamma);
+    const cz = Math.sqrt(c * c - cx * cx - cy * cy);
+
+    return [cx, cy, cz];
+  }
+
+  // Load MPI info and pseudopotentials
   useEffect(() => {
-    async function checkMpi() {
+    async function init() {
       try {
+        // Check MPI
         const count = await invoke<number>("get_cpu_count");
         setCpuCount(count);
         setMpiProcs(Math.max(1, Math.floor(count * 0.75)));
 
         const available = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(available);
+
+        // Load pseudopotentials
+        const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+        const pseudos = await invoke<string[]>("list_pseudopotentials", { pseudoDir });
+        setPseudopotentials(pseudos);
+
+        // Auto-select pseudopotentials for elements in the structure
+        const elements = [...new Set(crystalData.atom_sites.map(s => getBaseElement(s.type_symbol)))];
+        const selected: Record<string, string> = {};
+        for (const el of elements) {
+          const match = pseudos.find(p => pseudoMatchesElement(p, el));
+          if (match) {
+            selected[el] = match;
+          }
+        }
+        setSelectedPseudos(selected);
       } catch (e) {
-        console.error("Failed to check MPI:", e);
+        console.error("Failed to initialize:", e);
       }
     }
-    checkMpi();
-  }, []);
+    init();
+  }, [qePath, crystalData]);
 
   // Auto-scroll output
   useEffect(() => {
@@ -171,17 +220,60 @@ export function BandStructureWizard({
       // Build k-path
       const kPath = buildKPath();
 
-      // Get the SCF parameters to use as base
-      const scfParams = selectedScf.parameters;
+      // Get the SCF parameters for cutoffs, etc.
+      const scfParams = selectedScf.parameters || {};
 
-      // Create base calculation config
+      // Get unique elements from crystal data
+      const elements = [...new Set(crystalData.atom_sites.map(s => getBaseElement(s.type_symbol)))];
+
+      // Check we have pseudopotentials for all elements
+      for (const el of elements) {
+        if (!selectedPseudos[el]) {
+          throw new Error(`No pseudopotential selected for element ${el}`);
+        }
+      }
+
+      // Build the full calculation config from crystalData
+      const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
       const baseCalculation = {
         calculation: "scf",
-        prefix: scfParams.prefix || "qcortado",
+        prefix: "qcortado_bands",
         outdir: "./tmp",
-        pseudo_dir: scfParams.pseudo_dir || qePath.replace(/\/bin\/?$/, "/pseudo"),
-        system: scfParams.system,
-        kpoints: { type: "gamma" }, // Will be replaced
+        pseudo_dir: pseudoDir,
+        system: {
+          ibrav: "free",
+          celldm: null,
+          cell_parameters: [
+            [crystalData.cell_length_a.value, 0, 0],
+            [
+              crystalData.cell_length_b.value *
+                Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+              crystalData.cell_length_b.value *
+                Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+              0,
+            ],
+            calculateCVector(crystalData),
+          ],
+          cell_units: "angstrom",
+          species: elements.map((el) => ({
+            symbol: el,
+            mass: ELEMENT_MASSES[el] || 1.0,
+            pseudopotential: selectedPseudos[el],
+          })),
+          atoms: crystalData.atom_sites.map((site) => ({
+            symbol: getBaseElement(site.type_symbol),
+            position: [site.fract_x, site.fract_y, site.fract_z],
+            if_pos: [true, true, true],
+          })),
+          position_units: "crystal",
+          ecutwfc: scfParams.ecutwfc || 40,
+          ecutrho: scfParams.ecutrho || 320,
+          nspin: 1,
+          occupations: "smearing",
+          smearing: "gaussian",
+          degauss: 0.01,
+        },
+        kpoints: { type: "gamma" }, // Will be replaced by backend
         conv_thr: scfParams.conv_thr || 1e-6,
         mixing_beta: scfParams.mixing_beta || 0.7,
         tprnfor: false,
