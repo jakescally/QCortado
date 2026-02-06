@@ -94,6 +94,12 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
   const [ssspMissing, setSsspMissing] = useState(false);
 
+  // MPI settings
+  const [mpiEnabled, setMpiEnabled] = useState(false);
+  const [mpiProcs, setMpiProcs] = useState(1);
+  const [cpuCount, setCpuCount] = useState(1);
+  const [mpiAvailable, setMpiAvailable] = useState(false);
+
   // Load available pseudopotentials and SSSP data
   useEffect(() => {
     async function loadPseudos() {
@@ -134,6 +140,24 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
   }, [output]);
+
+  // Load CPU count and check MPI availability
+  useEffect(() => {
+    async function loadMpiInfo() {
+      try {
+        const cores = await invoke<number>("get_cpu_count");
+        setCpuCount(cores);
+        // Default to ~75% of cores, minimum 1
+        setMpiProcs(Math.max(1, Math.floor(cores * 0.75)));
+
+        const mpiOk = await invoke<boolean>("check_mpi_available");
+        setMpiAvailable(mpiOk);
+      } catch (e) {
+        console.error("Failed to load MPI info:", e);
+      }
+    }
+    loadMpiInfo();
+  }, []);
 
   // Strip oxidation state from element symbol (e.g., "Ni0+" -> "Ni", "Fe3+" -> "Fe")
   function getBaseElement(symbol: string): string {
@@ -318,6 +342,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       const calcResult = await invoke<any>("run_calculation_streaming", {
         calculation,
         workingDir: "/tmp/qcortado_work",
+        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
       });
 
       // Track calculation end time
@@ -615,12 +640,67 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                   )}
                 </section>
 
+                {/* MPI Parallelization */}
+                <section className="config-section">
+                  <h3>
+                    Parallelization
+                    <Tooltip text="MPI (Message Passing Interface) allows running calculations in parallel across multiple CPU cores, significantly speeding up large calculations. Your Quantum ESPRESSO installation must be compiled with MPI support for this to work." />
+                  </h3>
+
+                  <div className="mpi-toggle-row">
+                    <label className="toggle-label">
+                      <input
+                        type="checkbox"
+                        checked={mpiEnabled}
+                        onChange={(e) => setMpiEnabled(e.target.checked)}
+                        disabled={!mpiAvailable}
+                      />
+                      <span>Enable MPI parallel execution</span>
+                    </label>
+                    {!mpiAvailable && (
+                      <span className="mpi-unavailable">
+                        (mpirun not found on system)
+                      </span>
+                    )}
+                  </div>
+
+                  {mpiEnabled && (
+                    <div className="mpi-settings">
+                      <div className="param-row">
+                        <label>
+                          Number of processes
+                          <Tooltip text="Number of parallel MPI processes to use. More processes can speed up large calculations but have overhead for small systems. Using too many processes for a small system may actually slow things down." />
+                        </label>
+                        <div className="mpi-input-group">
+                          <input
+                            type="number"
+                            min={1}
+                            max={cpuCount}
+                            value={mpiProcs}
+                            onChange={(e) => setMpiProcs(Math.max(1, Math.min(cpuCount, parseInt(e.target.value) || 1)))}
+                          />
+                          <span className="mpi-core-info">
+                            of {cpuCount} available cores
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="mpi-warning">
+                        <strong>Note:</strong> MPI only works if Quantum ESPRESSO was compiled with MPI support.
+                        If the calculation fails, try disabling MPI or check your QE installation.
+                      </div>
+                    </div>
+                  )}
+                </section>
+
                 <button
                   className="run-btn"
                   onClick={handleRun}
                   disabled={!canRun()}
                 >
-                  Run SCF Calculation
+                  {mpiEnabled && mpiProcs > 1
+                    ? `Run SCF Calculation (${mpiProcs} cores)`
+                    : "Run SCF Calculation"}
                 </button>
               </div>
 

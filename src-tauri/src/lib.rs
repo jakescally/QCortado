@@ -170,6 +170,24 @@ fn parse_output(output: String) -> QEResult {
     parse_pw_output(&output)
 }
 
+/// Gets the number of available CPU cores.
+#[tauri::command]
+fn get_cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+}
+
+/// Checks if mpirun is available on the system.
+#[tauri::command]
+fn check_mpi_available() -> bool {
+    std::process::Command::new("mpirun")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Runs a pw.x calculation (blocking).
 #[tauri::command]
 async fn run_calculation(
@@ -197,12 +215,22 @@ async fn run_calculation(
         .map_err(|e| e.to_string())
 }
 
+/// MPI configuration for parallel calculations
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MpiConfig {
+    /// Whether MPI is enabled
+    pub enabled: bool,
+    /// Number of MPI processes
+    pub nprocs: u32,
+}
+
 /// Runs a pw.x calculation with streaming output via events.
 #[tauri::command]
 async fn run_calculation_streaming(
     app: AppHandle,
     calculation: QECalculation,
     working_dir: String,
+    mpi_config: Option<MpiConfig>,
     state: State<'_, AppState>,
 ) -> Result<QEResult, String> {
     use std::process::Stdio;
@@ -226,14 +254,40 @@ async fn run_calculation_streaming(
         return Err("pw.x not found".to_string());
     }
 
-    // Spawn the process
-    let mut child = tokio::process::Command::new(&exe_path)
-        .current_dir(&work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start pw.x: {}", e))?;
+    // Build the command - with or without MPI
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            // Use MPI
+            let _ = app.emit("qe-output-line", format!("Starting pw.x with MPI ({} processes)...", mpi.nprocs));
+            tokio::process::Command::new("mpirun")
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}. Is MPI installed?", e))?
+        } else {
+            // Serial mode
+            tokio::process::Command::new(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        // No MPI config provided - serial mode
+        tokio::process::Command::new(&exe_path)
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
 
     // Write input to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -398,6 +452,8 @@ pub fn run() {
             generate_input,
             validate_calculation,
             parse_output,
+            get_cpu_count,
+            check_mpi_available,
             run_calculation,
             run_calculation_streaming,
             set_project_dir,
