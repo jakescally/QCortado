@@ -2932,12 +2932,13 @@ h3 .tooltip-text::after {
 
 /* Results Step */
 .band-plot-wrapper {
-  background: #1e1e2e;
+  background: #f5f5f5;
   border-radius: 12px;
   padding: 1rem;
   margin-bottom: 1.5rem;
   display: flex;
   justify-content: center;
+  border: 1px solid #ddd;
 }
 
 .results-summary {
@@ -3060,6 +3061,122 @@ h3 .tooltip-text::after {
 
 .band-plot-reset {
   padding: 0.4rem 0.75rem;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  color: #333;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.band-plot-reset:hover {
+  background: #f0f0f0;
+  border-color: #999;
+}
+
+.band-plot-hint {
+  font-size: 0.75rem;
+  color: #888;
+  font-style: italic;
+}
+
+.band-plot-info {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.band-plot-info .band-gap-info {
+  color: #2e7d32;
+  font-weight: 500;
+}
+
+.band-plot-info .metal-info {
+  color: #1565c0;
+  font-weight: 500;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ============================================
+   Brillouin Zone Viewer Styles
+   ============================================ */
+
+.bz-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: #252536;
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.bz-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bz-viewer-header h4 {
+  margin: 0;
+  color: #cdd6f4;
+  font-size: 1rem;
+}
+
+.bz-viewer-info {
+  font-size: 0.8rem;
+  color: #a6adc8;
+}
+
+.bz-viewer-canvas {
+  width: 100%;
+  height: 400px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.bz-viewer-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.bz-path-display {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: #313244;
+  border-radius: 6px;
+}
+
+.bz-path-display label {
+  font-size: 0.8rem;
+  color: #a6adc8;
+  white-space: nowrap;
+}
+
+.bz-path-string {
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: #89b4fa;
+  overflow-x: auto;
+}
+
+.bz-viewer-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.bz-btn {
+  padding: 0.4rem 0.75rem;
   background: #313244;
   border: 1px solid #45475a;
   border-radius: 4px;
@@ -3069,34 +3186,78 @@ h3 .tooltip-text::after {
   transition: all 0.15s ease;
 }
 
-.band-plot-reset:hover {
+.bz-btn:hover:not(:disabled) {
   background: #45475a;
 }
 
-.band-plot-zoom-label {
-  font-size: 0.8rem;
-  color: #a6adc8;
+.bz-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.band-plot-info {
-  display: flex;
-  gap: 1.5rem;
+.bz-btn.recommended {
+  background: #89b4fa;
+  color: #1e1e2e;
+  border-color: #89b4fa;
+}
+
+.bz-btn.recommended:hover {
+  background: #b4befe;
+  border-color: #b4befe;
+}
+
+.bz-points-list {
+  border-top: 1px solid #45475a;
+  padding-top: 1rem;
+}
+
+.bz-points-list h5 {
+  margin: 0 0 0.5rem 0;
   font-size: 0.85rem;
   color: #a6adc8;
 }
 
-.band-plot-info .band-gap-info {
-  color: #a6e3a1;
-  font-weight: 500;
+.bz-points-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
 }
 
-.band-plot-info .metal-info {
-  color: #89b4fa;
-  font-weight: 500;
+.bz-point-item {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem;
+  background: #313244;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.bz-point-item:hover {
+  background: #45475a;
+  border-color: #89b4fa;
+}
+
+.bz-point-item.in-path {
+  border-color: #a6e3a1;
+  background: rgba(166, 227, 161, 0.1);
+}
+
+.bz-point-label {
+  font-weight: 600;
+  color: #cdd6f4;
+  font-size: 1rem;
+}
+
+.bz-point-coords {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #a6adc8;
+}
+
+.bz-point-desc {
+  font-size: 0.7rem;
+  color: #6c7086;
+  margin-top: 0.25rem;
 }

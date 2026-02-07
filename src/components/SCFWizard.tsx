@@ -828,6 +828,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
           calculationData={{
             calc_type: "scf",
             parameters: {
+              prefix: "qcortado_scf",
               ecutwfc: config.ecutwfc,
               ecutrho: config.ecutrho,
               kgrid: config.kgrid,

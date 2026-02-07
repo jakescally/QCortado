@@ -103,13 +103,16 @@ pub fn generate_bands_x_input(config: &BandsXConfig) -> String {
 ///
 /// The format is:
 /// ```text
-/// k_distance  energy_band_1
-/// k_distance  energy_band_2
+/// k_distance  energy  (band 1, k-point 1)
+/// k_distance  energy  (band 1, k-point 2)
 /// ...
+/// k_distance  energy  (band 1, k-point N)
 /// (blank line)
-/// k_distance  energy_band_1  (next k-point)
+/// k_distance  energy  (band 2, k-point 1)
+/// k_distance  energy  (band 2, k-point 2)
 /// ...
 /// ```
+/// Each block separated by blank lines represents one band across all k-points.
 pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, String> {
     let lines: Vec<&str> = content.lines().collect();
 
@@ -117,13 +120,18 @@ pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, Str
         return Err("Empty bands file".to_string());
     }
 
-    // Parse all data points
-    let mut k_values: Vec<f64> = Vec::new();
-    let mut all_energies: Vec<(f64, f64)> = Vec::new(); // (k, energy) pairs
+    // Parse data into bands, separated by blank lines
+    let mut bands: Vec<Vec<(f64, f64)>> = Vec::new(); // Each band is a vec of (k, energy) pairs
+    let mut current_band: Vec<(f64, f64)> = Vec::new();
 
     for line in lines.iter() {
         let line = line.trim();
         if line.is_empty() {
+            // Blank line marks end of a band
+            if !current_band.is_empty() {
+                bands.push(current_band);
+                current_band = Vec::new();
+            }
             continue;
         }
 
@@ -131,35 +139,41 @@ pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, Str
         if parts.len() >= 2 {
             let k: f64 = parts[0].parse().map_err(|_| "Failed to parse k value")?;
             let e: f64 = parts[1].parse().map_err(|_| "Failed to parse energy value")?;
-            all_energies.push((k, e));
-
-            // Collect unique k values in order
-            if k_values.is_empty() || (k_values.last().unwrap() - k).abs() > 1e-10 {
-                k_values.push(k);
-            }
+            current_band.push((k, e));
         }
     }
 
-    if k_values.is_empty() || all_energies.is_empty() {
+    // Don't forget the last band if file doesn't end with blank line
+    if !current_band.is_empty() {
+        bands.push(current_band);
+    }
+
+    if bands.is_empty() {
         return Err("No valid data in bands file".to_string());
     }
 
+    // Extract k_values from the first band (all bands should have same k-points)
+    let k_values: Vec<f64> = bands[0].iter().map(|(k, _)| *k).collect();
     let n_kpoints = k_values.len();
-    let n_bands = all_energies.len() / n_kpoints;
+    let n_bands = bands.len();
 
-    if n_bands == 0 {
-        return Err("Could not determine number of bands".to_string());
+    if n_kpoints == 0 {
+        return Err("No k-points found".to_string());
     }
 
-    // Organize into bands array: energies[band][kpoint]
-    let mut energies: Vec<Vec<f64>> = vec![vec![0.0; n_kpoints]; n_bands];
-
-    for (idx, (_, e)) in all_energies.iter().enumerate() {
-        let band_idx = idx / n_kpoints;
-        let k_idx = idx % n_kpoints;
-        if band_idx < n_bands && k_idx < n_kpoints {
-            energies[band_idx][k_idx] = *e;
+    // Convert to energies[band][kpoint] format
+    let mut energies: Vec<Vec<f64>> = Vec::with_capacity(n_bands);
+    for band in &bands {
+        let band_energies: Vec<f64> = band.iter().map(|(_, e)| *e).collect();
+        // Verify this band has the same number of k-points
+        if band_energies.len() != n_kpoints {
+            return Err(format!(
+                "Band has {} points, expected {}",
+                band_energies.len(),
+                n_kpoints
+            ));
         }
+        energies.push(band_energies);
     }
 
     // Calculate energy range
@@ -261,37 +275,61 @@ pub fn add_symmetry_markers(
     data: &mut BandData,
     k_path: &[KPathPoint],
 ) {
-    let mut markers = Vec::new();
-
-    // Estimate total path length from data
-    let total_k = data.k_points.last().copied().unwrap_or(0.0);
-
-    for (i, point) in k_path.iter().enumerate() {
-        if i == 0 || point.npoints == 0 || k_path.get(i.saturating_sub(1)).map_or(false, |p| p.npoints == 0) {
-            // This is a high-symmetry point
-            // Estimate its k-distance based on position in path
-            let k_frac = if k_path.len() > 1 {
-                i as f64 / (k_path.len() - 1) as f64
-            } else {
-                0.0
-            };
-
-            markers.push(HighSymmetryMarker {
-                k_distance: k_frac * total_k,
-                label: point.label.clone(),
-            });
-        }
+    if k_path.is_empty() {
+        return;
     }
 
-    // If we have markers, use the actual k_points data to place them more accurately
-    if !markers.is_empty() && !data.k_points.is_empty() {
-        // Simple heuristic: place first at k=0, last at k_max
-        if let Some(first) = markers.first_mut() {
-            first.k_distance = 0.0;
-        }
-        if let Some(last) = markers.last_mut() {
-            last.k_distance = total_k;
-        }
+    let total_k = data.k_points.last().copied().unwrap_or(0.0);
+
+    // Calculate total npoints to determine proportional positions
+    // Each point's npoints indicates the segment AFTER it, so we sum all but use
+    // cumulative sums to place markers
+    let total_npoints: u32 = k_path.iter().map(|p| p.npoints).sum();
+
+    if total_npoints == 0 {
+        // Fallback: just place markers evenly
+        let markers: Vec<HighSymmetryMarker> = k_path
+            .iter()
+            .enumerate()
+            .map(|(i, point)| {
+                let k_frac = if k_path.len() > 1 {
+                    i as f64 / (k_path.len() - 1) as f64
+                } else {
+                    0.0
+                };
+                HighSymmetryMarker {
+                    k_distance: k_frac * total_k,
+                    label: point.label.clone(),
+                }
+            })
+            .collect();
+        data.high_symmetry_points = markers;
+        return;
+    }
+
+    // Place markers based on cumulative npoints
+    // First point is at k=0, subsequent points are placed proportionally
+    let mut markers = Vec::new();
+    let mut cumulative: u32 = 0;
+
+    for (i, point) in k_path.iter().enumerate() {
+        let k_distance = if i == 0 {
+            0.0
+        } else {
+            (cumulative as f64 / total_npoints as f64) * total_k
+        };
+
+        markers.push(HighSymmetryMarker {
+            k_distance,
+            label: point.label.clone(),
+        });
+
+        cumulative += point.npoints;
+    }
+
+    // Ensure last marker is exactly at total_k
+    if let Some(last) = markers.last_mut() {
+        last.k_distance = total_k;
     }
 
     data.high_symmetry_points = markers;
@@ -320,15 +358,18 @@ mod tests {
 
     #[test]
     fn test_parse_bands_gnu() {
+        // Correct format: each band is a block of k-points, separated by blank lines
         let content = r#"
 0.000000  -6.12
-0.000000  -1.23
-0.000000   4.56
 0.100000  -6.00
-0.100000  -1.10
-0.100000   4.70
 0.200000  -5.80
+
+0.000000  -1.23
+0.100000  -1.10
 0.200000  -0.90
+
+0.000000   4.56
+0.100000   4.70
 0.200000   4.85
 "#;
 
@@ -339,5 +380,10 @@ mod tests {
         assert_eq!(data.n_kpoints, 3);
         assert_eq!(data.n_bands, 3);
         assert_eq!(data.k_points.len(), 3);
+
+        // Verify the energies are correctly organized
+        assert!((data.energies[0][0] - (-6.12)).abs() < 0.01); // Band 0, k-point 0
+        assert!((data.energies[1][0] - (-1.23)).abs() < 0.01); // Band 1, k-point 0
+        assert!((data.energies[2][2] - 4.85).abs() < 0.01);    // Band 2, k-point 2
     }
 }

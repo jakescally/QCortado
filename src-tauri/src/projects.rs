@@ -461,6 +461,29 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// Copies contents of a directory to another directory (public helper for bands calculation)
+pub fn copy_dir_contents(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dest_path)?;
+        } else {
+            fs::copy(&path, &dest_path)
+                .map_err(|e| format!("Failed to copy file: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Deletes a project
 #[tauri::command]
 pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> {

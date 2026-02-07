@@ -1,17 +1,11 @@
 // Band Structure Wizard - Calculate and visualize electronic band structures
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
-import { detectBravaisLattice, getBravaisLatticeName, BravaisLattice } from "../lib/brillouinZone";
-import {
-  getStandardKPath,
-  pathToString,
-  getOrderedPoints,
-  KPathSegment,
-} from "../lib/kpaths";
 import { BandPlot, BandData } from "./BandPlot";
+import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 
 interface CalculationRun {
   id: string;
@@ -37,16 +31,10 @@ interface BandStructureWizardProps {
 
 type WizardStep = "source" | "kpath" | "parameters" | "run" | "results";
 
-interface KPathConfig {
-  mode: "standard" | "custom" | "manual";
-  selectedPath: KPathSegment[];
-  pointsPerSegment: number;
-}
-
 export function BandStructureWizard({
   onBack,
   qePath,
-  projectId: _projectId,
+  projectId,
   cifId: _cifId,
   crystalData,
   scfCalculations,
@@ -58,25 +46,9 @@ export function BandStructureWizard({
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
 
-  // Step 2: K-Path
-  const bravaisLattice = crystalData.space_group_IT_number
-    ? detectBravaisLattice(crystalData.space_group_IT_number)
-    : "triclinic" as BravaisLattice;
-  const standardKPath = getStandardKPath(bravaisLattice);
-
-  const [kpathConfig, setKpathConfig] = useState<KPathConfig>({
-    mode: "standard",
-    selectedPath: standardKPath.defaultPath,
-    pointsPerSegment: 20,
-  });
-
-  // For custom path building
-  const [customPoints, setCustomPoints] = useState<string[]>(
-    standardKPath.defaultPath.map(s => s.from).concat([standardKPath.defaultPath[standardKPath.defaultPath.length - 1]?.to || ""])
-  );
-
-  // Manual entry
-  const [manualInput, setManualInput] = useState("");
+  // Step 2: K-Path (using BrillouinZoneViewer)
+  const [kPath, setKPath] = useState<KPathPoint[]>([]);
+  const [pointsPerSegment, setPointsPerSegment] = useState(20);
 
   // Step 3: Parameters
   const [nbnd, setNbnd] = useState<number | "auto">("auto");
@@ -88,6 +60,8 @@ export function BandStructureWizard({
 
   // Step 5: Results
   const [bandData, setBandData] = useState<BandData | null>(null);
+  // Store SCF Fermi energy separately to ensure it persists
+  const [scfFermiEnergy, setScfFermiEnergy] = useState<number | null>(null);
 
   // MPI settings
   const [mpiEnabled, setMpiEnabled] = useState(false);
@@ -168,33 +142,10 @@ export function BandStructureWizard({
     }
   }, [output]);
 
-  // Build k-path for calculation
-  const buildKPath = () => {
-    if (kpathConfig.mode === "manual") {
-      // Parse manual input
-      const lines = manualInput.trim().split("\n");
-      return lines.map(line => {
-        const parts = line.trim().split(/\s+/);
-        return {
-          label: parts[0] || "?",
-          coords: [
-            parseFloat(parts[1]) || 0,
-            parseFloat(parts[2]) || 0,
-            parseFloat(parts[3]) || 0,
-          ] as [number, number, number],
-          npoints: parseInt(parts[4]) || 0,
-        };
-      });
-    }
-
-    // Standard or custom mode - use getOrderedPoints
-    const orderedPoints = getOrderedPoints(kpathConfig.selectedPath, standardKPath.points);
-    return orderedPoints.map(({ point, npoints }) => ({
-      label: point.label,
-      coords: point.coords,
-      npoints: kpathConfig.mode === "standard" ? kpathConfig.pointsPerSegment : npoints,
-    }));
-  };
+  // Handle k-path changes from the BZ viewer
+  const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
+    setKPath(newPath);
+  }, []);
 
   // Run the calculation
   const runCalculation = async () => {
@@ -217,8 +168,10 @@ export function BandStructureWizard({
         setOutput((prev) => prev + event.payload + "\n");
       });
 
-      // Build k-path
-      const kPath = buildKPath();
+      // Validate k-path
+      if (kPath.length < 2) {
+        throw new Error("Please select at least 2 points for the k-path");
+      }
 
       // Get the SCF parameters for cutoffs, etc.
       const scfParams = selectedScf.parameters || {};
@@ -234,10 +187,13 @@ export function BandStructureWizard({
       }
 
       // Build the full calculation config from crystalData
+      // Use the same prefix as the source SCF so we can read its .save directory
+      // SCFWizard uses "qcortado_scf" as the prefix
+      const scfPrefix = scfParams.prefix || "qcortado_scf";
       const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
       const baseCalculation = {
         calculation: "scf",
-        prefix: "qcortado_bands",
+        prefix: scfPrefix,
         outdir: "./tmp",
         pseudo_dir: pseudoDir,
         system: {
@@ -289,6 +245,8 @@ export function BandStructureWizard({
           base_calculation: baseCalculation,
           k_path: kPath,
           nbnd: nbnd === "auto" ? null : nbnd,
+          project_id: projectId,
+          scf_calc_id: selectedScf.id,
         },
         workingDir: "/tmp/qcortado_bands",
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
@@ -352,13 +310,19 @@ export function BandStructureWizard({
             <div
               key={scf.id}
               className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
-              onClick={() => setSelectedScf(scf)}
+              onClick={() => {
+                setSelectedScf(scf);
+                setScfFermiEnergy(scf.result?.fermi_energy ?? null);
+              }}
             >
               <div className="scf-option-header">
                 <input
                   type="radio"
                   checked={selectedScf?.id === scf.id}
-                  onChange={() => setSelectedScf(scf)}
+                  onChange={() => {
+                    setSelectedScf(scf);
+                    setScfFermiEnergy(scf.result?.fermi_energy ?? null);
+                  }}
                 />
                 <span className="scf-date">
                   {new Date(scf.started_at).toLocaleDateString()}
@@ -390,17 +354,13 @@ export function BandStructureWizard({
     );
   };
 
-  // Step 2: K-Path selection
+  // Step 2: K-Path selection with 3D Brillouin Zone viewer
   const renderKPathStep = () => {
     return (
       <div className="wizard-step kpath-step">
         <h3>Select K-Path</h3>
 
         <div className="crystal-info">
-          <div className="info-row">
-            <span className="label">Crystal System:</span>
-            <span className="value">{getBravaisLatticeName(bravaisLattice)}</span>
-          </div>
           {crystalData.space_group_HM && (
             <div className="info-row">
               <span className="label">Space Group:</span>
@@ -412,99 +372,12 @@ export function BandStructureWizard({
           )}
         </div>
 
-        <div className="kpath-mode-selector">
-          <label className={`mode-option ${kpathConfig.mode === "standard" ? "selected" : ""}`}>
-            <input
-              type="radio"
-              name="kpath-mode"
-              checked={kpathConfig.mode === "standard"}
-              onChange={() => setKpathConfig({
-                ...kpathConfig,
-                mode: "standard",
-                selectedPath: standardKPath.defaultPath,
-              })}
-            />
-            <div className="mode-content">
-              <span className="mode-title">Recommended Path</span>
-              <span className="mode-path">{pathToString(standardKPath.defaultPath)}</span>
-            </div>
-          </label>
-
-          <label className={`mode-option ${kpathConfig.mode === "custom" ? "selected" : ""}`}>
-            <input
-              type="radio"
-              name="kpath-mode"
-              checked={kpathConfig.mode === "custom"}
-              onChange={() => setKpathConfig({ ...kpathConfig, mode: "custom" })}
-            />
-            <div className="mode-content">
-              <span className="mode-title">Custom Path</span>
-              <span className="mode-description">Select from available high-symmetry points</span>
-            </div>
-          </label>
-
-          <label className={`mode-option ${kpathConfig.mode === "manual" ? "selected" : ""}`}>
-            <input
-              type="radio"
-              name="kpath-mode"
-              checked={kpathConfig.mode === "manual"}
-              onChange={() => setKpathConfig({ ...kpathConfig, mode: "manual" })}
-            />
-            <div className="mode-content">
-              <span className="mode-title">Manual Entry</span>
-              <span className="mode-description">Enter k-points directly</span>
-            </div>
-          </label>
-        </div>
-
-        {kpathConfig.mode === "custom" && (
-          <div className="custom-path-editor">
-            <h4>Available Points</h4>
-            <div className="point-toggles">
-              {standardKPath.points.map((point) => (
-                <label key={point.label} className="point-toggle" title={point.description}>
-                  <input
-                    type="checkbox"
-                    checked={customPoints.includes(point.label)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setCustomPoints([...customPoints, point.label]);
-                      } else {
-                        setCustomPoints(customPoints.filter(p => p !== point.label));
-                      }
-                    }}
-                  />
-                  <span className="point-label">{point.label}</span>
-                  <span className="point-coords">
-                    ({point.coords.map(c => c.toFixed(2)).join(", ")})
-                  </span>
-                </label>
-              ))}
-            </div>
-            <div className="current-path">
-              <span className="label">Current Path:</span>
-              <span className="path-preview">{customPoints.join(" → ")}</span>
-            </div>
-          </div>
-        )}
-
-        {kpathConfig.mode === "manual" && (
-          <div className="manual-entry">
-            <h4>Enter K-Points</h4>
-            <p className="help-text">
-              Format: LABEL kx ky kz npoints (one point per line)
-            </p>
-            <textarea
-              value={manualInput}
-              onChange={(e) => setManualInput(e.target.value)}
-              placeholder={`G 0.0 0.0 0.0 20
-X 0.5 0.0 0.0 20
-M 0.5 0.5 0.0 20
-G 0.0 0.0 0.0 0`}
-              rows={8}
-            />
-          </div>
-        )}
+        <BrillouinZoneViewer
+          crystalData={crystalData}
+          onPathChange={handleKPathChange}
+          initialPath={kPath}
+          pointsPerSegment={pointsPerSegment}
+        />
 
         <div className="points-per-segment">
           <label>
@@ -513,11 +386,8 @@ G 0.0 0.0 0.0 0`}
               type="number"
               min={5}
               max={100}
-              value={kpathConfig.pointsPerSegment}
-              onChange={(e) => setKpathConfig({
-                ...kpathConfig,
-                pointsPerSegment: parseInt(e.target.value) || 20,
-              })}
+              value={pointsPerSegment}
+              onChange={(e) => setPointsPerSegment(parseInt(e.target.value) || 20)}
             />
           </label>
         </div>
@@ -526,7 +396,11 @@ G 0.0 0.0 0.0 0`}
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button className="primary-button" onClick={() => setStep("parameters")}>
+          <button
+            className="primary-button"
+            disabled={kPath.length < 2}
+            onClick={() => setStep("parameters")}
+          >
             Next: Parameters
           </button>
         </div>
@@ -536,8 +410,10 @@ G 0.0 0.0 0.0 0`}
 
   // Step 3: Parameters
   const renderParametersStep = () => {
-    const kPath = buildKPath();
+    // Calculate total k-points from the path
     const totalKPoints = kPath.reduce((sum, p) => sum + p.npoints, 0) + kPath.filter(p => p.npoints === 0).length;
+    // Format path for display
+    const pathString = kPath.map((p) => p.label).join(" → ");
 
     return (
       <div className="wizard-step parameters-step">
@@ -570,7 +446,7 @@ G 0.0 0.0 0.0 0`}
           <h4>Summary</h4>
           <div className="summary-row">
             <span>K-path:</span>
-            <span>{kpathConfig.mode === "standard" ? pathToString(standardKPath.defaultPath) : "Custom"}</span>
+            <span>{pathString || "Not selected"}</span>
           </div>
           <div className="summary-row">
             <span>Total k-points:</span>
@@ -680,7 +556,12 @@ G 0.0 0.0 0.0 0`}
         <h3>Band Structure Results</h3>
 
         <div className="band-plot-wrapper">
-          <BandPlot data={bandData} width={800} height={500} />
+          <BandPlot
+            data={bandData}
+            width={800}
+            height={500}
+            scfFermiEnergy={scfFermiEnergy ?? undefined}
+          />
         </div>
 
         <div className="results-summary">
@@ -697,6 +578,7 @@ G 0.0 0.0 0.0 0`}
               <span className="label">Fermi Energy:</span>
               <span className="value">{bandData.fermi_energy.toFixed(3)} eV</span>
             </div>
+            {/* Band gap info - disabled for now
             {bandData.band_gap ? (
               <>
                 <div className="summary-item">
@@ -714,6 +596,7 @@ G 0.0 0.0 0.0 0`}
                 <span className="value metal-value">Metallic</span>
               </div>
             )}
+            */}
           </div>
         </div>
 

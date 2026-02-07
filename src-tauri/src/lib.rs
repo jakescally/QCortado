@@ -416,6 +416,10 @@ pub struct BandsCalculationConfig {
     pub k_path: Vec<KPathPoint>,
     /// Optional number of bands (auto if None)
     pub nbnd: Option<u32>,
+    /// Project ID containing the source SCF calculation
+    pub project_id: Option<String>,
+    /// SCF calculation ID to get the .save directory from
+    pub scf_calc_id: Option<String>,
 }
 
 /// Runs a band structure calculation (NSCF + bands.x) with streaming output.
@@ -441,6 +445,30 @@ async fn run_bands_calculation(
     // Ensure working directory exists
     std::fs::create_dir_all(&work_path)
         .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    // Copy SCF's .save directory if project/calculation IDs are provided
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            let _ = app.emit("qe-output-line", "Copying SCF data to working directory...");
+
+            // Copy everything from the SCF tmp dir (includes .save directory)
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+
+            let _ = app.emit("qe-output-line", "SCF data copied successfully.");
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
 
     // Step 1: Create bands calculation from base SCF
     let mut bands_calc = config.base_calculation.clone();
