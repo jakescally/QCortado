@@ -456,12 +456,36 @@ async fn run_bands_calculation(
             .join("tmp");
 
         if scf_tmp_dir.exists() {
+            let _ = app.emit("qe-output-line", format!("SCF tmp dir: {}", scf_tmp_dir.display()));
+
+            // Check for .save directory
+            let save_dir = scf_tmp_dir.join("qcortado_scf.save");
+            if save_dir.exists() {
+                let _ = app.emit("qe-output-line", format!("Found .save directory: {}", save_dir.display()));
+            } else {
+                let _ = app.emit("qe-output-line", "WARNING: .save directory not found!");
+                // List contents of tmp dir
+                if let Ok(entries) = std::fs::read_dir(&scf_tmp_dir) {
+                    for entry in entries.flatten() {
+                        let _ = app.emit("qe-output-line", format!("  - {}", entry.file_name().to_string_lossy()));
+                    }
+                }
+            }
+
             let _ = app.emit("qe-output-line", "Copying SCF data to working directory...");
 
             // Copy everything from the SCF tmp dir (includes .save directory)
             projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
 
             let _ = app.emit("qe-output-line", "SCF data copied successfully.");
+
+            // Verify copy
+            let copied_save = work_path.join("qcortado_scf.save");
+            if copied_save.exists() {
+                let _ = app.emit("qe-output-line", format!("Verified .save in working dir: {}", copied_save.display()));
+            } else {
+                let _ = app.emit("qe-output-line", "WARNING: .save not found in working dir after copy!");
+            }
         } else {
             return Err(format!(
                 "SCF calculation tmp directory not found: {}",
@@ -493,7 +517,28 @@ async fn run_bands_calculation(
     std::fs::write(work_path.join("bands.in"), &input)
         .map_err(|e| format!("Failed to write input file: {}", e))?;
 
+    // Log the K_POINTS section of the input for debugging
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "=== Generated K_POINTS section ===");
+    for line in input.lines() {
+        if line.contains("K_POINTS") || line.trim().starts_with("0.") || line.trim().starts_with("-0.") || line.trim().parse::<i32>().is_ok() {
+            let _ = app.emit("qe-output-line", line);
+        }
+    }
+    let _ = app.emit("qe-output-line", "=== End K_POINTS ===");
+    let _ = app.emit("qe-output-line", "");
+
     let _ = app.emit("qe-output-line", "=== Starting Band Structure Calculation ===");
+
+    // Log the k-path being used
+    let _ = app.emit("qe-output-line", format!("K-path has {} points:", config.k_path.len()));
+    for (i, point) in config.k_path.iter().enumerate() {
+        let _ = app.emit("qe-output-line", format!(
+            "  {}: {} ({:.4}, {:.4}, {:.4}) -> {} points to next",
+            i + 1, point.label, point.coords[0], point.coords[1], point.coords[2], point.npoints
+        ));
+    }
+
     let _ = app.emit("qe-output-line", "Step 1/2: Running NSCF calculation along k-path...");
 
     // Step 2: Run pw.x for bands
@@ -630,9 +675,23 @@ async fn run_bands_calculation(
         return Err("bands.dat.gnu not found. bands.x may have failed.".to_string());
     }
 
+    // Log file size for debugging
+    if let Ok(metadata) = std::fs::metadata(&gnu_file) {
+        let _ = app.emit("qe-output-line", format!("bands.dat.gnu size: {} bytes", metadata.len()));
+    }
+
     let ef = fermi_energy.unwrap_or(0.0);
+    let _ = app.emit("qe-output-line", format!("Using Fermi energy: {:.4} eV", ef));
+
     let mut band_data = read_bands_gnu_file(&gnu_file, ef)
         .map_err(|e| format!("Failed to parse band data: {}", e))?;
+
+    // Log some stats about parsed data
+    let _ = app.emit("qe-output-line", format!(
+        "Parsed: {} bands, {} k-points, energy range [{:.2}, {:.2}] eV",
+        band_data.n_bands, band_data.n_kpoints,
+        band_data.energy_range[0], band_data.energy_range[1]
+    ));
 
     // Add high-symmetry point markers
     qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);

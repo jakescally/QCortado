@@ -14,6 +14,7 @@ interface QEResult {
   n_scf_steps: number | null;
   wall_time_seconds: number | null;
   raw_output: string;
+  band_data?: any;  // Band structure data for bands calculations
 }
 
 export interface CalculationRun {
@@ -48,6 +49,7 @@ interface ProjectDashboardProps {
   onDeleted: () => void;
   onRunSCF: (cifId: string, crystalData: CrystalData, cifContent: string, filename: string) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
 }
 
 const CONFIRM_TEXT = "delete my project for good";
@@ -93,12 +95,40 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
   return tags;
 }
 
+// Helper to generate bands-specific tags
+function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+
+  // K-points info
+  if (params.total_k_points) {
+    tags.push({ label: `${params.total_k_points} k-pts`, type: "info" });
+  }
+
+  // Inherited feature tags from SCF
+  if (params.lspinorb) {
+    tags.push({ label: "SOC", type: "feature" });
+  }
+  if (params.nspin === 2) {
+    tags.push({ label: "Magnetic", type: "feature" });
+  }
+  if (params.lda_plus_u) {
+    tags.push({ label: "DFT+U", type: "feature" });
+  }
+  if (params.vdw_corr && params.vdw_corr !== "none") {
+    tags.push({ label: "vdW", type: "feature" });
+  }
+
+  return tags;
+}
+
 export function ProjectDashboard({
   projectId,
   onBack,
   onDeleted,
   onRunSCF,
   onRunBands,
+  onViewBands,
 }: ProjectDashboardProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -538,12 +568,12 @@ export function ProjectDashboard({
           </div>
         </section>
 
-        {/* Calculation History */}
-        {selectedVariant && selectedVariant.calculations.length > 0 && (
+        {/* SCF Calculations */}
+        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "scf").length > 0 && (
           <section className="history-section">
-            <h3>Calculation History</h3>
+            <h3>SCFs</h3>
             <div className="calculations-list">
-              {selectedVariant.calculations.map((calc) => (
+              {selectedVariant.calculations.filter(c => c.calc_type === "scf").map((calc) => (
                 <div key={calc.id} className="calculation-item">
                   <div
                     className="calculation-header"
@@ -552,7 +582,7 @@ export function ProjectDashboard({
                     }
                   >
                     <div className="calculation-info">
-                      <span className="calc-type">{calc.calc_type.toUpperCase()}</span>
+                      <span className="calc-type">SCF</span>
                       {calc.result && (
                         <span
                           className={`calc-status ${
@@ -582,7 +612,7 @@ export function ProjectDashboard({
                           : "In progress..."}
                       </span>
                       <span className="expand-icon">
-                        {expandedCalc === calc.id ? "v" : ">"}
+                        {expandedCalc === calc.id ? "▼" : "▶"}
                       </span>
                     </div>
                   </div>
@@ -628,6 +658,100 @@ export function ProjectDashboard({
                           }}
                         >
                           Delete Calculation
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Band Structure Calculations */}
+        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "bands").length > 0 && (
+          <section className="history-section bands-section">
+            <h3>Bands</h3>
+            <div className="calculations-list">
+              {selectedVariant.calculations.filter(c => c.calc_type === "bands").map((calc) => (
+                <div key={calc.id} className="calculation-item bands-item">
+                  <div
+                    className="calculation-header"
+                    onClick={() =>
+                      setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                    }
+                  >
+                    <div className="calculation-info">
+                      <span className="calc-type">BANDS</span>
+                      {calc.parameters?.k_path && (
+                        <span className="calc-kpath">{calc.parameters.k_path}</span>
+                      )}
+                      <div className="calc-tags">
+                        {getBandsTags(calc).map((tag, i) => (
+                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            {tag.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="calculation-meta">
+                      <span className="calc-date">
+                        {calc.completed_at
+                          ? formatDate(calc.completed_at)
+                          : "In progress..."}
+                      </span>
+                      <span className="expand-icon">
+                        {expandedCalc === calc.id ? "▼" : "▶"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {expandedCalc === calc.id && (
+                    <div className="calculation-details">
+                      <div className="details-grid">
+                        <div className="detail-item">
+                          <label>K-Path</label>
+                          <span>{calc.parameters?.k_path || "N/A"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Total K-Points</label>
+                          <span>{calc.parameters?.total_k_points || "N/A"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Number of Bands</label>
+                          <span>{calc.parameters?.n_bands || "N/A"}</span>
+                        </div>
+                        {calc.result?.fermi_energy && (
+                          <div className="detail-item">
+                            <label>Fermi Energy</label>
+                            <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                          </div>
+                        )}
+                        <div className="detail-item">
+                          <label>Source SCF</label>
+                          <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                        </div>
+                      </div>
+                      <div className="calc-actions">
+                        {calc.result?.band_data && (
+                          <button
+                            className="view-bands-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onViewBands(calc.result?.band_data, calc.result?.fermi_energy ?? null);
+                            }}
+                          >
+                            View Bands
+                          </button>
+                        )}
+                        <button
+                          className="delete-calc-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                          }}
+                        >
+                          Delete
                         </button>
                       </div>
                     </div>

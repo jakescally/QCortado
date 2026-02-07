@@ -261,6 +261,84 @@ export function conventionalToPrimitive(
   }
 }
 
+/**
+ * Transform k-point coordinates from primitive reciprocal lattice to conventional.
+ *
+ * When using ibrav=0 with a conventional cell in Quantum ESPRESSO, the crystal_b
+ * k-point format expects coordinates in the conventional reciprocal lattice basis.
+ * However, standard k-point tables (e.g., Setyawan & Curtarolo) give coordinates
+ * in the primitive reciprocal lattice basis.
+ *
+ * This function transforms k-points from primitive to conventional basis so they
+ * can be used with crystal_b format and a conventional cell.
+ *
+ * @param kPoint - k-point in primitive reciprocal lattice coordinates
+ * @param centering - Centering type of the lattice
+ * @returns k-point in conventional reciprocal lattice coordinates
+ */
+export function kPointPrimitiveToConventional(
+  kPoint: Vec3,
+  centering: CenteringType
+): Vec3 {
+  const [k1, k2, k3] = kPoint;
+
+  switch (centering) {
+    case "P":
+      // Primitive - no transformation needed
+      return kPoint;
+
+    case "F":
+      // Face-centered: T^-1 = [[-1,1,1], [1,-1,1], [1,1,-1]]
+      // k_conv = k_prim * T^-1
+      return [
+        -k1 + k2 + k3,
+        k1 - k2 + k3,
+        k1 + k2 - k3,
+      ];
+
+    case "I":
+      // Body-centered: T^-1 = [[0,1,1], [1,0,1], [1,1,0]]
+      // k_conv = k_prim * T^-1
+      return [
+        k2 + k3,
+        k1 + k3,
+        k1 + k2,
+      ];
+
+    case "C":
+      // C-centered: T^-1 = [[1,-1,0], [1,1,0], [0,0,1]]
+      // k_conv = k_prim * T^-1
+      return [
+        k1 + k2,
+        -k1 + k2,
+        k3,
+      ];
+
+    case "A":
+      // A-centered: T^-1 = [[1,0,0], [0,1,-1], [0,1,1]]
+      return [
+        k1,
+        k2 + k3,
+        -k2 + k3,
+      ];
+
+    case "B":
+      // B-centered: T^-1 = [[1,0,-1], [0,1,0], [1,0,1]]
+      return [
+        k1 + k3,
+        k2,
+        -k1 + k3,
+      ];
+
+    case "R":
+      // Rhombohedral - typically already in correct basis
+      return kPoint;
+
+    default:
+      return kPoint;
+  }
+}
+
 // ============================================================================
 // Brillouin Zone Calculation (Wigner-Seitz cell of reciprocal lattice)
 // ============================================================================

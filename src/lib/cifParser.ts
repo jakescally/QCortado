@@ -200,6 +200,180 @@ function parseSymmetryOperations(loopData: LoopData): string[] {
   return ops;
 }
 
+/**
+ * Parse a single coordinate expression like "x", "-y", "x+1/2", "-z+3/4"
+ * Returns coefficients [coeff_x, coeff_y, coeff_z, constant]
+ */
+function parseCoordExpression(expr: string): [number, number, number, number] {
+  const cleaned = expr.toLowerCase().replace(/\s/g, "");
+
+  let coeffX = 0, coeffY = 0, coeffZ = 0, constant = 0;
+
+  // Match terms like: +x, -y, +1/2, -3/4, x, y, z
+  // We need to handle: x, -x, +x, 1/2, -1/2, +1/2, x+1/2, -x+1/2, etc.
+  let sign = 1;
+
+  let i = 0;
+  while (i < cleaned.length) {
+    // Check for sign
+    if (cleaned[i] === '+') {
+      sign = 1;
+      i++;
+      continue;
+    } else if (cleaned[i] === '-') {
+      sign = -1;
+      i++;
+      continue;
+    }
+
+    // Check for variable x, y, z
+    if (cleaned[i] === 'x') {
+      coeffX = sign;
+      sign = 1;
+      i++;
+      continue;
+    } else if (cleaned[i] === 'y') {
+      coeffY = sign;
+      sign = 1;
+      i++;
+      continue;
+    } else if (cleaned[i] === 'z') {
+      coeffZ = sign;
+      sign = 1;
+      i++;
+      continue;
+    }
+
+    // Check for fraction like 1/2, 3/4
+    const fractionMatch = cleaned.slice(i).match(/^(\d+)\/(\d+)/);
+    if (fractionMatch) {
+      const num = parseInt(fractionMatch[1]);
+      const denom = parseInt(fractionMatch[2]);
+      constant += sign * (num / denom);
+      sign = 1;
+      i += fractionMatch[0].length;
+      continue;
+    }
+
+    // Check for decimal number
+    const decimalMatch = cleaned.slice(i).match(/^(\d+\.?\d*)/);
+    if (decimalMatch) {
+      constant += sign * parseFloat(decimalMatch[1]);
+      sign = 1;
+      i += decimalMatch[0].length;
+      continue;
+    }
+
+    // Skip unknown characters
+    i++;
+  }
+
+  return [coeffX, coeffY, coeffZ, constant];
+}
+
+/**
+ * Parse a symmetry operation string like "x,y,z" or "-x+1/2,y,-z"
+ * Returns a function that transforms fractional coordinates
+ */
+function parseSymmetryOperation(opString: string): (x: number, y: number, z: number) => [number, number, number] {
+  const parts = opString.split(",").map(s => s.trim());
+  if (parts.length !== 3) {
+    // Return identity if invalid
+    return (x, y, z) => [x, y, z];
+  }
+
+  const [ax, ay, az, ac] = parseCoordExpression(parts[0]);
+  const [bx, by, bz, bc] = parseCoordExpression(parts[1]);
+  const [cx, cy, cz, cc] = parseCoordExpression(parts[2]);
+
+  return (x: number, y: number, z: number): [number, number, number] => {
+    const newX = ax * x + ay * y + az * z + ac;
+    const newY = bx * x + by * y + bz * z + bc;
+    const newZ = cx * x + cy * y + cz * z + cc;
+    return [newX, newY, newZ];
+  };
+}
+
+/**
+ * Wrap coordinate to [0, 1) range
+ */
+function wrapCoord(x: number): number {
+  let result = x % 1;
+  if (result < 0) result += 1;
+  // Handle floating point errors near 1
+  if (result > 0.9999) result = 0;
+  return result;
+}
+
+/**
+ * Check if two positions are equivalent (within tolerance)
+ */
+function positionsEqual(
+  p1: [number, number, number],
+  p2: [number, number, number],
+  tolerance: number = 0.001
+): boolean {
+  // Wrap both positions to [0, 1)
+  const w1: [number, number, number] = [wrapCoord(p1[0]), wrapCoord(p1[1]), wrapCoord(p1[2])];
+  const w2: [number, number, number] = [wrapCoord(p2[0]), wrapCoord(p2[1]), wrapCoord(p2[2])];
+
+  for (let i = 0; i < 3; i++) {
+    let diff = Math.abs(w1[i] - w2[i]);
+    // Handle periodicity (e.g., 0.999 vs 0.001)
+    if (diff > 0.5) diff = 1 - diff;
+    if (diff > tolerance) return false;
+  }
+  return true;
+}
+
+/**
+ * Expand atom sites using symmetry operations
+ */
+function expandAtomSites(sites: AtomSite[], symmetryOps: string[]): AtomSite[] {
+  if (symmetryOps.length === 0) {
+    // No symmetry operations - return sites as-is
+    return sites;
+  }
+
+  const expandedSites: AtomSite[] = [];
+  const parsedOps = symmetryOps.map(op => parseSymmetryOperation(op));
+
+  for (const site of sites) {
+    const originalPos: [number, number, number] = [site.fract_x, site.fract_y, site.fract_z];
+
+    for (let opIdx = 0; opIdx < parsedOps.length; opIdx++) {
+      const op = parsedOps[opIdx];
+      const newPos = op(originalPos[0], originalPos[1], originalPos[2]);
+      const wrappedPos: [number, number, number] = [
+        wrapCoord(newPos[0]),
+        wrapCoord(newPos[1]),
+        wrapCoord(newPos[2])
+      ];
+
+      // Check if this position already exists
+      const isDuplicate = expandedSites.some(existing =>
+        existing.type_symbol === site.type_symbol &&
+        positionsEqual(
+          [existing.fract_x, existing.fract_y, existing.fract_z],
+          wrappedPos
+        )
+      );
+
+      if (!isDuplicate) {
+        expandedSites.push({
+          ...site,
+          label: `${site.label}_${expandedSites.length + 1}`,
+          fract_x: wrappedPos[0],
+          fract_y: wrappedPos[1],
+          fract_z: wrappedPos[2],
+        });
+      }
+    }
+  }
+
+  return expandedSites;
+}
+
 function parseAnisotropicParams(loopData: LoopData): AnisotropicParams[] {
   const params: AnisotropicParams[] = [];
 
@@ -386,6 +560,16 @@ export function parseCIF(content: string): CrystalData {
   // Parse citation
   const citation = parseCitation(content, lines);
   if (citation) crystalData.citation = citation;
+
+  // Expand atom sites using symmetry operations
+  if (crystalData.symmetry_operations.length > 0 && crystalData.atom_sites.length > 0) {
+    const originalCount = crystalData.atom_sites.length;
+    crystalData.atom_sites = expandAtomSites(
+      crystalData.atom_sites,
+      crystalData.symmetry_operations
+    );
+    console.log(`Symmetry expansion: ${originalCount} -> ${crystalData.atom_sites.length} atoms`);
+  }
 
   return crystalData;
 }

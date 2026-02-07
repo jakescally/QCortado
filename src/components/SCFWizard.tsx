@@ -9,6 +9,7 @@ import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
+import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -390,6 +391,92 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     try {
       const elements = getUniqueElements();
 
+      // Check if this is an FCC structure that should use primitive cell
+      // Using primitive cell with ibrav gives correct symmetry and faster calculations
+      const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+      const usePrimitiveCell = primitiveCell !== null;
+
+      if (usePrimitiveCell && primitiveCell) {
+        console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
+      }
+
+      // Build species list (same for both primitive and conventional)
+      const speciesList = elements.map((el) => ({
+        symbol: el,
+        mass: ELEMENT_MASSES[el] || 1.0,
+        pseudopotential: selectedPseudos[el],
+        starting_magnetization: config.starting_magnetization[el] || 0,
+        hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
+        hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
+      }));
+
+      // Build system configuration based on cell type
+      const systemConfig: any = {
+        // Common properties
+        species: speciesList,
+        position_units: "crystal",
+        ecutwfc: config.ecutwfc,
+        ecutrho: config.ecutrho,
+        // Electronic structure
+        occupations: config.occupations,
+        smearing: config.occupations === "smearing" ? config.smearing : undefined,
+        degauss: config.occupations === "smearing" ? config.degauss : undefined,
+        nbnd: config.nbnd,
+        tot_charge: config.tot_charge !== 0 ? config.tot_charge : undefined,
+        // Magnetism
+        nspin: config.nspin,
+        noncolin: config.noncolin || undefined,
+        lspinorb: config.lspinorb || undefined,
+        tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
+        constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
+        // DFT+U
+        lda_plus_u: config.lda_plus_u || undefined,
+        lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
+        // Van der Waals
+        vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
+        // Isolated systems
+        assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
+        // XC functional override
+        input_dft: config.input_dft || undefined,
+      };
+
+      // Add cell-specific properties
+      if (usePrimitiveCell && primitiveCell) {
+        // Primitive cell with ibrav (e.g., ibrav=2 for FCC)
+        systemConfig.ibrav = primitiveCell.ibrav;
+        // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
+        // For cubic, only celldm(1) = a is needed
+        systemConfig.celldm = [primitiveCell.celldm1, 0, 0, 0, 0, 0];
+        systemConfig.cell_parameters = null;
+        systemConfig.cell_units = null;
+        systemConfig.atoms = primitiveCell.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true],
+        }));
+      } else {
+        // Conventional cell with ibrav=0 (fallback for non-FCC structures)
+        systemConfig.ibrav = "free";
+        systemConfig.celldm = null;
+        systemConfig.cell_parameters = [
+          [crystalData.cell_length_a.value, 0, 0],
+          [
+            crystalData.cell_length_b.value *
+              Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+            crystalData.cell_length_b.value *
+              Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+            0,
+          ],
+          calculateCVector(crystalData),
+        ];
+        systemConfig.cell_units = "angstrom";
+        systemConfig.atoms = crystalData.atom_sites.map((site) => ({
+          symbol: getBaseElement(site.type_symbol),
+          position: [site.fract_x, site.fract_y, site.fract_z],
+          if_pos: [true, true, true],
+        }));
+      }
+
       // Build the calculation configuration with all options
       const calculation: any = {
         calculation: "scf",
@@ -400,59 +487,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
         tprnfor: config.tprnfor,
         tstress: config.tstress,
         disk_io: config.disk_io,
-        system: {
-          ibrav: "free",
-          celldm: null,
-          cell_parameters: [
-            [crystalData.cell_length_a.value, 0, 0],
-            [
-              crystalData.cell_length_b.value *
-                Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              crystalData.cell_length_b.value *
-                Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              0,
-            ],
-            calculateCVector(crystalData),
-          ],
-          cell_units: "angstrom",
-          species: elements.map((el) => ({
-            symbol: el,
-            mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: selectedPseudos[el],
-            starting_magnetization: config.starting_magnetization[el] || 0,
-            hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
-            hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
-          })),
-          atoms: crystalData.atom_sites.map((site) => ({
-            symbol: getBaseElement(site.type_symbol),
-            position: [site.fract_x, site.fract_y, site.fract_z],
-            if_pos: [true, true, true],
-          })),
-          position_units: "crystal",
-          ecutwfc: config.ecutwfc,
-          ecutrho: config.ecutrho,
-          // Electronic structure
-          occupations: config.occupations,
-          smearing: config.occupations === "smearing" ? config.smearing : undefined,
-          degauss: config.occupations === "smearing" ? config.degauss : undefined,
-          nbnd: config.nbnd,
-          tot_charge: config.tot_charge !== 0 ? config.tot_charge : undefined,
-          // Magnetism
-          nspin: config.nspin,
-          noncolin: config.noncolin || undefined,
-          lspinorb: config.lspinorb || undefined,
-          tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
-          constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
-          // DFT+U
-          lda_plus_u: config.lda_plus_u || undefined,
-          lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
-          // Van der Waals
-          vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
-          // Isolated systems
-          assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
-          // XC functional override
-          input_dft: config.input_dft || undefined,
-        },
+        system: systemConfig,
         kpoints: {
           type: "automatic",
           grid: config.kgrid,

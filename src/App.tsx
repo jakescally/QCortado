@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { BandStructureWizard } from "./components/BandStructureWizard";
+import { BandPlot } from "./components/BandPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
@@ -19,7 +20,7 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "project-browser" | "project-dashboard";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "project-browser" | "project-dashboard";
 
 interface SCFContext {
   cifId: string;
@@ -51,6 +52,9 @@ function App() {
 
   // Context for running Bands from a project
   const [bandsContext, setBandsContext] = useState<BandsContext | null>(null);
+
+  // Context for viewing saved band data
+  const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -126,6 +130,33 @@ function App() {
     );
   }
 
+  if (currentView === "bands-viewer" && viewBandsData) {
+    return (
+      <div className="bands-viewer-container">
+        <div className="bands-viewer-header">
+          <button
+            className="back-button"
+            onClick={() => {
+              setCurrentView("project-dashboard");
+              setViewBandsData(null);
+            }}
+          >
+            ← Back to Dashboard
+          </button>
+          <h2>Band Structure</h2>
+        </div>
+        <div className="bands-viewer-content">
+          <BandPlot
+            data={viewBandsData.bandData}
+            width={900}
+            height={600}
+            scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
+          />
+        </div>
+      </div>
+    );
+  }
+
   if (currentView === "scf-wizard" && qePath) {
     return (
       <SCFWizard
@@ -190,6 +221,10 @@ function App() {
             scfCalculations,
           });
           setCurrentView("bands-wizard");
+        }}
+        onViewBands={(bandData, fermiEnergy) => {
+          setViewBandsData({ bandData, fermiEnergy });
+          setCurrentView("bands-viewer");
         }}
       />
     );

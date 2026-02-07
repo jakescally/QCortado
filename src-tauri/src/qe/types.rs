@@ -330,6 +330,9 @@ pub struct QEResult {
     pub eigenvalues: Option<Vec<Vec<f64>>>,
     /// Raw output text (for debugging)
     pub raw_output: String,
+    /// Full band structure data (for bands calculations)
+    #[serde(default)]
+    pub band_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -345,6 +348,7 @@ impl Default for QEResult {
             wall_time_seconds: None,
             eigenvalues: None,
             raw_output: String::new(),
+            band_data: None,
         }
     }
 }

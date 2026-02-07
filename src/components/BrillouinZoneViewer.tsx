@@ -505,13 +505,20 @@ export function BrillouinZoneViewer({
       }
 
       // Add point to path
+      // npoints = number of k-points from THIS point to the NEXT point
+      // Last point should have npoints = 0 (no segment after it)
       const newPoint: KPathPoint = {
         label: point.label,
         coords: point.coords,
-        npoints: path.length === 0 ? 0 : pointsPerSegment,
+        npoints: 0,  // New point is last, so no segment after it
       };
 
-      const newPath = [...path, newPoint];
+      // Update previous last point to have pointsPerSegment (now has a segment after it)
+      const newPath = path.map((p, i) =>
+        i === path.length - 1 ? { ...p, npoints: pointsPerSegment } : p
+      );
+      newPath.push(newPoint);
+
       setPath(newPath);
       onPathChange(newPath);
     },
@@ -549,7 +556,7 @@ export function BrillouinZoneViewer({
           recommendedPath.push({
             label: fromPoint.label,
             coords: fromPoint.coords,
-            npoints: recommendedPath.length === 0 ? 0 : pointsPerSegment,
+            npoints: pointsPerSegment,
           });
         }
       }

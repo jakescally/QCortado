@@ -271,52 +271,29 @@ pub fn read_bands_gnu_file(path: &Path, fermi_energy: f64) -> Result<BandData, S
 }
 
 /// Add high-symmetry point markers to band data
+///
+/// The k-path defines segments like: L(20) -> Γ(20) -> X(20) -> U(0)
+/// where each npoints value indicates how many k-points in the segment TO that point.
+/// High-symmetry points occur at cumulative indices: 0, 20, 40, 60.
+/// We read the actual k-distance from the parsed band data at those indices.
 pub fn add_symmetry_markers(
     data: &mut BandData,
     k_path: &[KPathPoint],
 ) {
-    if k_path.is_empty() {
+    if k_path.is_empty() || data.k_points.is_empty() {
         return;
     }
 
-    let total_k = data.k_points.last().copied().unwrap_or(0.0);
-
-    // Calculate total npoints to determine proportional positions
-    // Each point's npoints indicates the segment AFTER it, so we sum all but use
-    // cumulative sums to place markers
-    let total_npoints: u32 = k_path.iter().map(|p| p.npoints).sum();
-
-    if total_npoints == 0 {
-        // Fallback: just place markers evenly
-        let markers: Vec<HighSymmetryMarker> = k_path
-            .iter()
-            .enumerate()
-            .map(|(i, point)| {
-                let k_frac = if k_path.len() > 1 {
-                    i as f64 / (k_path.len() - 1) as f64
-                } else {
-                    0.0
-                };
-                HighSymmetryMarker {
-                    k_distance: k_frac * total_k,
-                    label: point.label.clone(),
-                }
-            })
-            .collect();
-        data.high_symmetry_points = markers;
-        return;
-    }
-
-    // Place markers based on cumulative npoints
-    // First point is at k=0, subsequent points are placed proportionally
     let mut markers = Vec::new();
-    let mut cumulative: u32 = 0;
+    let mut k_index: usize = 0;
 
     for (i, point) in k_path.iter().enumerate() {
-        let k_distance = if i == 0 {
-            0.0
+        // Get the actual k-distance from the band data at this index
+        let k_distance = if k_index < data.k_points.len() {
+            data.k_points[k_index]
         } else {
-            (cumulative as f64 / total_npoints as f64) * total_k
+            // Fallback to last k-point if we're past the end
+            data.k_points.last().copied().unwrap_or(0.0)
         };
 
         markers.push(HighSymmetryMarker {
@@ -324,12 +301,11 @@ pub fn add_symmetry_markers(
             label: point.label.clone(),
         });
 
-        cumulative += point.npoints;
-    }
-
-    // Ensure last marker is exactly at total_k
-    if let Some(last) = markers.last_mut() {
-        last.k_distance = total_k;
+        // Move to the next high-symmetry point index
+        // npoints indicates how many points in the segment AFTER this point
+        if i < k_path.len() - 1 {
+            k_index += point.npoints as usize;
+        }
     }
 
     data.high_symmetry_points = markers;

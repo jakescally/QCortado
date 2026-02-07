@@ -1,11 +1,14 @@
 // Band Structure Wizard - Calculate and visualize electronic band structures
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { BandPlot, BandData } from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
+import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
+import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
+import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 
 interface CalculationRun {
   id: string;
@@ -102,6 +105,13 @@ export function BandStructureWizard({
   const [bandData, setBandData] = useState<BandData | null>(null);
   // Store SCF Fermi energy separately to ensure it persists
   const [scfFermiEnergy, setScfFermiEnergy] = useState<number | null>(null);
+  // Show calculation output in results
+  const [showOutput, setShowOutput] = useState(false);
+  // Track if calculation was saved
+  const [isSaved, setIsSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  // Track calculation timing
+  const [calcStartTime, setCalcStartTime] = useState<string>("");
 
   // MPI settings
   const [mpiEnabled, setMpiEnabled] = useState(false);
@@ -140,6 +150,34 @@ export function BandStructureWizard({
 
     return [cx, cy, cz];
   }
+
+  // Detect centering type for k-point transformation
+  const centeringType = useMemo((): CenteringType => {
+    const spaceGroup = crystalData.space_group_IT_number;
+    const bravaisType: BravaisLattice = spaceGroup
+      ? detectBravaisLattice(spaceGroup)
+      : "triclinic";
+
+    // Map Bravais lattice to centering type
+    const centeringMap: Record<BravaisLattice, CenteringType> = {
+      "cubic-P": "P",
+      "cubic-F": "F",
+      "cubic-I": "I",
+      "tetragonal-P": "P",
+      "tetragonal-I": "I",
+      "orthorhombic-P": "P",
+      "orthorhombic-C": "C",
+      "orthorhombic-I": "I",
+      "orthorhombic-F": "F",
+      "hexagonal": "P",
+      "trigonal-R": "R",
+      "monoclinic-P": "P",
+      "monoclinic-C": "C",
+      "triclinic": "P",
+    };
+
+    return centeringMap[bravaisType] || "P";
+  }, [crystalData]);
 
   // Load MPI info and pseudopotentials
   useEffect(() => {
@@ -198,6 +236,8 @@ export function BandStructureWizard({
     setOutput("");
     setError(null);
     setBandData(null);
+    setIsSaved(false);
+    setCalcStartTime(new Date().toISOString());
     setStep("run");
 
     let unlisten: UnlistenFn | null = null;
@@ -231,59 +271,128 @@ export function BandStructureWizard({
       // SCFWizard uses "qcortado_scf" as the prefix
       const scfPrefix = scfParams.prefix || "qcortado_scf";
       const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-      const baseCalculation = {
-        calculation: "scf",
-        prefix: scfPrefix,
-        outdir: "./tmp",
-        pseudo_dir: pseudoDir,
-        system: {
-          ibrav: "free",
-          celldm: null,
-          cell_parameters: [
-            [crystalData.cell_length_a.value, 0, 0],
-            [
-              crystalData.cell_length_b.value *
-                Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              crystalData.cell_length_b.value *
-                Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              0,
+
+      // Check if this is an FCC structure (diamond, zincblende) that should use primitive cell
+      // Using primitive cell with ibrav=2 gives correct band structure matching literature
+      const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+      const usePrimitiveCell = primitiveCell !== null;
+
+      let baseCalculation;
+      let transformedKPath;
+
+      if (usePrimitiveCell && primitiveCell) {
+        // Use primitive cell with ibrav (e.g., ibrav=2 for FCC)
+        // This is the standard approach for band structure calculations
+        console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
+
+        baseCalculation = {
+          calculation: "scf",
+          prefix: scfPrefix,
+          outdir: "./tmp",
+          pseudo_dir: pseudoDir,
+          system: {
+            ibrav: primitiveCell.ibrav,
+            // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
+            // For cubic, only celldm(1) = a is needed
+            celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
+            cell_parameters: null, // Not needed when using ibrav
+            cell_units: null,
+            species: elements.map((el) => ({
+              symbol: el,
+              mass: ELEMENT_MASSES[el] || 1.0,
+              pseudopotential: selectedPseudos[el],
+            })),
+            atoms: primitiveCell.atoms.map((atom) => ({
+              symbol: atom.symbol,
+              position: atom.position,
+              if_pos: [true, true, true],
+            })),
+            position_units: "crystal",
+            ecutwfc: scfParams.ecutwfc || 40,
+            ecutrho: scfParams.ecutrho || 320,
+            nspin: 1,
+            occupations: "smearing",
+            smearing: "gaussian",
+            degauss: 0.01,
+          },
+          kpoints: { type: "gamma" }, // Will be replaced by backend
+          conv_thr: scfParams.conv_thr || 1e-6,
+          mixing_beta: scfParams.mixing_beta || 0.7,
+          tprnfor: false,
+          tstress: false,
+          forc_conv_thr: null,
+          etot_conv_thr: null,
+          verbosity: "high",
+        };
+
+        // For primitive cell, k-points are already in the correct basis
+        // No transformation needed - use them directly
+        transformedKPath = kPath;
+      } else {
+        // Fall back to conventional cell with ibrav=0 for non-FCC structures
+        baseCalculation = {
+          calculation: "scf",
+          prefix: scfPrefix,
+          outdir: "./tmp",
+          pseudo_dir: pseudoDir,
+          system: {
+            ibrav: "free",
+            celldm: null,
+            cell_parameters: [
+              [crystalData.cell_length_a.value, 0, 0],
+              [
+                crystalData.cell_length_b.value *
+                  Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+                crystalData.cell_length_b.value *
+                  Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+                0,
+              ],
+              calculateCVector(crystalData),
             ],
-            calculateCVector(crystalData),
-          ],
-          cell_units: "angstrom",
-          species: elements.map((el) => ({
-            symbol: el,
-            mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: selectedPseudos[el],
-          })),
-          atoms: crystalData.atom_sites.map((site) => ({
-            symbol: getBaseElement(site.type_symbol),
-            position: [site.fract_x, site.fract_y, site.fract_z],
-            if_pos: [true, true, true],
-          })),
-          position_units: "crystal",
-          ecutwfc: scfParams.ecutwfc || 40,
-          ecutrho: scfParams.ecutrho || 320,
-          nspin: 1,
-          occupations: "smearing",
-          smearing: "gaussian",
-          degauss: 0.01,
-        },
-        kpoints: { type: "gamma" }, // Will be replaced by backend
-        conv_thr: scfParams.conv_thr || 1e-6,
-        mixing_beta: scfParams.mixing_beta || 0.7,
-        tprnfor: false,
-        tstress: false,
-        forc_conv_thr: null,
-        etot_conv_thr: null,
-        verbosity: "high",
-      };
+            cell_units: "angstrom",
+            species: elements.map((el) => ({
+              symbol: el,
+              mass: ELEMENT_MASSES[el] || 1.0,
+              pseudopotential: selectedPseudos[el],
+            })),
+            atoms: crystalData.atom_sites.map((site) => ({
+              symbol: getBaseElement(site.type_symbol),
+              position: [site.fract_x, site.fract_y, site.fract_z],
+              if_pos: [true, true, true],
+            })),
+            position_units: "crystal",
+            ecutwfc: scfParams.ecutwfc || 40,
+            ecutrho: scfParams.ecutrho || 320,
+            nspin: 1,
+            occupations: "smearing",
+            smearing: "gaussian",
+            degauss: 0.01,
+          },
+          kpoints: { type: "gamma" }, // Will be replaced by backend
+          conv_thr: scfParams.conv_thr || 1e-6,
+          mixing_beta: scfParams.mixing_beta || 0.7,
+          tprnfor: false,
+          tstress: false,
+          forc_conv_thr: null,
+          etot_conv_thr: null,
+          verbosity: "high",
+        };
+
+        // Transform k-points from primitive to conventional reciprocal lattice
+        // This is necessary because the standard k-point coordinates (e.g., from
+        // Setyawan & Curtarolo) are in the primitive reciprocal basis, but QE's
+        // crystal_b format with ibrav=0 uses the conventional reciprocal basis.
+        transformedKPath = kPath.map(point => ({
+          ...point,
+          coords: kPointPrimitiveToConventional(point.coords, centeringType),
+        }));
+      }
 
       // Call the backend
       const result = await invoke<BandData>("run_bands_calculation", {
         config: {
           base_calculation: baseCalculation,
-          k_path: kPath,
+          k_path: transformedKPath,
           nbnd: nbnd === "auto" ? null : nbnd,
           project_id: projectId,
           scf_calc_id: selectedScf.id,
@@ -292,8 +401,58 @@ export function BandStructureWizard({
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
       });
 
+      const endTime = new Date().toISOString();
       setBandData(result);
       setStep("results");
+
+      // Auto-save the band calculation to the project
+      try {
+        setIsSaving(true);
+        const pathString = kPath.map((p) => p.label).join(" → ");
+        const scfParams = selectedScf?.parameters || {};
+
+        await invoke("save_calculation", {
+          projectId,
+          cifId: _cifId,
+          calcData: {
+            calc_type: "bands",
+            parameters: {
+              source_scf_id: selectedScf?.id,
+              k_path: pathString,
+              points_per_segment: pointsPerSegment,
+              total_k_points: result.n_kpoints,
+              n_bands: result.n_bands,
+              // Inherit SCF parameters for tags
+              ecutwfc: scfParams.ecutwfc,
+              nspin: scfParams.nspin,
+              lspinorb: scfParams.lspinorb,
+              lda_plus_u: scfParams.lda_plus_u,
+              vdw_corr: scfParams.vdw_corr,
+            },
+            result: {
+              converged: true,
+              total_energy: null,
+              fermi_energy: scfFermiEnergy,
+              n_scf_steps: null,
+              wall_time_seconds: null,
+              raw_output: output,
+              // Store band data for later viewing
+              band_data: result,
+            },
+            started_at: calcStartTime,
+            completed_at: endTime,
+            input_content: "", // TODO: store bands input
+            output_content: output,
+          },
+          workingDir: "/tmp/qcortado_bands",
+        });
+        setIsSaved(true);
+      } catch (saveError) {
+        console.error("Failed to save band calculation:", saveError);
+        // Don't fail the whole operation if save fails
+      } finally {
+        setIsSaving(false);
+      }
     } catch (e) {
       setError(String(e));
       setOutput((prev) => prev + `\nError: ${e}\n`);
@@ -458,7 +617,9 @@ export function BandStructureWizard({
   // Step 3: Parameters
   const renderParametersStep = () => {
     // Calculate total k-points from the path
-    const totalKPoints = kPath.reduce((sum, p) => sum + p.npoints, 0) + kPath.filter(p => p.npoints === 0).length;
+    // Each point's npoints indicates k-points in the segment TO the next point
+    // Last point has npoints=0, so sum gives total k-points
+    const totalKPoints = kPath.reduce((sum, p) => sum + p.npoints, 0);
     // Format path for display
     const pathString = kPath.map((p) => p.label).join(" → ");
 
@@ -645,6 +806,27 @@ export function BandStructureWizard({
             )}
             */}
           </div>
+        </div>
+
+        {/* Collapsible calculation output */}
+        <div className="output-section">
+          <button
+            className="output-toggle"
+            onClick={() => setShowOutput(!showOutput)}
+          >
+            {showOutput ? "▼" : "▶"} Calculation Output
+          </button>
+          {showOutput && (
+            <pre className="calculation-output results-output">
+              {output || "No output available"}
+            </pre>
+          )}
+        </div>
+
+        {/* Save status */}
+        <div className="save-status">
+          {isSaving && <span className="saving">Saving to project...</span>}
+          {isSaved && <span className="saved">Saved to project</span>}
         </div>
 
         <div className="step-actions">

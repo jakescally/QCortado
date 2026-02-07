@@ -77,12 +77,28 @@ export function BandPlot({
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
 
+  // Use SCF Fermi energy if available, otherwise fall back to data.fermi_energy
+  const fermiEnergy = scfFermiEnergy ?? data.fermi_energy;
+
+  // Shift all energies relative to Fermi level (E - E_F)
+  const shiftedEnergies = useMemo(() => {
+    return data.energies.map(band => band.map(e => e - fermiEnergy));
+  }, [data.energies, fermiEnergy]);
+
+  // Calculate shifted energy range
+  const shiftedEnergyRange: [number, number] = useMemo(() => {
+    return [
+      data.energy_range[0] - fermiEnergy,
+      data.energy_range[1] - fermiEnergy,
+    ];
+  }, [data.energy_range, fermiEnergy]);
+
   // Calculate scales - X is always fixed, Y is adjustable
   const scales = useMemo(() => {
     const kMin = 0;
     const kMax = data.k_points[data.k_points.length - 1] || 1;
 
-    // Use provided energy range, custom Y range, or calculate from data with padding
+    // Use provided energy range, custom Y range, or calculate from shifted data with padding
     let eMin: number, eMax: number;
 
     if (yMin !== null && yMax !== null) {
@@ -91,17 +107,16 @@ export function BandPlot({
     } else if (energyRange) {
       [eMin, eMax] = energyRange;
     } else {
-      [eMin, eMax] = data.energy_range;
+      [eMin, eMax] = shiftedEnergyRange;
       const padding = (eMax - eMin) * 0.1;
       eMin -= padding;
       eMax += padding;
 
-      // Clamp to reasonable range around Fermi level if too wide
+      // Clamp to reasonable range around Fermi level (now at 0) if too wide
       const maxRange = 20; // eV
       if (eMax - eMin > maxRange * 2) {
-        const center = data.fermi_energy;
-        eMin = center - maxRange;
-        eMax = center + maxRange;
+        eMin = -maxRange;
+        eMax = maxRange;
       }
     }
 
@@ -113,7 +128,7 @@ export function BandPlot({
       xScale: (k: number) => ((k - kMin) / (kMax - kMin)) * plotWidth,
       yScale: (e: number) => plotHeight - ((e - eMin) / (eMax - eMin)) * plotHeight,
     };
-  }, [data, energyRange, plotWidth, plotHeight, yMin, yMax]);
+  }, [data, energyRange, plotWidth, plotHeight, yMin, yMax, shiftedEnergyRange]);
 
   // Generate SVG path for a band
   const bandToPath = useCallback(
@@ -159,11 +174,11 @@ export function BandPlot({
         }
       }
 
-      // Find closest band at that k-point
+      // Find closest band at that k-point (using shifted energies)
       let closestBandIdx = 0;
       minDist = Infinity;
-      for (let b = 0; b < data.energies.length; b++) {
-        const dist = Math.abs(data.energies[b][closestKIdx] - energy);
+      for (let b = 0; b < shiftedEnergies.length; b++) {
+        const dist = Math.abs(shiftedEnergies[b][closestKIdx] - energy);
         if (dist < minDist) {
           minDist = dist;
           closestBandIdx = b;
@@ -171,7 +186,7 @@ export function BandPlot({
       }
 
       // Only show tooltip if close enough
-      const bandEnergy = data.energies[closestBandIdx][closestKIdx];
+      const bandEnergy = shiftedEnergies[closestBandIdx][closestKIdx];
       const pixelDist = Math.abs(scales.yScale(bandEnergy) - y);
       if (pixelDist < 15) {
         setHoveredPoint({
@@ -185,7 +200,7 @@ export function BandPlot({
         setHoveredPoint(null);
       }
     },
-    [data, scales, plotWidth, plotHeight, margin]
+    [data, scales, plotWidth, plotHeight, margin, shiftedEnergies]
   );
 
   // Handle scroll to adjust Y-axis range
@@ -316,21 +331,21 @@ export function BandPlot({
             </g>
           ))}
 
-          {/* Fermi level at E=0 (band calculations reference to Fermi) */}
+          {/* Fermi level at E - E_F = 0 */}
           {showFermiLevel && (
             <g>
               <line
                 x1={0}
                 x2={plotWidth}
-                y1={scales.yScale(data.fermi_energy)}
-                y2={scales.yScale(data.fermi_energy)}
+                y1={scales.yScale(0)}
+                y2={scales.yScale(0)}
                 stroke="#d32f2f"
                 strokeWidth={1}
                 strokeDasharray="4,4"
               />
               <text
                 x={plotWidth + 5}
-                y={scales.yScale(data.fermi_energy) + 4}
+                y={scales.yScale(0) + 4}
                 fill="#d32f2f"
                 fontSize={11}
               >
@@ -341,7 +356,7 @@ export function BandPlot({
 
           {/* Band lines */}
           <g clipPath="url(#plot-area)">
-            {data.energies.map((band, bandIdx) => (
+            {shiftedEnergies.map((band, bandIdx) => (
               <path
                 key={bandIdx}
                 d={bandToPath(band, data.k_points)}

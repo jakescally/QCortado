@@ -2424,6 +2424,97 @@ h3 .tooltip-text::after {
 }
 
 /* ============================================
+   Bands Section Styles
+   ============================================ */
+
+.calc-kpath {
+  font-family: 'Georgia', serif;
+  font-style: italic;
+  color: #4a5568;
+  margin-left: 0.5rem;
+}
+
+.bands-item .calculation-header {
+  border-left: 3px solid #805ad5;
+}
+
+.view-bands-btn {
+  background: #805ad5;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.view-bands-btn:hover {
+  background: #6b46c1;
+}
+
+.save-status {
+  margin: 1rem 0;
+  text-align: center;
+}
+
+.save-status .saving {
+  color: #805ad5;
+}
+
+.save-status .saved {
+  color: #38a169;
+}
+
+/* Bands Viewer Container */
+.bands-viewer-container {
+  min-height: 100vh;
+  background: #f7fafc;
+  padding: 1rem;
+}
+
+.bands-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0;
+}
+
+.bands-viewer-header h2 {
+  margin: 0;
+  color: #2d3748;
+}
+
+.bands-viewer-content {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  display: flex;
+  justify-content: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  .calc-kpath {
+    color: #a0aec0;
+  }
+
+  .bands-viewer-container {
+    background: #1a202c;
+  }
+
+  .bands-viewer-header h2 {
+    color: #f7fafc;
+  }
+
+  .bands-viewer-content {
+    background: #2d3748;
+  }
+}
+
+/* ============================================
    MPI Settings Styles
    ============================================ */
 
@@ -3106,6 +3197,42 @@ h3 .tooltip-text::after {
 
 .error-actions {
   margin-top: 1.5rem;
+}
+
+/* Output section in results */
+.output-section {
+  margin-top: 1.5rem;
+  text-align: left;
+}
+
+.output-toggle {
+  background: none;
+  border: 1px solid #45475a;
+  color: #cdd6f4;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+
+.output-toggle:hover {
+  background: #313244;
+}
+
+.results-output {
+  text-align: left;
+  background: #11111b;
+  padding: 1rem;
+  border-radius: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  color: #cdd6f4;
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 /* Results Step */
