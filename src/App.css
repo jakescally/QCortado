@@ -883,6 +883,102 @@ h3 .tooltip-text::after {
   color: white;
 }
 
+/* Collapsible Sections */
+.config-section.collapsible .section-header {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  user-select: none;
+}
+
+.config-section.collapsible .section-header:hover {
+  color: #4299e1;
+}
+
+.collapse-icon {
+  font-size: 0.75rem;
+  transition: transform 0.2s ease;
+  color: #718096;
+}
+
+.collapse-icon.expanded {
+  transform: rotate(90deg);
+}
+
+/* Full-width param rows */
+.param-row.full-width {
+  flex-basis: 100%;
+  margin-top: 0.5rem;
+}
+
+/* Magnetization grid */
+.magnetization-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.mag-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #f7fafc;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
+
+.mag-row label {
+  font-weight: 600;
+  min-width: 30px;
+  color: #2d3748;
+}
+
+.mag-row input {
+  width: 70px;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* Hubbard grid */
+.hubbard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.hubbard-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #f7fafc;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
+
+.hubbard-row label {
+  font-weight: 600;
+  min-width: 30px;
+  color: #2d3748;
+}
+
+.hubbard-row span {
+  color: #718096;
+  font-size: 0.85rem;
+}
+
+.hubbard-row input {
+  width: 60px;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
 /* Dark mode for wizard */
 @media (prefers-color-scheme: dark) {
   .wizard-header h2 {
@@ -964,6 +1060,35 @@ h3 .tooltip-text::after {
   .sssp-success {
     background: #276749;
     color: #c6f6d5;
+  }
+
+  .collapse-icon {
+    color: #a0aec0;
+  }
+
+  .config-section.collapsible .section-header:hover {
+    color: #63b3ed;
+  }
+
+  .mag-row,
+  .hubbard-row {
+    background: #4a5568;
+  }
+
+  .mag-row label,
+  .hubbard-row label {
+    color: #e2e8f0;
+  }
+
+  .hubbard-row span {
+    color: #a0aec0;
+  }
+
+  .mag-row input,
+  .hubbard-row input {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
   }
 }
 
@@ -1817,7 +1942,8 @@ h3 .tooltip-text::after {
 .calculation-info {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .calc-type {
@@ -1862,6 +1988,32 @@ h3 .tooltip-text::after {
 .expand-icon {
   color: #a0aec0;
   font-size: 0.75rem;
+}
+
+/* Calculation Tags */
+.calc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-left: 0.5rem;
+}
+
+.calc-tag {
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.calc-tag-info {
+  background: #e2e8f0;
+  color: #4a5568;
+}
+
+.calc-tag-feature {
+  background: #bee3f8;
+  color: #2b6cb0;
 }
 
 .calculation-details {
@@ -1946,6 +2098,16 @@ h3 .tooltip-text::after {
 
   .calc-energy {
     color: #e2e8f0;
+  }
+
+  .calc-tag-info {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .calc-tag-feature {
+    background: #2c5282;
+    color: #bee3f8;
   }
 
   .calculation-details {
@@ -2564,6 +2726,22 @@ h3 .tooltip-text::after {
   font-size: 0.85rem;
   color: #a6adc8;
   font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.scf-option .calc-tags {
+  padding-left: 1.75rem;
+  margin-top: 0.5rem;
+  margin-left: 0;
+}
+
+.scf-option .calc-tag-info {
+  background: #45475a;
+  color: #cdd6f4;
+}
+
+.scf-option .calc-tag-feature {
+  background: #1e3a5f;
+  color: #89b4fa;
 }
 
 /* K-Path Step */

@@ -52,6 +52,47 @@ interface ProjectDashboardProps {
 
 const CONFIRM_TEXT = "delete my project for good";
 
+// Helper to generate calculation feature tags from parameters
+function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+
+  // K-points grid
+  if (params.kgrid) {
+    const [k1, k2, k3] = params.kgrid;
+    tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
+  }
+
+  // Convergence threshold
+  if (params.conv_thr) {
+    const thr = params.conv_thr;
+    // Format as scientific notation if small
+    const label = thr < 0.001 ? thr.toExponential(0) : thr.toString();
+    tags.push({ label: label, type: "info" });
+  }
+
+  // Feature tags
+  if (params.lspinorb) {
+    tags.push({ label: "SOC", type: "feature" });
+  }
+
+  if (params.nspin === 4) {
+    tags.push({ label: "Non-collinear", type: "feature" });
+  } else if (params.nspin === 2) {
+    tags.push({ label: "Magnetic", type: "feature" });
+  }
+
+  if (params.lda_plus_u) {
+    tags.push({ label: "DFT+U", type: "feature" });
+  }
+
+  if (params.vdw_corr && params.vdw_corr !== "none") {
+    tags.push({ label: "vdW", type: "feature" });
+  }
+
+  return tags;
+}
+
 export function ProjectDashboard({
   projectId,
   onBack,
@@ -526,6 +567,13 @@ export function ProjectDashboard({
                           E = {formatEnergy(calc.result.total_energy)}
                         </span>
                       )}
+                      <div className="calc-tags">
+                        {getCalculationTags(calc).map((tag, i) => (
+                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            {tag.label}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                     <div className="calculation-meta">
                       <span className="calc-date">

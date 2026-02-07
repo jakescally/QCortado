@@ -36,11 +36,57 @@ interface SCFWizardProps {
 }
 
 interface SCFConfig {
+  // Basic parameters
   ecutwfc: number;
   ecutrho: number;
   kgrid: [number, number, number];
+  kgrid_offset: [number, number, number];
+
+  // Electronic structure
+  occupations: "smearing" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt" | "fixed" | "from_input";
+  smearing: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" | "cold";
+  degauss: number;
+  nbnd: number | null;  // null = auto
+  tot_charge: number;
+
+  // Magnetism & Spin
+  nspin: 1 | 2 | 4;
+  noncolin: boolean;
+  lspinorb: boolean;
+  starting_magnetization: Record<string, number>;  // per element
+  tot_magnetization: number | null;  // null = auto, only for nspin=2
+  constrained_magnetization: "none" | "total" | "atomic" | "total direction" | "atomic direction";
+
+  // SCF Convergence
   conv_thr: number;
+  electron_maxstep: number;
+  mixing_mode: "plain" | "TF" | "local-TF";
   mixing_beta: number;
+  mixing_ndim: number;
+  diagonalization: "david" | "cg" | "ppcg" | "paro" | "rmm-davidson";
+  startingpot: "atomic" | "file";
+  startingwfc: "atomic" | "atomic+random" | "random" | "file";
+
+  // DFT+U
+  lda_plus_u: boolean;
+  lda_plus_u_kind: 0 | 1 | 2;
+  hubbard_u: Record<string, number>;  // per element
+  hubbard_j: Record<string, number>;  // per element (for kind=1,2)
+
+  // Van der Waals
+  vdw_corr: "none" | "grimme-d2" | "grimme-d3" | "ts-vdw" | "xdm" | "dft-d";
+
+  // Isolated systems
+  assume_isolated: "none" | "makov-payne" | "martyna-tuckerman" | "esm" | "2D";
+
+  // XC functional override
+  input_dft: string;  // empty = use pseudopotential default
+
+  // Output control
+  verbosity: "low" | "high";
+  tprnfor: boolean;
+  tstress: boolean;
+  disk_io: "low" | "medium" | "high" | "nowf";
 }
 
 type WizardStep = "import" | "configure" | "run" | "results";
@@ -75,12 +121,73 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const outputRef = useRef<HTMLPreElement>(null);
 
   const [config, setConfig] = useState<SCFConfig>({
+    // Basic parameters
     ecutwfc: 40,
     ecutrho: 320,
     kgrid: [4, 4, 4],
+    kgrid_offset: [0, 0, 0],
+
+    // Electronic structure
+    occupations: "smearing",
+    smearing: "gaussian",
+    degauss: 0.01,
+    nbnd: null,
+    tot_charge: 0,
+
+    // Magnetism & Spin
+    nspin: 1,
+    noncolin: false,
+    lspinorb: false,
+    starting_magnetization: {},
+    tot_magnetization: null,
+    constrained_magnetization: "none",
+
+    // SCF Convergence
     conv_thr: 1e-6,
+    electron_maxstep: 1000,
+    mixing_mode: "plain",
     mixing_beta: 0.7,
+    mixing_ndim: 8,
+    diagonalization: "david",
+    startingpot: "atomic",
+    startingwfc: "atomic",
+
+    // DFT+U
+    lda_plus_u: false,
+    lda_plus_u_kind: 0,
+    hubbard_u: {},
+    hubbard_j: {},
+
+    // Van der Waals
+    vdw_corr: "none",
+
+    // Isolated systems
+    assume_isolated: "none",
+
+    // XC functional override
+    input_dft: "",
+
+    // Output control
+    verbosity: "high",
+    tprnfor: true,
+    tstress: true,
+    disk_io: "low",
   });
+
+  // Collapsed section states
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    basic: true,
+    electronic: false,
+    magnetism: false,
+    convergence: false,
+    dftu: false,
+    vdw: false,
+    advanced: false,
+  });
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  };
 
   // Local string state for conv_thr input (to allow typing scientific notation)
   const [convThrInput, setConvThrInput] = useState("1e-6");
@@ -283,14 +390,18 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     try {
       const elements = getUniqueElements();
 
-      // Build the calculation configuration
-      const calculation = {
+      // Build the calculation configuration with all options
+      const calculation: any = {
         calculation: "scf",
         prefix: "qcortado_scf",
         outdir: "./tmp",
         pseudo_dir: qePath.replace("/bin", "/pseudo"),
+        verbosity: config.verbosity,
+        tprnfor: config.tprnfor,
+        tstress: config.tstress,
+        disk_io: config.disk_io,
         system: {
-          ibrav: "free", // Free lattice - use CELL_PARAMETERS
+          ibrav: "free",
           celldm: null,
           cell_parameters: [
             [crystalData.cell_length_a.value, 0, 0],
@@ -308,6 +419,9 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             symbol: el,
             mass: ELEMENT_MASSES[el] || 1.0,
             pseudopotential: selectedPseudos[el],
+            starting_magnetization: config.starting_magnetization[el] || 0,
+            hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
+            hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
           })),
           atoms: crystalData.atom_sites.map((site) => ({
             symbol: getBaseElement(site.type_symbol),
@@ -317,23 +431,44 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
           position_units: "crystal",
           ecutwfc: config.ecutwfc,
           ecutrho: config.ecutrho,
-          nspin: 1,
-          occupations: "smearing",
-          smearing: "gaussian",
-          degauss: 0.01,
+          // Electronic structure
+          occupations: config.occupations,
+          smearing: config.occupations === "smearing" ? config.smearing : undefined,
+          degauss: config.occupations === "smearing" ? config.degauss : undefined,
+          nbnd: config.nbnd,
+          tot_charge: config.tot_charge !== 0 ? config.tot_charge : undefined,
+          // Magnetism
+          nspin: config.nspin,
+          noncolin: config.noncolin || undefined,
+          lspinorb: config.lspinorb || undefined,
+          tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
+          constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
+          // DFT+U
+          lda_plus_u: config.lda_plus_u || undefined,
+          lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
+          // Van der Waals
+          vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
+          // Isolated systems
+          assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
+          // XC functional override
+          input_dft: config.input_dft || undefined,
         },
         kpoints: {
           type: "automatic",
           grid: config.kgrid,
-          offset: [0, 0, 0],
+          offset: config.kgrid_offset,
         },
+        // SCF convergence settings
         conv_thr: config.conv_thr,
+        electron_maxstep: config.electron_maxstep,
+        mixing_mode: config.mixing_mode,
         mixing_beta: config.mixing_beta,
-        tprnfor: true,
-        tstress: true,
+        mixing_ndim: config.mixing_ndim,
+        diagonalization: config.diagonalization,
+        startingpot: config.startingpot,
+        startingwfc: config.startingwfc,
         forc_conv_thr: null,
         etot_conv_thr: null,
-        verbosity: "high",
       };
 
       // Generate and display the input file
@@ -546,137 +681,514 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                   )}
                 </section>
 
-                {/* SCF Parameters */}
-                <section className="config-section">
-                  <h3>
-                    SCF Parameters
-                    <Tooltip text="Self-Consistent Field (SCF) calculations iteratively solve the Kohn-Sham equations until the electron density converges. These parameters control the accuracy and computational cost of the calculation." />
+                {/* Basic Parameters */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("basic")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.basic ? "expanded" : ""}`}>▶</span>
+                    Basic Parameters
+                    <Tooltip text="Essential parameters for any SCF calculation: energy cutoffs and k-point sampling." />
                   </h3>
-                  <div className="param-grid">
-                    <div className="param-row">
-                      <label>
-                        Wavefunction Cutoff
-                        <Tooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher values = more accurate but slower. Typical range: 30-80 Ry. Start with your pseudopotential's recommended value. Doubling this roughly 8x the computation time." />
-                      </label>
-                      <div className="param-input-group">
-                        <input
-                          type="number"
-                          value={config.ecutwfc}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              ecutwfc: parseFloat(e.target.value),
-                            }))
-                          }
-                        />
-                        <span className="param-unit">Ry</span>
+                  {expandedSections.basic && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Wavefunction Cutoff
+                          <Tooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher = more accurate but slower. Typical: 30-80 Ry." />
+                        </label>
+                        <div className="param-input-group">
+                          <input type="number" value={config.ecutwfc}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, ecutwfc: parseFloat(e.target.value) }))} />
+                          <span className="param-unit">Ry</span>
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Charge Density Cutoff
+                          <Tooltip text="Energy cutoff for charge density (in Rydberg). Use 4x ecutwfc for NC, 8-12x for US/PAW pseudopotentials." />
+                        </label>
+                        <div className="param-input-group">
+                          <input type="number" value={config.ecutrho}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, ecutrho: parseFloat(e.target.value) }))} />
+                          <span className="param-unit">Ry</span>
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          K-point Grid
+                          <Tooltip text="Monkhorst-Pack grid for Brillouin zone sampling. Denser = more accurate. Metals need denser grids." />
+                        </label>
+                        <div className="kgrid-inputs">
+                          <input type="number" value={config.kgrid[0]}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid: [parseInt(e.target.value), prev.kgrid[1], prev.kgrid[2]] }))} />
+                          <span>×</span>
+                          <input type="number" value={config.kgrid[1]}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid: [prev.kgrid[0], parseInt(e.target.value), prev.kgrid[2]] }))} />
+                          <span>×</span>
+                          <input type="number" value={config.kgrid[2]}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid: [prev.kgrid[0], prev.kgrid[1], parseInt(e.target.value)] }))} />
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          K-point Offset
+                          <Tooltip text="Shift the k-point grid. Use (1,1,1) for metals to avoid high-symmetry points, (0,0,0) for insulators." />
+                        </label>
+                        <div className="kgrid-inputs">
+                          <input type="number" value={config.kgrid_offset[0]} min={0} max={1}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid_offset: [parseInt(e.target.value), prev.kgrid_offset[1], prev.kgrid_offset[2]] as [number, number, number] }))} />
+                          <span>,</span>
+                          <input type="number" value={config.kgrid_offset[1]} min={0} max={1}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid_offset: [prev.kgrid_offset[0], parseInt(e.target.value), prev.kgrid_offset[2]] as [number, number, number] }))} />
+                          <span>,</span>
+                          <input type="number" value={config.kgrid_offset[2]} min={0} max={1}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, kgrid_offset: [prev.kgrid_offset[0], prev.kgrid_offset[1], parseInt(e.target.value)] as [number, number, number] }))} />
+                        </div>
                       </div>
                     </div>
-                    <div className="param-row">
-                      <label>
-                        Charge Density Cutoff
-                        <Tooltip text="Energy cutoff for charge density and potential (in Rydberg). Should be 4x wavefunction cutoff for norm-conserving pseudopotentials, or 8-12x for ultrasoft/PAW. Higher values improve accuracy of forces and stress." />
-                      </label>
-                      <div className="param-input-group">
-                        <input
-                          type="number"
-                          value={config.ecutrho}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              ecutrho: parseFloat(e.target.value),
-                            }))
-                          }
-                        />
-                        <span className="param-unit">Ry</span>
-                      </div>
-                    </div>
-                    <div className="param-row">
-                      <label>
-                        K-point Grid
-                        <Tooltip text="Sampling grid for the Brillouin zone (reciprocal space). Denser grids = more accurate but slower. Metals need denser grids than insulators. For cubic cells, use equal values. Doubling each dimension = 8x more k-points = ~8x slower." />
-                      </label>
-                      <div className="kgrid-inputs">
-                        <input
-                          type="number"
-                          value={config.kgrid[0]}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              kgrid: [parseInt(e.target.value), prev.kgrid[1], prev.kgrid[2]],
-                            }))
-                          }
-                        />
-                        <span>×</span>
-                        <input
-                          type="number"
-                          value={config.kgrid[1]}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              kgrid: [prev.kgrid[0], parseInt(e.target.value), prev.kgrid[2]],
-                            }))
-                          }
-                        />
-                        <span>×</span>
-                        <input
-                          type="number"
-                          value={config.kgrid[2]}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              kgrid: [prev.kgrid[0], prev.kgrid[1], parseInt(e.target.value)],
-                            }))
-                          }
-                        />
-                      </div>
-                    </div>
-                    <div className="param-row">
-                      <label>
-                        Convergence Threshold
-                        <Tooltip text="SCF iteration stops when energy change falls below this value (in Rydberg). Smaller = more accurate but more iterations. 1e-6 is good for most calculations. Use 1e-8 or smaller for phonons or precise forces." />
-                      </label>
-                      <div className="param-input-group">
-                        <input
-                          type="text"
-                          value={convThrInput}
-                          onChange={(e) => setConvThrInput(e.target.value)}
-                          onBlur={() => {
-                            const parsed = parseFloat(convThrInput);
-                            if (!isNaN(parsed) && parsed > 0) {
-                              setConfig((prev) => ({ ...prev, conv_thr: parsed }));
-                            } else {
-                              // Reset to current config value if invalid
-                              setConvThrInput(config.conv_thr.toString());
-                            }
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.currentTarget.blur();
-                            }
-                          }}
-                        />
-                        <span className="param-unit">Ry</span>
-                      </div>
-                    </div>
-                  </div>
-                  {ssspMissing && (
+                  )}
+                  {ssspMissing && expandedSections.basic && (
                     <p className="sssp-hint">
                       Cutoff values are defaults. For optimized values, download the{" "}
-                      <a
-                        href="https://www.materialscloud.org/discover/sssp/table/precision"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        SSSP library
-                      </a>{" "}
-                      and place the JSON file in your pseudo directory.
+                      <a href="https://www.materialscloud.org/discover/sssp/table/precision" target="_blank" rel="noopener noreferrer">SSSP library</a>.
                     </p>
                   )}
-                  {!ssspMissing && ssspData && (
-                    <p className="sssp-success">
-                      Cutoffs auto-configured from SSSP library (max values for all elements).
-                    </p>
+                  {!ssspMissing && ssspData && expandedSections.basic && (
+                    <p className="sssp-success">Cutoffs auto-configured from SSSP library.</p>
+                  )}
+                </section>
+
+                {/* Electronic Structure */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("electronic")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.electronic ? "expanded" : ""}`}>▶</span>
+                    Electronic Structure
+                    <Tooltip text="Control how electronic states are occupied and how the Fermi level is determined." />
+                  </h3>
+                  {expandedSections.electronic && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Occupations
+                          <Tooltip text="How to fill electronic states. 'smearing' for metals, 'tetrahedra' for accurate DOS, 'fixed' for insulators with gap." />
+                        </label>
+                        <select value={config.occupations}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, occupations: e.target.value as any }))}>
+                          <option value="smearing">Smearing (metals/default)</option>
+                          <option value="tetrahedra">Tetrahedra</option>
+                          <option value="tetrahedra_lin">Tetrahedra (linear)</option>
+                          <option value="tetrahedra_opt">Tetrahedra (optimized)</option>
+                          <option value="fixed">Fixed</option>
+                        </select>
+                      </div>
+                      {config.occupations === "smearing" && (
+                        <>
+                          <div className="param-row">
+                            <label>
+                              Smearing Type
+                              <Tooltip text="gaussian: simple, good for most cases. methfessel-paxton: better for metals. marzari-vanderbilt: 'cold smearing', good for forces. fermi-dirac: physical but needs higher temp." />
+                            </label>
+                            <select value={config.smearing}
+                              onChange={(e) => setConfig((prev) => ({ ...prev, smearing: e.target.value as any }))}>
+                              <option value="gaussian">Gaussian</option>
+                              <option value="methfessel-paxton">Methfessel-Paxton</option>
+                              <option value="marzari-vanderbilt">Marzari-Vanderbilt (cold)</option>
+                              <option value="fermi-dirac">Fermi-Dirac</option>
+                            </select>
+                          </div>
+                          <div className="param-row">
+                            <label>
+                              Smearing Width (degauss)
+                              <Tooltip text="Smearing width in Ry. Smaller = more accurate but harder to converge. Typical: 0.005-0.02 Ry for metals." />
+                            </label>
+                            <div className="param-input-group">
+                              <input type="number" step="0.001" value={config.degauss}
+                                onChange={(e) => setConfig((prev) => ({ ...prev, degauss: parseFloat(e.target.value) }))} />
+                              <span className="param-unit">Ry</span>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                      <div className="param-row">
+                        <label>
+                          Number of Bands
+                          <Tooltip text="Total number of Kohn-Sham states. Leave empty for automatic (occupied + some empty). Increase for accurate DOS or optical properties." />
+                        </label>
+                        <div className="param-input-group">
+                          <input type="number" value={config.nbnd ?? ""} placeholder="auto"
+                            onChange={(e) => setConfig((prev) => ({ ...prev, nbnd: e.target.value ? parseInt(e.target.value) : null }))} />
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Total Charge
+                          <Tooltip text="Total charge of the system in units of e. Positive = remove electrons, negative = add electrons. 0 = neutral." />
+                        </label>
+                        <div className="param-input-group">
+                          <input type="number" step="0.1" value={config.tot_charge}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, tot_charge: parseFloat(e.target.value) || 0 }))} />
+                          <span className="param-unit">e</span>
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          XC Functional Override
+                          <Tooltip text="Override the exchange-correlation functional from pseudopotentials. Leave empty to use pseudopotential default. Examples: PBE, PBEsol, SCAN, HSE, B3LYP." />
+                        </label>
+                        <input type="text" value={config.input_dft} placeholder="(use pseudopotential default)"
+                          onChange={(e) => setConfig((prev) => ({ ...prev, input_dft: e.target.value }))} />
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                {/* Magnetism & Spin */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("magnetism")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.magnetism ? "expanded" : ""}`}>▶</span>
+                    Magnetism & Spin
+                    <Tooltip text="Enable spin-polarized calculations for magnetic materials and spin-orbit coupling for heavy elements." />
+                  </h3>
+                  {expandedSections.magnetism && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Spin Polarization
+                          <Tooltip text="nspin=1: non-magnetic. nspin=2: collinear magnetic (spin up/down). nspin=4: non-collinear (required for spin-orbit)." />
+                        </label>
+                        <select value={config.nspin}
+                          onChange={(e) => {
+                            const nspin = parseInt(e.target.value) as 1 | 2 | 4;
+                            setConfig((prev) => ({
+                              ...prev,
+                              nspin,
+                              noncolin: nspin === 4,
+                              lspinorb: nspin === 4 ? prev.lspinorb : false,
+                            }));
+                          }}>
+                          <option value={1}>Non-polarized (nspin=1)</option>
+                          <option value={2}>Collinear (nspin=2)</option>
+                          <option value={4}>Non-collinear (nspin=4)</option>
+                        </select>
+                      </div>
+                      {config.nspin === 4 && (
+                        <div className="param-row">
+                          <label>
+                            Spin-Orbit Coupling
+                            <Tooltip text="Include spin-orbit interaction. Required for topological properties and heavy elements. Needs fully-relativistic pseudopotentials." />
+                          </label>
+                          <label className="toggle-label">
+                            <input type="checkbox" checked={config.lspinorb}
+                              onChange={(e) => setConfig((prev) => ({ ...prev, lspinorb: e.target.checked }))} />
+                            <span>Enable spin-orbit coupling</span>
+                          </label>
+                        </div>
+                      )}
+                      {config.nspin === 2 && (
+                        <div className="param-row">
+                          <label>
+                            Total Magnetization
+                            <Tooltip text="Fix total magnetization (N_up - N_down). Leave empty for unconstrained." />
+                          </label>
+                          <div className="param-input-group">
+                            <input type="number" step="0.1" value={config.tot_magnetization ?? ""} placeholder="auto"
+                              onChange={(e) => setConfig((prev) => ({ ...prev, tot_magnetization: e.target.value ? parseFloat(e.target.value) : null }))} />
+                            <span className="param-unit">Bohr mag</span>
+                          </div>
+                        </div>
+                      )}
+                      {(config.nspin === 2 || config.nspin === 4) && (
+                        <>
+                          <div className="param-row full-width">
+                            <label>
+                              Starting Magnetization (per element)
+                              <Tooltip text="Initial spin polarization for each element (-1 to +1). Helps SCF converge to correct magnetic state." />
+                            </label>
+                          </div>
+                          <div className="magnetization-grid">
+                            {getUniqueElements().map((el) => (
+                              <div key={el} className="mag-row">
+                                <label>{el}</label>
+                                <input type="number" step="0.1" min={-1} max={1}
+                                  value={config.starting_magnetization[el] ?? 0}
+                                  onChange={(e) => setConfig((prev) => ({
+                                    ...prev,
+                                    starting_magnetization: { ...prev.starting_magnetization, [el]: parseFloat(e.target.value) || 0 }
+                                  }))} />
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                {/* SCF Convergence */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("convergence")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.convergence ? "expanded" : ""}`}>▶</span>
+                    SCF Convergence
+                    <Tooltip text="Parameters controlling how the self-consistent field iteration converges." />
+                  </h3>
+                  {expandedSections.convergence && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Convergence Threshold
+                          <Tooltip text="SCF stops when energy change falls below this value (Ry). 1e-6 for most cases, 1e-8+ for phonons." />
+                        </label>
+                        <div className="param-input-group">
+                          <input type="text" value={convThrInput}
+                            onChange={(e) => setConvThrInput(e.target.value)}
+                            onBlur={() => {
+                              const parsed = parseFloat(convThrInput);
+                              if (!isNaN(parsed) && parsed > 0) {
+                                setConfig((prev) => ({ ...prev, conv_thr: parsed }));
+                              } else {
+                                setConvThrInput(config.conv_thr.toString());
+                              }
+                            }}
+                            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+                          <span className="param-unit">Ry</span>
+                        </div>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Max SCF Iterations
+                          <Tooltip text="Maximum number of SCF iterations before giving up." />
+                        </label>
+                        <input type="number" value={config.electron_maxstep}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, electron_maxstep: parseInt(e.target.value) }))} />
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Mixing Mode
+                          <Tooltip text="How to mix old and new charge density. 'plain' is default, 'TF' or 'local-TF' can help metals converge." />
+                        </label>
+                        <select value={config.mixing_mode}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, mixing_mode: e.target.value as any }))}>
+                          <option value="plain">Plain</option>
+                          <option value="TF">Thomas-Fermi</option>
+                          <option value="local-TF">Local Thomas-Fermi</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Mixing Beta
+                          <Tooltip text="Fraction of new density to mix in (0-1). Lower = more stable but slower. 0.7 default, use 0.1-0.3 for difficult cases." />
+                        </label>
+                        <input type="number" step="0.05" min={0} max={1} value={config.mixing_beta}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, mixing_beta: parseFloat(e.target.value) }))} />
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Mixing Dimensions
+                          <Tooltip text="Number of previous iterations used in Broyden mixing. Higher can help difficult cases converge." />
+                        </label>
+                        <input type="number" min={2} max={20} value={config.mixing_ndim}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, mixing_ndim: parseInt(e.target.value) }))} />
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Diagonalization
+                          <Tooltip text="Algorithm for solving eigenvalue problem. 'david' is fast for most cases, 'cg' for difficult cases, 'ppcg'/'paro' for large parallel runs." />
+                        </label>
+                        <select value={config.diagonalization}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, diagonalization: e.target.value as any }))}>
+                          <option value="david">Davidson</option>
+                          <option value="cg">Conjugate Gradient</option>
+                          <option value="ppcg">PPCG</option>
+                          <option value="paro">ParO</option>
+                          <option value="rmm-davidson">RMM-Davidson</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Starting Potential
+                          <Tooltip text="'atomic': superposition of atomic potentials (default). 'file': read from previous calculation." />
+                        </label>
+                        <select value={config.startingpot}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, startingpot: e.target.value as any }))}>
+                          <option value="atomic">Atomic</option>
+                          <option value="file">From file</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Starting Wavefunctions
+                          <Tooltip text="Initial guess for wavefunctions. 'atomic': atomic orbitals. 'atomic+random': with randomization. 'random': fully random." />
+                        </label>
+                        <select value={config.startingwfc}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, startingwfc: e.target.value as any }))}>
+                          <option value="atomic">Atomic</option>
+                          <option value="atomic+random">Atomic + Random</option>
+                          <option value="random">Random</option>
+                          <option value="file">From file</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                {/* DFT+U */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("dftu")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.dftu ? "expanded" : ""}`}>▶</span>
+                    DFT+U (Hubbard Correction)
+                    <Tooltip text="Add Hubbard U correction to improve description of localized d and f electrons in transition metals and lanthanides." />
+                  </h3>
+                  {expandedSections.dftu && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Enable DFT+U
+                          <Tooltip text="Apply Hubbard U correction. Essential for correlated materials like transition metal oxides." />
+                        </label>
+                        <label className="toggle-label">
+                          <input type="checkbox" checked={config.lda_plus_u}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, lda_plus_u: e.target.checked }))} />
+                          <span>Enable Hubbard correction</span>
+                        </label>
+                      </div>
+                      {config.lda_plus_u && (
+                        <>
+                          <div className="param-row">
+                            <label>
+                              DFT+U Type
+                              <Tooltip text="0: simplified rotationally invariant. 1: rotationally invariant with J. 2: DFT+U+J (full)." />
+                            </label>
+                            <select value={config.lda_plus_u_kind}
+                              onChange={(e) => setConfig((prev) => ({ ...prev, lda_plus_u_kind: parseInt(e.target.value) as 0 | 1 | 2 }))}>
+                              <option value={0}>Simplified (kind=0)</option>
+                              <option value={1}>Rotationally invariant (kind=1)</option>
+                              <option value={2}>Full DFT+U+J (kind=2)</option>
+                            </select>
+                          </div>
+                          <div className="param-row full-width">
+                            <label>Hubbard U values (per element, in eV)</label>
+                          </div>
+                          <div className="hubbard-grid">
+                            {getUniqueElements().map((el) => (
+                              <div key={el} className="hubbard-row">
+                                <label>{el}</label>
+                                <span>U:</span>
+                                <input type="number" step="0.1" min={0}
+                                  value={config.hubbard_u[el] ?? 0}
+                                  onChange={(e) => setConfig((prev) => ({
+                                    ...prev,
+                                    hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
+                                  }))} />
+                                {config.lda_plus_u_kind > 0 && (
+                                  <>
+                                    <span>J:</span>
+                                    <input type="number" step="0.1" min={0}
+                                      value={config.hubbard_j[el] ?? 0}
+                                      onChange={(e) => setConfig((prev) => ({
+                                        ...prev,
+                                        hubbard_j: { ...prev.hubbard_j, [el]: parseFloat(e.target.value) || 0 }
+                                      }))} />
+                                  </>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                {/* Van der Waals */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("vdw")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.vdw ? "expanded" : ""}`}>▶</span>
+                    Van der Waals Corrections
+                    <Tooltip text="Add dispersion corrections for systems where van der Waals interactions are important (layered materials, molecules, etc.)." />
+                  </h3>
+                  {expandedSections.vdw && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          vdW Correction Method
+                          <Tooltip text="None: standard DFT. DFT-D2/D3: Grimme's empirical corrections. TS-vdW: Tkatchenko-Scheffler. XDM: exchange-hole dipole moment." />
+                        </label>
+                        <select value={config.vdw_corr}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, vdw_corr: e.target.value as any }))}>
+                          <option value="none">None</option>
+                          <option value="grimme-d2">Grimme DFT-D2</option>
+                          <option value="grimme-d3">Grimme DFT-D3</option>
+                          <option value="ts-vdw">Tkatchenko-Scheffler</option>
+                          <option value="xdm">XDM</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                {/* Advanced Options */}
+                <section className="config-section collapsible">
+                  <h3 onClick={() => toggleSection("advanced")} className="section-header">
+                    <span className={`collapse-icon ${expandedSections.advanced ? "expanded" : ""}`}>▶</span>
+                    Advanced Options
+                    <Tooltip text="Additional settings for special cases: isolated systems, output control, etc." />
+                  </h3>
+                  {expandedSections.advanced && (
+                    <div className="param-grid">
+                      <div className="param-row">
+                        <label>
+                          Isolated System
+                          <Tooltip text="For molecules or slabs, remove spurious interactions with periodic images. 'martyna-tuckerman' for molecules, 'esm' or '2D' for slabs." />
+                        </label>
+                        <select value={config.assume_isolated}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, assume_isolated: e.target.value as any }))}>
+                          <option value="none">None (3D periodic)</option>
+                          <option value="makov-payne">Makov-Payne (charged)</option>
+                          <option value="martyna-tuckerman">Martyna-Tuckerman (molecules)</option>
+                          <option value="esm">ESM (slabs)</option>
+                          <option value="2D">2D (slabs)</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Verbosity
+                          <Tooltip text="Amount of output. 'high' gives more detail for debugging." />
+                        </label>
+                        <select value={config.verbosity}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, verbosity: e.target.value as any }))}>
+                          <option value="low">Low</option>
+                          <option value="high">High</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>
+                          Disk I/O
+                          <Tooltip text="How much to write to disk. 'low' saves space, 'nowf' doesn't save wavefunctions (can't restart)." />
+                        </label>
+                        <select value={config.disk_io}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, disk_io: e.target.value as any }))}>
+                          <option value="low">Low</option>
+                          <option value="medium">Medium</option>
+                          <option value="high">High</option>
+                          <option value="nowf">No wavefunctions</option>
+                        </select>
+                      </div>
+                      <div className="param-row">
+                        <label>Calculate Forces</label>
+                        <label className="toggle-label">
+                          <input type="checkbox" checked={config.tprnfor}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, tprnfor: e.target.checked }))} />
+                          <span>Print forces on atoms</span>
+                        </label>
+                      </div>
+                      <div className="param-row">
+                        <label>Calculate Stress</label>
+                        <label className="toggle-label">
+                          <input type="checkbox" checked={config.tstress}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, tstress: e.target.checked }))} />
+                          <span>Print stress tensor</span>
+                        </label>
+                      </div>
+                    </div>
                   )}
                 </section>
 
@@ -834,6 +1346,11 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
               kgrid: config.kgrid,
               conv_thr: config.conv_thr,
               mixing_beta: config.mixing_beta,
+              // Feature flags for tags
+              nspin: config.nspin,
+              lspinorb: config.lspinorb,
+              lda_plus_u: config.lda_plus_u,
+              vdw_corr: config.vdw_corr,
             },
             result: result,
             started_at: calcStartTime,

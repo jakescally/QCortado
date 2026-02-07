@@ -189,6 +189,10 @@ export function BandPlot({
   );
 
   // Handle scroll to adjust Y-axis range
+  // Limit the vertical range to -25 to 25 eV
+  const Y_LIMIT_MIN = -25;
+  const Y_LIMIT_MAX = 25;
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
 
@@ -196,19 +200,32 @@ export function BandPlot({
     const currentMax = yMax ?? scales.eMax;
     const range = currentMax - currentMin;
 
+    let newMin: number, newMax: number;
+
     // Normal scroll zooms the Y range
     // Shift+scroll shifts the energy window (pan up/down)
     if (e.shiftKey) {
       const shift = e.deltaY > 0 ? range * 0.02 : -range * 0.02;
-      setYMin(currentMin + shift);
-      setYMax(currentMax + shift);
+      newMin = currentMin + shift;
+      newMax = currentMax + shift;
     } else {
       const factor = e.deltaY > 0 ? 1.03 : 0.97;
       const center = (currentMax + currentMin) / 2;
       const newRange = range * factor;
-      setYMin(center - newRange / 2);
-      setYMax(center + newRange / 2);
+      newMin = center - newRange / 2;
+      newMax = center + newRange / 2;
     }
+
+    // Clamp to limits
+    if (newMin < Y_LIMIT_MIN) {
+      newMin = Y_LIMIT_MIN;
+    }
+    if (newMax > Y_LIMIT_MAX) {
+      newMax = Y_LIMIT_MAX;
+    }
+
+    setYMin(newMin);
+    setYMax(newMax);
   }, [yMin, yMax, scales]);
 
   // Reset view
