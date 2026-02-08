@@ -2016,6 +2016,12 @@ h3 .tooltip-text::after {
   color: #2b6cb0;
 }
 
+.calc-tag-special {
+  background: #c6f6d5;
+  color: #276749;
+  font-weight: 500;
+}
+
 .calculation-details {
   padding: 1rem 1.25rem;
   background: #f7fafc;
@@ -2108,6 +2114,11 @@ h3 .tooltip-text::after {
   .calc-tag-feature {
     background: #2c5282;
     color: #bee3f8;
+  }
+
+  .calc-tag-special {
+    background: #276749;
+    color: #c6f6d5;
   }
 
   .calculation-details {
@@ -2833,6 +2844,11 @@ h3 .tooltip-text::after {
 .scf-option .calc-tag-feature {
   background: #1e3a5f;
   color: #89b4fa;
+}
+
+.scf-option .calc-tag-special {
+  background: #1e5631;
+  color: #a6e3a1;
 }
 
 /* K-Path Step */
@@ -3565,4 +3581,345 @@ h3 .tooltip-text::after {
   font-size: 0.7rem;
   color: #6c7086;
   margin-top: 0.25rem;
+}
+
+/* ============================================
+   Phonon Wizard Styles
+   ============================================ */
+
+.phonon-wizard {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e2e;
+}
+
+.phonon-ready-badge {
+  background: #a6e3a1;
+  color: #1e1e2e;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.scf-option.phonon-ready {
+  border-left: 3px solid #a6e3a1;
+}
+
+.warning-banner {
+  background: #45293e;
+  border: 1px solid #fab387;
+  padding: 1rem;
+  border-radius: 8px;
+  color: #fab387;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+/* Q-Grid inputs */
+.qgrid-inputs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.qgrid-inputs input {
+  width: 60px;
+  padding: 0.4rem 0.5rem;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.qgrid-inputs span {
+  color: #a6adc8;
+}
+
+.param-hint {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #a6adc8;
+}
+
+/* Options Step */
+.option-section {
+  background: #313244;
+  padding: 1.25rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.option-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: #cdd6f4;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.option-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #89b4fa;
+}
+
+.option-params {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #45475a;
+}
+
+/* Phonon Section in Dashboard */
+.phonon-item .calculation-header {
+  border-left: 3px solid #38a169;
+}
+
+.view-phonon-btn {
+  background: #38a169;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s;
+  margin-right: 0.5rem;
+}
+
+.view-phonon-btn:hover {
+  background: #2f855a;
+}
+
+/* Phonon Plot Styles */
+.phonon-dispersion-container,
+.phonon-dos-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.phonon-plot-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.phonon-plot-reset {
+  padding: 0.4rem 0.75rem;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  color: #333;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.phonon-plot-reset:hover {
+  background: #f0f0f0;
+  border-color: #999;
+}
+
+.phonon-plot-hint {
+  font-size: 0.75rem;
+  color: #888;
+  font-style: italic;
+}
+
+.phonon-plot-info {
+  display: flex;
+  gap: 1.5rem;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.instability-warning {
+  color: #d32f2f;
+  font-weight: 500;
+}
+
+/* Combined Phonon Plot */
+.phonon-combined-plot {
+  display: flex;
+  flex-direction: column;
+}
+
+.phonon-combined-container {
+  display: flex;
+}
+
+/* Phonon Plot Wrapper */
+.phonon-plot-wrapper {
+  background: #f5f5f5;
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  justify-content: center;
+  border: 1px solid #ddd;
+}
+
+.phonon-plot-wrapper.combined {
+  width: 100%;
+}
+
+.phonon-plot-wrapper.dos-only {
+  width: fit-content;
+  margin: 0 auto 1.5rem;
+}
+
+.phonon-plot-wrapper.dispersion-only {
+  width: fit-content;
+  margin: 0 auto 1.5rem;
+}
+
+/* Phonon Viewer Container */
+.phonon-viewer-container {
+  min-height: 100vh;
+  background: #f7fafc;
+  padding: 1rem;
+}
+
+.phonon-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0;
+}
+
+.phonon-viewer-header h2 {
+  margin: 0;
+  color: #2d3748;
+}
+
+.phonon-viewer-content {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  display: flex;
+  justify-content: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  .phonon-viewer-container {
+    background: #1a202c;
+  }
+
+  .phonon-viewer-header h2 {
+    color: #f7fafc;
+  }
+
+  .phonon-viewer-content {
+    background: #2d3748;
+  }
+
+  .phonon-plot-controls {
+    color: #e2e8f0;
+  }
+
+  .phonon-plot-reset {
+    background: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .phonon-plot-reset:hover {
+    background: #718096;
+  }
+
+  .phonon-plot-info {
+    color: #a0aec0;
+  }
+
+  .phonon-plot-hint {
+    color: #a0aec0;
+  }
+}
+
+/* Preset Buttons */
+.preset-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.preset-btn {
+  padding: 0.4rem 0.75rem;
+  background: #e2e8f0;
+  border: 1px solid #cbd5e0;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #2d3748;
+}
+
+.preset-btn:hover {
+  background: #cbd5e0;
+  border-color: #a0aec0;
+}
+
+.preset-btn.preset-phonon {
+  background: #c6f6d5;
+  border-color: #9ae6b4;
+  color: #276749;
+}
+
+.preset-btn.preset-phonon:hover {
+  background: #9ae6b4;
+  border-color: #68d391;
+}
+
+.preset-btn.preset-relax {
+  background: #feebc8;
+  border-color: #fbd38d;
+  color: #744210;
+}
+
+.preset-btn.preset-relax:hover {
+  background: #fbd38d;
+  border-color: #f6ad55;
+}
+
+@media (prefers-color-scheme: dark) {
+  .preset-btn {
+    background: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .preset-btn:hover {
+    background: #718096;
+  }
+
+  .preset-btn.preset-phonon {
+    background: #276749;
+    border-color: #276749;
+    color: #c6f6d5;
+  }
+
+  .preset-btn.preset-phonon:hover {
+    background: #38a169;
+  }
+
+  .preset-btn.preset-relax {
+    background: #744210;
+    border-color: #744210;
+    color: #feebc8;
+  }
+
+  .preset-btn.preset-relax:hover {
+    background: #975a16;
+  }
 }

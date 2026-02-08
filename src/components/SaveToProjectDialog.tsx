@@ -38,6 +38,7 @@ interface CalculationData {
   completed_at: string;
   input_content: string;
   output_content: string;
+  tags?: string[];
 }
 
 interface CifData {

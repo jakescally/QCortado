@@ -15,6 +15,7 @@ pub mod projects;
 pub mod qe;
 
 use qe::{generate_pw_input, parse_pw_output, QECalculation, QEResult, QERunner, BandData, BandsXConfig, KPathPoint, generate_bands_x_input, read_bands_gnu_file};
+use qe::{PhononPipelineConfig, PhononResult, Q2RCalculation, MatdynCalculation, QPathPoint, generate_ph_input, generate_q2r_input, generate_matdyn_dos_input, generate_matdyn_bands_input, parse_ph_output, read_phonon_dos_file, read_phonon_dispersion_file, add_phonon_symmetry_markers};
 
 /// Application state shared across commands.
 pub struct AppState {
@@ -707,6 +708,376 @@ async fn run_bands_calculation(
 }
 
 // ============================================================================
+// Phonon Calculation Commands
+// ============================================================================
+
+/// Runs a complete phonon calculation pipeline (ph.x → q2r.x → matdyn.x) with streaming output.
+#[tauri::command]
+async fn run_phonon_calculation(
+    app: AppHandle,
+    config: PhononPipelineConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    state: State<'_, AppState>,
+) -> Result<PhononResult, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader, AsyncWriteExt};
+
+    // Get QE bin directory
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+
+    let work_path = PathBuf::from(&working_dir);
+
+    // Ensure working directory exists
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    let mut full_output = String::new();
+
+    // Copy SCF's .save directory if project/calculation IDs are provided
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            let _ = app.emit("qe-output-line", format!("Copying SCF data from: {}", scf_tmp_dir.display()));
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            let _ = app.emit("qe-output-line", "SCF data copied successfully.");
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
+
+    // ========================================================================
+    // Step 1: Run ph.x
+    // ========================================================================
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "=== Step 1/4: Running ph.x Phonon Calculation ===");
+    let _ = app.emit("qe-output-line", format!("Q-grid: {}×{}×{}", config.phonon.nq[0], config.phonon.nq[1], config.phonon.nq[2]));
+
+    let ph_exe = bin_dir.join("ph.x");
+    if !ph_exe.exists() {
+        return Err("ph.x not found. Make sure your QE installation includes ph.x".to_string());
+    }
+
+    let ph_input = generate_ph_input(&config.phonon);
+
+    // Save ph.x input for reference
+    std::fs::write(work_path.join("ph.in"), &ph_input)
+        .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
+
+    // Build ph.x command with optional MPI
+    let mut ph_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            let _ = app.emit("qe-output-line", format!("Using MPI with {} processes", mpi.nprocs));
+            tokio::process::Command::new("mpirun")
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&ph_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio::process::Command::new(&ph_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start ph.x: {}", e))?
+        }
+    } else {
+        tokio::process::Command::new(&ph_exe)
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start ph.x: {}", e))?
+    };
+
+    // Write input to stdin
+    if let Some(mut stdin) = ph_child.stdin.take() {
+        stdin.write_all(ph_input.as_bytes()).await
+            .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
+    }
+
+    // Stream ph.x output
+    let ph_stdout = ph_child.stdout.take().ok_or("Failed to capture ph.x stdout")?;
+    let mut ph_reader = BufReader::new(ph_stdout).lines();
+
+    while let Some(line) = ph_reader.next_line().await.map_err(|e| e.to_string())? {
+        full_output.push_str(&line);
+        full_output.push('\n');
+        let _ = app.emit("qe-output-line", &line);
+    }
+
+    let ph_status = ph_child.wait().await.map_err(|e| e.to_string())?;
+    if !ph_status.success() {
+        return Err(format!("ph.x failed with exit code: {:?}", ph_status.code()));
+    }
+
+    // Check convergence
+    let (converged, n_qpoints) = parse_ph_output(&full_output);
+    if !converged {
+        return Err("ph.x did not converge successfully".to_string());
+    }
+
+    let _ = app.emit("qe-output-line", format!("ph.x completed: {} q-points calculated", n_qpoints));
+
+    // ========================================================================
+    // Step 2: Run q2r.x
+    // ========================================================================
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "=== Step 2/4: Running q2r.x (Force Constants) ===");
+
+    let q2r_exe = bin_dir.join("q2r.x");
+    if !q2r_exe.exists() {
+        return Err("q2r.x not found".to_string());
+    }
+
+    let q2r_calc = Q2RCalculation {
+        fildyn: config.phonon.fildyn.clone(),
+        flfrc: "force_constants".to_string(),
+        zasr: config.phonon.asr.clone(),
+    };
+    let q2r_input = generate_q2r_input(&q2r_calc);
+
+    std::fs::write(work_path.join("q2r.in"), &q2r_input)
+        .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
+
+    let mut q2r_child = tokio::process::Command::new(&q2r_exe)
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start q2r.x: {}", e))?;
+
+    if let Some(mut stdin) = q2r_child.stdin.take() {
+        stdin.write_all(q2r_input.as_bytes()).await
+            .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
+    }
+
+    let q2r_stdout = q2r_child.stdout.take().ok_or("Failed to capture q2r.x stdout")?;
+    let mut q2r_reader = BufReader::new(q2r_stdout).lines();
+
+    while let Some(line) = q2r_reader.next_line().await.map_err(|e| e.to_string())? {
+        let _ = app.emit("qe-output-line", &line);
+    }
+
+    let q2r_status = q2r_child.wait().await.map_err(|e| e.to_string())?;
+    if !q2r_status.success() {
+        return Err(format!("q2r.x failed with exit code: {:?}", q2r_status.code()));
+    }
+
+    let _ = app.emit("qe-output-line", "q2r.x completed successfully");
+
+    // Variables to hold results
+    let mut dos_data = None;
+    let mut dispersion_data = None;
+
+    // ========================================================================
+    // Step 3: Run matdyn.x for DOS (if requested)
+    // ========================================================================
+    if config.calculate_dos {
+        let _ = app.emit("qe-output-line", "");
+        let _ = app.emit("qe-output-line", "=== Step 3/4: Running matdyn.x (Phonon DOS) ===");
+
+        let matdyn_exe = bin_dir.join("matdyn.x");
+        if !matdyn_exe.exists() {
+            return Err("matdyn.x not found".to_string());
+        }
+
+        let dos_grid = config.dos_grid.unwrap_or([20, 20, 20]);
+        let _ = app.emit("qe-output-line", format!("DOS grid: {}×{}×{}", dos_grid[0], dos_grid[1], dos_grid[2]));
+
+        let matdyn_dos_calc = MatdynCalculation {
+            flfrc: "force_constants".to_string(),
+            asr: config.phonon.asr.clone(),
+            dos: true,
+            fldos: Some("phonon_dos".to_string()),
+            nk: Some(dos_grid),
+            delta_e: Some(1.0),
+            q_path: None,
+            flfrq: None,
+        };
+        let matdyn_dos_input = generate_matdyn_dos_input(&matdyn_dos_calc);
+
+        std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
+            .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
+
+        let mut matdyn_dos_child = tokio::process::Command::new(&matdyn_exe)
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+
+        if let Some(mut stdin) = matdyn_dos_child.stdin.take() {
+            stdin.write_all(matdyn_dos_input.as_bytes()).await
+                .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
+        }
+
+        let matdyn_dos_stdout = matdyn_dos_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+        let mut matdyn_dos_reader = BufReader::new(matdyn_dos_stdout).lines();
+
+        while let Some(line) = matdyn_dos_reader.next_line().await.map_err(|e| e.to_string())? {
+            let _ = app.emit("qe-output-line", &line);
+        }
+
+        let matdyn_dos_status = matdyn_dos_child.wait().await.map_err(|e| e.to_string())?;
+        if !matdyn_dos_status.success() {
+            let _ = app.emit("qe-output-line", "Warning: matdyn.x DOS calculation failed");
+        } else {
+            // Parse DOS output
+            let dos_file = work_path.join("phonon_dos");
+            if dos_file.exists() {
+                match read_phonon_dos_file(&dos_file) {
+                    Ok(dos) => {
+                        let _ = app.emit("qe-output-line", format!(
+                            "Phonon DOS: {} points, frequency range [{:.1}, {:.1}] cm^-1",
+                            dos.frequencies.len(), dos.omega_min, dos.omega_max
+                        ));
+                        dos_data = Some(dos);
+                    }
+                    Err(e) => {
+                        let _ = app.emit("qe-output-line", format!("Warning: Failed to parse phonon DOS: {}", e));
+                    }
+                }
+            }
+        }
+    } else {
+        let _ = app.emit("qe-output-line", "");
+        let _ = app.emit("qe-output-line", "=== Step 3/4: Skipping DOS calculation ===");
+    }
+
+    // ========================================================================
+    // Step 4: Run matdyn.x for dispersion (if requested)
+    // ========================================================================
+    if config.calculate_dispersion {
+        let _ = app.emit("qe-output-line", "");
+        let _ = app.emit("qe-output-line", "=== Step 4/4: Running matdyn.x (Phonon Dispersion) ===");
+
+        let matdyn_exe = bin_dir.join("matdyn.x");
+        if !matdyn_exe.exists() {
+            return Err("matdyn.x not found".to_string());
+        }
+
+        if let Some(ref q_path) = config.q_path {
+            let _ = app.emit("qe-output-line", format!("Q-path: {} points", q_path.len()));
+
+            // Create q_path with correct npoints
+            let q_path_with_points: Vec<QPathPoint> = q_path.iter().enumerate().map(|(i, p)| {
+                QPathPoint {
+                    label: p.label.clone(),
+                    coords: p.coords,
+                    npoints: if i < q_path.len() - 1 { config.points_per_segment } else { 0 },
+                }
+            }).collect();
+
+            let matdyn_bands_calc = MatdynCalculation {
+                flfrc: "force_constants".to_string(),
+                asr: config.phonon.asr.clone(),
+                dos: false,
+                fldos: None,
+                nk: None,
+                delta_e: None,
+                q_path: Some(q_path_with_points.clone()),
+                flfrq: Some("phonon_freq.gp".to_string()),
+            };
+            let matdyn_bands_input = generate_matdyn_bands_input(&matdyn_bands_calc);
+
+            std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
+                .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
+
+            let mut matdyn_bands_child = tokio::process::Command::new(&matdyn_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+
+            if let Some(mut stdin) = matdyn_bands_child.stdin.take() {
+                stdin.write_all(matdyn_bands_input.as_bytes()).await
+                    .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
+            }
+
+            let matdyn_bands_stdout = matdyn_bands_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+            let mut matdyn_bands_reader = BufReader::new(matdyn_bands_stdout).lines();
+
+            while let Some(line) = matdyn_bands_reader.next_line().await.map_err(|e| e.to_string())? {
+                let _ = app.emit("qe-output-line", &line);
+            }
+
+            let matdyn_bands_status = matdyn_bands_child.wait().await.map_err(|e| e.to_string())?;
+            if !matdyn_bands_status.success() {
+                let _ = app.emit("qe-output-line", "Warning: matdyn.x dispersion calculation failed");
+            } else {
+                // Parse dispersion output
+                let freq_file = work_path.join("phonon_freq.gp");
+                if freq_file.exists() {
+                    match read_phonon_dispersion_file(&freq_file) {
+                        Ok(mut disp) => {
+                            add_phonon_symmetry_markers(&mut disp, &q_path_with_points);
+                            let _ = app.emit("qe-output-line", format!(
+                                "Phonon dispersion: {} modes, {} q-points, frequency range [{:.1}, {:.1}] cm^-1",
+                                disp.n_modes, disp.n_qpoints, disp.frequency_range[0], disp.frequency_range[1]
+                            ));
+                            dispersion_data = Some(disp);
+                        }
+                        Err(e) => {
+                            let _ = app.emit("qe-output-line", format!("Warning: Failed to parse phonon dispersion: {}", e));
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = app.emit("qe-output-line", "No Q-path specified, skipping dispersion");
+        }
+    } else {
+        let _ = app.emit("qe-output-line", "");
+        let _ = app.emit("qe-output-line", "=== Step 4/4: Skipping dispersion calculation ===");
+    }
+
+    // Calculate n_modes from dispersion or DOS data
+    let n_modes = dispersion_data.as_ref().map(|d| d.n_modes).unwrap_or(0);
+
+    let _ = app.emit("qe-output-line", "");
+    let _ = app.emit("qe-output-line", "=== Phonon Calculation Complete ===");
+    let _ = app.emit("qe-output-line", format!("  {} q-points, {} modes", n_qpoints, n_modes));
+    if dos_data.is_some() {
+        let _ = app.emit("qe-output-line", "  DOS: calculated");
+    }
+    if dispersion_data.is_some() {
+        let _ = app.emit("qe-output-line", "  Dispersion: calculated");
+    }
+
+    Ok(PhononResult {
+        converged: true,
+        n_qpoints,
+        n_modes,
+        dos_data,
+        dispersion_data,
+        raw_output: full_output,
+    })
+}
+
+// ============================================================================
 // Application Entry Point
 // ============================================================================
 
@@ -760,6 +1131,7 @@ pub fn run() {
             run_calculation,
             run_calculation_streaming,
             run_bands_calculation,
+            run_phonon_calculation,
             set_project_dir,
             get_project_dir,
             list_pseudopotentials,

@@ -294,6 +294,9 @@ pub struct QECalculation {
     /// Energy convergence threshold (for relax)
     #[serde(default)]
     pub etot_conv_thr: Option<f64>,
+    /// Target pressure for vc-relax (kbar)
+    #[serde(default)]
+    pub press: Option<f64>,
     /// Verbosity level
     #[serde(default)]
     pub verbosity: Option<String>,
@@ -351,4 +354,207 @@ impl Default for QEResult {
             band_data: None,
         }
     }
+}
+
+// ============================================================================
+// Phonon Calculation Types
+// ============================================================================
+
+/// Configuration for ph.x phonon calculation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononCalculation {
+    /// Prefix from the SCF calculation
+    pub prefix: String,
+    /// Output directory containing .save from SCF
+    pub outdir: String,
+    /// Base name for dynamical matrix files
+    pub fildyn: String,
+    /// Q-point grid dimensions [nq1, nq2, nq3]
+    pub nq: [u32; 3],
+    /// Convergence threshold for phonons (default 1e-12)
+    pub tr2_ph: f64,
+    /// Whether to compute phonon dispersion
+    pub ldisp: bool,
+    /// Whether to recover from an interrupted calculation
+    pub recover: bool,
+    /// Acoustic sum rule (none, simple, crystal, one-dim, zero-dim)
+    #[serde(default = "default_asr")]
+    pub asr: String,
+}
+
+fn default_asr() -> String {
+    "crystal".to_string()
+}
+
+impl Default for PhononCalculation {
+    fn default() -> Self {
+        Self {
+            prefix: "qcortado_scf".to_string(),
+            outdir: "./tmp".to_string(),
+            fildyn: "dynmat".to_string(),
+            nq: [4, 4, 4],
+            tr2_ph: 1.0e-12,
+            ldisp: true,
+            recover: false,
+            asr: "crystal".to_string(),
+        }
+    }
+}
+
+/// Configuration for q2r.x (interatomic force constants)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Q2RCalculation {
+    /// Base name for dynamical matrix files (from ph.x)
+    pub fildyn: String,
+    /// Output file for force constants
+    pub flfrc: String,
+    /// Acoustic sum rule: "simple", "crystal", "one-dim", "zero-dim"
+    pub zasr: String,
+}
+
+impl Default for Q2RCalculation {
+    fn default() -> Self {
+        Self {
+            fildyn: "dynmat".to_string(),
+            flfrc: "force_constants".to_string(),
+            zasr: "crystal".to_string(),
+        }
+    }
+}
+
+/// Configuration for matdyn.x (phonon DOS and dispersion)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatdynCalculation {
+    /// Force constants file from q2r.x
+    pub flfrc: String,
+    /// Acoustic sum rule
+    pub asr: String,
+    /// Whether to calculate DOS
+    pub dos: bool,
+    /// Output file for phonon DOS
+    pub fldos: Option<String>,
+    /// K-point grid for DOS sampling [nk1, nk2, nk3]
+    pub nk: Option<[u32; 3]>,
+    /// Energy step for DOS (cm^-1)
+    pub delta_e: Option<f64>,
+    /// Q-path for dispersion calculation
+    pub q_path: Option<Vec<QPathPoint>>,
+    /// Output file for frequencies along path
+    pub flfrq: Option<String>,
+}
+
+impl Default for MatdynCalculation {
+    fn default() -> Self {
+        Self {
+            flfrc: "force_constants".to_string(),
+            asr: "crystal".to_string(),
+            dos: true,
+            fldos: Some("phonon_dos".to_string()),
+            nk: Some([20, 20, 20]),
+            delta_e: Some(1.0),
+            q_path: None,
+            flfrq: None,
+        }
+    }
+}
+
+/// A point in the Q-path for phonon dispersion calculations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QPathPoint {
+    /// Label for the high-symmetry point (e.g., "Γ", "X", "L")
+    pub label: String,
+    /// Coordinates in reciprocal lattice units
+    pub coords: [f64; 3],
+    /// Number of points in the segment to the next point
+    pub npoints: u32,
+}
+
+/// Phonon density of states data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononDOS {
+    /// Frequencies in cm^-1
+    pub frequencies: Vec<f64>,
+    /// DOS values
+    pub dos: Vec<f64>,
+    /// Maximum frequency
+    pub omega_max: f64,
+    /// Minimum frequency (can be negative for instabilities)
+    pub omega_min: f64,
+}
+
+/// High-symmetry point marker for phonon dispersion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononHighSymmetryMarker {
+    /// Q-path distance
+    pub q_distance: f64,
+    /// Label (e.g., "Γ", "X", "M")
+    pub label: String,
+}
+
+/// Phonon dispersion data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononDispersion {
+    /// Q-point distances along the path
+    pub q_points: Vec<f64>,
+    /// Frequencies for each mode at each q-point: [mode_index][q_index]
+    pub frequencies: Vec<Vec<f64>>,
+    /// High-symmetry point markers
+    pub high_symmetry_points: Vec<PhononHighSymmetryMarker>,
+    /// Number of phonon modes (3 * nat)
+    pub n_modes: usize,
+    /// Number of q-points
+    pub n_qpoints: usize,
+    /// Frequency range [min, max] in cm^-1
+    pub frequency_range: [f64; 2],
+}
+
+/// Combined phonon calculation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononResult {
+    /// Whether the calculation converged
+    pub converged: bool,
+    /// Number of q-points calculated
+    pub n_qpoints: u32,
+    /// Number of phonon modes
+    pub n_modes: usize,
+    /// Phonon DOS data (if calculated)
+    pub dos_data: Option<PhononDOS>,
+    /// Phonon dispersion data (if calculated)
+    pub dispersion_data: Option<PhononDispersion>,
+    /// Raw output from ph.x
+    pub raw_output: String,
+}
+
+impl Default for PhononResult {
+    fn default() -> Self {
+        Self {
+            converged: false,
+            n_qpoints: 0,
+            n_modes: 0,
+            dos_data: None,
+            dispersion_data: None,
+            raw_output: String::new(),
+        }
+    }
+}
+
+/// Configuration for a complete phonon pipeline calculation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhononPipelineConfig {
+    /// ph.x configuration
+    pub phonon: PhononCalculation,
+    /// Whether to calculate DOS
+    pub calculate_dos: bool,
+    /// DOS grid dimensions (if calculating DOS)
+    pub dos_grid: Option<[u32; 3]>,
+    /// Whether to calculate dispersion
+    pub calculate_dispersion: bool,
+    /// Q-path for dispersion (if calculating dispersion)
+    pub q_path: Option<Vec<QPathPoint>>,
+    /// Points per segment for dispersion
+    pub points_per_segment: u32,
+    /// Project ID containing the source SCF
+    pub project_id: Option<String>,
+    /// SCF calculation ID to get the .save directory from
+    pub scf_calc_id: Option<String>,
 }

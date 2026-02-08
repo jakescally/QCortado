@@ -46,6 +46,9 @@ pub struct CalculationRun {
     pub result: Option<QEResult>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Summary info for project listing (lighter than full Project)
@@ -70,6 +73,9 @@ pub struct SaveCalculationData {
     pub completed_at: String,
     pub input_content: String,
     pub output_content: String,
+    /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Data about a CIF file to add to a project
@@ -419,6 +425,7 @@ pub fn save_calculation(
         result: Some(calc_data.result),
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
+        tags: calc_data.tags,
     };
 
     // Save calc.json

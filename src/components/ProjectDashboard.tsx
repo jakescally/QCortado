@@ -24,6 +24,7 @@ export interface CalculationRun {
   result: QEResult | null;
   started_at: string;
   completed_at: string | null;
+  tags?: string[];
 }
 
 interface CifVariant {
@@ -50,14 +51,27 @@ interface ProjectDashboardProps {
   onRunSCF: (cifId: string, crystalData: CrystalData, cifContent: string, filename: string) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
+  onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onViewPhonons: (phononData: any) => void;
 }
 
 const CONFIRM_TEXT = "delete my project for good";
 
 // Helper to generate calculation feature tags from parameters
-function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
-  const tags: { label: string; type: "info" | "feature" }[] = [];
+function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" }[] {
+  const tags: { label: string; type: "info" | "feature" | "special" }[] = [];
   const params = calc.parameters || {};
+
+  // Special tags from stored tags array (phonon-ready, structure-optimized)
+  if (calc.tags) {
+    for (const tag of calc.tags) {
+      if (tag === "phonon-ready") {
+        tags.push({ label: "Phonon-Ready", type: "special" });
+      } else if (tag === "structure-optimized") {
+        tags.push({ label: "Optimized", type: "special" });
+      }
+    }
+  }
 
   // K-points grid
   if (params.kgrid) {
@@ -122,6 +136,31 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
   return tags;
 }
 
+// Helper to generate phonon-specific tags
+function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+
+  if (params.q_grid) {
+    const [q1, q2, q3] = params.q_grid;
+    tags.push({ label: `${q1}×${q2}×${q3} Q`, type: "info" });
+  }
+
+  if (params.n_modes) {
+    tags.push({ label: `${params.n_modes} modes`, type: "info" });
+  }
+
+  if (params.calculate_dos) {
+    tags.push({ label: "DOS", type: "feature" });
+  }
+
+  if (params.calculate_dispersion) {
+    tags.push({ label: "Dispersion", type: "feature" });
+  }
+
+  return tags;
+}
+
 export function ProjectDashboard({
   projectId,
   onBack,
@@ -129,6 +168,8 @@ export function ProjectDashboard({
   onRunSCF,
   onRunBands,
   onViewBands,
+  onRunPhonons,
+  onViewPhonons,
 }: ProjectDashboardProps) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -323,6 +364,13 @@ export function ProjectDashboard({
     if (!variant) return;
     // Pass all calculations for this CIF - the wizard will filter for SCF
     onRunBands(selectedCifId, crystalData, variant.calculations);
+  }
+
+  function handleRunPhonons() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunPhonons(selectedCifId, crystalData, variant.calculations);
   }
 
   function hasConvergedSCF(): boolean {
@@ -555,10 +603,16 @@ export function ProjectDashboard({
                 {hasConvergedSCF() ? "Electronic bands" : "Requires SCF"}
               </span>
             </button>
-            <button className="calc-action-btn" disabled>
-              <span className="calc-action-icon">DOS</span>
-              <span className="calc-action-label">Density of States</span>
-              <span className="calc-action-hint">Coming soon</span>
+            <button
+              className="calc-action-btn"
+              onClick={handleRunPhonons}
+              disabled={!hasConvergedSCF()}
+            >
+              <span className="calc-action-icon">Ph</span>
+              <span className="calc-action-label">Phonons</span>
+              <span className="calc-action-hint">
+                {hasConvergedSCF() ? "DOS & Dispersion" : "Requires SCF"}
+              </span>
             </button>
             <button className="calc-action-btn" disabled>
               <span className="calc-action-icon">Opt</span>
@@ -742,6 +796,106 @@ export function ProjectDashboard({
                             }}
                           >
                             View Bands
+                          </button>
+                        )}
+                        <button
+                          className="delete-calc-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Phonon Calculations */}
+        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "phonon").length > 0 && (
+          <section className="history-section phonon-section">
+            <h3>Phonons</h3>
+            <div className="calculations-list">
+              {selectedVariant.calculations.filter(c => c.calc_type === "phonon").map((calc) => (
+                <div key={calc.id} className="calculation-item phonon-item">
+                  <div
+                    className="calculation-header"
+                    onClick={() =>
+                      setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                    }
+                  >
+                    <div className="calculation-info">
+                      <span className="calc-type">PHONON</span>
+                      {calc.parameters?.q_path && (
+                        <span className="calc-kpath">{calc.parameters.q_path}</span>
+                      )}
+                      <div className="calc-tags">
+                        {getPhononTags(calc).map((tag, i) => (
+                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            {tag.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="calculation-meta">
+                      <span className="calc-date">
+                        {calc.completed_at
+                          ? formatDate(calc.completed_at)
+                          : "In progress..."}
+                      </span>
+                      <span className="expand-icon">
+                        {expandedCalc === calc.id ? "▼" : "▶"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {expandedCalc === calc.id && (
+                    <div className="calculation-details">
+                      <div className="details-grid">
+                        <div className="detail-item">
+                          <label>Q-Grid</label>
+                          <span>
+                            {calc.parameters?.q_grid
+                              ? `${calc.parameters.q_grid[0]}×${calc.parameters.q_grid[1]}×${calc.parameters.q_grid[2]}`
+                              : "N/A"}
+                          </span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Modes</label>
+                          <span>{calc.parameters?.n_modes || "N/A"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Q-Points</label>
+                          <span>{calc.parameters?.n_qpoints || "N/A"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>DOS</label>
+                          <span>{calc.parameters?.calculate_dos ? "Yes" : "No"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Dispersion</label>
+                          <span>{calc.parameters?.calculate_dispersion ? "Yes" : "No"}</span>
+                        </div>
+                        <div className="detail-item">
+                          <label>Source SCF</label>
+                          <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                        </div>
+                      </div>
+                      <div className="calc-actions">
+                        {(calc.result as any)?.phonon_data && (
+                          <button
+                            className="view-phonon-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onViewPhonons((calc.result as any)?.phonon_data);
+                            }}
+                          >
+                            View Phonons
                           </button>
                         )}
                         <button

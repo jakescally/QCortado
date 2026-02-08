@@ -5,6 +5,8 @@ import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { BandStructureWizard } from "./components/BandStructureWizard";
 import { BandPlot } from "./components/BandPlot";
+import { PhononWizard } from "./components/PhononWizard";
+import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
@@ -20,7 +22,7 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "project-browser" | "project-dashboard";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard";
 
 interface SCFContext {
   cifId: string;
@@ -35,6 +37,18 @@ interface BandsContext {
   crystalData: CrystalData;
   projectId: string;
   scfCalculations: CalculationRun[];
+}
+
+interface PhononsContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  scfCalculations: CalculationRun[];
+}
+
+interface PhononData {
+  dos_data: any | null;
+  dispersion_data: any | null;
 }
 
 function App() {
@@ -55,6 +69,12 @@ function App() {
 
   // Context for viewing saved band data
   const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
+
+  // Context for running Phonons from a project
+  const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
+
+  // Context for viewing saved phonon data
+  const [viewPhononData, setViewPhononData] = useState<PhononData | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -157,6 +177,68 @@ function App() {
     );
   }
 
+  if (currentView === "phonon-wizard" && qePath && phononsContext) {
+    return (
+      <PhononWizard
+        qePath={qePath}
+        onBack={() => {
+          setCurrentView("project-dashboard");
+          setPhononsContext(null);
+        }}
+        projectId={phononsContext.projectId}
+        cifId={phononsContext.cifId}
+        crystalData={phononsContext.crystalData}
+        scfCalculations={phononsContext.scfCalculations}
+      />
+    );
+  }
+
+  if (currentView === "phonon-viewer" && viewPhononData) {
+    const hasDos = viewPhononData.dos_data !== null;
+    const hasDispersion = viewPhononData.dispersion_data !== null;
+
+    return (
+      <div className="phonon-viewer-container">
+        <div className="phonon-viewer-header">
+          <button
+            className="back-button"
+            onClick={() => {
+              setCurrentView("project-dashboard");
+              setViewPhononData(null);
+            }}
+          >
+            ← Back to Dashboard
+          </button>
+          <h2>Phonon Spectrum</h2>
+        </div>
+        <div className="phonon-viewer-content">
+          {hasDos && hasDispersion ? (
+            <PhononPlot
+              dos={viewPhononData.dos_data}
+              dispersion={viewPhononData.dispersion_data}
+              width={900}
+              height={600}
+            />
+          ) : hasDos ? (
+            <PhononDOSPlot
+              data={viewPhononData.dos_data}
+              width={400}
+              height={600}
+            />
+          ) : hasDispersion ? (
+            <PhononDispersionPlot
+              data={viewPhononData.dispersion_data}
+              width={800}
+              height={600}
+            />
+          ) : (
+            <p>No phonon data available</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (currentView === "scf-wizard" && qePath) {
     return (
       <SCFWizard
@@ -225,6 +307,19 @@ function App() {
         onViewBands={(bandData, fermiEnergy) => {
           setViewBandsData({ bandData, fermiEnergy });
           setCurrentView("bands-viewer");
+        }}
+        onRunPhonons={(cifId, crystalData, scfCalculations) => {
+          setPhononsContext({
+            cifId,
+            crystalData,
+            projectId: selectedProjectId,
+            scfCalculations,
+          });
+          setCurrentView("phonon-wizard");
+        }}
+        onViewPhonons={(phononData) => {
+          setViewPhononData(phononData);
+          setCurrentView("phonon-viewer");
         }}
       />
     );

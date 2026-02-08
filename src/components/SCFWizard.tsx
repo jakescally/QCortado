@@ -37,11 +37,19 @@ interface SCFWizardProps {
 }
 
 interface SCFConfig {
+  // Calculation type
+  calculation: "scf" | "relax" | "vcrelax";
+
   // Basic parameters
   ecutwfc: number;
   ecutrho: number;
   kgrid: [number, number, number];
   kgrid_offset: [number, number, number];
+
+  // Relaxation parameters (for relax/vcrelax)
+  forc_conv_thr: number;
+  etot_conv_thr: number;
+  press: number;  // Target pressure for vcrelax (kbar)
 
   // Electronic structure
   occupations: "smearing" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt" | "fixed" | "from_input";
@@ -122,11 +130,19 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const outputRef = useRef<HTMLPreElement>(null);
 
   const [config, setConfig] = useState<SCFConfig>({
+    // Calculation type
+    calculation: "scf",
+
     // Basic parameters
     ecutwfc: 40,
     ecutrho: 320,
     kgrid: [4, 4, 4],
     kgrid_offset: [0, 0, 0],
+
+    // Relaxation parameters
+    forc_conv_thr: 1e-4,
+    etot_conv_thr: 1e-5,
+    press: 0.0,
 
     // Electronic structure
     occupations: "smearing",
@@ -210,9 +226,15 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
   const [ssspMissing, setSsspMissing] = useState(false);
 
-  // MPI settings
-  const [mpiEnabled, setMpiEnabled] = useState(false);
-  const [mpiProcs, setMpiProcs] = useState(1);
+  // MPI settings - load from localStorage if available
+  const [mpiEnabled, setMpiEnabled] = useState(() => {
+    const saved = localStorage.getItem("qcortado_mpi_enabled");
+    return saved ? JSON.parse(saved) : false;
+  });
+  const [mpiProcs, setMpiProcs] = useState(() => {
+    const saved = localStorage.getItem("qcortado_mpi_procs");
+    return saved ? parseInt(saved, 10) : 1;
+  });
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
 
@@ -263,8 +285,12 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       try {
         const cores = await invoke<number>("get_cpu_count");
         setCpuCount(cores);
-        // Default to ~75% of cores, minimum 1
-        setMpiProcs(Math.max(1, Math.floor(cores * 0.75)));
+
+        // Only set default if no saved value exists
+        const savedProcs = localStorage.getItem("qcortado_mpi_procs");
+        if (!savedProcs) {
+          setMpiProcs(Math.max(1, Math.floor(cores * 0.75)));
+        }
 
         const mpiOk = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(mpiOk);
@@ -274,6 +300,15 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     }
     loadMpiInfo();
   }, []);
+
+  // Persist MPI settings to localStorage
+  useEffect(() => {
+    localStorage.setItem("qcortado_mpi_enabled", JSON.stringify(mpiEnabled));
+  }, [mpiEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem("qcortado_mpi_procs", String(mpiProcs));
+  }, [mpiProcs]);
 
   // Strip oxidation state from element symbol (e.g., "Ni0+" -> "Ni", "Fe3+" -> "Fe")
   function getBaseElement(symbol: string): string {
@@ -479,7 +514,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
 
       // Build the calculation configuration with all options
       const calculation: any = {
-        calculation: "scf",
+        calculation: config.calculation,
         prefix: "qcortado_scf",
         outdir: "./tmp",
         pseudo_dir: qePath.replace("/bin", "/pseudo"),
@@ -502,8 +537,11 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
         diagonalization: config.diagonalization,
         startingpot: config.startingpot,
         startingwfc: config.startingwfc,
-        forc_conv_thr: null,
-        etot_conv_thr: null,
+        // Relaxation settings (only used for relax/vcrelax)
+        forc_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.forc_conv_thr : null,
+        etot_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.etot_conv_thr : null,
+        // vcrelax specific
+        press: config.calculation === "vcrelax" ? config.press : null,
       };
 
       // Generate and display the input file
@@ -725,6 +763,135 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                   </h3>
                   {expandedSections.basic && (
                     <div className="param-grid">
+                      {/* Preset buttons */}
+                      <div className="param-row full-width">
+                        <label>Presets</label>
+                        <div className="preset-buttons">
+                          <button
+                            type="button"
+                            className="preset-btn"
+                            onClick={() => setConfig(prev => ({
+                              ...prev,
+                              calculation: "scf",
+                              conv_thr: 1e-6,
+                              disk_io: "low",
+                            }))}
+                            title="Standard SCF calculation"
+                          >
+                            Standard
+                          </button>
+                          <button
+                            type="button"
+                            className="preset-btn preset-phonon"
+                            onClick={() => {
+                              setConfig(prev => ({
+                                ...prev,
+                                calculation: "scf",
+                                conv_thr: 1e-12,
+                                disk_io: "medium",
+                              }));
+                              setConvThrInput("1e-12");
+                            }}
+                            title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
+                          >
+                            Phonon-Ready
+                          </button>
+                          <button
+                            type="button"
+                            className="preset-btn preset-relax"
+                            onClick={() => setConfig(prev => ({
+                              ...prev,
+                              calculation: "vcrelax",
+                              forc_conv_thr: 1e-4,
+                              etot_conv_thr: 1e-5,
+                              press: 0,
+                              tprnfor: true,
+                              tstress: true,
+                            }))}
+                            title="Variable-cell relaxation for structure optimization"
+                          >
+                            Optimize Structure
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="param-row">
+                        <label>
+                          Calculation Type
+                          <Tooltip text="scf: ground state energy only. relax: optimize atomic positions. vcrelax: optimize both positions and cell shape/size." />
+                        </label>
+                        <select
+                          value={config.calculation}
+                          onChange={(e) => setConfig((prev) => ({ ...prev, calculation: e.target.value as "scf" | "relax" | "vcrelax" }))}
+                        >
+                          <option value="scf">SCF (ground state)</option>
+                          <option value="relax">Relax (fixed cell)</option>
+                          <option value="vcrelax">VC-Relax (variable cell)</option>
+                        </select>
+                      </div>
+
+                      {/* Relaxation parameters - shown only for relax/vcrelax */}
+                      {(config.calculation === "relax" || config.calculation === "vcrelax") && (
+                        <>
+                          <div className="param-row">
+                            <label>
+                              Force Convergence
+                              <Tooltip text="Convergence threshold for forces (Ry/Bohr). Relaxation stops when all forces are below this value. Use 1e-4 for rough optimization, 1e-5 for phonon calculations." />
+                            </label>
+                            <div className="param-input-group">
+                              <input
+                                type="text"
+                                value={config.forc_conv_thr}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  if (!isNaN(val)) {
+                                    setConfig((prev) => ({ ...prev, forc_conv_thr: val }));
+                                  }
+                                }}
+                              />
+                              <span className="param-unit">Ry/Bohr</span>
+                            </div>
+                          </div>
+                          <div className="param-row">
+                            <label>
+                              Energy Convergence
+                              <Tooltip text="Convergence threshold for total energy change between ionic steps (Ry)." />
+                            </label>
+                            <div className="param-input-group">
+                              <input
+                                type="text"
+                                value={config.etot_conv_thr}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  if (!isNaN(val)) {
+                                    setConfig((prev) => ({ ...prev, etot_conv_thr: val }));
+                                  }
+                                }}
+                              />
+                              <span className="param-unit">Ry</span>
+                            </div>
+                          </div>
+                        </>
+                      )}
+
+                      {/* VC-Relax specific: target pressure */}
+                      {config.calculation === "vcrelax" && (
+                        <div className="param-row">
+                          <label>
+                            Target Pressure
+                            <Tooltip text="Target external pressure in kbar. Use 0 for ambient pressure, positive for compression." />
+                          </label>
+                          <div className="param-input-group">
+                            <input
+                              type="number"
+                              value={config.press}
+                              onChange={(e) => setConfig((prev) => ({ ...prev, press: parseFloat(e.target.value) || 0 }))}
+                            />
+                            <span className="param-unit">kbar</span>
+                          </div>
+                        </div>
+                      )}
+
                       <div className="param-row">
                         <label>
                           Wavefunction Cutoff
@@ -1373,7 +1540,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             setResultSaved(true);
           }}
           calculationData={{
-            calc_type: "scf",
+            calc_type: config.calculation,
             parameters: {
               prefix: "qcortado_scf",
               ecutwfc: config.ecutwfc,
@@ -1386,12 +1553,22 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
               lspinorb: config.lspinorb,
               lda_plus_u: config.lda_plus_u,
               vdw_corr: config.vdw_corr,
+              // Relaxation parameters
+              forc_conv_thr: config.forc_conv_thr,
+              etot_conv_thr: config.etot_conv_thr,
+              press: config.press,
             },
             result: result,
             started_at: calcStartTime,
             completed_at: calcEndTime,
             input_content: generatedInput,
             output_content: result.raw_output || "",
+            tags: [
+              // Tag as structure-optimized for vcrelax or relax
+              ...(config.calculation === "vcrelax" || config.calculation === "relax" ? ["structure-optimized"] : []),
+              // Tag as phonon-ready if conv_thr is very tight (1e-10 or tighter)
+              ...(config.conv_thr <= 1e-10 ? ["phonon-ready"] : []),
+            ],
           }}
           cifData={{
             filename: cifFilename,
