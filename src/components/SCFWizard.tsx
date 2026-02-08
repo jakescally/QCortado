@@ -115,12 +115,15 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [pseudopotentials, setPseudopotentials] = useState<string[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
 
+  const WORK_DIR = "/tmp/qcortado_work";
+
   // Save dialog state
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [calcStartTime, setCalcStartTime] = useState<string>("");
   const [calcEndTime, setCalcEndTime] = useState<string>("");
   const [generatedInput, setGeneratedInput] = useState<string>("");
   const [resultSaved, setResultSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Exit confirmation dialog
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -414,6 +417,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     setIsRunning(true);
     setOutput("");
     setResult(null);
+    setResultSaved(false);
     setStep("run");
 
     // Track calculation start time
@@ -557,7 +561,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       // Run the calculation with streaming
       const calcResult = await invoke<any>("run_calculation_streaming", {
         calculation,
-        workingDir: "/tmp/qcortado_work",
+        workingDir: WORK_DIR,
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
       });
 
@@ -568,6 +572,25 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       setResult(calcResult);
       setOutput((prev) => prev + "\n=== Calculation Complete ===\n");
       setStep("results");
+
+      // Auto-save to project if we have project context
+      if (projectContext) {
+        try {
+          setIsSaving(true);
+          const calcData = buildCalculationData(calcResult, startTime, endTime, inputText);
+          await invoke("save_calculation", {
+            projectId: projectContext.projectId,
+            cifId: projectContext.cifId,
+            calcData,
+            workingDir: WORK_DIR,
+          });
+          setResultSaved(true);
+        } catch (saveError) {
+          console.error("Failed to auto-save SCF calculation:", saveError);
+        } finally {
+          setIsSaving(false);
+        }
+      }
     } catch (e) {
       setError(`Calculation failed: ${e}`);
       setOutput((prev) => prev + `\n\nERROR: ${e}`);
@@ -615,6 +638,49 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
 
     return [cx, cy, cz];
   }
+
+  function buildCalculationData(
+    calcResult: any,
+    startedAt: string,
+    completedAt: string,
+    inputContent: string,
+  ) {
+    return {
+      calc_type: config.calculation,
+      parameters: {
+        prefix: "qcortado_scf",
+        ecutwfc: config.ecutwfc,
+        ecutrho: config.ecutrho,
+        kgrid: config.kgrid,
+        conv_thr: config.conv_thr,
+        mixing_beta: config.mixing_beta,
+        // Feature flags for tags
+        nspin: config.nspin,
+        lspinorb: config.lspinorb,
+        lda_plus_u: config.lda_plus_u,
+        vdw_corr: config.vdw_corr,
+        // Relaxation parameters
+        forc_conv_thr: config.forc_conv_thr,
+        etot_conv_thr: config.etot_conv_thr,
+        press: config.press,
+      },
+      result: calcResult,
+      started_at: startedAt,
+      completed_at: completedAt,
+      input_content: inputContent,
+      output_content: calcResult?.raw_output || "",
+      tags: [
+        // Tag as structure-optimized for vcrelax or relax
+        ...(config.calculation === "vcrelax" || config.calculation === "relax" ? ["structure-optimized"] : []),
+        // Tag as phonon-ready if conv_thr is very tight (1e-10 or tighter)
+        ...(config.conv_thr <= 1e-10 ? ["phonon-ready"] : []),
+      ],
+    };
+  }
+
+  const calculationData = result
+    ? buildCalculationData(result, calcStartTime, calcEndTime, generatedInput)
+    : null;
 
   return (
     <div className="wizard-container">
@@ -1517,6 +1583,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                   <button
                     onClick={() => setShowSaveDialog(true)}
                     className="save-project-btn"
+                    disabled={isSaving}
                   >
                     {resultSaved ? "Saved" : "Save to Project"}
                   </button>
@@ -1526,12 +1593,19 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                 </>
               )}
             </div>
+
+            {result && (
+              <div className="save-status">
+                {isSaving && <span className="saving">Saving to project...</span>}
+                {resultSaved && <span className="saved">Saved to project</span>}
+              </div>
+            )}
           </div>
         )}
       </div>
 
       {/* Save to Project Dialog */}
-      {showSaveDialog && crystalData && result && (
+      {showSaveDialog && crystalData && calculationData && (
         <SaveToProjectDialog
           isOpen={showSaveDialog}
           onClose={() => setShowSaveDialog(false)}
@@ -1539,44 +1613,14 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             setShowSaveDialog(false);
             setResultSaved(true);
           }}
-          calculationData={{
-            calc_type: config.calculation,
-            parameters: {
-              prefix: "qcortado_scf",
-              ecutwfc: config.ecutwfc,
-              ecutrho: config.ecutrho,
-              kgrid: config.kgrid,
-              conv_thr: config.conv_thr,
-              mixing_beta: config.mixing_beta,
-              // Feature flags for tags
-              nspin: config.nspin,
-              lspinorb: config.lspinorb,
-              lda_plus_u: config.lda_plus_u,
-              vdw_corr: config.vdw_corr,
-              // Relaxation parameters
-              forc_conv_thr: config.forc_conv_thr,
-              etot_conv_thr: config.etot_conv_thr,
-              press: config.press,
-            },
-            result: result,
-            started_at: calcStartTime,
-            completed_at: calcEndTime,
-            input_content: generatedInput,
-            output_content: result.raw_output || "",
-            tags: [
-              // Tag as structure-optimized for vcrelax or relax
-              ...(config.calculation === "vcrelax" || config.calculation === "relax" ? ["structure-optimized"] : []),
-              // Tag as phonon-ready if conv_thr is very tight (1e-10 or tighter)
-              ...(config.conv_thr <= 1e-10 ? ["phonon-ready"] : []),
-            ],
-          }}
+          calculationData={calculationData}
           cifData={{
             filename: cifFilename,
             formula: crystalData.formula_sum || crystalData.formula_structural || "Unknown",
             content: cifContent,
             crystal_data: crystalData,
           }}
-          workingDir="/tmp/qcortado_work"
+          workingDir={WORK_DIR}
           projectContext={projectContext || undefined}
         />
       )}
