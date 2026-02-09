@@ -6,6 +6,8 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./PhononPlot";
+import { ProgressBar } from "./ProgressBar";
+import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
 interface CalculationRun {
   id: string;
@@ -115,6 +117,11 @@ export function PhononWizard({
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
   const outputRef = useRef<HTMLPreElement>(null);
+  const [progress, setProgress] = useState<ProgressState>({
+    status: "idle",
+    percent: null,
+    phase: "Phonon calculation",
+  });
 
   // Step 5: Results
   const [phononResult, setPhononResult] = useState<PhononResult | null>(null);
@@ -170,6 +177,7 @@ export function PhononWizard({
     setError(null);
     setPhononResult(null);
     setIsSaved(false);
+    setProgress(defaultProgressState("Phonon calculation"));
     setCalcStartTime(new Date().toISOString());
     setStep("run");
 
@@ -179,6 +187,7 @@ export function PhononWizard({
       // Listen for output events
       unlisten = await listen<string>("qe-output-line", (event) => {
         setOutput((prev) => prev + event.payload + "\n");
+        setProgress((prev) => progressReducer("phonon", event.payload, prev));
       });
 
       // Build the phonon configuration
@@ -216,6 +225,12 @@ export function PhononWizard({
       const endTime = new Date().toISOString();
       setPhononResult(result);
       setStep("results");
+      setProgress((prev) => ({
+        ...prev,
+        status: "complete",
+        percent: 100,
+        phase: "Complete",
+      }));
 
       // Auto-save the phonon calculation to the project
       try {
@@ -267,6 +282,12 @@ export function PhononWizard({
     } catch (e) {
       setError(String(e));
       setOutput((prev) => prev + `\nError: ${e}\n`);
+      setProgress((prev) => ({
+        ...prev,
+        status: "error",
+        percent: null,
+        phase: "Error",
+      }));
     } finally {
       if (unlisten) unlisten();
       setIsRunning(false);
@@ -613,15 +634,12 @@ export function PhononWizard({
           This may take a while depending on system size and q-grid density.
         </p>
 
-        <div className="progress-indicator">
-          {isRunning ? (
-            <div className="spinner"></div>
-          ) : error ? (
-            <span className="error-icon">Error</span>
-          ) : (
-            <span className="success-icon">Complete</span>
-          )}
-        </div>
+        <ProgressBar
+          status={progress.status}
+          percent={progress.percent}
+          phase={progress.phase}
+          detail={progress.detail}
+        />
 
         <pre ref={outputRef} className="calculation-output">
           {output || "Starting calculation..."}

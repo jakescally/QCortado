@@ -10,6 +10,8 @@ import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import { ProgressBar } from "./ProgressBar";
+import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -217,6 +219,11 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [result, setResult] = useState<any>(null);
   const [pseudoDir, setPseudoDir] = useState<string>("");
   const [pseudoError, setPseudoError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ProgressState>({
+    status: "idle",
+    percent: null,
+    phase: "SCF iterations",
+  });
 
   // SSSP data for recommended cutoffs and pseudopotentials
   interface SSSPElementData {
@@ -418,6 +425,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     setOutput("");
     setResult(null);
     setResultSaved(false);
+    setProgress(defaultProgressState("SCF iterations"));
     setStep("run");
 
     // Track calculation start time
@@ -556,6 +564,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       // Listen for streaming output
       unlisten = await listen<string>("qe-output-line", (event) => {
         setOutput((prev) => prev + event.payload + "\n");
+        setProgress((prev) => progressReducer("scf", event.payload, prev));
       });
 
       // Run the calculation with streaming
@@ -572,6 +581,12 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
       setResult(calcResult);
       setOutput((prev) => prev + "\n=== Calculation Complete ===\n");
       setStep("results");
+      setProgress((prev) => ({
+        ...prev,
+        status: "complete",
+        percent: 100,
+        phase: "Complete",
+      }));
 
       // Auto-save to project if we have project context
       if (projectContext) {
@@ -594,6 +609,12 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     } catch (e) {
       setError(`Calculation failed: ${e}`);
       setOutput((prev) => prev + `\n\nERROR: ${e}`);
+      setProgress((prev) => ({
+        ...prev,
+        status: "error",
+        percent: null,
+        phase: "Error",
+      }));
     } finally {
       // Clean up event listener
       if (unlisten) {
@@ -1535,6 +1556,12 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
 
         {(step === "run" || step === "results") && (
           <div className="run-step">
+            <ProgressBar
+              status={progress.status}
+              percent={progress.percent}
+              phase={progress.phase}
+              detail={progress.detail}
+            />
             <div className="run-layout">
               <div className="output-panel">
                 <h3>{isRunning ? "Running..." : "Output"}</h3>

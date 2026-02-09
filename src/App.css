@@ -3211,6 +3211,78 @@ h3 .tooltip-text::after {
   margin: 0;
 }
 
+/* Progress Bar */
+.progress-bar {
+  margin: 1.5rem 0;
+  text-align: left;
+}
+
+.progress-bar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+  color: #cdd6f4;
+  margin-bottom: 0.5rem;
+}
+
+.progress-bar-phase {
+  font-weight: 600;
+}
+
+.progress-bar-percent {
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-bar-track {
+  position: relative;
+  height: 10px;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #89b4fa, #74c7ec);
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.progress-bar.indeterminate .progress-bar-fill {
+  position: absolute;
+  width: 35%;
+  left: -35%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.progress-bar-detail {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: #a6adc8;
+}
+
+.progress-bar.complete .progress-bar-fill {
+  background: linear-gradient(90deg, #a6e3a1, #94e2d5);
+}
+
+.progress-bar.error .progress-bar-fill {
+  background: linear-gradient(90deg, #f38ba8, #fab387);
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    left: -35%;
+  }
+  50% {
+    left: 35%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
 .error-actions {
   margin-top: 1.5rem;
 }

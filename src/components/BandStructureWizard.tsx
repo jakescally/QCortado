@@ -9,6 +9,8 @@ import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import { ProgressBar } from "./ProgressBar";
+import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
 interface CalculationRun {
   id: string;
@@ -100,6 +102,11 @@ export function BandStructureWizard({
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
   const outputRef = useRef<HTMLPreElement>(null);
+  const [progress, setProgress] = useState<ProgressState>({
+    status: "idle",
+    percent: null,
+    phase: "Band structure",
+  });
 
   // Step 5: Results
   const [bandData, setBandData] = useState<BandData | null>(null);
@@ -237,6 +244,7 @@ export function BandStructureWizard({
     setError(null);
     setBandData(null);
     setIsSaved(false);
+    setProgress(defaultProgressState("Band structure"));
     setCalcStartTime(new Date().toISOString());
     setStep("run");
 
@@ -246,6 +254,7 @@ export function BandStructureWizard({
       // Listen for output events
       unlisten = await listen<string>("qe-output-line", (event) => {
         setOutput((prev) => prev + event.payload + "\n");
+        setProgress((prev) => progressReducer("bands", event.payload, prev));
       });
 
       // Validate k-path
@@ -404,6 +413,12 @@ export function BandStructureWizard({
       const endTime = new Date().toISOString();
       setBandData(result);
       setStep("results");
+      setProgress((prev) => ({
+        ...prev,
+        status: "complete",
+        percent: 100,
+        phase: "Complete",
+      }));
 
       // Auto-save the band calculation to the project
       try {
@@ -456,6 +471,12 @@ export function BandStructureWizard({
     } catch (e) {
       setError(String(e));
       setOutput((prev) => prev + `\nError: ${e}\n`);
+      setProgress((prev) => ({
+        ...prev,
+        status: "error",
+        percent: null,
+        phase: "Error",
+      }));
     } finally {
       if (unlisten) unlisten();
       setIsRunning(false);
@@ -721,15 +742,12 @@ export function BandStructureWizard({
       <div className="wizard-step run-step">
         <h3>Running Band Structure Calculation</h3>
 
-        <div className="progress-indicator">
-          {isRunning ? (
-            <div className="spinner"></div>
-          ) : error ? (
-            <span className="error-icon">Error</span>
-          ) : (
-            <span className="success-icon">Complete</span>
-          )}
-        </div>
+        <ProgressBar
+          status={progress.status}
+          percent={progress.percent}
+          phase={progress.phase}
+          detail={progress.detail}
+        />
 
         <pre ref={outputRef} className="calculation-output">
           {output || "Starting calculation..."}
