@@ -102,6 +102,14 @@ export function BandStructureWizard({
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
   const outputRef = useRef<HTMLPreElement>(null);
+  const followOutputRef = useRef(true);
+
+  const handleOutputScroll = () => {
+    const el = outputRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    followOutputRef.current = distanceToBottom <= 16;
+  };
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -220,11 +228,11 @@ export function BandStructureWizard({
     init();
   }, [qePath, crystalData]);
 
-  // Auto-scroll output
+  // Auto-scroll output only if user is at the bottom
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
+    const el = outputRef.current;
+    if (!el || !followOutputRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [output]);
 
   // Handle k-path changes from the BZ viewer
@@ -240,6 +248,7 @@ export function BandStructureWizard({
     }
 
     setIsRunning(true);
+    followOutputRef.current = true;
     setOutput("");
     setError(null);
     setBandData(null);
@@ -749,7 +758,7 @@ export function BandStructureWizard({
           detail={progress.detail}
         />
 
-        <pre ref={outputRef} className="calculation-output">
+        <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
           {output || "Starting calculation..."}
         </pre>
 

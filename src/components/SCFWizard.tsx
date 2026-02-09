@@ -131,8 +131,16 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [pendingExitAction, setPendingExitAction] = useState<(() => void) | null>(null);
 
-  // Ref for auto-scrolling output
+  // Ref for output auto-follow (only when user is at the bottom)
   const outputRef = useRef<HTMLPreElement>(null);
+  const followOutputRef = useRef(true);
+
+  const handleOutputScroll = () => {
+    const el = outputRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    followOutputRef.current = distanceToBottom <= 16;
+  };
 
   const [config, setConfig] = useState<SCFConfig>({
     // Calculation type
@@ -282,11 +290,11 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     loadPseudos();
   }, [qePath]);
 
-  // Auto-scroll output when it changes
+  // Auto-scroll output only if user is at the bottom
   useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
+    const el = outputRef.current;
+    if (!el || !followOutputRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [output]);
 
   // Load CPU count and check MPI availability
@@ -422,6 +430,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     if (!crystalData || !canRun()) return;
 
     setIsRunning(true);
+    followOutputRef.current = true;
     setOutput("");
     setResult(null);
     setResultSaved(false);
@@ -1565,7 +1574,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
             <div className="run-layout">
               <div className="output-panel">
                 <h3>{isRunning ? "Running..." : "Output"}</h3>
-                <pre className="output-text" ref={outputRef}>{output}</pre>
+                <pre className="output-text" ref={outputRef} onScroll={handleOutputScroll}>{output}</pre>
               </div>
 
               {result && (
