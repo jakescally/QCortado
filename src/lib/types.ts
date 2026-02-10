@@ -73,6 +73,8 @@ export interface CrystalData {
   anisotropic_params: AnisotropicParams[];
 }
 
+export type SCFPreset = "standard" | "phonon" | "relax";
+
 // Element data for periodic table
 export interface ElementInfo {
   symbol: string;

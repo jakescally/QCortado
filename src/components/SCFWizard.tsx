@@ -1,11 +1,11 @@
 // SCF Calculation Wizard - Import CIF, configure, and run SCF calculations
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
-import { CrystalData, ELEMENT_MASSES } from "../lib/types";
+import { CrystalData, ELEMENT_MASSES, SCFPreset } from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
@@ -36,6 +36,8 @@ interface SCFWizardProps {
   qePath: string;
   /** Pre-loaded CIF data from project dashboard */
   initialCif?: InitialCifData;
+  initialPreset?: SCFPreset;
+  presetLock?: boolean;
 }
 
 interface SCFConfig {
@@ -102,7 +104,7 @@ interface SCFConfig {
 
 type WizardStep = "import" | "configure" | "run" | "results";
 
-export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
+export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLock }: SCFWizardProps) {
   // If we have initial CIF data, skip to configure step
   const [step, setStep] = useState<WizardStep>(initialCif ? "configure" : "import");
   const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
@@ -203,7 +205,57 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     tstress: true,
     disk_io: "low",
   });
-  const [selectedPreset, setSelectedPreset] = useState<"standard" | "phonon" | "relax" | null>(null);
+  const [selectedPreset, setSelectedPreset] = useState<SCFPreset | null>(null);
+
+  const applyPreset = useCallback((preset: SCFPreset) => {
+    setSelectedPreset(preset);
+    setConfig((prev) => {
+      switch (preset) {
+        case "standard":
+          return {
+            ...prev,
+            calculation: "scf",
+            conv_thr: 1e-6,
+            disk_io: "low",
+          };
+        case "phonon":
+          return {
+            ...prev,
+            calculation: "scf",
+            conv_thr: 1e-12,
+            disk_io: "medium",
+          };
+        case "relax":
+          return {
+            ...prev,
+            calculation: "vcrelax",
+            forc_conv_thr: 1e-4,
+            etot_conv_thr: 1e-5,
+            press: 0,
+            tprnfor: true,
+            tstress: true,
+          };
+        default:
+          return prev;
+      }
+    });
+    if (preset === "phonon") {
+      setConvThrInput("1e-12");
+    } else if (preset === "standard") {
+      setConvThrInput("1e-6");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialPreset) {
+      applyPreset(initialPreset);
+    }
+  }, [initialPreset, applyPreset]);
+
+  const lockedPreset = presetLock && initialPreset ? initialPreset : null;
+  const showStandardPreset = !lockedPreset || lockedPreset === "standard";
+  const showPhononPreset = !lockedPreset || lockedPreset === "phonon";
+  const showRelaxPreset = !lockedPreset || lockedPreset === "relax";
 
   // Collapsed section states
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -864,59 +916,36 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                       <div className="param-row full-width">
                         <label>Presets</label>
                         <div className="preset-buttons">
-                          <button
-                            type="button"
-                            className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
-                            onClick={() => {
-                              setSelectedPreset("standard");
-                              setConfig(prev => ({
-                                ...prev,
-                                calculation: "scf",
-                                conv_thr: 1e-6,
-                                disk_io: "low",
-                              }));
-                              setConvThrInput("1e-6");
-                            }}
-                            title="Standard SCF calculation"
-                          >
-                            Standard
-                          </button>
-                          <button
-                            type="button"
-                            className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
-                            onClick={() => {
-                              setSelectedPreset("phonon");
-                              setConfig(prev => ({
-                                ...prev,
-                                calculation: "scf",
-                                conv_thr: 1e-12,
-                                disk_io: "medium",
-                              }));
-                              setConvThrInput("1e-12");
-                            }}
-                            title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
-                          >
-                            Phonon-Ready
-                          </button>
-                          <button
-                            type="button"
-                            className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
-                            onClick={() => {
-                              setSelectedPreset("relax");
-                              setConfig(prev => ({
-                                ...prev,
-                                calculation: "vcrelax",
-                                forc_conv_thr: 1e-4,
-                                etot_conv_thr: 1e-5,
-                                press: 0,
-                                tprnfor: true,
-                                tstress: true,
-                              }));
-                            }}
-                            title="Variable-cell relaxation for structure optimization"
-                          >
-                            Optimize Structure
-                          </button>
+                          {showStandardPreset && (
+                            <button
+                              type="button"
+                              className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
+                              onClick={() => applyPreset("standard")}
+                              title="Standard SCF calculation"
+                            >
+                              Standard
+                            </button>
+                          )}
+                          {showPhononPreset && (
+                            <button
+                              type="button"
+                              className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
+                              onClick={() => applyPreset("phonon")}
+                              title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
+                            >
+                              Phonon-Ready
+                            </button>
+                          )}
+                          {showRelaxPreset && (
+                            <button
+                              type="button"
+                              className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
+                              onClick={() => applyPreset("relax")}
+                              title="Variable-cell relaxation for structure optimization"
+                            >
+                              Optimize Structure
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -928,6 +957,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                         <select
                           value={config.calculation}
                           onChange={(e) => setConfig((prev) => ({ ...prev, calculation: e.target.value as "scf" | "relax" | "vcrelax" }))}
+                          disabled={Boolean(lockedPreset)}
                         >
                           <option value="scf">SCF (ground state)</option>
                           <option value="relax">Relax (fixed cell)</option>

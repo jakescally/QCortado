@@ -10,7 +10,7 @@ import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./components/Ph
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
-import { CrystalData } from "./lib/types";
+import { CrystalData, SCFPreset } from "./lib/types";
 
 interface ProjectSummary {
   id: string;
@@ -30,6 +30,8 @@ interface SCFContext {
   cifContent: string;
   filename: string;
   projectId: string;
+  initialPreset?: SCFPreset;
+  presetLock?: boolean;
 }
 
 interface BandsContext {
@@ -253,6 +255,8 @@ function App() {
           }
         }}
         initialCif={scfContext || undefined}
+        initialPreset={scfContext?.initialPreset}
+        presetLock={scfContext?.presetLock}
       />
     );
   }
@@ -285,13 +289,15 @@ function App() {
           setSelectedProjectId(null);
           loadProjectCount();
         }}
-        onRunSCF={(cifId, crystalData, cifContent, filename) => {
+        onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock) => {
           setScfContext({
             cifId,
             crystalData,
             cifContent,
             filename,
             projectId: selectedProjectId,
+            initialPreset: preset,
+            presetLock,
           });
           setCurrentView("scf-wizard");
         }}

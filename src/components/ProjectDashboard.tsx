@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
-import { CrystalData } from "../lib/types";
+import { CrystalData, SCFPreset } from "../lib/types";
 
 interface QEResult {
   converged: boolean;
@@ -48,7 +48,14 @@ interface ProjectDashboardProps {
   projectId: string;
   onBack: () => void;
   onDeleted: () => void;
-  onRunSCF: (cifId: string, crystalData: CrystalData, cifContent: string, filename: string) => void;
+  onRunSCF: (
+    cifId: string,
+    crystalData: CrystalData,
+    cifContent: string,
+    filename: string,
+    preset?: SCFPreset,
+    presetLock?: boolean,
+  ) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
@@ -358,6 +365,13 @@ export function ProjectDashboard({
     onRunSCF(selectedCifId, crystalData, cifContent, variant.filename);
   }
 
+  function handleRunOptimization() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunSCF(selectedCifId, crystalData, cifContent, variant.filename, "relax", true);
+  }
+
   function handleRunBands() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -614,10 +628,10 @@ export function ProjectDashboard({
                 {hasConvergedSCF() ? "DOS & Dispersion" : "Requires SCF"}
               </span>
             </button>
-            <button className="calc-action-btn" disabled>
+            <button className="calc-action-btn" onClick={handleRunOptimization}>
               <span className="calc-action-icon">Opt</span>
               <span className="calc-action-label">Geometry Optimization</span>
-              <span className="calc-action-hint">Coming soon</span>
+              <span className="calc-action-hint">VC-Relax preset</span>
             </button>
           </div>
         </section>
