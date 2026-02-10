@@ -203,6 +203,7 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
     tstress: true,
     disk_io: "low",
   });
+  const [selectedPreset, setSelectedPreset] = useState<"standard" | "phonon" | "relax" | null>(null);
 
   // Collapsed section states
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -865,21 +866,26 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                         <div className="preset-buttons">
                           <button
                             type="button"
-                            className="preset-btn"
-                            onClick={() => setConfig(prev => ({
-                              ...prev,
-                              calculation: "scf",
-                              conv_thr: 1e-6,
-                              disk_io: "low",
-                            }))}
+                            className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
+                            onClick={() => {
+                              setSelectedPreset("standard");
+                              setConfig(prev => ({
+                                ...prev,
+                                calculation: "scf",
+                                conv_thr: 1e-6,
+                                disk_io: "low",
+                              }));
+                              setConvThrInput("1e-6");
+                            }}
                             title="Standard SCF calculation"
                           >
                             Standard
                           </button>
                           <button
                             type="button"
-                            className="preset-btn preset-phonon"
+                            className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
                             onClick={() => {
+                              setSelectedPreset("phonon");
                               setConfig(prev => ({
                                 ...prev,
                                 calculation: "scf",
@@ -894,16 +900,19 @@ export function SCFWizard({ onBack, qePath, initialCif }: SCFWizardProps) {
                           </button>
                           <button
                             type="button"
-                            className="preset-btn preset-relax"
-                            onClick={() => setConfig(prev => ({
-                              ...prev,
-                              calculation: "vcrelax",
-                              forc_conv_thr: 1e-4,
-                              etot_conv_thr: 1e-5,
-                              press: 0,
-                              tprnfor: true,
-                              tstress: true,
-                            }))}
+                            className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
+                            onClick={() => {
+                              setSelectedPreset("relax");
+                              setConfig(prev => ({
+                                ...prev,
+                                calculation: "vcrelax",
+                                forc_conv_thr: 1e-4,
+                                etot_conv_thr: 1e-5,
+                                press: 0,
+                                tprnfor: true,
+                                tstress: true,
+                              }));
+                            }}
                             title="Variable-cell relaxation for structure optimization"
                           >
                             Optimize Structure
