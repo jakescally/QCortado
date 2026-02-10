@@ -75,6 +75,40 @@ export interface CrystalData {
 
 export type SCFPreset = "standard" | "phonon" | "relax";
 
+export type QePositionUnit = "alat" | "bohr" | "angstrom" | "crystal";
+
+export interface SavedStructureAtom {
+  symbol: string;
+  position: [number, number, number];
+}
+
+export interface SavedStructureData {
+  position_units: QePositionUnit;
+  atoms: SavedStructureAtom[];
+  cell_parameters: [[number, number, number], [number, number, number], [number, number, number]] | null;
+  cell_units: QePositionUnit | null;
+}
+
+export interface SavedCellSummary {
+  a: number;
+  b: number;
+  c: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+  volume: number;
+  units: string;
+}
+
+export interface OptimizedStructureOption {
+  calcId: string;
+  label: string;
+  mode: "relax" | "vcrelax";
+  completedAt: string | null;
+  structure: SavedStructureData;
+  cellSummary: SavedCellSummary | null;
+}
+
 // Element data for periodic table
 export interface ElementInfo {
   symbol: string;

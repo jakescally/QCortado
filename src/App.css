@@ -2022,6 +2022,12 @@ h3 .tooltip-text::after {
   font-weight: 500;
 }
 
+.calc-tag-geometry {
+  background: #feebc8;
+  color: #744210;
+  font-weight: 500;
+}
+
 .calculation-details {
   padding: 1rem 1.25rem;
   background: #f7fafc;
@@ -2119,6 +2125,11 @@ h3 .tooltip-text::after {
   .calc-tag-special {
     background: #276749;
     color: #c6f6d5;
+  }
+
+  .calc-tag-geometry {
+    background: #744210;
+    color: #feebc8;
   }
 
   .calculation-details {
@@ -2293,6 +2304,33 @@ h3 .tooltip-text::after {
   font-weight: 700;
   margin-bottom: 1rem;
   letter-spacing: -0.5px;
+}
+
+.hero-cell-toggle {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.hero-cell-toggle-btn {
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hero-cell-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.hero-cell-toggle-btn.active {
+  background: #ffffff;
+  color: #2d3748;
+  border-color: #ffffff;
 }
 
 .hero-details {

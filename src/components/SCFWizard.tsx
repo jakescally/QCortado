@@ -1,11 +1,19 @@
 // SCF Calculation Wizard - Import CIF, configure, and run SCF calculations
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
-import { CrystalData, ELEMENT_MASSES, SCFPreset } from "../lib/types";
+import {
+  CrystalData,
+  ELEMENT_MASSES,
+  OptimizedStructureOption,
+  QePositionUnit,
+  SavedCellSummary,
+  SavedStructureData,
+  SCFPreset,
+} from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
@@ -38,6 +46,7 @@ interface SCFWizardProps {
   initialCif?: InitialCifData;
   initialPreset?: SCFPreset;
   presetLock?: boolean;
+  optimizedStructures?: OptimizedStructureOption[];
 }
 
 interface SCFConfig {
@@ -103,8 +112,25 @@ interface SCFConfig {
 }
 
 type WizardStep = "import" | "configure" | "run" | "results";
+type CellViewMode = "conventional" | "primitive";
 
-export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLock }: SCFWizardProps) {
+interface DisplayCellMetrics {
+  a: number;
+  b: number;
+  c: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+}
+
+export function SCFWizard({
+  onBack,
+  qePath,
+  initialCif,
+  initialPreset,
+  presetLock,
+  optimizedStructures = [],
+}: SCFWizardProps) {
   // If we have initial CIF data, skip to configure step
   const [step, setStep] = useState<WizardStep>(initialCif ? "configure" : "import");
   const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
@@ -128,6 +154,9 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
   const [generatedInput, setGeneratedInput] = useState<string>("");
   const [resultSaved, setResultSaved] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [runSourceStructure, setRunSourceStructure] = useState<SavedStructureData | null>(null);
+  const [runSourceDescriptor, setRunSourceDescriptor] = useState<{ type: "cif" | "optimization"; calc_id?: string } | null>(null);
+  const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
 
   // Exit confirmation dialog
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -259,6 +288,71 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
   const showStandardPreset = !lockedPreset || lockedPreset === "standard";
   const showPhononPreset = !lockedPreset || lockedPreset === "phonon";
   const showRelaxPreset = lockedPreset === "relax";
+  const conventionalCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
+    if (!crystalData) return null;
+    return {
+      a: crystalData.cell_length_a.value,
+      b: crystalData.cell_length_b.value,
+      c: crystalData.cell_length_c.value,
+      alpha: crystalData.cell_angle_alpha.value,
+      beta: crystalData.cell_angle_beta.value,
+      gamma: crystalData.cell_angle_gamma.value,
+    };
+  }, [crystalData]);
+
+  const primitiveCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
+    if (!crystalData) return null;
+    const primitive = getPrimitiveCell(crystalData);
+    if (!primitive) return null;
+    const BOHR_TO_ANGSTROM = 0.529177;
+    const a = primitive.celldm1 * BOHR_TO_ANGSTROM;
+
+    if (primitive.ibrav === "cubic_f") {
+      const v1: [number, number, number] = [0, a / 2, a / 2];
+      const v2: [number, number, number] = [a / 2, 0, a / 2];
+      const v3: [number, number, number] = [a / 2, a / 2, 0];
+      return calculateMetricsFromVectors(v1, v2, v3);
+    }
+
+    if (primitive.ibrav === "cubic_i") {
+      const v1: [number, number, number] = [a / 2, a / 2, -a / 2];
+      const v2: [number, number, number] = [-a / 2, a / 2, a / 2];
+      const v3: [number, number, number] = [a / 2, -a / 2, a / 2];
+      return calculateMetricsFromVectors(v1, v2, v3);
+    }
+
+    return {
+      a,
+      b: a,
+      c: a,
+      alpha: 90,
+      beta: 90,
+      gamma: 90,
+    };
+  }, [crystalData]);
+
+  const hasPrimitiveDisplay = primitiveCellMetrics !== null;
+  const displayedCellMetrics = cellViewMode === "primitive" && primitiveCellMetrics
+    ? primitiveCellMetrics
+    : conventionalCellMetrics;
+  const [structureSource, setStructureSource] = useState<string>("cif");
+  const selectedOptimizedStructure =
+    structureSource === "cif"
+      ? null
+      : optimizedStructures.find((option) => option.calcId === structureSource) || null;
+
+  useEffect(() => {
+    if (structureSource === "cif") return;
+    if (!selectedOptimizedStructure) {
+      setStructureSource("cif");
+    }
+  }, [structureSource, selectedOptimizedStructure]);
+
+  useEffect(() => {
+    if (!hasPrimitiveDisplay && cellViewMode === "primitive") {
+      setCellViewMode("conventional");
+    }
+  }, [hasPrimitiveDisplay, cellViewMode]);
 
   // Collapsed section states
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -402,11 +496,12 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
     );
   }
 
-  // Auto-select pseudopotentials and set cutoffs when crystal data or SSSP data changes
+  // Auto-select pseudopotentials and set cutoffs when structure source or SSSP data changes
   useEffect(() => {
-    if (crystalData && pseudopotentials.length > 0) {
+    if (pseudopotentials.length > 0) {
       const selected: Record<string, string> = {};
-      const elements = [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
+      const elements = getUniqueElements();
+      if (elements.length === 0) return;
 
       let maxWfc = 0;
       let maxRho = 0;
@@ -446,7 +541,7 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
         }));
       }
     }
-  }, [crystalData, pseudopotentials, ssspData]);
+  }, [crystalData, pseudopotentials, ssspData, structureSource, optimizedStructures]);
 
   async function handleImportCIF() {
     try {
@@ -471,8 +566,10 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
   }
 
   function getUniqueElements(): string[] {
+    if (selectedOptimizedStructure) {
+      return [...new Set(selectedOptimizedStructure.structure.atoms.map((a) => getBaseElement(a.symbol)))];
+    }
     if (!crystalData) return [];
-    // Strip oxidation states and get unique base elements
     return [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
   }
 
@@ -502,11 +599,24 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
 
     try {
       const elements = getUniqueElements();
+      const cifStructure = buildCifConventionalStructure(crystalData);
+      const sourceStructure: SavedStructureData = selectedOptimizedStructure
+        ? {
+            ...selectedOptimizedStructure.structure,
+            cell_parameters: selectedOptimizedStructure.structure.cell_parameters || cifStructure.cell_parameters,
+            cell_units: selectedOptimizedStructure.structure.cell_units || cifStructure.cell_units,
+          }
+        : cifStructure;
+      const sourceDescriptor = selectedOptimizedStructure
+        ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
+        : { type: "cif" as const };
+      setRunSourceStructure(sourceStructure);
+      setRunSourceDescriptor(sourceDescriptor);
 
       // Check if this is an FCC structure that should use primitive cell
       // Using primitive cell with ibrav gives correct symmetry and faster calculations
-      const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
-      const usePrimitiveCell = primitiveCell !== null;
+      const primitiveCell: PrimitiveCell | null = selectedOptimizedStructure ? null : getPrimitiveCell(crystalData);
+      const usePrimitiveCell = !selectedOptimizedStructure && primitiveCell !== null;
 
       if (usePrimitiveCell && primitiveCell) {
         console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
@@ -526,7 +636,7 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
       const systemConfig: any = {
         // Common properties
         species: speciesList,
-        position_units: "crystal",
+        position_units: sourceStructure.position_units || "crystal",
         ecutwfc: config.ecutwfc,
         ecutrho: config.ecutrho,
         // Electronic structure
@@ -553,7 +663,17 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
       };
 
       // Add cell-specific properties
-      if (usePrimitiveCell && primitiveCell) {
+      if (selectedOptimizedStructure) {
+        systemConfig.ibrav = "free";
+        systemConfig.celldm = null;
+        systemConfig.cell_parameters = sourceStructure.cell_parameters;
+        systemConfig.cell_units = sourceStructure.cell_units || "angstrom";
+        systemConfig.atoms = sourceStructure.atoms.map((atom) => ({
+          symbol: getBaseElement(atom.symbol),
+          position: atom.position,
+          if_pos: [true, true, true],
+        }));
+      } else if (usePrimitiveCell && primitiveCell) {
         // Primitive cell with ibrav (e.g., ibrav=2 for FCC)
         systemConfig.ibrav = primitiveCell.ibrav;
         // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
@@ -657,7 +777,14 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
       if (projectContext) {
         try {
           setIsSaving(true);
-          const calcData = buildCalculationData(calcResult, startTime, endTime, inputText);
+          const calcData = buildCalculationData(
+            calcResult,
+            startTime,
+            endTime,
+            inputText,
+            sourceStructure,
+            sourceDescriptor,
+          );
           await invoke("save_calculation", {
             projectId: projectContext.projectId,
             cifId: projectContext.cifId,
@@ -725,21 +852,284 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
     return [cx, cy, cz];
   }
 
+  function calculateMetricsFromVectors(
+    v1: [number, number, number],
+    v2: [number, number, number],
+    v3: [number, number, number],
+  ): DisplayCellMetrics {
+    const norm = (v: [number, number, number]) => Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const dot = (u: [number, number, number], v: [number, number, number]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    const angle = (u: [number, number, number], v: [number, number, number]) => {
+      const denom = norm(u) * norm(v);
+      if (denom === 0) return 0;
+      const cosine = dot(u, v) / denom;
+      const clamped = Math.max(-1, Math.min(1, cosine));
+      return (Math.acos(clamped) * 180) / Math.PI;
+    };
+
+    return {
+      a: norm(v1),
+      b: norm(v2),
+      c: norm(v3),
+      alpha: angle(v2, v3),
+      beta: angle(v1, v3),
+      gamma: angle(v1, v2),
+    };
+  }
+
+  function isQeUnit(value: string): value is QePositionUnit {
+    return value === "alat" || value === "bohr" || value === "angstrom" || value === "crystal";
+  }
+
+  function parseUnitFromHeader(line: string): QePositionUnit | null {
+    const match = line.match(/[\(\{]\s*([a-zA-Z]+)/);
+    if (!match) return null;
+    const unit = match[1].toLowerCase();
+    return isQeUnit(unit) ? unit : null;
+  }
+
+  function parseAlatFromHeader(line: string): number | null {
+    const match = line.match(/[\(\{]\s*alat\s*=\s*([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)/i);
+    if (!match) return null;
+    const alatValue = Number.parseFloat(match[1]);
+    if (!Number.isFinite(alatValue) || alatValue <= 0) return null;
+    return alatValue;
+  }
+
+  function parseTriplet(line: string): [number, number, number] | null {
+    const numbers = line.match(/[-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?/g);
+    if (!numbers || numbers.length < 3) return null;
+    const first = Number.parseFloat(numbers[0]);
+    const second = Number.parseFloat(numbers[1]);
+    const third = Number.parseFloat(numbers[2]);
+    if ([first, second, third].some((value) => Number.isNaN(value))) return null;
+    return [first, second, third];
+  }
+
+  function parseCellBlock(lines: string[], index: number): {
+    cellParameters: [[number, number, number], [number, number, number], [number, number, number]] | null;
+    cellUnits: QePositionUnit | null;
+    cellAlat: number | null;
+  } {
+    const vectors: [number, number, number][] = [];
+    for (let i = index + 1; i < Math.min(lines.length, index + 8); i += 1) {
+      const vector = parseTriplet(lines[i]);
+      if (!vector) break;
+      vectors.push(vector);
+      if (vectors.length === 3) break;
+    }
+    return {
+      cellParameters: vectors.length === 3
+        ? [vectors[0], vectors[1], vectors[2]]
+        : null,
+      cellUnits: parseUnitFromHeader(lines[index]),
+      cellAlat: parseAlatFromHeader(lines[index]),
+    };
+  }
+
+  function parseAtomsBlock(lines: string[], index: number): {
+    atoms: { symbol: string; position: [number, number, number] }[];
+    positionUnits: QePositionUnit;
+  } {
+    const atoms: { symbol: string; position: [number, number, number] }[] = [];
+    const parsedUnit = parseUnitFromHeader(lines[index]);
+    const positionUnits: QePositionUnit = parsedUnit || "crystal";
+
+    for (let i = index + 1; i < lines.length; i += 1) {
+      const line = lines[i].trim();
+      if (!line) break;
+      if (
+        line.startsWith("CELL_PARAMETERS") ||
+        line.startsWith("ATOMIC_POSITIONS") ||
+        line.startsWith("End final coordinates")
+      ) {
+        break;
+      }
+      const match = line.match(/^([A-Za-z]{1,3}[A-Za-z0-9]*)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)/);
+      if (!match) continue;
+      const x = Number.parseFloat(match[2]);
+      const y = Number.parseFloat(match[3]);
+      const z = Number.parseFloat(match[4]);
+      if ([x, y, z].some((value) => Number.isNaN(value))) continue;
+      atoms.push({
+        symbol: getBaseElement(match[1]),
+        position: [x, y, z],
+      });
+    }
+
+    return { atoms, positionUnits };
+  }
+
+  function buildCifConventionalStructure(data: CrystalData): SavedStructureData {
+    return {
+      position_units: "crystal",
+      cell_units: "angstrom",
+      cell_parameters: [
+        [data.cell_length_a.value, 0, 0],
+        [
+          data.cell_length_b.value * Math.cos((data.cell_angle_gamma.value * Math.PI) / 180),
+          data.cell_length_b.value * Math.sin((data.cell_angle_gamma.value * Math.PI) / 180),
+          0,
+        ],
+        calculateCVector(data),
+      ],
+      atoms: data.atom_sites.map((site) => ({
+        symbol: getBaseElement(site.type_symbol),
+        position: [site.fract_x, site.fract_y, site.fract_z] as [number, number, number],
+      })),
+    };
+  }
+
+  function convertCellToAngstrom(
+    cellParameters: [[number, number, number], [number, number, number], [number, number, number]] | null,
+    cellUnits: QePositionUnit | null,
+    alatInBohr: number | null,
+  ): {
+    cellParameters: [[number, number, number], [number, number, number], [number, number, number]] | null;
+    cellUnits: QePositionUnit | null;
+  } {
+    if (!cellParameters || !cellUnits) {
+      return { cellParameters, cellUnits };
+    }
+
+    const BOHR_TO_ANGSTROM = 0.529177210903;
+
+    if (cellUnits === "angstrom") {
+      return { cellParameters, cellUnits };
+    }
+
+    let scale: number | null = null;
+    if (cellUnits === "bohr") {
+      scale = BOHR_TO_ANGSTROM;
+    } else if (cellUnits === "alat" && alatInBohr && Number.isFinite(alatInBohr) && alatInBohr > 0) {
+      // QE reports "alat" in Bohr, so convert vector components to Angstrom.
+      scale = alatInBohr * BOHR_TO_ANGSTROM;
+    }
+
+    if (scale === null) {
+      return { cellParameters, cellUnits };
+    }
+
+    const scaleValue = scale;
+    const scaled = cellParameters.map((vector) => [
+      vector[0] * scaleValue,
+      vector[1] * scaleValue,
+      vector[2] * scaleValue,
+    ]) as [[number, number, number], [number, number, number], [number, number, number]];
+
+    return {
+      cellParameters: scaled,
+      cellUnits: "angstrom",
+    };
+  }
+
+  function extractOptimizedStructure(rawOutput: string, fallback: SavedStructureData): SavedStructureData {
+    const lines = rawOutput.split(/\r?\n/);
+    const begin = lines.findIndex((line) => line.includes("Begin final coordinates"));
+    const end = lines.findIndex((line) => line.includes("End final coordinates"));
+    const scope = begin >= 0 && end > begin ? lines.slice(begin, end + 1) : lines;
+
+    let lastCell = fallback.cell_parameters;
+    let lastCellUnits = fallback.cell_units;
+    let lastCellAlat: number | null = null;
+    let lastAtoms = fallback.atoms;
+    let lastPositionUnits = fallback.position_units;
+
+    for (let i = 0; i < scope.length; i += 1) {
+      const line = scope[i];
+      if (line.includes("CELL_PARAMETERS")) {
+        const parsed = parseCellBlock(scope, i);
+        if (parsed.cellParameters) lastCell = parsed.cellParameters;
+        if (parsed.cellUnits) {
+          lastCellUnits = parsed.cellUnits;
+          lastCellAlat = parsed.cellUnits === "alat" ? parsed.cellAlat : null;
+        }
+        if (parsed.cellAlat !== null) {
+          lastCellAlat = parsed.cellAlat;
+        }
+      }
+      if (line.includes("ATOMIC_POSITIONS")) {
+        const parsed = parseAtomsBlock(scope, i);
+        if (parsed.atoms.length > 0) {
+          lastAtoms = parsed.atoms;
+          lastPositionUnits = parsed.positionUnits;
+        }
+      }
+    }
+
+    const normalizedCell = convertCellToAngstrom(lastCell, lastCellUnits, lastCellAlat);
+
+    return {
+      position_units: lastPositionUnits,
+      cell_units: normalizedCell.cellUnits,
+      cell_parameters: normalizedCell.cellParameters,
+      atoms: lastAtoms,
+    };
+  }
+
+  function summarizeCell(structure: SavedStructureData): SavedCellSummary | null {
+    if (!structure.cell_parameters) return null;
+    const [aVec, bVec, cVec] = structure.cell_parameters;
+    const norm = (v: [number, number, number]) => Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const dot = (u: [number, number, number], v: [number, number, number]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    const cross = (u: [number, number, number], v: [number, number, number]): [number, number, number] => [
+      u[1] * v[2] - u[2] * v[1],
+      u[2] * v[0] - u[0] * v[2],
+      u[0] * v[1] - u[1] * v[0],
+    ];
+    const angle = (u: [number, number, number], v: [number, number, number]) => {
+      const cosine = dot(u, v) / (norm(u) * norm(v));
+      const clamped = Math.max(-1, Math.min(1, cosine));
+      return (Math.acos(clamped) * 180) / Math.PI;
+    };
+
+    const a = norm(aVec);
+    const b = norm(bVec);
+    const c = norm(cVec);
+    const alpha = angle(bVec, cVec);
+    const beta = angle(aVec, cVec);
+    const gamma = angle(aVec, bVec);
+    const volume = Math.abs(dot(aVec, cross(bVec, cVec)));
+
+    return {
+      a,
+      b,
+      c,
+      alpha,
+      beta,
+      gamma,
+      volume,
+      units: structure.cell_units || "angstrom",
+    };
+  }
+
   function buildCalculationData(
     calcResult: any,
     startedAt: string,
     completedAt: string,
     inputContent: string,
+    sourceStructure: SavedStructureData,
+    sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string },
   ) {
+    const isOptimization = config.calculation === "relax" || config.calculation === "vcrelax";
+    const usesOptimizedSource = sourceDescriptor.type === "optimization";
+    const optimizedStructure = isOptimization
+      ? extractOptimizedStructure(calcResult?.raw_output || "", sourceStructure)
+      : null;
+    const optimizedCellSummary = optimizedStructure ? summarizeCell(optimizedStructure) : null;
+
     return {
-      calc_type: config.calculation,
+      calc_type: isOptimization ? "optimization" : "scf",
       parameters: {
         prefix: "qcortado_scf",
+        calculation_mode: config.calculation,
         ecutwfc: config.ecutwfc,
         ecutrho: config.ecutrho,
         kgrid: config.kgrid,
         conv_thr: config.conv_thr,
         mixing_beta: config.mixing_beta,
+        structure_source: sourceDescriptor,
+        source_structure: sourceStructure,
         // Feature flags for tags
         nspin: config.nspin,
         lspinorb: config.lspinorb,
@@ -749,6 +1139,9 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
         forc_conv_thr: config.forc_conv_thr,
         etot_conv_thr: config.etot_conv_thr,
         press: config.press,
+        optimization_mode: isOptimization ? config.calculation : null,
+        optimized_structure: optimizedStructure,
+        optimized_cell_summary: optimizedCellSummary,
       },
       result: calcResult,
       started_at: startedAt,
@@ -756,6 +1149,7 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
       input_content: inputContent,
       output_content: calcResult?.raw_output || "",
       tags: [
+        ...(isOptimization || usesOptimizedSource ? ["geometry"] : []),
         // Tag as structure-optimized for vcrelax or relax
         ...(config.calculation === "vcrelax" || config.calculation === "relax" ? ["structure-optimized"] : []),
         // Tag as phonon-ready if conv_thr is very tight (1e-10 or tighter)
@@ -764,8 +1158,32 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
     };
   }
 
-  const calculationData = result
-    ? buildCalculationData(result, calcStartTime, calcEndTime, generatedInput)
+  const currentSourceStructure: SavedStructureData | null = crystalData
+    ? (
+        selectedOptimizedStructure
+          ? {
+              ...selectedOptimizedStructure.structure,
+              cell_parameters: selectedOptimizedStructure.structure.cell_parameters || buildCifConventionalStructure(crystalData).cell_parameters,
+              cell_units: selectedOptimizedStructure.structure.cell_units || buildCifConventionalStructure(crystalData).cell_units,
+            }
+          : buildCifConventionalStructure(crystalData)
+      )
+    : null;
+  const currentSourceDescriptor = runSourceDescriptor || (
+    selectedOptimizedStructure
+      ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
+      : { type: "cif" as const }
+  );
+
+  const calculationData = result && (runSourceStructure || currentSourceStructure)
+    ? buildCalculationData(
+        result,
+        calcStartTime,
+        calcEndTime,
+        generatedInput,
+        runSourceStructure || currentSourceStructure!,
+        currentSourceDescriptor,
+      )
     : null;
 
   return (
@@ -809,6 +1227,26 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
                 {/* Crystal Info */}
                 <section className="config-section">
                   <h3>Crystal Structure</h3>
+                  {hasPrimitiveDisplay && (
+                    <div className="preset-buttons">
+                      <button
+                        type="button"
+                        className={`preset-btn ${cellViewMode === "conventional" ? "active" : ""}`}
+                        onClick={() => setCellViewMode("conventional")}
+                        title="Show conventional CIF lattice parameters"
+                      >
+                        Conventional
+                      </button>
+                      <button
+                        type="button"
+                        className={`preset-btn ${cellViewMode === "primitive" ? "active" : ""}`}
+                        onClick={() => setCellViewMode("primitive")}
+                        title="Show primitive lattice parameters used by QE (when detected)"
+                      >
+                        Primitive
+                      </button>
+                    </div>
+                  )}
                   <div className="info-grid">
                     <div className="info-item">
                       <label>Formula</label>
@@ -821,19 +1259,25 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
                     <div className="info-item">
                       <label>Lattice (Å)</label>
                       <span>
-                        a={crystalData.cell_length_a.value.toFixed(3)}, b=
-                        {crystalData.cell_length_b.value.toFixed(3)}, c=
-                        {crystalData.cell_length_c.value.toFixed(3)}
+                        a={(displayedCellMetrics?.a ?? crystalData.cell_length_a.value).toFixed(3)}, b=
+                        {(displayedCellMetrics?.b ?? crystalData.cell_length_b.value).toFixed(3)}, c=
+                        {(displayedCellMetrics?.c ?? crystalData.cell_length_c.value).toFixed(3)}
                       </span>
                     </div>
                     <div className="info-item">
                       <label>Angles (°)</label>
                       <span>
-                        α={crystalData.cell_angle_alpha.value.toFixed(1)}, β=
-                        {crystalData.cell_angle_beta.value.toFixed(1)}, γ=
-                        {crystalData.cell_angle_gamma.value.toFixed(1)}
+                        α={(displayedCellMetrics?.alpha ?? crystalData.cell_angle_alpha.value).toFixed(1)}, β=
+                        {(displayedCellMetrics?.beta ?? crystalData.cell_angle_beta.value).toFixed(1)}, γ=
+                        {(displayedCellMetrics?.gamma ?? crystalData.cell_angle_gamma.value).toFixed(1)}
                       </span>
                     </div>
+                    {hasPrimitiveDisplay && (
+                      <div className="info-item">
+                        <label>Cell View</label>
+                        <span>{cellViewMode === "primitive" ? "Primitive (QE)" : "Conventional (CIF)"}</span>
+                      </div>
+                    )}
                     <div className="info-item">
                       <label>Atoms</label>
                       <span>{crystalData.atom_sites.length} sites</span>
@@ -950,6 +1394,26 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
                               </button>
                             )}
                           </div>
+                        </div>
+                      )}
+
+                      {!isOptimizationWizard && (
+                        <div className="param-row">
+                          <label>
+                            Structure Source
+                            <Tooltip text="Choose the geometry used for this SCF. 'From CIF' uses the original imported structure; optimized structures come from saved geometry optimization runs." />
+                          </label>
+                          <select
+                            value={structureSource}
+                            onChange={(e) => setStructureSource(e.target.value)}
+                          >
+                            <option value="cif">From CIF (original structure)</option>
+                            {optimizedStructures.map((option) => (
+                              <option key={option.calcId} value={option.calcId}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
                         </div>
                       )}
 

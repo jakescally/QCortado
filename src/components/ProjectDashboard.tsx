@@ -1,11 +1,12 @@
 // Project Dashboard - Main view for working with a project's structures and calculations
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
-import { CrystalData, SCFPreset } from "../lib/types";
+import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, SavedStructureData } from "../lib/types";
+import { getPrimitiveCell } from "../lib/primitiveCell";
 
 interface QEResult {
   converged: boolean;
@@ -55,6 +56,7 @@ interface ProjectDashboardProps {
     filename: string,
     preset?: SCFPreset,
     presetLock?: boolean,
+    optimizedStructures?: OptimizedStructureOption[],
   ) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
@@ -62,12 +64,27 @@ interface ProjectDashboardProps {
   onViewPhonons: (phononData: any) => void;
 }
 
+type CalcTagType = "info" | "feature" | "special" | "geometry";
+type CellViewMode = "conventional" | "primitive";
+
+interface DisplayCellMetrics {
+  a: number;
+  b: number;
+  c: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+}
+
+type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
+
 const CONFIRM_TEXT = "delete my project for good";
 
 // Helper to generate calculation feature tags from parameters
-function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" }[] {
-  const tags: { label: string; type: "info" | "feature" | "special" }[] = [];
+function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
+  const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
+  let hasGeometryTag = false;
 
   // Special tags from stored tags array (phonon-ready, structure-optimized)
   if (calc.tags) {
@@ -76,8 +93,15 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
         tags.push({ label: "Phonon-Ready", type: "special" });
       } else if (tag === "structure-optimized") {
         tags.push({ label: "Optimized", type: "special" });
+      } else if (tag === "geometry") {
+        tags.push({ label: "Geometry", type: "geometry" });
+        hasGeometryTag = true;
       }
     }
+  }
+
+  if (!hasGeometryTag && params.structure_source?.type === "optimization") {
+    tags.push({ label: "Geometry", type: "geometry" });
   }
 
   // K-points grid
@@ -111,6 +135,31 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
 
   if (params.vdw_corr && params.vdw_corr !== "none") {
     tags.push({ label: "vdW", type: "feature" });
+  }
+
+  return tags;
+}
+
+function isOptimizationCalculation(calc: CalculationRun): boolean {
+  return calc.calc_type === "optimization" || calc.calc_type === "relax" || calc.calc_type === "vcrelax";
+}
+
+function getOptimizationMode(calc: CalculationRun): "relax" | "vcrelax" {
+  const mode = calc.parameters?.optimization_mode;
+  if (mode === "relax" || calc.calc_type === "relax") return "relax";
+  if (mode === "vcrelax" || calc.calc_type === "vcrelax") return "vcrelax";
+  return "vcrelax";
+}
+
+function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
+  const tags: { label: string; type: CalcTagType }[] = [];
+  const params = calc.parameters || {};
+  tags.push({ label: "Geometry", type: "geometry" });
+  tags.push({ label: getOptimizationMode(calc) === "vcrelax" ? "VC-Relax" : "Relax", type: "info" });
+
+  if (params.kgrid) {
+    const [k1, k2, k3] = params.kgrid;
+    tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
   }
 
   return tags;
@@ -168,6 +217,108 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
   return tags;
 }
 
+function calculateMetricsFromVectors(
+  v1: [number, number, number],
+  v2: [number, number, number],
+  v3: [number, number, number],
+): DisplayCellMetrics {
+  const norm = (v: [number, number, number]) => Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  const dot = (u: [number, number, number], v: [number, number, number]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const angle = (u: [number, number, number], v: [number, number, number]) => {
+    const denom = norm(u) * norm(v);
+    if (denom === 0) return 0;
+    const cosine = dot(u, v) / denom;
+    const clamped = Math.max(-1, Math.min(1, cosine));
+    return (Math.acos(clamped) * 180) / Math.PI;
+  };
+
+  return {
+    a: norm(v1),
+    b: norm(v2),
+    c: norm(v3),
+    alpha: angle(v2, v3),
+    beta: angle(v1, v3),
+    gamma: angle(v1, v2),
+  };
+}
+
+function calculateVolumeFromMetrics(metrics: DisplayCellMetrics): number {
+  const alpha = (metrics.alpha * Math.PI) / 180;
+  const beta = (metrics.beta * Math.PI) / 180;
+  const gamma = (metrics.gamma * Math.PI) / 180;
+  const cosAlpha = Math.cos(alpha);
+  const cosBeta = Math.cos(beta);
+  const cosGamma = Math.cos(gamma);
+  const factor = 1 + (2 * cosAlpha * cosBeta * cosGamma)
+    - (cosAlpha * cosAlpha)
+    - (cosBeta * cosBeta)
+    - (cosGamma * cosGamma);
+  const safeFactor = Math.max(0, factor);
+  return metrics.a * metrics.b * metrics.c * Math.sqrt(safeFactor);
+}
+
+function calculateVolumeFromVectors(
+  v1: [number, number, number],
+  v2: [number, number, number],
+  v3: [number, number, number],
+): number {
+  const cross: [number, number, number] = [
+    v2[1] * v3[2] - v2[2] * v3[1],
+    v2[2] * v3[0] - v2[0] * v3[2],
+    v2[0] * v3[1] - v2[1] * v3[0],
+  ];
+  return Math.abs(v1[0] * cross[0] + v1[1] * cross[1] + v1[2] * cross[2]);
+}
+
+function convertPrimitiveToConventionalCell(
+  primitiveCell: CellMatrix,
+  primitiveLatticeKind: "cubic_f" | "cubic_i" | "cubic_p" | null,
+): CellMatrix | null {
+  if (!primitiveLatticeKind) return null;
+
+  const [p1, p2, p3] = primitiveCell;
+
+  if (primitiveLatticeKind === "cubic_f") {
+    // Conventional vectors from FCC primitive basis:
+    // a = -p1 + p2 + p3, b = p1 - p2 + p3, c = p1 + p2 - p3
+    return [
+      [-p1[0] + p2[0] + p3[0], -p1[1] + p2[1] + p3[1], -p1[2] + p2[2] + p3[2]],
+      [p1[0] - p2[0] + p3[0], p1[1] - p2[1] + p3[1], p1[2] - p2[2] + p3[2]],
+      [p1[0] + p2[0] - p3[0], p1[1] + p2[1] - p3[1], p1[2] + p2[2] - p3[2]],
+    ];
+  }
+
+  if (primitiveLatticeKind === "cubic_i") {
+    // Conventional vectors from BCC primitive basis:
+    // a = p1 + p3, b = p1 + p2, c = p2 + p3
+    return [
+      [p1[0] + p3[0], p1[1] + p3[1], p1[2] + p3[2]],
+      [p1[0] + p2[0], p1[1] + p2[1], p1[2] + p2[2]],
+      [p2[0] + p3[0], p2[1] + p3[1], p2[2] + p3[2]],
+    ];
+  }
+
+  if (primitiveLatticeKind === "cubic_p") {
+    return primitiveCell;
+  }
+
+  return null;
+}
+
+function asCellMatrix(value: unknown): CellMatrix | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const rows: [number, number, number][] = [];
+  for (const row of value) {
+    if (!Array.isArray(row) || row.length !== 3) return null;
+    const x = Number(row[0]);
+    const y = Number(row[1]);
+    const z = Number(row[2]);
+    if (![x, y, z].every((entry) => Number.isFinite(entry))) return null;
+    rows.push([x, y, z]);
+  }
+  return [rows[0], rows[1], rows[2]];
+}
+
 export function ProjectDashboard({
   projectId,
   onBack,
@@ -178,6 +329,7 @@ export function ProjectDashboard({
   onRunPhonons,
   onViewPhonons,
 }: ProjectDashboardProps) {
+  const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -248,6 +400,7 @@ export function ProjectDashboard({
 
   async function selectCif(cifId: string) {
     setSelectedCifId(cifId);
+    setCellViewMode("conventional");
     try {
       // Load crystal data
       const data = await invoke<CrystalData>("get_cif_crystal_data", {
@@ -358,11 +511,46 @@ export function ProjectDashboard({
     }
   }
 
+  function getOptimizedStructureOptions(calculations: CalculationRun[]): OptimizedStructureOption[] {
+    return calculations
+      .filter((calc) => isOptimizationCalculation(calc))
+      .map((calc) => {
+        const structure = calc.parameters?.optimized_structure;
+        if (!structure || !Array.isArray(structure.atoms) || structure.atoms.length === 0) {
+          return null;
+        }
+
+        const mode = getOptimizationMode(calc);
+        const completedAt = calc.completed_at;
+        const dateLabel = completedAt
+          ? new Date(completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+          : "In progress";
+
+        return {
+          calcId: calc.id,
+          label: `${mode === "vcrelax" ? "VC-Relax" : "Relax"} (${dateLabel})`,
+          mode,
+          completedAt,
+          structure,
+          cellSummary: calc.parameters?.optimized_cell_summary ?? null,
+        } as OptimizedStructureOption;
+      })
+      .filter((opt): opt is OptimizedStructureOption => opt !== null);
+  }
+
   function handleRunSCF() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunSCF(selectedCifId, crystalData, cifContent, variant.filename);
+    onRunSCF(
+      selectedCifId,
+      crystalData,
+      cifContent,
+      variant.filename,
+      undefined,
+      undefined,
+      getOptimizedStructureOptions(variant.calculations),
+    );
   }
 
   function handleRunOptimization() {
@@ -415,6 +603,74 @@ export function ProjectDashboard({
   function getSelectedVariant(): CifVariant | undefined {
     return project?.cif_variants.find(v => v.id === selectedCifId);
   }
+
+  const selectedVariant = getSelectedVariant();
+  const optimizationCalculations = selectedVariant
+    ? selectedVariant.calculations.filter((calc) => isOptimizationCalculation(calc))
+    : [];
+  const primitiveCell = useMemo(() => {
+    if (!crystalData) return null;
+    return getPrimitiveCell(crystalData);
+  }, [crystalData]);
+  const primitiveLatticeKind = primitiveCell?.ibrav ?? null;
+  const conventionalCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
+    if (!crystalData) return null;
+    return {
+      a: crystalData.cell_length_a.value,
+      b: crystalData.cell_length_b.value,
+      c: crystalData.cell_length_c.value,
+      alpha: crystalData.cell_angle_alpha.value,
+      beta: crystalData.cell_angle_beta.value,
+      gamma: crystalData.cell_angle_gamma.value,
+    };
+  }, [crystalData]);
+
+  const primitiveCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
+    if (!primitiveCell) return null;
+
+    const BOHR_TO_ANGSTROM = 0.529177;
+    const a = primitiveCell.celldm1 * BOHR_TO_ANGSTROM;
+
+    if (primitiveCell.ibrav === "cubic_f") {
+      const v1: [number, number, number] = [0, a / 2, a / 2];
+      const v2: [number, number, number] = [a / 2, 0, a / 2];
+      const v3: [number, number, number] = [a / 2, a / 2, 0];
+      return calculateMetricsFromVectors(v1, v2, v3);
+    }
+
+    if (primitiveCell.ibrav === "cubic_i") {
+      const v1: [number, number, number] = [a / 2, a / 2, -a / 2];
+      const v2: [number, number, number] = [-a / 2, a / 2, a / 2];
+      const v3: [number, number, number] = [a / 2, -a / 2, a / 2];
+      return calculateMetricsFromVectors(v1, v2, v3);
+    }
+
+    return {
+      a,
+      b: a,
+      c: a,
+      alpha: 90,
+      beta: 90,
+      gamma: 90,
+    };
+  }, [primitiveCell]);
+
+  const hasPrimitiveDisplay = primitiveCellMetrics !== null;
+  const displayedCellMetrics = cellViewMode === "primitive" && primitiveCellMetrics
+    ? primitiveCellMetrics
+    : conventionalCellMetrics;
+  const displayedCellVolume = useMemo<number | null>(() => {
+    if (!displayedCellMetrics) {
+      return crystalData?.cell_volume ?? null;
+    }
+    return calculateVolumeFromMetrics(displayedCellMetrics);
+  }, [displayedCellMetrics, crystalData]);
+
+  useEffect(() => {
+    if (!hasPrimitiveDisplay && cellViewMode === "primitive") {
+      setCellViewMode("conventional");
+    }
+  }, [hasPrimitiveDisplay, cellViewMode]);
 
   if (isLoading) {
     return (
@@ -516,8 +772,6 @@ export function ProjectDashboard({
     );
   }
 
-  const selectedVariant = getSelectedVariant();
-
   return (
     <div className="dashboard-container">
       <div className="dashboard-header">
@@ -559,6 +813,26 @@ export function ProjectDashboard({
             <div className="hero-formula">
               {crystalData.formula_sum || crystalData.formula_structural || "Unknown"}
             </div>
+            {hasPrimitiveDisplay && (
+              <div className="hero-cell-toggle">
+                <button
+                  type="button"
+                  className={`hero-cell-toggle-btn ${cellViewMode === "conventional" ? "active" : ""}`}
+                  onClick={() => setCellViewMode("conventional")}
+                  title="Show conventional CIF lattice parameters"
+                >
+                  Conventional
+                </button>
+                <button
+                  type="button"
+                  className={`hero-cell-toggle-btn ${cellViewMode === "primitive" ? "active" : ""}`}
+                  onClick={() => setCellViewMode("primitive")}
+                  title="Show primitive lattice parameters used by QE (when detected)"
+                >
+                  Primitive
+                </button>
+              </div>
+            )}
             <div className="hero-details">
               <div className="hero-detail-item">
                 <label>Space Group</label>
@@ -570,23 +844,29 @@ export function ProjectDashboard({
               <div className="hero-detail-item">
                 <label>Lattice Parameters</label>
                 <span>
-                  a = {crystalData.cell_length_a.value.toFixed(4)} A,{" "}
-                  b = {crystalData.cell_length_b.value.toFixed(4)} A,{" "}
-                  c = {crystalData.cell_length_c.value.toFixed(4)} A
+                  a = {(displayedCellMetrics?.a ?? crystalData.cell_length_a.value).toFixed(4)} A,{" "}
+                  b = {(displayedCellMetrics?.b ?? crystalData.cell_length_b.value).toFixed(4)} A,{" "}
+                  c = {(displayedCellMetrics?.c ?? crystalData.cell_length_c.value).toFixed(4)} A
                 </span>
               </div>
               <div className="hero-detail-item">
                 <label>Angles</label>
                 <span>
-                  alpha = {crystalData.cell_angle_alpha.value.toFixed(2)} deg,{" "}
-                  beta = {crystalData.cell_angle_beta.value.toFixed(2)} deg,{" "}
-                  gamma = {crystalData.cell_angle_gamma.value.toFixed(2)} deg
+                  alpha = {(displayedCellMetrics?.alpha ?? crystalData.cell_angle_alpha.value).toFixed(2)} deg,{" "}
+                  beta = {(displayedCellMetrics?.beta ?? crystalData.cell_angle_beta.value).toFixed(2)} deg,{" "}
+                  gamma = {(displayedCellMetrics?.gamma ?? crystalData.cell_angle_gamma.value).toFixed(2)} deg
                 </span>
               </div>
-              {crystalData.cell_volume && (
+              {hasPrimitiveDisplay && (
+                <div className="hero-detail-item">
+                  <label>Cell View</label>
+                  <span>{cellViewMode === "primitive" ? "Primitive (QE)" : "Conventional (CIF)"}</span>
+                </div>
+              )}
+              {displayedCellVolume !== null && (
                 <div className="hero-detail-item">
                   <label>Volume</label>
-                  <span>{crystalData.cell_volume.toFixed(2)} A^3</span>
+                  <span>{displayedCellVolume.toFixed(2)} A^3</span>
                 </div>
               )}
               <div className="hero-detail-item">
@@ -926,6 +1206,178 @@ export function ProjectDashboard({
                   )}
                 </div>
               ))}
+            </div>
+          </section>
+        )}
+
+        {/* Geometry Optimization Calculations */}
+        {optimizationCalculations.length > 0 && (
+          <section className="history-section">
+            <h3>Optimizations</h3>
+            <div className="calculations-list">
+              {optimizationCalculations.map((calc) => {
+                const summary = calc.parameters?.optimized_cell_summary as SavedCellSummary | undefined;
+                const optimizedStructure = calc.parameters?.optimized_structure as SavedStructureData | undefined;
+                const optimizedCell = asCellMatrix(optimizedStructure?.cell_parameters);
+                const units = summary?.units || optimizedStructure?.cell_units || "angstrom";
+                const supportsConventionalTransform =
+                  primitiveLatticeKind === "cubic_f" ||
+                  primitiveLatticeKind === "cubic_i" ||
+                  primitiveLatticeKind === "cubic_p";
+                let displaySummary: SavedCellSummary | null = summary
+                  ? { ...summary }
+                  : null;
+                let cellBasisLabel = supportsConventionalTransform
+                  ? "Primitive (QE)"
+                  : "Stored (QE output)";
+
+                if (!displaySummary && optimizedCell) {
+                  const metrics = calculateMetricsFromVectors(optimizedCell[0], optimizedCell[1], optimizedCell[2]);
+                  displaySummary = {
+                    a: metrics.a,
+                    b: metrics.b,
+                    c: metrics.c,
+                    alpha: metrics.alpha,
+                    beta: metrics.beta,
+                    gamma: metrics.gamma,
+                    volume: calculateVolumeFromVectors(optimizedCell[0], optimizedCell[1], optimizedCell[2]),
+                    units,
+                  };
+                }
+
+                if (cellViewMode === "conventional" && supportsConventionalTransform && optimizedCell) {
+                  const convertedCell = convertPrimitiveToConventionalCell(optimizedCell, primitiveLatticeKind);
+                  if (convertedCell) {
+                    const metrics = calculateMetricsFromVectors(convertedCell[0], convertedCell[1], convertedCell[2]);
+                    displaySummary = {
+                      a: metrics.a,
+                      b: metrics.b,
+                      c: metrics.c,
+                      alpha: metrics.alpha,
+                      beta: metrics.beta,
+                      gamma: metrics.gamma,
+                      volume: calculateVolumeFromVectors(convertedCell[0], convertedCell[1], convertedCell[2]),
+                      units,
+                    };
+                    cellBasisLabel = "Conventional (derived)";
+                  } else {
+                    cellBasisLabel = "Primitive (QE)";
+                  }
+                }
+
+                const mode = getOptimizationMode(calc);
+                const modeLabel = mode === "vcrelax" ? "VC-Relax" : "Relax";
+                const sourceLabel =
+                  calc.parameters?.structure_source?.type === "optimization"
+                    ? `Saved optimization ${String(calc.parameters?.structure_source?.calc_id || "").slice(0, 8)}`
+                    : "From CIF";
+
+                return (
+                  <div key={calc.id} className="calculation-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">OPT</span>
+                        {calc.result && (
+                          <span
+                            className={`calc-status ${
+                              calc.result.converged ? "converged" : "failed"
+                            }`}
+                          >
+                            {calc.result.converged ? "Converged" : "Not converged"}
+                          </span>
+                        )}
+                        {calc.result?.total_energy && (
+                          <span className="calc-energy">
+                            E = {formatEnergy(calc.result.total_energy)}
+                          </span>
+                        )}
+                        <div className="calc-tags">
+                          {getOptimizationTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Mode</label>
+                            <span>{modeLabel}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source Structure</label>
+                            <span>{sourceLabel}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Atoms</label>
+                            <span>{calc.parameters?.optimized_structure?.atoms?.length || "N/A"}</span>
+                          </div>
+                          {displaySummary && (
+                            <div className="detail-item">
+                              <label>Cell Basis</label>
+                              <span>{cellBasisLabel}</span>
+                            </div>
+                          )}
+                          {displaySummary && (
+                            <div className="detail-item">
+                              <label>Lattice ({displaySummary.units})</label>
+                              <span>{`${displaySummary.a.toFixed(4)} / ${displaySummary.b.toFixed(4)} / ${displaySummary.c.toFixed(4)}`}</span>
+                            </div>
+                          )}
+                          {displaySummary && (
+                            <div className="detail-item">
+                              <label>Angles (deg)</label>
+                              <span>{`${displaySummary.alpha.toFixed(2)} / ${displaySummary.beta.toFixed(2)} / ${displaySummary.gamma.toFixed(2)}`}</span>
+                            </div>
+                          )}
+                          {displaySummary && (
+                            <div className="detail-item">
+                              <label>Volume</label>
+                              <span>{`${displaySummary.volume.toFixed(4)} ${displaySummary.units === "angstrom" ? "A^3" : `${displaySummary.units}^3`}`}</span>
+                            </div>
+                          )}
+                          {calc.result?.wall_time_seconds && (
+                            <div className="detail-item">
+                              <label>Wall Time</label>
+                              <span>{calc.result.wall_time_seconds.toFixed(1)} s</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="calc-actions">
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
         )}
