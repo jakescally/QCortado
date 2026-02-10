@@ -7,6 +7,7 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
 import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, SavedStructureData } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
+import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 
 interface QEResult {
   converged: boolean;
@@ -454,7 +455,7 @@ export function ProjectDashboard({
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
-  const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>("recent");
+  const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>(() => getStoredSortMode());
 
   useEffect(() => {
     loadProject();
@@ -699,6 +700,11 @@ export function ProjectDashboard({
 
   function getSelectedVariant(): CifVariant | undefined {
     return project?.cif_variants.find(v => v.id === selectedCifId);
+  }
+
+  function handleCalculationSortModeChange(mode: CalculationSortMode) {
+    setCalculationSortMode(mode);
+    setStoredSortMode(mode);
   }
 
   async function togglePinnedCalculation(calcId: string, isPinned: boolean) {
@@ -1068,7 +1074,7 @@ export function ProjectDashboard({
               <select
                 id="dashboard-sort-mode"
                 value={calculationSortMode}
-                onChange={(e) => setCalculationSortMode(e.target.value as CalculationSortMode)}
+                onChange={(e) => handleCalculationSortModeChange(e.target.value as CalculationSortMode)}
               >
                 <option value="recent">Most Recent</option>
                 <option value="best">Best</option>

@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 
 interface HighSymmetryMarker {
   k_distance: number;
@@ -67,6 +67,7 @@ export function BandPlot({
 }: BandPlotProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | null>(null);
+  const [isHoveringPlot, setIsHoveringPlot] = useState(false);
 
   // Y-axis energy window (adjustable via scroll)
   const [yMin, setYMin] = useState<number | null>(null);
@@ -262,6 +263,23 @@ export function BandPlot({
     return ticks;
   }, [scales]);
 
+  // Prevent page scroll while interacting with the plot area.
+  useEffect(() => {
+    if (!isHoveringPlot || typeof document === "undefined") return;
+
+    const { body, documentElement } = document;
+    const prevBodyOverflow = body.style.overflow;
+    const prevHtmlOverflow = documentElement.style.overflow;
+
+    body.style.overflow = "hidden";
+    documentElement.style.overflow = "hidden";
+
+    return () => {
+      body.style.overflow = prevBodyOverflow;
+      documentElement.style.overflow = prevHtmlOverflow;
+    };
+  }, [isHoveringPlot]);
+
   return (
     <div className="band-plot-container">
       <div className="band-plot-controls">
@@ -275,8 +293,12 @@ export function BandPlot({
         ref={svgRef}
         width={width}
         height={height}
+        onMouseEnter={() => setIsHoveringPlot(true)}
         onMouseMove={handleMouseMove}
-        onMouseLeave={() => setHoveredPoint(null)}
+        onMouseLeave={() => {
+          setIsHoveringPlot(false);
+          setHoveredPoint(null);
+        }}
         onWheel={handleWheel}
         style={{ cursor: "crosshair" }}
       >

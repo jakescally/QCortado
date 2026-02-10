@@ -10,6 +10,7 @@ export interface ScfLikeCalculation {
 }
 
 const SOC_PRIORITY_BOOST = 250;
+const SORT_MODE_STORAGE_KEY = "qcortado-sort-mode";
 
 function getRecencyTimestamp(calc: ScfLikeCalculation): number {
   const completed = calc.completed_at ? Date.parse(calc.completed_at) : Number.NaN;
@@ -56,4 +57,23 @@ export function sortScfByMode<T extends ScfLikeCalculation>(
     return getRecencyTimestamp(b) - getRecencyTimestamp(a);
   });
   return sorted;
+}
+
+export function getStoredSortMode(): ScfSortMode {
+  if (typeof window === "undefined") return "recent";
+  try {
+    const stored = window.localStorage.getItem(SORT_MODE_STORAGE_KEY);
+    return stored === "best" ? "best" : "recent";
+  } catch {
+    return "recent";
+  }
+}
+
+export function setStoredSortMode(sortMode: ScfSortMode): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SORT_MODE_STORAGE_KEY, sortMode);
+  } catch {
+    // Ignore persistence failures and keep in-memory behavior.
+  }
 }

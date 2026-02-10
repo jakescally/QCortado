@@ -9,7 +9,7 @@ import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
-import { sortScfByMode, ScfSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
@@ -24,43 +24,65 @@ interface CalculationRun {
   } | null;
   started_at: string;
   completed_at: string | null;
+  tags?: string[];
 }
 
 // Helper to generate calculation feature tags from parameters
-function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
-  const tags: { label: string; type: "info" | "feature" }[] = [];
+function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
+  const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (calc.tags) {
+    for (const tag of calc.tags) {
+      if (tag === "phonon-ready") {
+        pushTag("Phonon-Ready", "special");
+      } else if (tag === "structure-optimized") {
+        pushTag("Optimized", "special");
+      } else if (tag === "geometry") {
+        pushTag("Geometry", "geometry");
+      }
+    }
+  }
+
+  if (params.structure_source?.type === "optimization") {
+    pushTag("Geometry", "geometry");
+  }
 
   // K-points grid
   if (params.kgrid) {
     const [k1, k2, k3] = params.kgrid;
-    tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
+    pushTag(`${k1}×${k2}×${k3}`, "info");
   }
 
   // Convergence threshold
   if (params.conv_thr) {
     const thr = params.conv_thr;
     const label = thr < 0.001 ? thr.toExponential(0) : thr.toString();
-    tags.push({ label: label, type: "info" });
+    pushTag(label, "info");
   }
 
   // Feature tags
   if (params.lspinorb) {
-    tags.push({ label: "SOC", type: "feature" });
+    pushTag("SOC", "feature");
   }
 
   if (params.nspin === 4) {
-    tags.push({ label: "Non-collinear", type: "feature" });
+    pushTag("Non-collinear", "feature");
   } else if (params.nspin === 2) {
-    tags.push({ label: "Magnetic", type: "feature" });
+    pushTag("Magnetic", "feature");
   }
 
   if (params.lda_plus_u) {
-    tags.push({ label: "DFT+U", type: "feature" });
+    pushTag("DFT+U", "feature");
   }
 
   if (params.vdw_corr && params.vdw_corr !== "none") {
-    tags.push({ label: "vdW", type: "feature" });
+    pushTag("vdW", "feature");
   }
 
   return tags;
@@ -91,7 +113,12 @@ export function BandStructureWizard({
 
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
-  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>("recent");
+  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>(() => getStoredSortMode());
+
+  const handleScfSortModeChange = useCallback((mode: ScfSortMode) => {
+    setScfSortMode(mode);
+    setStoredSortMode(mode);
+  }, []);
 
   // Step 2: K-Path (using BrillouinZoneViewer)
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
@@ -539,7 +566,7 @@ export function BandStructureWizard({
             <select
               id="bands-scf-sort"
               value={scfSortMode}
-              onChange={(e) => setScfSortMode(e.target.value as ScfSortMode)}
+              onChange={(e) => handleScfSortModeChange(e.target.value as ScfSortMode)}
             >
               <option value="recent">Most Recent</option>
               <option value="best">Best</option>

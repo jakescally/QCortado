@@ -2817,6 +2817,7 @@ h3 .tooltip-text::after {
   border-top: 1px solid #e2e8f0;
   display: flex;
   justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 .delete-calc-btn {

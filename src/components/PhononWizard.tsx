@@ -6,7 +6,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./PhononPlot";
-import { sortScfByMode, ScfSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
@@ -21,27 +21,67 @@ interface CalculationRun {
   } | null;
   started_at: string;
   completed_at: string | null;
+  tags?: string[];
 }
 
 // Helper to generate calculation feature tags from parameters
-function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
-  const tags: { label: string; type: "info" | "feature" }[] = [];
+function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
+  const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (calc.tags) {
+    for (const tag of calc.tags) {
+      if (tag === "phonon-ready") {
+        pushTag("Phonon-Ready", "special");
+      } else if (tag === "structure-optimized") {
+        pushTag("Optimized", "special");
+      } else if (tag === "geometry") {
+        pushTag("Geometry", "geometry");
+      }
+    }
+  }
+
+  if (params.structure_source?.type === "optimization") {
+    pushTag("Geometry", "geometry");
+  }
 
   if (params.kgrid) {
     const [k1, k2, k3] = params.kgrid;
-    tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
+    pushTag(`${k1}×${k2}×${k3}`, "info");
   }
 
   if (params.conv_thr) {
     const thr = params.conv_thr;
     const label = thr < 0.001 ? thr.toExponential(0) : thr.toString();
-    tags.push({ label: label, type: "info" });
+    pushTag(label, "info");
   }
 
   // Mark phonon-ready calculations
   if (params.conv_thr && params.conv_thr <= 1e-10) {
-    tags.push({ label: "Phonon-ready", type: "feature" });
+    pushTag("Phonon-Ready", "special");
+  }
+
+  if (params.lspinorb) {
+    pushTag("SOC", "feature");
+  }
+
+  if (params.nspin === 4) {
+    pushTag("Non-collinear", "feature");
+  } else if (params.nspin === 2) {
+    pushTag("Magnetic", "feature");
+  }
+
+  if (params.lda_plus_u) {
+    pushTag("DFT+U", "feature");
+  }
+
+  if (params.vdw_corr && params.vdw_corr !== "none") {
+    pushTag("vdW", "feature");
   }
 
   return tags;
@@ -102,7 +142,12 @@ export function PhononWizard({
 
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
-  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>("recent");
+  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>(() => getStoredSortMode());
+
+  const handleScfSortModeChange = useCallback((mode: ScfSortMode) => {
+    setScfSortMode(mode);
+    setStoredSortMode(mode);
+  }, []);
 
   // Step 2: Q-Grid
   const [qGrid, setQGrid] = useState<[number, number, number]>([4, 4, 4]);
@@ -362,7 +407,7 @@ export function PhononWizard({
             <select
               id="phonon-scf-sort"
               value={scfSortMode}
-              onChange={(e) => setScfSortMode(e.target.value as ScfSortMode)}
+              onChange={(e) => handleScfSortModeChange(e.target.value as ScfSortMode)}
             >
               <option value="recent">Most Recent</option>
               <option value="best">Best</option>
