@@ -186,7 +186,12 @@ export function PhononWizard({
     setError(null);
     setPhononResult(null);
     setIsSaved(false);
-    setProgress(defaultProgressState("Phonon calculation"));
+    setProgress(defaultProgressState("Phonon calculation", {
+      phonon: {
+        hasDos: calculateDos,
+        hasDispersion: calculateDispersion,
+      },
+    }));
     setCalcStartTime(new Date().toISOString());
     setStep("run");
 

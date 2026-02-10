@@ -1,14 +1,30 @@
 export type ProgressStatus = "idle" | "running" | "error" | "complete";
 
+export interface PhononProgressMeta {
+  totalQPoints?: number;
+  completedQPoints?: string[];
+  inProgressQ?: string;
+  hasDos?: boolean;
+  hasDispersion?: boolean;
+}
+
+export interface ProgressMeta {
+  phonon?: PhononProgressMeta;
+}
+
 export interface ProgressState {
   status: ProgressStatus;
   percent: number | null;
   phase: string;
   detail?: string;
+  meta?: ProgressMeta;
 }
 
 const SCF_ITER_RE = /iteration\s+#\s*(\d+)/i;
 const SCF_ACCURACY_RE = /estimated\s+scf\s+accuracy\s*[=<]\s*([-\d.Ee+]+)\s*(\S+)?/i;
+
+const QPOINTS_TOTAL_RE = /\(\s*(\d+)\s*q-points?\s*\)/i;
+const CALC_Q_RE = /Calculation of q\s*=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)/i;
 
 const SCF_DONE_MARKERS = [
   "convergence has been achieved",
@@ -19,6 +35,14 @@ const SCF_DONE_MARKERS = [
 function updateWithDetail(state: ProgressState, detail?: string): ProgressState {
   if (!detail) return state;
   return { ...state, detail };
+}
+
+function normalizeQPoint(x: string, y: string, z: string): string {
+  const nums = [x, y, z].map((value) => Number.parseFloat(value));
+  if (nums.some((value) => Number.isNaN(value))) {
+    return `${x.trim()} ${y.trim()} ${z.trim()}`;
+  }
+  return nums.map((value) => value.toFixed(6)).join(" ");
 }
 
 export function updateScfProgress(line: string, state: ProgressState): ProgressState {
@@ -79,25 +103,80 @@ export function updateBandsProgress(line: string, state: ProgressState): Progres
 }
 
 export function updatePhononProgress(line: string, state: ProgressState): ProgressState {
-  let next = { ...state, status: "running" };
+  let next: ProgressState = { ...state, status: "running" };
+  const meta = { ...(state.meta?.phonon ?? {}) };
+  let metaUpdated = false;
+
+  const totalMatch = line.match(QPOINTS_TOTAL_RE);
+  if (totalMatch) {
+    const total = Number.parseInt(totalMatch[1], 10);
+    if (!Number.isNaN(total) && total > 0) {
+      meta.totalQPoints = total;
+      metaUpdated = true;
+    }
+  }
+
+  const calcMatch = line.match(CALC_Q_RE);
+  if (calcMatch) {
+    const key = normalizeQPoint(calcMatch[1], calcMatch[2], calcMatch[3]);
+    const completed = meta.completedQPoints ? [...meta.completedQPoints] : [];
+    if (meta.inProgressQ && meta.inProgressQ !== key && !completed.includes(meta.inProgressQ)) {
+      completed.push(meta.inProgressQ);
+    }
+    meta.inProgressQ = key;
+    meta.completedQPoints = completed;
+    metaUpdated = true;
+
+    const total = meta.totalQPoints ?? 0;
+    const completedCount = meta.completedQPoints?.length ?? 0;
+    if (total > 0) {
+      const phMax = meta.hasDos ? 95 : 99;
+      const ratio = Math.min(1, completedCount / total);
+      const percent = Math.max(next.percent ?? 0, ratio * phMax);
+      const runningIndex = Math.min(completedCount + 1, total);
+      next = updateWithDetail(
+        { ...next, percent, phase: "ph.x" },
+        `Q-point ${runningIndex}/${total}`
+      );
+    } else {
+      next = { ...next, phase: "ph.x" };
+    }
+  }
+
+  const attachMeta = (stateToReturn: ProgressState): ProgressState => {
+    if (metaUpdated || state.meta?.phonon) {
+      return { ...stateToReturn, meta: { ...(state.meta ?? {}), phonon: meta } };
+    }
+    return stateToReturn;
+  };
 
   if (line.includes("=== Step 1/4")) {
-    return { ...next, percent: 5, phase: "ph.x" };
+    return attachMeta({ ...next, percent: next.percent ?? 0, phase: "ph.x" });
   }
   if (line.includes("=== Step 2/4")) {
-    return { ...next, percent: 35, phase: "q2r.x" };
+    const phMax = meta.hasDos ? 95 : 99;
+    const completed = meta.completedQPoints ? [...meta.completedQPoints] : [];
+    if (meta.inProgressQ && !completed.includes(meta.inProgressQ)) {
+      completed.push(meta.inProgressQ);
+      meta.completedQPoints = completed;
+      meta.inProgressQ = undefined;
+      metaUpdated = true;
+    }
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, phMax), phase: "q2r.x" });
   }
   if (line.includes("=== Step 3/4")) {
-    return { ...next, percent: 65, phase: "matdyn.x (DOS)" };
+    const target = meta.hasDos ? 95 : 99;
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, target), phase: "matdyn.x (DOS)" });
   }
   if (line.includes("=== Step 4/4")) {
-    return { ...next, percent: 85, phase: "matdyn.x (dispersion)" };
+    const target = 100;
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, target), phase: "matdyn.x (dispersion)" });
   }
   if (line.includes("=== Phonon Calculation Complete ===")) {
-    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+    return attachMeta({ ...next, percent: 100, status: "complete", phase: "Complete" });
   }
 
-  return next;
+  return attachMeta(next);
 }
 
 type ProgressKind = "scf" | "bands" | "phonon";
@@ -119,10 +198,11 @@ export function progressReducer(
   }
 }
 
-export function defaultProgressState(phase: string): ProgressState {
+export function defaultProgressState(phase: string, meta?: ProgressMeta): ProgressState {
   return {
     status: "running",
     percent: null,
     phase,
+    meta,
   };
 }
