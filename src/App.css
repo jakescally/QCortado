@@ -2358,6 +2358,46 @@ h3 .tooltip-text::after {
 }
 
 /* Calculation Actions Grid */
+.actions-section-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.actions-section-header h3 {
+  margin: 0;
+}
+
+.history-sort-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.history-sort-control label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #718096;
+  font-weight: 600;
+}
+
+.history-sort-control select {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.85rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: white;
+  color: #2d3748;
+  cursor: pointer;
+}
+
+.history-sort-control select:hover {
+  border-color: #cbd5e0;
+}
+
 .calc-action-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -2441,6 +2481,16 @@ h3 .tooltip-text::after {
   }
 
   .structure-selector select {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .history-sort-control label {
+    color: #a0aec0;
+  }
+
+  .history-sort-control select {
     background: #2d3748;
     border-color: #4a5568;
     color: #e2e8f0;

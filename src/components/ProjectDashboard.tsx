@@ -66,6 +66,8 @@ interface ProjectDashboardProps {
 
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
+type CalculationSortMode = "recent" | "best";
+type CalculationCategory = "scf" | "bands" | "phonon" | "optimization";
 
 interface DisplayCellMetrics {
   a: number;
@@ -162,6 +164,16 @@ function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcT
     tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
   }
 
+  const forceConv = formatThreshold(params.forc_conv_thr);
+  if (forceConv) {
+    tags.push({ label: `F ${forceConv}`, type: "info" });
+  }
+
+  const energyConv = formatThreshold(params.etot_conv_thr);
+  if (energyConv) {
+    tags.push({ label: `E ${energyConv}`, type: "info" });
+  }
+
   return tags;
 }
 
@@ -215,6 +227,81 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
   }
 
   return tags;
+}
+
+function getRecencyTimestamp(calc: CalculationRun): number {
+  const completed = calc.completed_at ? Date.parse(calc.completed_at) : Number.NaN;
+  if (Number.isFinite(completed)) return completed;
+  const started = Date.parse(calc.started_at);
+  if (Number.isFinite(started)) return started;
+  return 0;
+}
+
+function getMeshProduct(mesh: unknown): number {
+  if (!Array.isArray(mesh) || mesh.length !== 3) return 0;
+  const values = mesh.map((entry) => Number(entry));
+  if (!values.every((value) => Number.isFinite(value) && value > 0)) return 0;
+  return values[0] * values[1] * values[2];
+}
+
+function getThresholdTightness(value: unknown, maxScore = 20): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return Math.max(0, Math.min(maxScore, -Math.log10(numeric)));
+}
+
+function formatThreshold(value: unknown): string | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric < 0.001 ? numeric.toExponential(1) : numeric.toString();
+}
+
+function getCalculationBestScore(calc: CalculationRun, category: CalculationCategory): number {
+  const params = calc.parameters || {};
+  const convergedBonus = calc.result?.converged ? 100 : 0;
+  const socBonus = params.lspinorb ? 8 : 0;
+
+  if (category === "scf") {
+    const kScore = Math.log2(Math.max(1, getMeshProduct(params.kgrid)));
+    const convScore = getThresholdTightness(params.conv_thr);
+    const ecutScore = Math.log2(Math.max(1, Number(params.ecutwfc) || 1));
+    return convergedBonus + (4 * convScore) + (3 * kScore) + socBonus + ecutScore;
+  }
+
+  if (category === "phonon") {
+    const qScore = Math.log2(Math.max(1, getMeshProduct(params.q_grid)));
+    const tr2Score = getThresholdTightness(params.tr2_ph);
+    return convergedBonus + (6 * qScore) + tr2Score;
+  }
+
+  if (category === "optimization") {
+    const kScore = Math.log2(Math.max(1, getMeshProduct(params.kgrid)));
+    const convScore = getThresholdTightness(params.conv_thr);
+    const forceScore = getThresholdTightness(params.forc_conv_thr);
+    const energyScore = getThresholdTightness(params.etot_conv_thr);
+    return convergedBonus + (2 * kScore) + (2 * convScore) + (4 * forceScore) + (3 * energyScore) + socBonus;
+  }
+
+  // Bands: prioritize denser path sampling, then inherited SCF settings when present.
+  const pathScore = Math.log2(Math.max(1, Number(params.total_k_points) || 0));
+  const bandCountScore = Math.log2(Math.max(1, Number(params.n_bands) || 0));
+  return convergedBonus + (3 * pathScore) + bandCountScore + socBonus;
+}
+
+function sortCalculations(
+  calculations: CalculationRun[],
+  sortMode: CalculationSortMode,
+  category: CalculationCategory,
+): CalculationRun[] {
+  const sorted = [...calculations];
+  sorted.sort((a, b) => {
+    if (sortMode === "best") {
+      const diff = getCalculationBestScore(b, category) - getCalculationBestScore(a, category);
+      if (Math.abs(diff) > 1e-9) return diff;
+    }
+    return getRecencyTimestamp(b) - getRecencyTimestamp(a);
+  });
+  return sorted;
 }
 
 function calculateMetricsFromVectors(
@@ -358,6 +445,7 @@ export function ProjectDashboard({
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
+  const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>("recent");
 
   useEffect(() => {
     loadProject();
@@ -605,9 +693,38 @@ export function ProjectDashboard({
   }
 
   const selectedVariant = getSelectedVariant();
-  const optimizationCalculations = selectedVariant
-    ? selectedVariant.calculations.filter((calc) => isOptimizationCalculation(calc))
-    : [];
+  const scfCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "scf") || [],
+      calculationSortMode,
+      "scf",
+    ),
+    [selectedVariant, calculationSortMode],
+  );
+  const bandCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "bands") || [],
+      calculationSortMode,
+      "bands",
+    ),
+    [selectedVariant, calculationSortMode],
+  );
+  const phononCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "phonon") || [],
+      calculationSortMode,
+      "phonon",
+    ),
+    [selectedVariant, calculationSortMode],
+  );
+  const optimizationCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => isOptimizationCalculation(calc)) || [],
+      calculationSortMode,
+      "optimization",
+    ),
+    [selectedVariant, calculationSortMode],
+  );
   const primitiveCell = useMemo(() => {
     if (!crystalData) return null;
     return getPrimitiveCell(crystalData);
@@ -879,7 +996,20 @@ export function ProjectDashboard({
 
         {/* Calculation Actions */}
         <section className="actions-section">
-          <h3>Calculations</h3>
+          <div className="actions-section-header">
+            <h3>Calculations</h3>
+            <div className="history-sort-control">
+              <label htmlFor="dashboard-sort-mode">Sort Entries</label>
+              <select
+                id="dashboard-sort-mode"
+                value={calculationSortMode}
+                onChange={(e) => setCalculationSortMode(e.target.value as CalculationSortMode)}
+              >
+                <option value="recent">Most Recent</option>
+                <option value="best">Best</option>
+              </select>
+            </div>
+          </div>
           <div className="calc-action-grid">
             <button className="calc-action-btn" onClick={handleRunSCF}>
               <span className="calc-action-icon">SCF</span>
@@ -917,11 +1047,11 @@ export function ProjectDashboard({
         </section>
 
         {/* SCF Calculations */}
-        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "scf").length > 0 && (
+        {scfCalculations.length > 0 && (
           <section className="history-section">
             <h3>SCFs</h3>
             <div className="calculations-list">
-              {selectedVariant.calculations.filter(c => c.calc_type === "scf").map((calc) => (
+              {scfCalculations.map((calc) => (
                 <div key={calc.id} className="calculation-item">
                   <div
                     className="calculation-header"
@@ -1017,11 +1147,11 @@ export function ProjectDashboard({
         )}
 
         {/* Band Structure Calculations */}
-        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "bands").length > 0 && (
+        {bandCalculations.length > 0 && (
           <section className="history-section bands-section">
             <h3>Bands</h3>
             <div className="calculations-list">
-              {selectedVariant.calculations.filter(c => c.calc_type === "bands").map((calc) => (
+              {bandCalculations.map((calc) => (
                 <div key={calc.id} className="calculation-item bands-item">
                   <div
                     className="calculation-header"
@@ -1111,11 +1241,11 @@ export function ProjectDashboard({
         )}
 
         {/* Phonon Calculations */}
-        {selectedVariant && selectedVariant.calculations.filter(c => c.calc_type === "phonon").length > 0 && (
+        {phononCalculations.length > 0 && (
           <section className="history-section phonon-section">
             <h3>Phonons</h3>
             <div className="calculations-list">
-              {selectedVariant.calculations.filter(c => c.calc_type === "phonon").map((calc) => (
+              {phononCalculations.map((calc) => (
                 <div key={calc.id} className="calculation-item phonon-item">
                   <div
                     className="calculation-header"
@@ -1271,6 +1401,10 @@ export function ProjectDashboard({
                   calc.parameters?.structure_source?.type === "optimization"
                     ? `Saved optimization ${String(calc.parameters?.structure_source?.calc_id || "").slice(0, 8)}`
                     : "From CIF";
+                const electronConvLabel = formatThreshold(calc.parameters?.conv_thr);
+                const forceConvLabel = formatThreshold(calc.parameters?.forc_conv_thr);
+                const energyConvLabel = formatThreshold(calc.parameters?.etot_conv_thr);
+                const pressValue = Number(calc.parameters?.press);
 
                 return (
                   <div key={calc.id} className="calculation-item">
@@ -1331,6 +1465,30 @@ export function ProjectDashboard({
                             <label>Atoms</label>
                             <span>{calc.parameters?.optimized_structure?.atoms?.length || "N/A"}</span>
                           </div>
+                          {electronConvLabel && (
+                            <div className="detail-item">
+                              <label>Electron Conv.</label>
+                              <span>{electronConvLabel}</span>
+                            </div>
+                          )}
+                          {forceConvLabel && (
+                            <div className="detail-item">
+                              <label>Force Conv.</label>
+                              <span>{forceConvLabel}</span>
+                            </div>
+                          )}
+                          {energyConvLabel && (
+                            <div className="detail-item">
+                              <label>Energy Conv.</label>
+                              <span>{energyConvLabel}</span>
+                            </div>
+                          )}
+                          {mode === "vcrelax" && Number.isFinite(pressValue) && (
+                            <div className="detail-item">
+                              <label>Target Pressure</label>
+                              <span>{pressValue.toFixed(2)} kbar</span>
+                            </div>
+                          )}
                           {displaySummary && (
                             <div className="detail-item">
                               <label>Cell Basis</label>
