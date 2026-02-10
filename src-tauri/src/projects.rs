@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-use crate::qe::QEResult;
+use crate::qe::{QEResult, read_phonon_dos_file, read_phonon_dispersion_file};
 
 // ============================================================================
 // Types
@@ -405,15 +405,34 @@ pub fn save_calculation(
         .map_err(|e| format!("Failed to write pw.out: {}", e))?;
 
     // Copy working directory contents if provided (includes .save directory, etc.)
+    let mut copied_work_path: Option<PathBuf> = None;
     if let Some(work_dir) = working_dir {
         let work_path = PathBuf::from(&work_dir);
         if work_path.exists() {
+            copied_work_path = Some(work_path.clone());
             let tmp_dir = calc_dir.join("tmp");
             fs::create_dir_all(&tmp_dir)
                 .map_err(|e| format!("Failed to create tmp directory: {}", e))?;
 
             // Copy all files and directories from working dir
             copy_dir_recursive(&work_path, &tmp_dir)?;
+        }
+    }
+
+    // For phonons, keep an explicit raw pipeline log and top-level output artifacts
+    // so parsing fixes can be applied without depending on intermediate state.
+    if calc_data.calc_type == "phonon" {
+        fs::write(calc_dir.join("phonon_pipeline.out"), &calc_data.output_content)
+            .map_err(|e| format!("Failed to write phonon_pipeline.out: {}", e))?;
+
+        if let Some(work_path) = copied_work_path.as_ref() {
+            for filename in ["phonon_freq", "phonon_freq.gp", "phonon_dos"] {
+                let source = work_path.join(filename);
+                if source.exists() {
+                    fs::copy(&source, calc_dir.join(filename))
+                        .map_err(|e| format!("Failed to copy {}: {}", filename, e))?;
+                }
+            }
         }
     }
 
@@ -711,4 +730,149 @@ pub fn get_cif_content(
 
     fs::read_to_string(&cif_path)
         .map_err(|e| format!("Failed to read CIF file: {}", e))
+}
+
+/// Loads saved phonon DOS/dispersion data for a calculation, including recovery
+/// from saved output artifacts when embedded data is missing.
+#[tauri::command]
+pub fn get_saved_phonon_data(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+) -> Result<serde_json::Value, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    // Load existing project
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    let mut found_calc = false;
+    let mut did_recover = false;
+    let mut response: Option<serde_json::Value> = None;
+
+    'outer: for variant in project.cif_variants.iter_mut() {
+        for calc in variant.calculations.iter_mut() {
+            if calc.id != calc_id {
+                continue;
+            }
+            found_calc = true;
+
+            if calc.calc_type != "phonon" {
+                return Err(format!("Calculation {} is not a phonon calculation", calc_id));
+            }
+
+            let mut dos_data = calc
+                .result
+                .as_ref()
+                .and_then(|result| result.phonon_data.as_ref())
+                .and_then(|phonon| phonon.get("dos_data"))
+                .cloned();
+            let mut dispersion_data = calc
+                .result
+                .as_ref()
+                .and_then(|result| result.phonon_data.as_ref())
+                .and_then(|phonon| phonon.get("dispersion_data"))
+                .cloned();
+
+            let tmp_dir = project_dir.join("calculations").join(&calc_id).join("tmp");
+
+            let dos_missing = match dos_data.as_ref() {
+                Some(v) => v.is_null(),
+                None => true,
+            };
+            if dos_missing {
+                let dos_file = tmp_dir.join("phonon_dos");
+                if dos_file.exists() {
+                    if let Ok(dos) = read_phonon_dos_file(&dos_file) {
+                        dos_data = Some(
+                            serde_json::to_value(dos)
+                                .map_err(|e| format!("Failed to serialize recovered DOS data: {}", e))?,
+                        );
+                        did_recover = true;
+                    }
+                }
+            }
+
+            let dispersion_missing = match dispersion_data.as_ref() {
+                Some(v) => v.is_null(),
+                None => true,
+            };
+            if dispersion_missing {
+                let dispersion_gp_file = tmp_dir.join("phonon_freq.gp");
+                let dispersion_file = tmp_dir.join("phonon_freq");
+                let source_file = if dispersion_gp_file.exists() {
+                    Some(dispersion_gp_file)
+                } else if dispersion_file.exists() {
+                    Some(dispersion_file)
+                } else {
+                    None
+                };
+                if let Some(source_file) = source_file {
+                    if let Ok(dispersion) = read_phonon_dispersion_file(&source_file) {
+                        dispersion_data = Some(
+                            serde_json::to_value(dispersion)
+                                .map_err(|e| format!("Failed to serialize recovered dispersion data: {}", e))?,
+                        );
+                        did_recover = true;
+                    }
+                }
+            }
+
+            let merged = serde_json::json!({
+                "dos_data": dos_data.unwrap_or(serde_json::Value::Null),
+                "dispersion_data": dispersion_data.unwrap_or(serde_json::Value::Null),
+            });
+
+            if did_recover {
+                if let Some(result) = calc.result.as_mut() {
+                    result.phonon_data = Some(merged.clone());
+                }
+            }
+
+            response = Some(merged);
+            break 'outer;
+        }
+    }
+
+    if !found_calc {
+        return Err(format!("Calculation not found: {}", calc_id));
+    }
+
+    if did_recover {
+        // Persist recovered phonon data into project and calc JSON
+        let project_json = serde_json::to_string_pretty(&project)
+            .map_err(|e| format!("Failed to serialize project: {}", e))?;
+        fs::write(&project_json_path, project_json)
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+        let calc_json_path = project_dir
+            .join("calculations")
+            .join(&calc_id)
+            .join("calc.json");
+        if calc_json_path.exists() {
+            let calc = project
+                .cif_variants
+                .iter()
+                .flat_map(|variant| variant.calculations.iter())
+                .find(|calc| calc.id == calc_id)
+                .ok_or_else(|| format!("Calculation not found while writing calc.json: {}", calc_id))?;
+            let calc_json = serde_json::to_string_pretty(calc)
+                .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+            fs::write(&calc_json_path, calc_json)
+                .map_err(|e| format!("Failed to write calc.json: {}", e))?;
+        }
+    }
+
+    Ok(response.unwrap_or_else(|| serde_json::json!({
+        "dos_data": serde_json::Value::Null,
+        "dispersion_data": serde_json::Value::Null,
+    })))
 }

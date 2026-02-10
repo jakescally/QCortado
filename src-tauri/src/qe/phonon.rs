@@ -91,6 +91,101 @@ pub fn parse_phonon_dispersion(content: &str) -> Result<PhononDispersion, String
         return Err("Empty dispersion file".to_string());
     }
 
+    // Detect whether this file is in:
+    // 1) mode-block format (blank-line separated, two columns: q freq), or
+    // 2) q-row format (one row per q, columns: q f1 f2 ... fn)
+    let mut detected_columns: Option<usize> = None;
+    for line in &lines {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let numeric_values: Vec<f64> = line
+            .split_whitespace()
+            .filter_map(|part| part.parse::<f64>().ok())
+            .collect();
+        if numeric_values.len() >= 2 {
+            detected_columns = Some(numeric_values.len());
+            break;
+        }
+    }
+    let is_q_row_format = detected_columns.map(|cols| cols > 2).unwrap_or(false);
+
+    if is_q_row_format {
+        // Parse q-row format: q f1 f2 ... fn
+        let mut q_points: Vec<f64> = Vec::new();
+        let mut frequencies: Vec<Vec<f64>> = Vec::new();
+        let mut mode_count: Option<usize> = None;
+
+        for line in &lines {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let numeric_values: Vec<f64> = line
+                .split_whitespace()
+                .filter_map(|part| part.parse::<f64>().ok())
+                .collect();
+
+            if numeric_values.len() < 2 {
+                continue;
+            }
+
+            let this_mode_count = numeric_values.len() - 1;
+            if this_mode_count == 0 {
+                continue;
+            }
+
+            if let Some(expected) = mode_count {
+                if this_mode_count < expected {
+                    return Err(format!(
+                        "Q-row has {} modes, expected at least {}",
+                        this_mode_count, expected
+                    ));
+                }
+            } else {
+                mode_count = Some(this_mode_count);
+                frequencies = vec![Vec::new(); this_mode_count];
+            }
+
+            q_points.push(numeric_values[0]);
+            let expected = mode_count.unwrap_or(0);
+            for mode_idx in 0..expected {
+                frequencies[mode_idx].push(numeric_values[mode_idx + 1]);
+            }
+        }
+
+        if q_points.is_empty() || frequencies.is_empty() {
+            return Err("No valid q-row dispersion data found".to_string());
+        }
+
+        let n_qpoints = q_points.len();
+        let n_modes = frequencies.len();
+
+        let mut f_min = f64::MAX;
+        let mut f_max = f64::MIN;
+        for mode in &frequencies {
+            for &f in mode {
+                if f < f_min {
+                    f_min = f;
+                }
+                if f > f_max {
+                    f_max = f;
+                }
+            }
+        }
+
+        return Ok(PhononDispersion {
+            q_points,
+            frequencies,
+            high_symmetry_points: Vec::new(),
+            n_modes,
+            n_qpoints,
+            frequency_range: [f_min, f_max],
+        });
+    }
+
     // Parse data into modes, separated by blank lines
     let mut modes: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut current_mode: Vec<(f64, f64)> = Vec::new();
@@ -112,8 +207,14 @@ pub fn parse_phonon_dispersion(content: &str) -> Result<PhononDispersion, String
 
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
-            let q: f64 = parts[0].parse().map_err(|_| "Failed to parse q value")?;
-            let freq: f64 = parts[1].parse().map_err(|_| "Failed to parse frequency")?;
+            let q: f64 = match parts[0].parse() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let freq: f64 = match parts[1].parse() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             current_mode.push((q, freq));
         }
     }
@@ -298,6 +399,26 @@ mod tests {
         // Check last mode values
         assert!((data.frequencies[2][0] - 400.0).abs() < 0.01);
         assert!((data.frequencies[2][2] - 450.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_phonon_dispersion_q_row_format() {
+        // Simulate matdyn output with q followed by all mode frequencies on one line
+        let content = r#"
+0.000000  0.00  200.00  400.00
+0.100000 50.00  220.00  420.00
+0.200000 100.00 240.00  450.00
+        "#;
+
+        let result = parse_phonon_dispersion(content);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.n_modes, 3);
+        assert_eq!(data.n_qpoints, 3);
+        assert_eq!(data.q_points.len(), 3);
+        assert!((data.frequencies[0][2] - 100.0).abs() < 0.01);
+        assert!((data.frequencies[2][1] - 420.0).abs() < 0.01);
     }
 
     #[test]

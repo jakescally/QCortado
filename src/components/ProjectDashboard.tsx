@@ -17,6 +17,7 @@ interface QEResult {
   wall_time_seconds: number | null;
   raw_output: string;
   band_data?: any;  // Band structure data for bands calculations
+  phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
 }
 
 export interface CalculationRun {
@@ -62,7 +63,7 @@ interface ProjectDashboardProps {
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onViewPhonons: (phononData: any) => void;
+  onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
 }
 
 type CalcTagType = "info" | "feature" | "special" | "geometry";
@@ -671,6 +672,36 @@ export function ProjectDashboard({
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     onRunPhonons(selectedCifId, crystalData, variant.calculations);
+  }
+
+  async function handleViewPhonon(
+    calc: CalculationRun,
+    viewMode: "bands" | "dos",
+    basePhononData: { dos_data: any; dispersion_data: any },
+  ) {
+    let phononData = basePhononData;
+    const needsDispersion = viewMode === "bands" && phononData.dispersion_data == null;
+    const needsDos = viewMode === "dos" && phononData.dos_data == null;
+
+    if (needsDispersion || needsDos) {
+      try {
+        const recovered = await invoke<{ dos_data: any | null; dispersion_data: any | null }>(
+          "get_saved_phonon_data",
+          {
+            projectId,
+            calcId: calc.id,
+          },
+        );
+        phononData = {
+          dos_data: phononData.dos_data ?? recovered?.dos_data ?? null,
+          dispersion_data: phononData.dispersion_data ?? recovered?.dispersion_data ?? null,
+        };
+      } catch (e) {
+        console.warn("Failed to recover saved phonon data:", e);
+      }
+    }
+
+    onViewPhonons(phononData, viewMode);
   }
 
   function hasConvergedSCF(): boolean {
@@ -1352,6 +1383,20 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {phononCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const resultData = calc.result as any;
+                const phononData = resultData?.phonon_data
+                  ?? ((resultData?.dos_data != null || resultData?.dispersion_data != null)
+                    ? {
+                      dos_data: resultData?.dos_data ?? null,
+                      dispersion_data: resultData?.dispersion_data ?? null,
+                    }
+                    : null);
+                const hasDispersion = phononData?.dispersion_data != null || calc.parameters?.calculate_dispersion === true;
+                const hasDos = phononData?.dos_data != null || calc.parameters?.calculate_dos === true;
+                const fallbackPhononData = phononData ?? {
+                  dos_data: null,
+                  dispersion_data: null,
+                };
                 return (
                   <div key={calc.id} className="calculation-item phonon-item">
                     <div
@@ -1432,15 +1477,26 @@ export function ProjectDashboard({
                           </div>
                         </div>
                         <div className="calc-actions">
-                          {(calc.result as any)?.phonon_data && (
+                          {hasDispersion && (
                             <button
                               className="view-phonon-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onViewPhonons((calc.result as any)?.phonon_data);
+                                void handleViewPhonon(calc, "bands", fallbackPhononData);
                               }}
                             >
-                              View Phonons
+                              View Bands
+                            </button>
+                          )}
+                          {hasDos && (
+                            <button
+                              className="view-phonon-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleViewPhonon(calc, "dos", fallbackPhononData);
+                              }}
+                            >
+                              View DOS
                             </button>
                           )}
                           <button

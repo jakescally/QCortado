@@ -997,7 +997,7 @@ async fn run_phonon_calculation(
                 nk: None,
                 delta_e: None,
                 q_path: Some(q_path_with_points.clone()),
-                flfrq: Some("phonon_freq.gp".to_string()),
+                flfrq: Some("phonon_freq".to_string()),
             };
             let matdyn_bands_input = generate_matdyn_bands_input(&matdyn_bands_calc);
 
@@ -1028,10 +1028,21 @@ async fn run_phonon_calculation(
             if !matdyn_bands_status.success() {
                 let _ = app.emit("qe-output-line", "Warning: matdyn.x dispersion calculation failed");
             } else {
-                // Parse dispersion output
-                let freq_file = work_path.join("phonon_freq.gp");
-                if freq_file.exists() {
-                    match read_phonon_dispersion_file(&freq_file) {
+                // Parse dispersion output.
+                // matdyn writes the gnuplot-friendly data to <flfrq>.gp.
+                // Keep fallback to <flfrq> for compatibility.
+                let freq_gp_file = work_path.join("phonon_freq.gp");
+                let freq_file = work_path.join("phonon_freq");
+                let source_file = if freq_gp_file.exists() {
+                    Some(freq_gp_file)
+                } else if freq_file.exists() {
+                    Some(freq_file)
+                } else {
+                    None
+                };
+
+                if let Some(source_file) = source_file {
+                    match read_phonon_dispersion_file(&source_file) {
                         Ok(mut disp) => {
                             add_phonon_symmetry_markers(&mut disp, &q_path_with_points);
                             let _ = app.emit("qe-output-line", format!(
@@ -1044,6 +1055,8 @@ async fn run_phonon_calculation(
                             let _ = app.emit("qe-output-line", format!("Warning: Failed to parse phonon dispersion: {}", e));
                         }
                     }
+                } else {
+                    let _ = app.emit("qe-output-line", "Warning: No phonon dispersion output file found");
                 }
             }
         } else {
@@ -1148,6 +1161,7 @@ pub fn run() {
             projects::set_last_opened_cif,
             projects::get_cif_crystal_data,
             projects::get_cif_content,
+            projects::get_saved_phonon_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -314,6 +314,7 @@ pub fn generate_matdyn_bands_input(calc: &super::types::MatdynCalculation) -> St
     writeln!(output, "  flfrc = '{}',", calc.flfrc).unwrap();
     writeln!(output, "  dos = .false.,").unwrap();
     writeln!(output, "  q_in_band_form = .true.,").unwrap();
+    writeln!(output, "  q_in_cryst_coord = .true.,").unwrap();
 
     if let Some(ref flfrq) = calc.flfrq {
         writeln!(output, "  flfrq = '{}',", flfrq).unwrap();

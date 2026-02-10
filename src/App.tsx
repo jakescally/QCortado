@@ -4,9 +4,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { BandStructureWizard } from "./components/BandStructureWizard";
-import { BandPlot } from "./components/BandPlot";
+import { BandData, BandPlot } from "./components/BandPlot";
 import { PhononWizard } from "./components/PhononWizard";
-import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./components/PhononPlot";
+import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
@@ -54,6 +54,24 @@ interface PhononData {
   dispersion_data: any | null;
 }
 
+type PhononViewMode = "bands" | "dos";
+
+function toBandDataFromPhononDispersion(phononDispersion: any): BandData {
+  return {
+    k_points: phononDispersion.q_points || [],
+    energies: phononDispersion.frequencies || [],
+    fermi_energy: 0,
+    high_symmetry_points: (phononDispersion.high_symmetry_points || []).map((point: any) => ({
+      k_distance: point.q_distance,
+      label: point.label,
+    })),
+    n_bands: phononDispersion.n_modes || 0,
+    n_kpoints: phononDispersion.n_qpoints || 0,
+    band_gap: null,
+    energy_range: phononDispersion.frequency_range || [0, 0],
+  };
+}
+
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
@@ -77,7 +95,7 @@ function App() {
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
 
   // Context for viewing saved phonon data
-  const [viewPhononData, setViewPhononData] = useState<PhononData | null>(null);
+  const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -197,8 +215,14 @@ function App() {
   }
 
   if (currentView === "phonon-viewer" && viewPhononData) {
-    const hasDos = viewPhononData.dos_data !== null;
-    const hasDispersion = viewPhononData.dispersion_data !== null;
+    const phononData = viewPhononData.data;
+    const showingBands = viewPhononData.mode === "bands";
+    const showingDos = viewPhononData.mode === "dos";
+    const hasDos = phononData.dos_data !== null;
+    const hasDispersion = phononData.dispersion_data !== null;
+    const phononBandData = hasDispersion
+      ? toBandDataFromPhononDispersion(phononData.dispersion_data)
+      : null;
 
     return (
       <div className="phonon-viewer-container">
@@ -212,30 +236,33 @@ function App() {
           >
             ← Back to Dashboard
           </button>
-          <h2>Phonon Spectrum</h2>
+          <h2>{showingBands ? "Phonon Bands" : "Phonon DOS"}</h2>
         </div>
         <div className="phonon-viewer-content">
-          {hasDos && hasDispersion ? (
-            <PhononPlot
-              dos={viewPhononData.dos_data}
-              dispersion={viewPhononData.dispersion_data}
+          {showingBands && phononBandData ? (
+            <BandPlot
+              data={phononBandData}
               width={900}
               height={600}
+              showFermiLevel={false}
+              yAxisLabel="Frequency (cm^-1)"
+              pointLabel="Mode"
+              valueLabel="Frequency"
+              valueUnit="cm^-1"
+              valueDecimals={1}
+              primaryCountLabel="modes"
+              secondaryCountLabel="q-points"
+              scrollHint="Scroll: zoom frequency | Shift+Scroll: pan"
+              yClampRange={null}
             />
-          ) : hasDos ? (
+          ) : showingDos && hasDos ? (
             <PhononDOSPlot
-              data={viewPhononData.dos_data}
+              data={phononData.dos_data}
               width={400}
               height={600}
             />
-          ) : hasDispersion ? (
-            <PhononDispersionPlot
-              data={viewPhononData.dispersion_data}
-              width={800}
-              height={600}
-            />
           ) : (
-            <p>No phonon data available</p>
+            <p>{showingBands ? "No phonon dispersion data available" : "No phonon DOS data available"}</p>
           )}
         </div>
       </div>
@@ -326,8 +353,11 @@ function App() {
           });
           setCurrentView("phonon-wizard");
         }}
-        onViewPhonons={(phononData) => {
-          setViewPhononData(phononData);
+        onViewPhonons={(phononData, viewMode) => {
+          setViewPhononData({
+            data: phononData,
+            mode: viewMode,
+          });
           setCurrentView("phonon-viewer");
         }}
       />

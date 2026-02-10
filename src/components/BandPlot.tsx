@@ -33,6 +33,15 @@ interface BandPlotProps {
   showFermiLevel?: boolean;
   /** Actual Fermi energy from SCF calculation (bands always reports 0) */
   scfFermiEnergy?: number;
+  yAxisLabel?: string;
+  pointLabel?: string;
+  valueLabel?: string;
+  valueUnit?: string;
+  valueDecimals?: number;
+  primaryCountLabel?: string;
+  secondaryCountLabel?: string;
+  scrollHint?: string;
+  yClampRange?: [number, number] | null;
 }
 
 interface HoveredPoint {
@@ -64,6 +73,15 @@ export function BandPlot({
   energyRange,
   showFermiLevel = true,
   scfFermiEnergy,
+  yAxisLabel = "E − E_F (eV)",
+  pointLabel = "Band",
+  valueLabel = "E − E_F",
+  valueUnit = "eV",
+  valueDecimals = 3,
+  primaryCountLabel = "bands",
+  secondaryCountLabel = "k-points",
+  scrollHint = "Scroll: zoom Y | Shift+Scroll: pan energy",
+  yClampRange = [-25, 25],
 }: BandPlotProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | null>(null);
@@ -205,9 +223,6 @@ export function BandPlot({
   );
 
   // Handle scroll to adjust Y-axis range
-  // Limit the vertical range to -25 to 25 eV
-  const Y_LIMIT_MIN = -25;
-  const Y_LIMIT_MAX = 25;
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
@@ -232,17 +247,20 @@ export function BandPlot({
       newMax = center + newRange / 2;
     }
 
-    // Clamp to limits
-    if (newMin < Y_LIMIT_MIN) {
-      newMin = Y_LIMIT_MIN;
-    }
-    if (newMax > Y_LIMIT_MAX) {
-      newMax = Y_LIMIT_MAX;
+    // Clamp to limits if configured
+    if (yClampRange) {
+      const [minLimit, maxLimit] = yClampRange;
+      if (newMin < minLimit) {
+        newMin = minLimit;
+      }
+      if (newMax > maxLimit) {
+        newMax = maxLimit;
+      }
     }
 
     setYMin(newMin);
     setYMax(newMax);
-  }, [yMin, yMax, scales]);
+  }, [yMin, yMax, scales, yClampRange]);
 
   // Reset view
   const resetView = useCallback(() => {
@@ -253,7 +271,13 @@ export function BandPlot({
   // Y-axis ticks
   const yTicks = useMemo(() => {
     const range = scales.eMax - scales.eMin;
-    const step = range > 10 ? 2 : range > 5 ? 1 : 0.5;
+    const step = range > 500 ? 100
+      : range > 200 ? 50
+      : range > 100 ? 25
+      : range > 20 ? 5
+      : range > 10 ? 2
+      : range > 5 ? 1
+      : 0.5;
     const ticks: number[] = [];
     let tick = Math.ceil(scales.eMin / step) * step;
     while (tick <= scales.eMax) {
@@ -286,7 +310,7 @@ export function BandPlot({
         <button onClick={resetView} className="band-plot-reset">
           Reset View
         </button>
-        <span className="band-plot-hint">Scroll: zoom Y | Shift+Scroll: pan energy</span>
+        <span className="band-plot-hint">{scrollHint}</span>
       </div>
 
       <svg
@@ -471,7 +495,7 @@ export function BandPlot({
               fill="#333"
               fontSize={14}
             >
-              E − E_F (eV)
+              {yAxisLabel}
             </text>
           </g>
 
@@ -493,10 +517,10 @@ export function BandPlot({
               filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
             />
             <text x={8} y={-12} fill="#333" fontSize={11}>
-              Band {hoveredPoint.band}
+              {pointLabel} {hoveredPoint.band}
             </text>
             <text x={8} y={4} fill="#1565c0" fontSize={11}>
-              E − E_F = {hoveredPoint.energy.toFixed(3)} eV
+              {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
             </text>
           </g>
         )}
@@ -504,9 +528,11 @@ export function BandPlot({
 
       {/* Info panel */}
       <div className="band-plot-info">
-        <span>{data.n_bands} bands</span>
-        <span>{data.n_kpoints} k-points</span>
-        <span>E_F = {scfFermiEnergy != null ? `${scfFermiEnergy.toFixed(3)} eV` : "N/A"}</span>
+        <span>{data.n_bands} {primaryCountLabel}</span>
+        <span>{data.n_kpoints} {secondaryCountLabel}</span>
+        {showFermiLevel && (
+          <span>E_F = {scfFermiEnergy != null ? `${scfFermiEnergy.toFixed(3)} eV` : "N/A"}</span>
+        )}
         {/* Band gap info - disabled for now
         {data.band_gap ? (
           <span className="band-gap-info">

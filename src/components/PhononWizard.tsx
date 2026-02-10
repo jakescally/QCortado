@@ -227,6 +227,12 @@ export function PhononWizard({
       return;
     }
 
+    const shouldCalculateDispersion = calculateDispersion && qPath.length >= 2;
+    if (calculateDispersion && !shouldCalculateDispersion) {
+      setError("Select at least 2 Q-path points for dispersion, or disable dispersion.");
+      return;
+    }
+
     setIsRunning(true);
     followOutputRef.current = true;
     setOutput("");
@@ -236,7 +242,7 @@ export function PhononWizard({
     setProgress(defaultProgressState("Phonon calculation", {
       phonon: {
         hasDos: calculateDos,
-        hasDispersion: calculateDispersion,
+        hasDispersion: shouldCalculateDispersion,
       },
     }));
     setCalcStartTime(new Date().toISOString());
@@ -265,8 +271,8 @@ export function PhononWizard({
         },
         calculate_dos: calculateDos,
         dos_grid: calculateDos ? dosGrid : null,
-        calculate_dispersion: calculateDispersion,
-        q_path: calculateDispersion && qPath.length >= 2 ? qPath.map(p => ({
+        calculate_dispersion: shouldCalculateDispersion,
+        q_path: shouldCalculateDispersion ? qPath.map(p => ({
           label: p.label,
           coords: p.coords,
           npoints: p.npoints,
@@ -296,7 +302,7 @@ export function PhononWizard({
       // Auto-save the phonon calculation to the project
       try {
         setIsSaving(true);
-        const pathString = qPath.map((p) => p.label).join(" -> ");
+        const pathString = shouldCalculateDispersion ? qPath.map((p) => p.label).join(" -> ") : "";
 
         await invoke("save_calculation", {
           projectId,
@@ -309,7 +315,7 @@ export function PhononWizard({
               tr2_ph: tr2Ph,
               calculate_dos: calculateDos,
               dos_grid: calculateDos ? dosGrid : null,
-              calculate_dispersion: calculateDispersion,
+              calculate_dispersion: shouldCalculateDispersion,
               q_path: pathString,
               points_per_segment: pointsPerSegment,
               n_qpoints: result.n_qpoints,

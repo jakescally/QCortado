@@ -3950,7 +3950,6 @@ h3 .tooltip-text::after {
   font-size: 0.875rem;
   font-weight: 500;
   transition: background 0.2s;
-  margin-right: 0.5rem;
 }
 
 .view-phonon-btn:hover {
