@@ -152,6 +152,7 @@ export function PhononWizard({
   // Step 2: Q-Grid
   const [qGrid, setQGrid] = useState<[number, number, number]>([4, 4, 4]);
   const [tr2Ph, setTr2Ph] = useState<number>(1e-12);
+  const [tr2PhInput, setTr2PhInput] = useState<string>("1e-12");
 
   // Step 3: Options
   const [calculateDos, setCalculateDos] = useState(true);
@@ -489,6 +490,8 @@ export function PhononWizard({
   // Step 2: Q-Grid configuration
   const renderQGridStep = () => {
     const totalQPoints = qGrid[0] * qGrid[1] * qGrid[2];
+    const parsedTr2Ph = Number(tr2PhInput);
+    const isTr2PhValid = Number.isFinite(parsedTr2Ph) && parsedTr2Ph > 0;
 
     return (
       <div className="wizard-step qgrid-step">
@@ -531,15 +534,24 @@ export function PhononWizard({
         <div className="param-section">
           <label>
             Convergence threshold (tr2_ph):
-            <select
-              value={tr2Ph}
-              onChange={(e) => setTr2Ph(parseFloat(e.target.value))}
-            >
-              <option value={1e-12}>1e-12 (standard)</option>
-              <option value={1e-14}>1e-14 (high precision)</option>
-              <option value={1e-16}>1e-16 (very high precision)</option>
-            </select>
+            <input
+              type="text"
+              value={tr2PhInput}
+              onChange={(e) => {
+                const value = e.target.value.trim();
+                setTr2PhInput(value);
+                const parsed = Number(value);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                  setTr2Ph(parsed);
+                }
+              }}
+              placeholder="e.g. 1e-12"
+              spellCheck={false}
+            />
           </label>
+          {!isTr2PhValid && (
+            <span className="param-hint">Enter a positive number (e.g. 1e-12).</span>
+          )}
         </div>
 
         {error && <div className="error-message">{error}</div>}
@@ -548,7 +560,14 @@ export function PhononWizard({
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button className="primary-button" onClick={() => setStep("options")}>
+          <button
+            className="primary-button"
+            disabled={!isTr2PhValid}
+            onClick={() => {
+              setTr2Ph(parsedTr2Ph);
+              setStep("options");
+            }}
+          >
             Next: Options
           </button>
         </div>

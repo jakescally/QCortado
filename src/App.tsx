@@ -72,6 +72,20 @@ function toBandDataFromPhononDispersion(phononDispersion: any): BandData {
   };
 }
 
+function getPhononViewerRange(phononBandData: BandData): [number, number] {
+  const rawMin = Number(phononBandData.energy_range?.[0]);
+  const rawMax = Number(phononBandData.energy_range?.[1]);
+  const safeMax = Number.isFinite(rawMax) ? rawMax : 0;
+  const upperBase = Math.max(safeMax, 1);
+  const padding = Math.max(5, upperBase * 0.08);
+  const lower = 0;
+  const upper = upperBase + padding;
+  if (Number.isFinite(rawMin) && rawMin > upper) {
+    return [0, rawMin + padding];
+  }
+  return [lower, upper];
+}
+
 function App() {
   const [qePath, setQePath] = useState<string | null>(null);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
@@ -244,6 +258,7 @@ function App() {
               data={phononBandData}
               width={900}
               height={600}
+              energyRange={getPhononViewerRange(phononBandData)}
               showFermiLevel={false}
               yAxisLabel="Frequency (cm^-1)"
               pointLabel="Mode"

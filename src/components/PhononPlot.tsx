@@ -231,10 +231,11 @@ export function PhononDispersionPlot({
       fMin = freqMin;
       fMax = freqMax;
     } else {
-      [fMin, fMax] = data.frequency_range;
-      const padding = (fMax - fMin) * 0.1;
-      fMin = fMin - padding;
-      fMax = fMax + padding;
+      const rawMax = Number(data.frequency_range?.[1]);
+      const upperBase = Number.isFinite(rawMax) ? Math.max(rawMax, 1) : 1;
+      const padding = Math.max(5, upperBase * 0.08);
+      fMin = 0;
+      fMax = upperBase + padding;
     }
 
     return {
@@ -564,13 +565,13 @@ export function PhononPlot({ dos, dispersion, width = 900, height = 500 }: Phono
 
   // Calculate common frequency range
   const freqRange = useMemo(() => {
-    const allMin = Math.min(dos.omega_min, dispersion.frequency_range[0]);
     const allMax = Math.max(dos.omega_max, dispersion.frequency_range[1]);
-    const padding = (allMax - allMin) * 0.1;
+    const upperBase = Math.max(allMax, 1);
+    const padding = Math.max(5, upperBase * 0.08);
 
     return {
-      min: yMin ?? allMin - padding,
-      max: yMax ?? allMax + padding,
+      min: yMin ?? 0,
+      max: yMax ?? upperBase + padding,
     };
   }, [dos, dispersion, yMin, yMax]);
 
