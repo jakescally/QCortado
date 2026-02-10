@@ -556,6 +556,77 @@ pub fn delete_calculation(
     Ok(())
 }
 
+/// Sets or unsets a tag on an existing calculation
+#[tauri::command]
+pub fn set_calculation_tag(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    calc_id: String,
+    tag: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return Err("Tag cannot be empty".to_string());
+    }
+
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    // Load existing project
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Find calculation and update tags
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|v| v.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calculation = variant
+        .calculations
+        .iter_mut()
+        .find(|c| c.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    if enabled {
+        if !calculation.tags.iter().any(|existing| existing == &tag) {
+            calculation.tags.push(tag.clone());
+        }
+    } else {
+        calculation.tags.retain(|existing| existing != &tag);
+    }
+    let updated_calculation = calculation.clone();
+
+    // Save updated project
+    let project_json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, project_json)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Keep calc.json in sync when it exists
+    let calc_json_path = project_dir
+        .join("calculations")
+        .join(&calc_id)
+        .join("calc.json");
+    if calc_json_path.exists() {
+        let calc_json = serde_json::to_string_pretty(&updated_calculation)
+            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+        fs::write(&calc_json_path, calc_json)
+            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Sets the last opened CIF variant for a project
 #[tauri::command]
 pub fn set_last_opened_cif(

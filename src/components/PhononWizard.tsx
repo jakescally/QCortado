@@ -6,6 +6,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./PhononPlot";
+import { sortScfByMode, ScfSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
@@ -101,6 +102,7 @@ export function PhononWizard({
 
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
+  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>("recent");
 
   // Step 2: Q-Grid
   const [qGrid, setQGrid] = useState<[number, number, number]>([4, 4, 4]);
@@ -333,6 +335,7 @@ export function PhononWizard({
   // Step 1: Select source SCF
   const renderSourceStep = () => {
     const validScfs = scfCalculations.filter(c => c.calc_type === "scf" && c.result?.converged);
+    const sortedScfs = sortScfByMode(validScfs, scfSortMode);
     const phononReadyScfs = validScfs.filter(isPhononReady);
 
     if (validScfs.length === 0) {
@@ -352,7 +355,20 @@ export function PhononWizard({
 
     return (
       <div className="wizard-step source-step">
-        <h3>Select Source SCF Calculation</h3>
+        <div className="source-step-header">
+          <h3>Select Source SCF Calculation</h3>
+          <div className="source-sort-control">
+            <label htmlFor="phonon-scf-sort">Sort SCFs</label>
+            <select
+              id="phonon-scf-sort"
+              value={scfSortMode}
+              onChange={(e) => setScfSortMode(e.target.value as ScfSortMode)}
+            >
+              <option value="recent">Most Recent</option>
+              <option value="best">Best</option>
+            </select>
+          </div>
+        </div>
         <p className="step-description">
           Choose an SCF calculation to use as the starting point for phonons.
           For best results, use a phonon-ready SCF (conv_thr &lt;= 1e-10).
@@ -366,7 +382,7 @@ export function PhononWizard({
         )}
 
         <div className="scf-list">
-          {validScfs.map((scf) => {
+          {sortedScfs.map((scf) => {
             const ready = isPhononReady(scf);
             return (
               <div

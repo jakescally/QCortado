@@ -1144,6 +1144,7 @@ pub fn run() {
             projects::save_calculation,
             projects::delete_project,
             projects::delete_calculation,
+            projects::set_calculation_tag,
             projects::set_last_opened_cif,
             projects::get_cif_crystal_data,
             projects::get_cif_content,

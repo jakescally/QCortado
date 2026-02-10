@@ -1980,6 +1980,49 @@ h3 .tooltip-text::after {
   gap: 1rem;
 }
 
+.pin-calc-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #a0aec0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.calculation-header:hover .pin-calc-btn,
+.pin-calc-btn.pinned {
+  opacity: 1;
+}
+
+.pin-calc-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.pin-calc-btn:hover {
+  color: #b38b1f;
+  background: rgba(220, 176, 48, 0.16);
+}
+
+.pin-calc-btn.pinned {
+  color: #c89a1d;
+  background: rgba(232, 188, 68, 0.22);
+}
+
+@media (hover: none) {
+  .pin-calc-btn {
+    opacity: 1;
+  }
+}
+
 .calc-date {
   font-size: 0.8rem;
   color: #a0aec0;
@@ -2110,6 +2153,20 @@ h3 .tooltip-text::after {
 
   .calc-energy {
     color: #e2e8f0;
+  }
+
+  .pin-calc-btn {
+    color: #718096;
+  }
+
+  .pin-calc-btn:hover {
+    color: #f2ce63;
+    background: rgba(242, 206, 99, 0.18);
+  }
+
+  .pin-calc-btn.pinned {
+    color: #f7d36d;
+    background: rgba(247, 211, 109, 0.26);
   }
 
   .calc-tag-info {
@@ -2867,6 +2924,47 @@ h3 .tooltip-text::after {
 }
 
 /* Source Step */
+.source-step-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.source-step-header h3 {
+  margin: 0;
+}
+
+.source-sort-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.source-sort-control label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #a6adc8;
+  font-weight: 600;
+}
+
+.source-sort-control select {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  color: #cdd6f4;
+  cursor: pointer;
+}
+
+.source-sort-control select:hover {
+  border-color: #89b4fa;
+}
+
 .scf-list {
   display: flex;
   flex-direction: column;

@@ -81,6 +81,8 @@ interface DisplayCellMetrics {
 type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
 
 const CONFIRM_TEXT = "delete my project for good";
+const SOC_PRIORITY_BOOST = 250;
+const PINNED_TAG = "pinned";
 
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
@@ -259,7 +261,7 @@ function formatThreshold(value: unknown): string | null {
 function getCalculationBestScore(calc: CalculationRun, category: CalculationCategory): number {
   const params = calc.parameters || {};
   const convergedBonus = calc.result?.converged ? 100 : 0;
-  const socBonus = params.lspinorb ? 8 : 0;
+  const socBonus = params.lspinorb ? SOC_PRIORITY_BOOST : 0;
 
   if (category === "scf") {
     const kScore = Math.log2(Math.max(1, getMeshProduct(params.kgrid)));
@@ -292,9 +294,16 @@ function sortCalculations(
   calculations: CalculationRun[],
   sortMode: CalculationSortMode,
   category: CalculationCategory,
+  pinnedIds: Set<string>,
 ): CalculationRun[] {
   const sorted = [...calculations];
   sorted.sort((a, b) => {
+    const aPinned = pinnedIds.has(a.id);
+    const bPinned = pinnedIds.has(b.id);
+    if (aPinned !== bPinned) {
+      return aPinned ? -1 : 1;
+    }
+
     if (sortMode === "best") {
       const diff = getCalculationBestScore(b, category) - getCalculationBestScore(a, category);
       if (Math.abs(diff) > 1e-9) return diff;
@@ -692,38 +701,94 @@ export function ProjectDashboard({
     return project?.cif_variants.find(v => v.id === selectedCifId);
   }
 
+  async function togglePinnedCalculation(calcId: string, isPinned: boolean) {
+    if (!selectedCifId) return;
+    const cifId = selectedCifId;
+    const shouldBePinned = !isPinned;
+
+    try {
+      await invoke("set_calculation_tag", {
+        projectId,
+        cifId,
+        calcId,
+        tag: PINNED_TAG,
+        enabled: shouldBePinned,
+      });
+
+      // Keep local UI state in sync without reloading the whole dashboard.
+      setProject((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          cif_variants: prev.cif_variants.map((variant) => {
+            if (variant.id !== cifId) return variant;
+            return {
+              ...variant,
+              calculations: variant.calculations.map((calc) => {
+                if (calc.id !== calcId) return calc;
+                const tags = Array.isArray(calc.tags) ? calc.tags.filter((tag) => tag !== PINNED_TAG) : [];
+                if (shouldBePinned) {
+                  tags.push(PINNED_TAG);
+                }
+                return {
+                  ...calc,
+                  tags,
+                };
+              }),
+            };
+          }),
+        };
+      });
+    } catch (e) {
+      console.error("Failed to update pin status:", e);
+      setError(`Failed to update pin status: ${e}`);
+    }
+  }
+
   const selectedVariant = getSelectedVariant();
+  const pinnedCalcIds = useMemo<Set<string>>(() => {
+    if (!selectedVariant) return new Set<string>();
+    return new Set(
+      selectedVariant.calculations
+        .filter((calc) => Array.isArray(calc.tags) && calc.tags.includes(PINNED_TAG))
+        .map((calc) => calc.id),
+    );
+  }, [selectedVariant]);
   const scfCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "scf") || [],
       calculationSortMode,
       "scf",
+      pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode],
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
   const bandCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "bands") || [],
       calculationSortMode,
       "bands",
+      pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode],
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
   const phononCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "phonon") || [],
       calculationSortMode,
       "phonon",
+      pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode],
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
   const optimizationCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => isOptimizationCalculation(calc)) || [],
       calculationSortMode,
       "optimization",
+      pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode],
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
   const primitiveCell = useMemo(() => {
     if (!crystalData) return null;
@@ -1051,97 +1116,114 @@ export function ProjectDashboard({
           <section className="history-section">
             <h3>SCFs</h3>
             <div className="calculations-list">
-              {scfCalculations.map((calc) => (
-                <div key={calc.id} className="calculation-item">
-                  <div
-                    className="calculation-header"
-                    onClick={() =>
-                      setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                    }
-                  >
-                    <div className="calculation-info">
-                      <span className="calc-type">SCF</span>
-                      {calc.result && (
-                        <span
-                          className={`calc-status ${
-                            calc.result.converged ? "converged" : "failed"
-                          }`}
-                        >
-                          {calc.result.converged ? "Converged" : "Not converged"}
-                        </span>
-                      )}
-                      {calc.result?.total_energy && (
-                        <span className="calc-energy">
-                          E = {formatEnergy(calc.result.total_energy)}
-                        </span>
-                      )}
-                      <div className="calc-tags">
-                        {getCalculationTags(calc).map((tag, i) => (
-                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
-                            {tag.label}
+              {scfCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                return (
+                  <div key={calc.id} className="calculation-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">SCF</span>
+                        {calc.result && (
+                          <span
+                            className={`calc-status ${
+                              calc.result.converged ? "converged" : "failed"
+                            }`}
+                          >
+                            {calc.result.converged ? "Converged" : "Not converged"}
                           </span>
-                        ))}
+                        )}
+                        {calc.result?.total_energy && (
+                          <span className="calc-energy">
+                            E = {formatEnergy(calc.result.total_energy)}
+                          </span>
+                        )}
+                        <div className="calc-tags">
+                          {getCalculationTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                    <div className="calculation-meta">
-                      <span className="calc-date">
-                        {calc.completed_at
-                          ? formatDate(calc.completed_at)
-                          : "In progress..."}
-                      </span>
-                      <span className="expand-icon">
-                        {expandedCalc === calc.id ? "▼" : "▶"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {expandedCalc === calc.id && calc.result && (
-                    <div className="calculation-details">
-                      <div className="details-grid">
-                        {calc.result.total_energy && (
-                          <div className="detail-item">
-                            <label>Total Energy</label>
-                            <span>{formatEnergy(calc.result.total_energy)}</span>
-                          </div>
-                        )}
-                        {calc.result.fermi_energy && (
-                          <div className="detail-item">
-                            <label>Fermi Energy</label>
-                            <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
-                          </div>
-                        )}
-                        {calc.result.n_scf_steps && (
-                          <div className="detail-item">
-                            <label>SCF Steps</label>
-                            <span>{calc.result.n_scf_steps}</span>
-                          </div>
-                        )}
-                        {calc.result.wall_time_seconds && (
-                          <div className="detail-item">
-                            <label>Wall Time</label>
-                            <span>{calc.result.wall_time_seconds.toFixed(1)} s</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="detail-item parameters">
-                        <label>Parameters</label>
-                        <pre>{JSON.stringify(calc.parameters, null, 2)}</pre>
-                      </div>
-                      <div className="calc-actions">
+                      <div className="calculation-meta">
                         <button
-                          className="delete-calc-btn"
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                            void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
-                          Delete Calculation
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
                         </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
                       </div>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {expandedCalc === calc.id && calc.result && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          {calc.result.total_energy && (
+                            <div className="detail-item">
+                              <label>Total Energy</label>
+                              <span>{formatEnergy(calc.result.total_energy)}</span>
+                            </div>
+                          )}
+                          {calc.result.fermi_energy && (
+                            <div className="detail-item">
+                              <label>Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                          {calc.result.n_scf_steps && (
+                            <div className="detail-item">
+                              <label>SCF Steps</label>
+                              <span>{calc.result.n_scf_steps}</span>
+                            </div>
+                          )}
+                          {calc.result.wall_time_seconds && (
+                            <div className="detail-item">
+                              <label>Wall Time</label>
+                              <span>{calc.result.wall_time_seconds.toFixed(1)} s</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="detail-item parameters">
+                          <label>Parameters</label>
+                          <pre>{JSON.stringify(calc.parameters, null, 2)}</pre>
+                        </div>
+                        <div className="calc-actions">
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete Calculation
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
         )}
@@ -1151,91 +1233,108 @@ export function ProjectDashboard({
           <section className="history-section bands-section">
             <h3>Bands</h3>
             <div className="calculations-list">
-              {bandCalculations.map((calc) => (
-                <div key={calc.id} className="calculation-item bands-item">
-                  <div
-                    className="calculation-header"
-                    onClick={() =>
-                      setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                    }
-                  >
-                    <div className="calculation-info">
-                      <span className="calc-type">BANDS</span>
-                      {calc.parameters?.k_path && (
-                        <span className="calc-kpath">{calc.parameters.k_path}</span>
-                      )}
-                      <div className="calc-tags">
-                        {getBandsTags(calc).map((tag, i) => (
-                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
-                            {tag.label}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="calculation-meta">
-                      <span className="calc-date">
-                        {calc.completed_at
-                          ? formatDate(calc.completed_at)
-                          : "In progress..."}
-                      </span>
-                      <span className="expand-icon">
-                        {expandedCalc === calc.id ? "▼" : "▶"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {expandedCalc === calc.id && (
-                    <div className="calculation-details">
-                      <div className="details-grid">
-                        <div className="detail-item">
-                          <label>K-Path</label>
-                          <span>{calc.parameters?.k_path || "N/A"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Total K-Points</label>
-                          <span>{calc.parameters?.total_k_points || "N/A"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Number of Bands</label>
-                          <span>{calc.parameters?.n_bands || "N/A"}</span>
-                        </div>
-                        {calc.result?.fermi_energy && (
-                          <div className="detail-item">
-                            <label>Fermi Energy</label>
-                            <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
-                          </div>
+              {bandCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                return (
+                  <div key={calc.id} className="calculation-item bands-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">BANDS</span>
+                        {calc.parameters?.k_path && (
+                          <span className="calc-kpath">{calc.parameters.k_path}</span>
                         )}
-                        <div className="detail-item">
-                          <label>Source SCF</label>
-                          <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                        <div className="calc-tags">
+                          {getBandsTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
                         </div>
                       </div>
-                      <div className="calc-actions">
-                        {calc.result?.band_data && (
-                          <button
-                            className="view-bands-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onViewBands(calc.result?.band_data, calc.result?.fermi_energy ?? null);
-                            }}
-                          >
-                            View Bands
-                          </button>
-                        )}
+                      <div className="calculation-meta">
                         <button
-                          className="delete-calc-btn"
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                            void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
-                          Delete
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
                         </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
                       </div>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>K-Path</label>
+                            <span>{calc.parameters?.k_path || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Total K-Points</label>
+                            <span>{calc.parameters?.total_k_points || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Number of Bands</label>
+                            <span>{calc.parameters?.n_bands || "N/A"}</span>
+                          </div>
+                          {calc.result?.fermi_energy && (
+                            <div className="detail-item">
+                              <label>Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                        </div>
+                        <div className="calc-actions">
+                          {calc.result?.band_data && (
+                            <button
+                              className="view-bands-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewBands(calc.result?.band_data, calc.result?.fermi_energy ?? null);
+                              }}
+                            >
+                              View Bands
+                            </button>
+                          )}
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
         )}
@@ -1245,97 +1344,114 @@ export function ProjectDashboard({
           <section className="history-section phonon-section">
             <h3>Phonons</h3>
             <div className="calculations-list">
-              {phononCalculations.map((calc) => (
-                <div key={calc.id} className="calculation-item phonon-item">
-                  <div
-                    className="calculation-header"
-                    onClick={() =>
-                      setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                    }
-                  >
-                    <div className="calculation-info">
-                      <span className="calc-type">PHONON</span>
-                      {calc.parameters?.q_path && (
-                        <span className="calc-kpath">{calc.parameters.q_path}</span>
-                      )}
-                      <div className="calc-tags">
-                        {getPhononTags(calc).map((tag, i) => (
-                          <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
-                            {tag.label}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="calculation-meta">
-                      <span className="calc-date">
-                        {calc.completed_at
-                          ? formatDate(calc.completed_at)
-                          : "In progress..."}
-                      </span>
-                      <span className="expand-icon">
-                        {expandedCalc === calc.id ? "▼" : "▶"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {expandedCalc === calc.id && (
-                    <div className="calculation-details">
-                      <div className="details-grid">
-                        <div className="detail-item">
-                          <label>Q-Grid</label>
-                          <span>
-                            {calc.parameters?.q_grid
-                              ? `${calc.parameters.q_grid[0]}×${calc.parameters.q_grid[1]}×${calc.parameters.q_grid[2]}`
-                              : "N/A"}
-                          </span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Modes</label>
-                          <span>{calc.parameters?.n_modes || "N/A"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Q-Points</label>
-                          <span>{calc.parameters?.n_qpoints || "N/A"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>DOS</label>
-                          <span>{calc.parameters?.calculate_dos ? "Yes" : "No"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Dispersion</label>
-                          <span>{calc.parameters?.calculate_dispersion ? "Yes" : "No"}</span>
-                        </div>
-                        <div className="detail-item">
-                          <label>Source SCF</label>
-                          <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
-                        </div>
-                      </div>
-                      <div className="calc-actions">
-                        {(calc.result as any)?.phonon_data && (
-                          <button
-                            className="view-phonon-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onViewPhonons((calc.result as any)?.phonon_data);
-                            }}
-                          >
-                            View Phonons
-                          </button>
+              {phononCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                return (
+                  <div key={calc.id} className="calculation-item phonon-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">PHONON</span>
+                        {calc.parameters?.q_path && (
+                          <span className="calc-kpath">{calc.parameters.q_path}</span>
                         )}
+                        <div className="calc-tags">
+                          {getPhononTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
                         <button
-                          className="delete-calc-btn"
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            openDeleteCalcDialog(calc.id, calc.calc_type);
+                            void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
-                          Delete
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
                         </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
                       </div>
                     </div>
-                  )}
-                </div>
-              ))}
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Q-Grid</label>
+                            <span>
+                              {calc.parameters?.q_grid
+                                ? `${calc.parameters.q_grid[0]}×${calc.parameters.q_grid[1]}×${calc.parameters.q_grid[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Modes</label>
+                            <span>{calc.parameters?.n_modes || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Q-Points</label>
+                            <span>{calc.parameters?.n_qpoints || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>DOS</label>
+                            <span>{calc.parameters?.calculate_dos ? "Yes" : "No"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Dispersion</label>
+                            <span>{calc.parameters?.calculate_dispersion ? "Yes" : "No"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                        </div>
+                        <div className="calc-actions">
+                          {(calc.result as any)?.phonon_data && (
+                            <button
+                              className="view-phonon-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewPhonons((calc.result as any)?.phonon_data);
+                              }}
+                            >
+                              View Phonons
+                            </button>
+                          )}
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
         )}
@@ -1405,6 +1521,7 @@ export function ProjectDashboard({
                 const forceConvLabel = formatThreshold(calc.parameters?.forc_conv_thr);
                 const energyConvLabel = formatThreshold(calc.parameters?.etot_conv_thr);
                 const pressValue = Number(calc.parameters?.press);
+                const isPinned = pinnedCalcIds.has(calc.id);
 
                 return (
                   <div key={calc.id} className="calculation-item">
@@ -1439,6 +1556,20 @@ export function ProjectDashboard({
                         </div>
                       </div>
                       <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)

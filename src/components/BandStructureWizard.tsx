@@ -9,6 +9,7 @@ import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import { sortScfByMode, ScfSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
@@ -90,6 +91,7 @@ export function BandStructureWizard({
 
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
+  const [scfSortMode, setScfSortMode] = useState<ScfSortMode>("recent");
 
   // Step 2: K-Path (using BrillouinZoneViewer)
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
@@ -511,6 +513,7 @@ export function BandStructureWizard({
   // Step 1: Select source SCF
   const renderSourceStep = () => {
     const validScfs = scfCalculations.filter(c => c.calc_type === "scf" && c.result?.converged);
+    const sortedScfs = sortScfByMode(validScfs, scfSortMode);
 
     if (validScfs.length === 0) {
       return (
@@ -529,13 +532,26 @@ export function BandStructureWizard({
 
     return (
       <div className="wizard-step source-step">
-        <h3>Select Source SCF Calculation</h3>
+        <div className="source-step-header">
+          <h3>Select Source SCF Calculation</h3>
+          <div className="source-sort-control">
+            <label htmlFor="bands-scf-sort">Sort SCFs</label>
+            <select
+              id="bands-scf-sort"
+              value={scfSortMode}
+              onChange={(e) => setScfSortMode(e.target.value as ScfSortMode)}
+            >
+              <option value="recent">Most Recent</option>
+              <option value="best">Best</option>
+            </select>
+          </div>
+        </div>
         <p className="step-description">
           Choose the SCF calculation to use as the starting point for band structure.
         </p>
 
         <div className="scf-list">
-          {validScfs.map((scf) => (
+          {sortedScfs.map((scf) => (
             <div
               key={scf.id}
               className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
