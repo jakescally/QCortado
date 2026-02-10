@@ -749,7 +749,7 @@ export function BandStructureWizard({
   const renderRunStep = () => {
     return (
       <div className="wizard-step run-step">
-        <h3>Running Band Structure Calculation</h3>
+        <h3>{isRunning ? "Running Band Structure Calculation" : "Band Structure Output"}</h3>
 
         <ProgressBar
           status={progress.status}

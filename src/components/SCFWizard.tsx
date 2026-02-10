@@ -253,9 +253,12 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
   }, [initialPreset, applyPreset]);
 
   const lockedPreset = presetLock && initialPreset ? initialPreset : null;
+  const isOptimizationWizard = lockedPreset === "relax";
+  const wizardTitle = isOptimizationWizard ? "Structure Optimization Wizard" : "SCF Calculation Wizard";
+  const showPresetRow = !lockedPreset || lockedPreset === "relax";
   const showStandardPreset = !lockedPreset || lockedPreset === "standard";
   const showPhononPreset = !lockedPreset || lockedPreset === "phonon";
-  const showRelaxPreset = !lockedPreset || lockedPreset === "relax";
+  const showRelaxPreset = lockedPreset === "relax";
 
   // Collapsed section states
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -771,7 +774,7 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
         <button className="back-btn" onClick={() => handleExitAttempt(onBack)}>
           ← Back
         </button>
-        <h2>SCF Calculation Wizard</h2>
+        <h2>{wizardTitle}</h2>
         <div className="step-indicator">
           <span className={step === "import" ? "active" : "done"}>
             1. Import
@@ -912,42 +915,43 @@ export function SCFWizard({ onBack, qePath, initialCif, initialPreset, presetLoc
                   </h3>
                   {expandedSections.basic && (
                     <div className="param-grid">
-                      {/* Preset buttons */}
-                      <div className="param-row full-width">
-                        <label>Presets</label>
-                        <div className="preset-buttons">
-                          {showStandardPreset && (
-                            <button
-                              type="button"
-                              className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
-                              onClick={() => applyPreset("standard")}
-                              title="Standard SCF calculation"
-                            >
-                              Standard
-                            </button>
-                          )}
-                          {showPhononPreset && (
-                            <button
-                              type="button"
-                              className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
-                              onClick={() => applyPreset("phonon")}
-                              title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
-                            >
-                              Phonon-Ready
-                            </button>
-                          )}
-                          {showRelaxPreset && (
-                            <button
-                              type="button"
-                              className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
-                              onClick={() => applyPreset("relax")}
-                              title="Variable-cell relaxation for structure optimization"
-                            >
-                              Optimize Structure
-                            </button>
-                          )}
+                      {showPresetRow && (
+                        <div className="param-row full-width">
+                          <label>Presets</label>
+                          <div className="preset-buttons">
+                            {showStandardPreset && (
+                              <button
+                                type="button"
+                                className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
+                                onClick={() => applyPreset("standard")}
+                                title="Standard SCF calculation"
+                              >
+                                Standard
+                              </button>
+                            )}
+                            {showPhononPreset && (
+                              <button
+                                type="button"
+                                className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
+                                onClick={() => applyPreset("phonon")}
+                                title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
+                              >
+                                Phonon-Ready
+                              </button>
+                            )}
+                            {showRelaxPreset && (
+                              <button
+                                type="button"
+                                className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
+                                onClick={() => applyPreset("relax")}
+                                title="Variable-cell relaxation for structure optimization"
+                              >
+                                Optimize Structure
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
 
                       <div className="param-row">
                         <label>

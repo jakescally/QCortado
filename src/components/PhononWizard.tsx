@@ -643,7 +643,7 @@ export function PhononWizard({
   const renderRunStep = () => {
     return (
       <div className="wizard-step run-step">
-        <h3>Running Phonon Calculation</h3>
+        <h3>{isRunning ? "Running Phonon Calculation" : "Phonon Output"}</h3>
         <p className="step-description">
           This may take a while depending on system size and q-grid density.
         </p>

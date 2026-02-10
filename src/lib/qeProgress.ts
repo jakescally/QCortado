@@ -84,7 +84,7 @@ export function updateScfProgress(line: string, state: ProgressState): ProgressS
 }
 
 export function updateBandsProgress(line: string, state: ProgressState): ProgressState {
-  let next = { ...state, status: "running" };
+  let next: ProgressState = { ...state, status: "running" };
 
   if (line.includes("Step 1/2: Running NSCF")) {
     return { ...next, percent: 10, phase: "NSCF along k-path" };
