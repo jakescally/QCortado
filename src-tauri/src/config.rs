@@ -13,6 +13,10 @@ pub struct AppConfig {
     /// Path to QE bin directory
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qe_bin_dir: Option<String>,
+    /// Optional command prefix prepended to all QE process launches
+    /// Example: "mpirun" or "srun"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_prefix: Option<String>,
 }
 
 /// Gets the config file path
@@ -61,5 +65,12 @@ pub fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
 pub fn update_qe_path(app: &AppHandle, path: Option<String>) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.qe_bin_dir = path;
+    save_config(app, &config)
+}
+
+/// Updates the global execution prefix and saves
+pub fn update_execution_prefix(app: &AppHandle, prefix: Option<String>) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.execution_prefix = prefix;
     save_config(app, &config)
 }

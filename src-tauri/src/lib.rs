@@ -6,7 +6,8 @@
 //! - Output parsing and result extraction
 //! - Project management
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -30,6 +31,8 @@ use qe::{
 pub struct AppState {
     /// Path to QE bin directory
     pub qe_bin_dir: Mutex<Option<PathBuf>>,
+    /// Optional command prefix prepended before all QE launches
+    pub execution_prefix: Mutex<Option<String>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
 }
@@ -38,9 +41,186 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             qe_bin_dir: Mutex::new(None),
+            execution_prefix: Mutex::new(None),
             project_dir: Mutex::new(None),
         }
     }
+}
+
+fn normalize_execution_prefix(prefix: Option<String>) -> Option<String> {
+    prefix.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn parse_execution_prefix_tokens(prefix: Option<&str>) -> Option<Vec<String>> {
+    let raw = prefix?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let tokens: Vec<String> = raw
+        .split_whitespace()
+        .map(|token| token.to_string())
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
+}
+
+fn command_basename(command: &str) -> String {
+    Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command)
+        .to_string()
+}
+
+fn is_same_command(prefix_command: &str, program: &str) -> bool {
+    command_basename(prefix_command) == command_basename(program)
+}
+
+fn tokio_command_with_prefix(
+    program: impl AsRef<std::ffi::OsStr>,
+    execution_prefix: Option<&str>,
+) -> tokio::process::Command {
+    let program_os = program.as_ref();
+    let program_text = program_os.to_string_lossy().to_string();
+
+    if let Some(tokens) = parse_execution_prefix_tokens(execution_prefix) {
+        let mut command = if is_same_command(&tokens[0], &program_text) {
+            tokio::process::Command::new(program_os)
+        } else {
+            let mut cmd = tokio::process::Command::new(&tokens[0]);
+            cmd.args(tokens.iter().skip(1));
+            cmd.arg(program_os);
+            return cmd;
+        };
+        command.args(tokens.iter().skip(1));
+        return command;
+    }
+
+    tokio::process::Command::new(program_os)
+}
+
+fn std_command_with_prefix(
+    program: impl AsRef<std::ffi::OsStr>,
+    execution_prefix: Option<&str>,
+) -> std::process::Command {
+    let program_os = program.as_ref();
+    let program_text = program_os.to_string_lossy().to_string();
+
+    if let Some(tokens) = parse_execution_prefix_tokens(execution_prefix) {
+        let mut command = if is_same_command(&tokens[0], &program_text) {
+            std::process::Command::new(program_os)
+        } else {
+            let mut cmd = std::process::Command::new(&tokens[0]);
+            cmd.args(tokens.iter().skip(1));
+            cmd.arg(program_os);
+            return cmd;
+        };
+        command.args(tokens.iter().skip(1));
+        return command;
+    }
+
+    std::process::Command::new(program_os)
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TempCleanupResult {
+    pub removed_paths: Vec<String>,
+    pub failed_paths: Vec<String>,
+    pub bytes_freed: u64,
+}
+
+fn estimate_path_size_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+
+    if meta.is_dir() {
+        let mut total = 0u64;
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                total = total.saturating_add(estimate_path_size_bytes(&entry.path()));
+            }
+        }
+        total
+    } else {
+        meta.len()
+    }
+}
+
+fn temp_roots_for_cleanup() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let candidates = vec![PathBuf::from("/tmp"), std::env::temp_dir()];
+
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        let normalized = candidate.canonicalize().unwrap_or(candidate);
+        if seen.insert(normalized.clone()) {
+            roots.push(normalized);
+        }
+    }
+
+    roots
+}
+
+/// Clears QCortado temporary working directories from system temp roots.
+#[tauri::command]
+fn clear_temp_storage() -> Result<TempCleanupResult, String> {
+    let mut removed_paths: Vec<String> = Vec::new();
+    let mut failed_paths: Vec<String> = Vec::new();
+    let mut bytes_freed: u64 = 0;
+
+    for root in temp_roots_for_cleanup() {
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.to_ascii_lowercase().starts_with("qcortado") {
+                continue;
+            }
+
+            let path = entry.path();
+            let size_bytes = estimate_path_size_bytes(&path);
+            let path_text = path.display().to_string();
+
+            let remove_result = match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => std::fs::remove_dir_all(&path),
+                Ok(_) => std::fs::remove_file(&path),
+                Err(err) => Err(err),
+            };
+
+            match remove_result {
+                Ok(_) => {
+                    bytes_freed = bytes_freed.saturating_add(size_bytes);
+                    removed_paths.push(path_text);
+                }
+                Err(err) => {
+                    failed_paths.push(format!("{} ({})", path_text, err));
+                }
+            }
+        }
+    }
+
+    Ok(TempCleanupResult {
+        removed_paths,
+        failed_paths,
+        bytes_freed,
+    })
 }
 
 // ============================================================================
@@ -78,6 +258,24 @@ fn get_qe_path(state: State<AppState>) -> Option<String> {
         .unwrap()
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Sets a command prefix prepended to all QE launches (e.g. "mpirun").
+#[tauri::command]
+fn set_execution_prefix(
+    app: AppHandle,
+    prefix: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let normalized = normalize_execution_prefix(prefix);
+    *state.execution_prefix.lock().unwrap() = normalized.clone();
+    config::update_execution_prefix(&app, normalized)
+}
+
+/// Gets the currently configured command prefix used for QE launches.
+#[tauri::command]
+fn get_execution_prefix(state: State<AppState>) -> Option<String> {
+    state.execution_prefix.lock().unwrap().clone()
 }
 
 /// Checks if QE is configured and which executables are available.
@@ -200,8 +398,9 @@ fn get_cpu_count() -> usize {
 
 /// Checks if mpirun is available on the system.
 #[tauri::command]
-fn check_mpi_available() -> bool {
-    std::process::Command::new("mpirun")
+fn check_mpi_available(state: State<AppState>) -> bool {
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+    std_command_with_prefix("mpirun", execution_prefix.as_deref())
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -215,13 +414,14 @@ async fn run_calculation(
     working_dir: String,
     state: State<'_, AppState>,
 ) -> Result<QEResult, String> {
-    // Clone the path out of the guard before any await points
+    // Clone state needed before await points
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
 
-    let runner = QERunner::new(bin_dir);
+    let runner = QERunner::new(bin_dir).with_execution_prefix(execution_prefix);
     let input = generate_pw_input(&calculation);
     let work_path = PathBuf::from(working_dir);
 
@@ -256,11 +456,12 @@ async fn run_calculation_streaming(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    // Clone the path out of the guard before any await points
+    // Clone state out of the guard before any await points
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
 
     let input = generate_pw_input(&calculation);
     let work_path = PathBuf::from(&working_dir);
@@ -282,7 +483,7 @@ async fn run_calculation_streaming(
                 "qe-output-line",
                 format!("Starting pw.x with MPI ({} processes)...", mpi.nprocs),
             );
-            tokio::process::Command::new("mpirun")
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
                 .current_dir(&work_path)
@@ -293,7 +494,7 @@ async fn run_calculation_streaming(
                 .map_err(|e| format!("Failed to start mpirun: {}. Is MPI installed?", e))?
         } else {
             // Serial mode
-            tokio::process::Command::new(&exe_path)
+            tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -303,7 +504,7 @@ async fn run_calculation_streaming(
         }
     } else {
         // No MPI config provided - serial mode
-        tokio::process::Command::new(&exe_path)
+        tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
             .current_dir(&work_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -478,11 +679,12 @@ async fn run_bands_calculation(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    // Clone the path out of the guard before any await points
+    // Clone state out of the guard before any await points
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
 
     let work_path = PathBuf::from(&working_dir);
 
@@ -618,7 +820,11 @@ async fn run_bands_calculation(
         );
     }
 
-    let projections_enabled = config.projections.as_ref().map(|p| p.enabled).unwrap_or(false);
+    let projections_enabled = config
+        .projections
+        .as_ref()
+        .map(|p| p.enabled)
+        .unwrap_or(false);
     let total_steps = if projections_enabled { 3 } else { 2 };
 
     let _ = app.emit(
@@ -642,7 +848,7 @@ async fn run_bands_calculation(
                 "qe-output-line",
                 format!("Using MPI with {} processes", mpi.nprocs),
             );
-            tokio::process::Command::new("mpirun")
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
                 .current_dir(&work_path)
@@ -652,7 +858,7 @@ async fn run_bands_calculation(
                 .spawn()
                 .map_err(|e| format!("Failed to start mpirun: {}", e))?
         } else {
-            tokio::process::Command::new(&exe_path)
+            tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -661,7 +867,7 @@ async fn run_bands_calculation(
                 .map_err(|e| format!("Failed to start pw.x: {}", e))?
         }
     } else {
-        tokio::process::Command::new(&exe_path)
+        tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
             .current_dir(&work_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -738,7 +944,7 @@ async fn run_bands_calculation(
     std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
         .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
 
-    let mut bands_child = tokio::process::Command::new(&bands_x_path)
+    let mut bands_child = tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
         .current_dir(&work_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -841,24 +1047,29 @@ async fn run_bands_calculation(
                 prefix: bands_calc.prefix.clone(),
                 outdir: bands_calc.outdir.clone(),
                 filproj: "bands.projwfc.dat".to_string(),
-                lsym: projection_options.and_then(|opts| opts.lsym).unwrap_or(false),
+                lsym: projection_options
+                    .and_then(|opts| opts.lsym)
+                    .unwrap_or(false),
                 diag_basis: projection_options
                     .and_then(|opts| opts.diag_basis)
                     .unwrap_or(false),
-                pawproj: projection_options.and_then(|opts| opts.pawproj).unwrap_or(false),
+                pawproj: projection_options
+                    .and_then(|opts| opts.pawproj)
+                    .unwrap_or(false),
             };
             let projwfc_input = generate_projwfc_input(&projwfc_config);
 
             std::fs::write(work_path.join("projwfc.in"), &projwfc_input)
                 .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
 
-            let mut projwfc_child = tokio::process::Command::new(&projwfc_x_path)
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
+            let mut projwfc_child =
+                tokio_command_with_prefix(&projwfc_x_path, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
 
             if let Some(mut stdin) = projwfc_child.stdin.take() {
                 stdin
@@ -874,7 +1085,11 @@ async fn run_bands_calculation(
             let mut projwfc_reader = BufReader::new(projwfc_stdout).lines();
             let mut projwfc_output = String::new();
 
-            while let Some(line) = projwfc_reader.next_line().await.map_err(|e| e.to_string())? {
+            while let Some(line) = projwfc_reader
+                .next_line()
+                .await
+                .map_err(|e| e.to_string())?
+            {
                 projwfc_output.push_str(&line);
                 projwfc_output.push('\n');
                 let _ = app.emit("qe-output-line", &line);
@@ -896,7 +1111,8 @@ async fn run_bands_calculation(
                 let projection_text = {
                     let filproj_path = work_path.join(&projwfc_config.filproj);
                     if filproj_path.exists() {
-                        std::fs::read_to_string(&filproj_path).unwrap_or_else(|_| projwfc_output.clone())
+                        std::fs::read_to_string(&filproj_path)
+                            .unwrap_or_else(|_| projwfc_output.clone())
                     } else {
                         projwfc_output.clone()
                     }
@@ -975,11 +1191,12 @@ async fn run_phonon_calculation(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    // Get QE bin directory
+    // Get QE runtime settings
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
 
     let work_path = PathBuf::from(&working_dir);
 
@@ -1048,7 +1265,7 @@ async fn run_phonon_calculation(
                 "qe-output-line",
                 format!("Using MPI with {} processes", mpi.nprocs),
             );
-            tokio::process::Command::new("mpirun")
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&ph_exe)
                 .current_dir(&work_path)
@@ -1058,7 +1275,7 @@ async fn run_phonon_calculation(
                 .spawn()
                 .map_err(|e| format!("Failed to start mpirun: {}", e))?
         } else {
-            tokio::process::Command::new(&ph_exe)
+            tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1067,7 +1284,7 @@ async fn run_phonon_calculation(
                 .map_err(|e| format!("Failed to start ph.x: {}", e))?
         }
     } else {
-        tokio::process::Command::new(&ph_exe)
+        tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
             .current_dir(&work_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1150,7 +1367,7 @@ async fn run_phonon_calculation(
     std::fs::write(work_path.join("q2r.in"), &q2r_input)
         .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
 
-    let mut q2r_child = tokio::process::Command::new(&q2r_exe)
+    let mut q2r_child = tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
         .current_dir(&work_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1230,13 +1447,14 @@ async fn run_phonon_calculation(
         std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
             .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
 
-        let mut matdyn_dos_child = tokio::process::Command::new(&matdyn_exe)
-            .current_dir(&work_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+        let mut matdyn_dos_child =
+            tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
 
         if let Some(mut stdin) = matdyn_dos_child.stdin.take() {
             stdin
@@ -1344,13 +1562,14 @@ async fn run_phonon_calculation(
             std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
                 .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
 
-            let mut matdyn_bands_child = tokio::process::Command::new(&matdyn_exe)
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+            let mut matdyn_bands_child =
+                tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
 
             if let Some(mut stdin) = matdyn_bands_child.stdin.take() {
                 stdin
@@ -1473,6 +1692,7 @@ pub fn run() {
 
             // Load saved configuration
             let mut qe_bin_dir: Option<PathBuf> = None;
+            let mut execution_prefix: Option<String> = None;
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
                     if let Some(path) = cfg.qe_bin_dir {
@@ -1482,6 +1702,7 @@ pub fn run() {
                             qe_bin_dir = Some(path_buf);
                         }
                     }
+                    execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to load config: {}", e);
@@ -1491,6 +1712,7 @@ pub fn run() {
             // Initialize AppState with loaded config
             app.manage(AppState {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
+                execution_prefix: Mutex::new(execution_prefix),
                 project_dir: Mutex::new(None),
             });
 
@@ -1499,6 +1721,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_qe_path,
             get_qe_path,
+            set_execution_prefix,
+            get_execution_prefix,
+            clear_temp_storage,
             check_qe_executables,
             generate_input,
             validate_calculation,

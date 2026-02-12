@@ -80,6 +80,12 @@ interface DisplayCellMetrics {
   gamma: number;
 }
 
+interface TempCleanupResult {
+  removed_paths: string[];
+  failed_paths: string[];
+  bytes_freed: number;
+}
+
 type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
 
 const CONFIRM_TEXT = "delete my project for good";
@@ -453,6 +459,11 @@ export function ProjectDashboard({
   // Settings menu state
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const [executionPrefixInput, setExecutionPrefixInput] = useState("");
+  const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
+  const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
+  const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
+  const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
 
   // Delete project confirmation dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -477,6 +488,10 @@ export function ProjectDashboard({
     loadProject();
   }, [projectId]);
 
+  useEffect(() => {
+    void loadExecutionPrefix();
+  }, []);
+
   // Close settings menu when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -487,6 +502,70 @@ export function ProjectDashboard({
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  async function loadExecutionPrefix() {
+    try {
+      const prefix = await invoke<string | null>("get_execution_prefix");
+      setExecutionPrefixInput(prefix ?? "");
+    } catch (e) {
+      console.error("Failed to load execution prefix:", e);
+    }
+  }
+
+  async function saveExecutionPrefix() {
+    const normalized = executionPrefixInput.trim();
+    setIsSavingExecutionPrefix(true);
+    setPrefixStatus(null);
+    try {
+      await invoke("set_execution_prefix", {
+        prefix: normalized.length > 0 ? normalized : null,
+      });
+      setExecutionPrefixInput(normalized);
+      setPrefixStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save execution prefix:", e);
+      setPrefixStatus("Failed to save");
+    } finally {
+      setIsSavingExecutionPrefix(false);
+    }
+  }
+
+  function formatBytes(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unitIdx = 0;
+    while (value >= 1024 && unitIdx < units.length - 1) {
+      value /= 1024;
+      unitIdx += 1;
+    }
+    const precision = value >= 10 || unitIdx === 0 ? 0 : 1;
+    return `${value.toFixed(precision)} ${units[unitIdx]}`;
+  }
+
+  async function clearTempStorage() {
+    setIsClearingTempStorage(true);
+    setTempStorageStatus(null);
+    try {
+      const result = await invoke<TempCleanupResult>("clear_temp_storage");
+      if (result.failed_paths.length > 0) {
+        setTempStorageStatus(
+          `Removed ${result.removed_paths.length} item(s), but ${result.failed_paths.length} item(s) could not be removed.`,
+        );
+      } else if (result.removed_paths.length > 0) {
+        setTempStorageStatus(
+          `Cleared ${formatBytes(result.bytes_freed)} from ${result.removed_paths.length} item(s).`,
+        );
+      } else {
+        setTempStorageStatus("No QCortado temporary data found.");
+      }
+    } catch (e) {
+      console.error("Failed to clear temp storage:", e);
+      setTempStorageStatus(`Failed to clear temporary storage: ${e}`);
+    } finally {
+      setIsClearingTempStorage(false);
+    }
+  }
 
   async function loadProject() {
     setIsLoading(true);
@@ -968,6 +1047,60 @@ export function ProjectDashboard({
     }
   }, [hasPrimitiveDisplay, cellViewMode]);
 
+  function renderSettingsMenu() {
+    return (
+      <div className="floating-settings-menu">
+        <div className="settings-menu-section">
+          <label className="settings-menu-label" htmlFor="execution-prefix-input">
+            Command Prefix
+          </label>
+          <input
+            id="execution-prefix-input"
+            className="settings-menu-input"
+            value={executionPrefixInput}
+            onChange={(e) => {
+              setExecutionPrefixInput(e.target.value);
+              setPrefixStatus(null);
+            }}
+            placeholder="e.g. mpirun"
+          />
+          <p className="settings-menu-hint">
+            Prepended before every QE executable launch.
+          </p>
+          <button
+            className="settings-menu-item"
+            onClick={saveExecutionPrefix}
+            disabled={isSavingExecutionPrefix}
+          >
+            {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
+          </button>
+          {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
+        </div>
+        <div className="settings-menu-divider" />
+        <div className="settings-menu-section">
+          <label className="settings-menu-label">Temporary Storage</label>
+          <p className="settings-menu-hint">
+            Remove `/tmp` and system temp QCortado working folders.
+          </p>
+          <button
+            className="settings-menu-item warning"
+            onClick={clearTempStorage}
+            disabled={isClearingTempStorage}
+          >
+            {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
+          </button>
+          {tempStorageStatus && (
+            <div className="settings-menu-status">{tempStorageStatus}</div>
+          )}
+        </div>
+        <div className="settings-menu-divider" />
+        <button className="settings-menu-item danger" onClick={openDeleteDialog}>
+          Delete Project
+        </button>
+      </div>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="dashboard-container">
@@ -1056,11 +1189,7 @@ export function ProjectDashboard({
           </button>
 
           {showSettingsMenu && (
-            <div className="floating-settings-menu">
-              <button className="settings-menu-item danger" onClick={openDeleteDialog}>
-                Delete Project
-              </button>
-            </div>
+            renderSettingsMenu()
           )}
         </div>
 
@@ -1838,11 +1967,7 @@ export function ProjectDashboard({
         </button>
 
         {showSettingsMenu && (
-          <div className="floating-settings-menu">
-            <button className="settings-menu-item danger" onClick={openDeleteDialog}>
-              Delete Project
-            </button>
-          </div>
+          renderSettingsMenu()
         )}
       </div>
 

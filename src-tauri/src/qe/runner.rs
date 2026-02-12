@@ -37,6 +37,8 @@ pub struct QERunner {
     pub nprocs: u32,
     /// MPI command (e.g., "mpirun", "mpiexec", "srun")
     pub mpi_command: Option<String>,
+    /// Optional command prefix prepended before launches
+    pub execution_prefix: Option<String>,
 }
 
 impl QERunner {
@@ -46,6 +48,7 @@ impl QERunner {
             qe_bin_dir: qe_bin_dir.into(),
             nprocs: 0,
             mpi_command: None,
+            execution_prefix: None,
         }
     }
 
@@ -54,6 +57,67 @@ impl QERunner {
         self.nprocs = nprocs;
         self.mpi_command = command;
         self
+    }
+
+    /// Sets an optional execution prefix prepended before all launches.
+    pub fn with_execution_prefix(mut self, prefix: Option<String>) -> Self {
+        self.execution_prefix = prefix.and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        self
+    }
+
+    fn parse_execution_prefix_tokens(&self) -> Option<Vec<String>> {
+        let raw = self.execution_prefix.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let tokens: Vec<String> = raw
+            .split_whitespace()
+            .map(|token| token.to_string())
+            .collect();
+        if tokens.is_empty() {
+            None
+        } else {
+            Some(tokens)
+        }
+    }
+
+    fn command_basename(command: &str) -> String {
+        std::path::Path::new(command)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(command)
+            .to_string()
+    }
+
+    fn is_same_command(prefix_command: &str, command: &str) -> bool {
+        Self::command_basename(prefix_command) == Self::command_basename(command)
+    }
+
+    fn command_with_prefix(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        let program_os = program.as_ref();
+        let program_text = program_os.to_string_lossy().to_string();
+
+        if let Some(tokens) = self.parse_execution_prefix_tokens() {
+            let mut command = if Self::is_same_command(&tokens[0], &program_text) {
+                Command::new(program_os)
+            } else {
+                let mut cmd = Command::new(&tokens[0]);
+                cmd.args(tokens.iter().skip(1));
+                cmd.arg(program_os);
+                return cmd;
+            };
+            command.args(tokens.iter().skip(1));
+            return command;
+        }
+
+        Command::new(program_os)
     }
 
     /// Gets the path to a QE executable.
@@ -125,12 +189,12 @@ impl QERunner {
         // Build the command
         let mut cmd = if self.nprocs > 0 {
             let mpi = self.mpi_command.as_deref().unwrap_or("mpirun");
-            let mut c = Command::new(mpi);
+            let mut c = self.command_with_prefix(mpi);
             c.args(["-np", &self.nprocs.to_string()]);
             c.arg(&exe_path);
             c
         } else {
-            Command::new(&exe_path)
+            self.command_with_prefix(&exe_path)
         };
 
         cmd.current_dir(working_dir)

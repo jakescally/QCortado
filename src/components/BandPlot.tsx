@@ -135,6 +135,70 @@ function bandColorForIndex(
   return rainbowPalette === "jet" ? jetColor(t) : sinebowColor(t);
 }
 
+function createZeroWeightGrid(nBands: number, nKpoints: number): number[][] {
+  return Array.from({ length: nBands }, () => Array(nKpoints).fill(0));
+}
+
+function addWeightsInPlace(target: number[][], source: number[][]): void {
+  for (let bandIndex = 0; bandIndex < target.length; bandIndex += 1) {
+    const sourceBand = source[bandIndex];
+    if (!sourceBand) continue;
+    for (let kIndex = 0; kIndex < target[bandIndex].length; kIndex += 1) {
+      const value = sourceBand[kIndex];
+      if (Number.isFinite(value)) {
+        target[bandIndex][kIndex] += value;
+      }
+    }
+  }
+}
+
+function parseElementIdentityFromGroup(group: BandProjectionGroup): {
+  key: string;
+  display: string;
+} {
+  const label = group.label.trim();
+  const symbolFromParentheses = label.match(/\(([A-Za-z][A-Za-z]?)\)/)?.[1];
+  const symbolFromElementId = group.id.startsWith("element-")
+    ? group.id.slice("element-".length)
+    : "";
+  const fallbackToken = label.split(/\s+/)[0] ?? group.id;
+  const rawSymbol =
+    symbolFromParentheses ||
+    symbolFromElementId ||
+    fallbackToken.match(/^([A-Za-z][A-Za-z]?)/)?.[1] ||
+    "X";
+
+  const normalized =
+    rawSymbol.length <= 1
+      ? rawSymbol.toUpperCase()
+      : rawSymbol.charAt(0).toUpperCase() + rawSymbol.slice(1).toLowerCase();
+  return { key: normalized.toLowerCase(), display: normalized };
+}
+
+function aggregateElementProjectionGroups(
+  groups: BandProjectionGroup[],
+  nBands: number,
+  nKpoints: number,
+): BandProjectionGroup[] {
+  const grouped = new Map<string, BandProjectionGroup>();
+  for (const group of groups) {
+    const element = parseElementIdentityFromGroup(group);
+    let aggregate = grouped.get(element.key);
+    if (!aggregate) {
+      aggregate = {
+        id: `element-${element.key}`,
+        label: `${element.display} total`,
+        kind: "atom",
+        weights: createZeroWeightGrid(nBands, nKpoints),
+      };
+      grouped.set(element.key, aggregate);
+    }
+    addWeightsInPlace(aggregate.weights, group.weights);
+  }
+
+  return Array.from(grouped.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
+
 function Tooltip({ text }: { text: string }) {
   return (
     <span className="tooltip-container">
@@ -281,10 +345,11 @@ export function BandPlot({
   const projectionGroups = useMemo(() => {
     if (!hasProjectionData) return [];
     if (projectionMode === "atom") {
-      return data.projections?.atom_groups ?? [];
+      const atomGroups = data.projections?.atom_groups ?? [];
+      return aggregateElementProjectionGroups(atomGroups, data.n_bands, data.n_kpoints);
     }
     return data.projections?.orbital_groups ?? [];
-  }, [data.projections, hasProjectionData, projectionMode]);
+  }, [data.projections, data.n_bands, data.n_kpoints, hasProjectionData, projectionMode]);
 
   useEffect(() => {
     if (projectionGroups.length === 0) {
@@ -738,7 +803,7 @@ export function BandPlot({
                     <div className="band-control-row">
                       <label>
                         Projection Group Type
-                        <Tooltip text="Choose whether projection weights are grouped by atom index/symbol or by orbital angular momentum (s/p/d/f)." />
+                        <Tooltip text="Choose whether projection weights are grouped by chemical element totals (all sites summed) or by orbital angular momentum (s/p/d/f)." />
                       </label>
                       <select
                         value={projectionMode}
@@ -746,7 +811,7 @@ export function BandPlot({
                           setProjectionMode(event.target.value as ProjectionMode)
                         }
                       >
-                        <option value="atom">By atom</option>
+                        <option value="atom">By element</option>
                         <option value="orbital">By orbital</option>
                       </select>
                     </div>
@@ -754,7 +819,7 @@ export function BandPlot({
                     <div className="band-control-row">
                       <label>
                         Selected Contribution
-                        <Tooltip text="The selected atom or orbital channel whose projection weights are used for fat-band sizing." />
+                        <Tooltip text="The selected element-total or orbital channel whose projection weights are used for fat-band sizing." />
                       </label>
                       <select
                         value={selectedProjectionId}

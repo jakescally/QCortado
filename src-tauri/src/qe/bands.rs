@@ -5,8 +5,8 @@
 //! - Output parsing for bands.dat.gnu file
 //! - Types for band structure data
 
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 use std::path::Path;
@@ -304,8 +304,8 @@ pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, Str
 
 #[derive(Debug, Clone)]
 struct StateProjectionInfo {
-    atom_index: usize,
-    atom_symbol: String,
+    atom_symbol_key: String,
+    atom_symbol_display: String,
     orbital: String,
 }
 
@@ -319,6 +319,34 @@ fn orbital_label_from_l(l: Option<usize>) -> String {
         Some(value) => format!("l{}", value),
         None => "other".to_string(),
     }
+}
+
+fn normalize_element_symbol(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let mut letters = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphabetic() {
+            letters.push(ch);
+            if letters.len() >= 2 {
+                break;
+            }
+        } else if !letters.is_empty() {
+            break;
+        }
+    }
+
+    if letters.is_empty() {
+        return ("x".to_string(), "X".to_string());
+    }
+
+    let mut chars = letters.chars();
+    let first = chars.next().unwrap().to_ascii_uppercase();
+    let second = chars.next().map(|ch| ch.to_ascii_lowercase());
+    let display = match second {
+        Some(ch) => format!("{}{}", first, ch),
+        None => first.to_string(),
+    };
+    (display.to_ascii_lowercase(), display)
 }
 
 fn commit_projection_buffer(
@@ -355,7 +383,7 @@ fn commit_projection_buffer(
     committed
 }
 
-/// Parse projwfc projection text (from `filproj` output) into atom and orbital groups.
+/// Parse projwfc projection text (from `filproj` output) into element-total and orbital groups.
 ///
 /// The parser is intentionally tolerant to formatting differences across QE versions.
 pub fn parse_projwfc_projection_groups(
@@ -368,9 +396,11 @@ pub fn parse_projwfc_projection_groups(
     }
 
     let state_re = Regex::new(
-        r"state\s*#\s*(\d+)\s*:\s*atom\s*(\d+)\s*\(\s*([A-Za-z0-9_+\-]+)\s*\).*?(?:l\s*=\s*(\d+))?",
+        r"^\s*state\s*#\s*(\d+)\s*:\s*atom\s*\d+\s*\(\s*([A-Za-z0-9_+\-]+)\s*\)(.*)$",
     )
     .map_err(|e| format!("Failed to build state regex: {}", e))?;
+    let l_re = Regex::new(r"(?i)\bl\s*=\s*(\d+)")
+        .map_err(|e| format!("Failed to build angular-momentum regex: {}", e))?;
     let k_re = Regex::new(r"^\s*k\s*=\s*[-\d.Ee+]+\s+[-\d.Ee+]+\s+[-\d.Ee+]+")
         .map_err(|e| format!("Failed to build k-point regex: {}", e))?;
     let band_re = Regex::new(r"e\(\s*(\d+)\s*\)\s*=\s*[-\d.Ee+]+\s*eV")
@@ -381,24 +411,29 @@ pub fn parse_projwfc_projection_groups(
     .map_err(|e| format!("Failed to build coefficient regex: {}", e))?;
 
     let mut states: HashMap<usize, StateProjectionInfo> = HashMap::new();
-    for caps in state_re.captures_iter(content) {
+    for line in content.lines() {
+        let Some(caps) = state_re.captures(line) else {
+            continue;
+        };
         let Some(state_id) = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok()) else {
             continue;
         };
-        let Some(atom_index) = caps.get(2).and_then(|m| m.as_str().parse::<usize>().ok()) else {
-            continue;
-        };
         let atom_symbol = caps
-            .get(3)
+            .get(2)
             .map(|m| m.as_str().trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "X".to_string());
-        let l_value = caps.get(4).and_then(|m| m.as_str().parse::<usize>().ok());
+        let tail = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+        let l_value = l_re
+            .captures(tail)
+            .and_then(|m| m.get(1))
+            .and_then(|m| m.as_str().parse::<usize>().ok());
+        let (atom_symbol_key, atom_symbol_display) = normalize_element_symbol(&atom_symbol);
         states.insert(
             state_id,
             StateProjectionInfo {
-                atom_index,
-                atom_symbol,
+                atom_symbol_key,
+                atom_symbol_display,
                 orbital: orbital_label_from_l(l_value),
             },
         );
@@ -408,20 +443,21 @@ pub fn parse_projwfc_projection_groups(
         return Err("No projection state definitions found in projwfc output".to_string());
     }
 
-    let mut atom_labels: BTreeMap<usize, String> = BTreeMap::new();
+    // Aggregate "atom groups" by chemical species (element) so users get total Ni / total Si etc.
+    let mut atom_labels: BTreeMap<String, String> = BTreeMap::new();
     let mut orbital_labels: BTreeSet<String> = BTreeSet::new();
     for info in states.values() {
         atom_labels
-            .entry(info.atom_index)
-            .or_insert_with(|| info.atom_symbol.clone());
+            .entry(info.atom_symbol_key.clone())
+            .or_insert_with(|| info.atom_symbol_display.clone());
         orbital_labels.insert(info.orbital.clone());
     }
 
     let mut atom_groups: Vec<BandProjectionGroup> = atom_labels
         .iter()
-        .map(|(atom_idx, atom_symbol)| BandProjectionGroup {
-            id: format!("atom-{}-{}", atom_idx, atom_symbol),
-            label: format!("Atom {} ({})", atom_idx, atom_symbol),
+        .map(|(atom_key, atom_symbol)| BandProjectionGroup {
+            id: format!("element-{}", atom_key),
+            label: format!("{} total", atom_symbol),
             kind: "atom".to_string(),
             weights: vec![vec![0.0; n_kpoints]; n_bands],
         })
@@ -436,10 +472,10 @@ pub fn parse_projwfc_projection_groups(
         })
         .collect();
 
-    let atom_lookup: HashMap<usize, usize> = atom_labels
+    let atom_lookup: HashMap<String, usize> = atom_labels
         .keys()
         .enumerate()
-        .map(|(idx, atom_idx)| (*atom_idx, idx))
+        .map(|(idx, atom_key)| (atom_key.clone(), idx))
         .collect();
     let orbital_lookup: HashMap<String, usize> = orbital_labels
         .iter()
@@ -449,7 +485,7 @@ pub fn parse_projwfc_projection_groups(
 
     let mut state_to_groups: HashMap<usize, (usize, usize)> = HashMap::new();
     for (state_id, info) in &states {
-        let Some(atom_group_idx) = atom_lookup.get(&info.atom_index).copied() else {
+        let Some(atom_group_idx) = atom_lookup.get(&info.atom_symbol_key).copied() else {
             continue;
         };
         let Some(orbital_group_idx) = orbital_lookup.get(&info.orbital).copied() else {
@@ -541,7 +577,9 @@ pub fn parse_projwfc_projection_groups(
     }
 
     if committed_blocks == 0 {
-        return Err("No k-point/band projection blocks were parsed from projwfc output".to_string());
+        return Err(
+            "No k-point/band projection blocks were parsed from projwfc output".to_string(),
+        );
     }
 
     Ok(BandProjectionData {
@@ -749,14 +787,14 @@ state #   2: atom   2 (B  ) wfc  2 (l=1 m=1)
         assert_eq!(parsed.atom_groups.len(), 2);
         assert_eq!(parsed.orbital_groups.len(), 2);
 
-        // Atom 1 has weight on band 1 at both k-points.
-        let atom1 = parsed
+        // Element-total Si channel has weight on band 1 at both k-points.
+        let si_total = parsed
             .atom_groups
             .iter()
-            .find(|group| group.id.contains("atom-1"))
+            .find(|group| group.id == "element-si")
             .unwrap();
-        assert!(atom1.weights[0][0] > 0.0);
-        assert!(atom1.weights[0][1] > 0.0);
+        assert!(si_total.weights[0][0] > 0.0);
+        assert!(si_total.weights[0][1] > 0.0);
 
         // Orbital p channel should have contributions on both bands.
         let p_orbital = parsed
@@ -766,5 +804,26 @@ state #   2: atom   2 (B  ) wfc  2 (l=1 m=1)
             .unwrap();
         assert!(p_orbital.weights[0][0] > 0.0);
         assert!(p_orbital.weights[1][0] > 0.0);
+    }
+
+    #[test]
+    fn test_parse_projwfc_projection_groups_merges_sites_by_element() {
+        let content = r#"
+state #   1: atom   1 (Ni1) wfc  1 (l=2 m=1)
+state #   2: atom   2 (Ni2) wfc  2 (l=2 m=2)
+
+ k = 0.0000 0.0000 0.0000
+ e( 1 ) = -1.0000 eV
+ psi = 0.5*[# 1] + 0.75*[# 2]
+"#;
+
+        let parsed = parse_projwfc_projection_groups(content, 1, 1).unwrap();
+        assert_eq!(parsed.atom_groups.len(), 1);
+        let ni_total = parsed
+            .atom_groups
+            .iter()
+            .find(|group| group.id == "element-ni")
+            .unwrap();
+        assert!(ni_total.weights[0][0] > 1.2);
     }
 }

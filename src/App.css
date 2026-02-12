@@ -1741,12 +1741,60 @@ h3 .tooltip-text::after {
   bottom: 100%;
   right: 0;
   margin-bottom: 0.5rem;
-  min-width: 160px;
+  min-width: 300px;
+  max-width: min(360px, calc(100vw - 2rem));
   background: white;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   overflow: hidden;
+}
+
+.settings-menu-section {
+  padding: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.settings-menu-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #4a5568;
+  letter-spacing: 0.2px;
+}
+
+.settings-menu-input {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #2d3748;
+  background: #ffffff;
+}
+
+.settings-menu-input:focus {
+  outline: none;
+  border-color: #4299e1;
+  box-shadow: 0 0 0 2px rgba(66, 153, 225, 0.2);
+}
+
+.settings-menu-hint {
+  margin: 0;
+  font-size: 0.74rem;
+  color: #718096;
+}
+
+.settings-menu-status {
+  font-size: 0.74rem;
+  color: #2b6cb0;
+  margin-top: 0.1rem;
+}
+
+.settings-menu-divider {
+  height: 1px;
+  background: #e2e8f0;
 }
 
 .settings-menu-item {
@@ -1772,6 +1820,14 @@ h3 .tooltip-text::after {
 
 .settings-menu-item.danger:hover {
   background: #fed7d7;
+}
+
+.settings-menu-item.warning {
+  color: #9c4221;
+}
+
+.settings-menu-item.warning:hover {
+  background: #feebc8;
 }
 
 /* Delete Confirmation Dialog */
@@ -2226,6 +2282,33 @@ h3 .tooltip-text::after {
     border-color: #4a5568;
   }
 
+  .settings-menu-label {
+    color: #e2e8f0;
+  }
+
+  .settings-menu-input {
+    background: #1a202c;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .settings-menu-input:focus {
+    border-color: #63b3ed;
+    box-shadow: 0 0 0 2px rgba(99, 179, 237, 0.25);
+  }
+
+  .settings-menu-hint {
+    color: #a0aec0;
+  }
+
+  .settings-menu-status {
+    color: #90cdf4;
+  }
+
+  .settings-menu-divider {
+    background: #4a5568;
+  }
+
   .settings-menu-item {
     color: #e2e8f0;
   }
@@ -2240,6 +2323,14 @@ h3 .tooltip-text::after {
 
   .settings-menu-item.danger:hover {
     background: #742a2a;
+  }
+
+  .settings-menu-item.warning {
+    color: #f6ad55;
+  }
+
+  .settings-menu-item.warning:hover {
+    background: #744210;
   }
 
   .delete-warning p {
