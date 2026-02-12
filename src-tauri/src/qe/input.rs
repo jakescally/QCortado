@@ -19,12 +19,21 @@ pub fn generate_pw_input(calc: &QECalculation) -> String {
     write_electrons_namelist(&mut output, calc);
 
     // &IONS namelist (if relaxation)
-    if matches!(calc.calculation, CalculationType::Relax | CalculationType::VcRelax | CalculationType::Md | CalculationType::VcMd) {
+    if matches!(
+        calc.calculation,
+        CalculationType::Relax
+            | CalculationType::VcRelax
+            | CalculationType::Md
+            | CalculationType::VcMd
+    ) {
         write_ions_namelist(&mut output, calc);
     }
 
     // &CELL namelist (if variable cell)
-    if matches!(calc.calculation, CalculationType::VcRelax | CalculationType::VcMd) {
+    if matches!(
+        calc.calculation,
+        CalculationType::VcRelax | CalculationType::VcMd
+    ) {
         write_cell_namelist(&mut output, calc);
     }
 
@@ -104,12 +113,17 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
     }
 
     if !matches!(sys.occupations, Occupations::Fixed) {
-        writeln!(out, "  occupations = '{}',", match sys.occupations {
-            Occupations::Fixed => "fixed",
-            Occupations::Smearing => "smearing",
-            Occupations::FromInput => "from_input",
-            Occupations::Tetrahedra => "tetrahedra",
-        }).unwrap();
+        writeln!(
+            out,
+            "  occupations = '{}',",
+            match sys.occupations {
+                Occupations::Fixed => "fixed",
+                Occupations::Smearing => "smearing",
+                Occupations::FromInput => "from_input",
+                Occupations::Tetrahedra => "tetrahedra",
+            }
+        )
+        .unwrap();
 
         if matches!(sys.occupations, Occupations::Smearing) {
             writeln!(out, "  smearing = '{}',", sys.smearing.as_str()).unwrap();
@@ -147,7 +161,12 @@ fn write_cell_namelist(out: &mut String, calc: &QECalculation) {
 fn write_atomic_species(out: &mut String, sys: &QESystem) {
     writeln!(out, "ATOMIC_SPECIES").unwrap();
     for species in &sys.species {
-        writeln!(out, "  {} {} {}", species.symbol, species.mass, species.pseudopotential).unwrap();
+        writeln!(
+            out,
+            "  {} {} {}",
+            species.symbol, species.mass, species.pseudopotential
+        )
+        .unwrap();
     }
     writeln!(out).unwrap();
 }
@@ -161,14 +180,19 @@ fn write_atomic_positions(out: &mut String, sys: &QESystem) {
 
         if has_constraints {
             let if_pos: Vec<i32> = atom.if_pos.iter().map(|&b| if b { 1 } else { 0 }).collect();
-            writeln!(out, "  {} {:12.8} {:12.8} {:12.8}  {} {} {}",
-                atom.symbol, pos[0], pos[1], pos[2],
-                if_pos[0], if_pos[1], if_pos[2]
-            ).unwrap();
+            writeln!(
+                out,
+                "  {} {:12.8} {:12.8} {:12.8}  {} {} {}",
+                atom.symbol, pos[0], pos[1], pos[2], if_pos[0], if_pos[1], if_pos[2]
+            )
+            .unwrap();
         } else {
-            writeln!(out, "  {} {:12.8} {:12.8} {:12.8}",
+            writeln!(
+                out,
+                "  {} {:12.8} {:12.8} {:12.8}",
                 atom.symbol, pos[0], pos[1], pos[2]
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
     writeln!(out).unwrap();
@@ -181,45 +205,59 @@ fn write_kpoints(out: &mut String, kpoints: &KPoints) {
         }
         KPoints::Automatic { grid, offset } => {
             writeln!(out, "K_POINTS {{automatic}}").unwrap();
-            writeln!(out, "  {} {} {}  {} {} {}",
-                grid[0], grid[1], grid[2],
-                offset[0], offset[1], offset[2]
-            ).unwrap();
+            writeln!(
+                out,
+                "  {} {} {}  {} {} {}",
+                grid[0], grid[1], grid[2], offset[0], offset[1], offset[2]
+            )
+            .unwrap();
         }
         KPoints::Crystal { points } => {
             writeln!(out, "K_POINTS {{crystal}}").unwrap();
             writeln!(out, "  {}", points.len()).unwrap();
             for kp in points {
-                writeln!(out, "  {:12.8} {:12.8} {:12.8} {:12.8}",
+                writeln!(
+                    out,
+                    "  {:12.8} {:12.8} {:12.8} {:12.8}",
                     kp.k[0], kp.k[1], kp.k[2], kp.weight
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
         KPoints::Tpiba { points } => {
             writeln!(out, "K_POINTS {{tpiba}}").unwrap();
             writeln!(out, "  {}", points.len()).unwrap();
             for kp in points {
-                writeln!(out, "  {:12.8} {:12.8} {:12.8} {:12.8}",
+                writeln!(
+                    out,
+                    "  {:12.8} {:12.8} {:12.8} {:12.8}",
                     kp.k[0], kp.k[1], kp.k[2], kp.weight
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
         KPoints::CrystalB { path } => {
             writeln!(out, "K_POINTS {{crystal_b}}").unwrap();
             writeln!(out, "  {}", path.len()).unwrap();
             for point in path {
-                writeln!(out, "  {:12.8} {:12.8} {:12.8} {}",
+                writeln!(
+                    out,
+                    "  {:12.8} {:12.8} {:12.8} {}",
                     point.k[0], point.k[1], point.k[2], point.npoints
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
         KPoints::TpibaB { path } => {
             writeln!(out, "K_POINTS {{tpiba_b}}").unwrap();
             writeln!(out, "  {}", path.len()).unwrap();
             for point in path {
-                writeln!(out, "  {:12.8} {:12.8} {:12.8} {}",
+                writeln!(
+                    out,
+                    "  {:12.8} {:12.8} {:12.8} {}",
                     point.k[0], point.k[1], point.k[2], point.npoints
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
     }
@@ -249,14 +287,70 @@ pub fn generate_ph_input(calc: &super::types::PhononCalculation) -> String {
     writeln!(output, "  prefix = '{}',", calc.prefix).unwrap();
     writeln!(output, "  outdir = '{}',", calc.outdir).unwrap();
     writeln!(output, "  fildyn = '{}',", calc.fildyn).unwrap();
-    writeln!(output, "  ldisp = .{}.,", if calc.ldisp { "true" } else { "false" }).unwrap();
+    writeln!(
+        output,
+        "  ldisp = .{}.,",
+        if calc.ldisp { "true" } else { "false" }
+    )
+    .unwrap();
     writeln!(output, "  nq1 = {},", calc.nq[0]).unwrap();
     writeln!(output, "  nq2 = {},", calc.nq[1]).unwrap();
     writeln!(output, "  nq3 = {},", calc.nq[2]).unwrap();
     writeln!(output, "  tr2_ph = {:.2e},", calc.tr2_ph).unwrap();
+    writeln!(
+        output,
+        "  trans = .{}.,",
+        if calc.trans { "true" } else { "false" }
+    )
+    .unwrap();
 
     if calc.recover {
         writeln!(output, "  recover = .true.,").unwrap();
+    }
+    if calc.epsil {
+        writeln!(output, "  epsil = .true.,").unwrap();
+    }
+    if calc.fpol {
+        writeln!(output, "  fpol = .true.,").unwrap();
+    }
+    if calc.lraman {
+        writeln!(output, "  lraman = .true.,").unwrap();
+    }
+    if let Some(ref fildvscf) = calc.fildvscf {
+        writeln!(output, "  fildvscf = '{}',", fildvscf).unwrap();
+    }
+    if let Some(ref electron_phonon) = calc.electron_phonon {
+        writeln!(output, "  electron_phonon = '{}',", electron_phonon).unwrap();
+    }
+    if let Some(el_ph_sigma) = calc.el_ph_sigma {
+        writeln!(output, "  el_ph_sigma = {},", el_ph_sigma).unwrap();
+    }
+    if let Some(el_ph_nsigma) = calc.el_ph_nsigma {
+        writeln!(output, "  el_ph_nsigma = {},", el_ph_nsigma).unwrap();
+    }
+    if let Some(nmix_ph) = calc.nmix_ph {
+        writeln!(output, "  nmix_ph = {},", nmix_ph).unwrap();
+    }
+    if let Some(niter_ph) = calc.niter_ph {
+        writeln!(output, "  niter_ph = {},", niter_ph).unwrap();
+    }
+    if let Some(alpha_mix) = calc.alpha_mix {
+        writeln!(output, "  alpha_mix(1) = {},", alpha_mix).unwrap();
+    }
+    if let Some(start_q) = calc.start_q {
+        writeln!(output, "  start_q = {},", start_q).unwrap();
+    }
+    if let Some(last_q) = calc.last_q {
+        writeln!(output, "  last_q = {},", last_q).unwrap();
+    }
+    if let Some(start_irr) = calc.start_irr {
+        writeln!(output, "  start_irr = {},", start_irr).unwrap();
+    }
+    if let Some(last_irr) = calc.last_irr {
+        writeln!(output, "  last_irr = {},", last_irr).unwrap();
+    }
+    if let Some(ref verbosity) = calc.verbosity {
+        writeln!(output, "  verbosity = '{}',", verbosity).unwrap();
     }
 
     writeln!(output, "/").unwrap();
@@ -326,9 +420,12 @@ pub fn generate_matdyn_bands_input(calc: &super::types::MatdynCalculation) -> St
     if let Some(ref q_path) = calc.q_path {
         writeln!(output, "{}", q_path.len()).unwrap();
         for point in q_path {
-            writeln!(output, "  {:12.8} {:12.8} {:12.8} {}",
+            writeln!(
+                output,
+                "  {:12.8} {:12.8} {:12.8} {}",
                 point.coords[0], point.coords[1], point.coords[2], point.npoints
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -413,7 +510,7 @@ mod tests {
             tr2_ph: 1.0e-14,
             ldisp: true,
             recover: false,
-            asr: "crystal".to_string(),
+            ..PhononCalculation::default()
         };
 
         let input = generate_ph_input(&calc);
@@ -485,9 +582,21 @@ mod tests {
             nk: None,
             delta_e: None,
             q_path: Some(vec![
-                QPathPoint { label: "Γ".to_string(), coords: [0.0, 0.0, 0.0], npoints: 20 },
-                QPathPoint { label: "X".to_string(), coords: [0.5, 0.0, 0.5], npoints: 20 },
-                QPathPoint { label: "L".to_string(), coords: [0.5, 0.5, 0.5], npoints: 0 },
+                QPathPoint {
+                    label: "Γ".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 20,
+                },
+                QPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.5],
+                    npoints: 20,
+                },
+                QPathPoint {
+                    label: "L".to_string(),
+                    coords: [0.5, 0.5, 0.5],
+                    npoints: 0,
+                },
             ]),
             flfrq: Some("silicon_freq".to_string()),
         };

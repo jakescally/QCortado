@@ -19,6 +19,7 @@ import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { ProgressBar } from "./ProgressBar";
+import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
 // Tooltip component for help icons
@@ -2078,6 +2079,7 @@ export function SCFWizard({
               phase={progress.phase}
               detail={progress.detail}
             />
+            <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
             <div className="run-layout">
               <div className="output-panel">
                 <h3>{isRunning ? "Running..." : "Output"}</h3>

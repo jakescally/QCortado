@@ -5,10 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
-use crate::qe::{QEResult, read_phonon_dos_file, read_phonon_dispersion_file};
+use crate::qe::{read_phonon_dispersion_file, read_phonon_dos_file, QEResult};
 
 // ============================================================================
 // Types
@@ -134,9 +134,7 @@ fn rand_simple() -> u32 {
 /// Gets the current timestamp as ISO string
 fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap();
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let secs = duration.as_secs();
     // Format as ISO 8601 (simplified)
     let days_since_1970 = secs / 86400;
@@ -222,13 +220,17 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
         // Calculate summary info
-        let calculation_count: usize = project.cif_variants.iter()
+        let calculation_count: usize = project
+            .cif_variants
+            .iter()
             .map(|v| v.calculations.len())
             .sum();
 
         let formula = project.cif_variants.first().map(|v| v.formula.clone());
 
-        let last_activity = project.cif_variants.iter()
+        let last_activity = project
+            .cif_variants
+            .iter()
             .flat_map(|v| v.calculations.iter())
             .filter_map(|c| c.completed_at.as_ref())
             .max()
@@ -304,8 +306,7 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let content = fs::read_to_string(&project_json)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
 
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))
 }
 
 /// Adds a CIF file to a project
@@ -334,14 +335,20 @@ pub fn add_cif_to_project(
     let structures_dir = project_dir.join("structures");
 
     // Save CIF file
-    fs::write(structures_dir.join(format!("{}.cif", cif_id)), &cif_data.content)
-        .map_err(|e| format!("Failed to write CIF file: {}", e))?;
+    fs::write(
+        structures_dir.join(format!("{}.cif", cif_id)),
+        &cif_data.content,
+    )
+    .map_err(|e| format!("Failed to write CIF file: {}", e))?;
 
     // Save parsed crystal data JSON
     let crystal_json = serde_json::to_string_pretty(&cif_data.crystal_data)
         .map_err(|e| format!("Failed to serialize crystal data: {}", e))?;
-    fs::write(structures_dir.join(format!("{}.json", cif_id)), crystal_json)
-        .map_err(|e| format!("Failed to write crystal JSON: {}", e))?;
+    fs::write(
+        structures_dir.join(format!("{}.json", cif_id)),
+        crystal_json,
+    )
+    .map_err(|e| format!("Failed to write crystal JSON: {}", e))?;
 
     let variant = CifVariant {
         id: cif_id,
@@ -386,7 +393,9 @@ pub fn save_calculation(
         .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
     // Find the CIF variant
-    let variant = project.cif_variants.iter_mut()
+    let variant = project
+        .cif_variants
+        .iter_mut()
         .find(|v| v.id == cif_id)
         .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
 
@@ -406,6 +415,19 @@ pub fn save_calculation(
 
     // Copy working directory contents if provided (includes .save directory, etc.)
     let mut copied_work_path: Option<PathBuf> = None;
+    let preserve_full_phonon_artifacts = calc_data.calc_type == "phonon"
+        && calc_data
+            .parameters
+            .get("epw_preparation")
+            .and_then(|value| value.get("preserve_full_artifacts"))
+            .and_then(|value| value.as_bool())
+            .or_else(|| {
+                calc_data
+                    .parameters
+                    .get("preserve_full_artifacts")
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(false);
     if let Some(work_dir) = working_dir {
         let work_path = PathBuf::from(&work_dir);
         if work_path.exists() {
@@ -414,16 +436,24 @@ pub fn save_calculation(
             fs::create_dir_all(&tmp_dir)
                 .map_err(|e| format!("Failed to create tmp directory: {}", e))?;
 
-            // Copy all files and directories from working dir
-            copy_dir_recursive(&work_path, &tmp_dir)?;
+            // For phonons, default to compact artifacts unless EPW-prep explicitly asks for full data.
+            if calc_data.calc_type == "phonon" && !preserve_full_phonon_artifacts {
+                copy_compact_phonon_artifacts(&work_path, &tmp_dir)?;
+            } else {
+                // Copy all files and directories for non-phonon, or EPW-preserving phonon calculations.
+                copy_dir_recursive(&work_path, &tmp_dir)?;
+            }
         }
     }
 
     // For phonons, keep an explicit raw pipeline log and top-level output artifacts
     // so parsing fixes can be applied without depending on intermediate state.
     if calc_data.calc_type == "phonon" {
-        fs::write(calc_dir.join("phonon_pipeline.out"), &calc_data.output_content)
-            .map_err(|e| format!("Failed to write phonon_pipeline.out: {}", e))?;
+        fs::write(
+            calc_dir.join("phonon_pipeline.out"),
+            &calc_data.output_content,
+        )
+        .map_err(|e| format!("Failed to write phonon_pipeline.out: {}", e))?;
 
         if let Some(work_path) = copied_work_path.as_ref() {
             for filename in ["phonon_freq", "phonon_freq.gp", "phonon_dos"] {
@@ -467,8 +497,7 @@ pub fn save_calculation(
 /// Recursively copies a directory
 fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     if !dst.exists() {
-        fs::create_dir_all(dst)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -479,9 +508,165 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
         if path.is_dir() {
             copy_dir_recursive(&path, &dest_path)?;
         } else {
-            fs::copy(&path, &dest_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
+            fs::copy(&path, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
         }
+    }
+
+    Ok(())
+}
+
+/// Copies a file relative to a source root into a destination root, preserving subdirectories.
+fn copy_file_relative_if_exists(
+    src_root: &Path,
+    dst_root: &Path,
+    rel_path: &Path,
+) -> Result<(), String> {
+    let source = src_root.join(rel_path);
+    if !source.exists() || !source.is_file() {
+        return Ok(());
+    }
+
+    let destination = dst_root.join(rel_path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+    }
+    fs::copy(&source, &destination)
+        .map_err(|e| format!("Failed to copy {}: {}", source.display(), e))?;
+    Ok(())
+}
+
+fn parse_dynmat_index(name: &str) -> Option<u32> {
+    let suffix = name.strip_prefix("dynmat")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    suffix.parse::<u32>().ok()
+}
+
+fn find_latest_dynmat_file(tmp_dir: &Path) -> Option<PathBuf> {
+    let mut latest: Option<(u32, PathBuf)> = None;
+
+    let entries = fs::read_dir(tmp_dir).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let idx = match parse_dynmat_index(&name) {
+            Some(i) => i,
+            None => continue,
+        };
+        match latest.as_ref() {
+            Some((current, _)) if *current >= idx => {}
+            _ => latest = Some((idx, path)),
+        }
+    }
+
+    latest.map(|(_, path)| path)
+}
+
+fn count_irreducible_qpoints(tmp_dir: &Path) -> Result<u32, String> {
+    let mut count = 0u32;
+    let entries = fs::read_dir(tmp_dir)
+        .map_err(|e| format!("Failed to read tmp directory {}: {}", tmp_dir.display(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(idx) = parse_dynmat_index(&name) {
+            // dynmat0 is metadata; dynmat1..N are irreducible q-points.
+            if idx > 0 {
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+fn looks_like_completed_phonon_run(tmp_dir: &Path) -> bool {
+    // QE writes this status XML when running with ldisp.
+    let status_xml = tmp_dir
+        .join("_ph0")
+        .join("qcortado_scf.phsave")
+        .join("status_run.xml");
+    if let Ok(content) = fs::read_to_string(&status_xml) {
+        if content.contains("STOPPED_IN") && content.contains("dynmatrix") {
+            return true;
+        }
+        if content.contains("<RECOVER_CODE>30</RECOVER_CODE>") {
+            return true;
+        }
+    }
+
+    if let Some(dynmat_path) = find_latest_dynmat_file(tmp_dir) {
+        if let Ok(content) = fs::read_to_string(dynmat_path) {
+            if content.contains("JOB DONE") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn copy_compact_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(staging_tmp_dir)
+        .map_err(|e| format!("Failed to create staging directory: {}", e))?;
+
+    // Always copy known top-level files if present.
+    let top_level = [
+        "ph.in",
+        "q2r.in",
+        "matdyn_dos.in",
+        "matdyn_bands.in",
+        "phonon_freq",
+        "phonon_freq.gp",
+        "phonon_dos",
+        "force_constants",
+        "ph_recover.stdout",
+        "ph_recover.stderr",
+        "q2r_recheck.stdout",
+        "q2r_recheck.stderr",
+        "matdyn_recheck.stdout",
+        "matdyn_recheck.stderr",
+    ];
+
+    for file in top_level {
+        copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, Path::new(file))?;
+    }
+
+    // Copy all dynmatN files.
+    let entries = fs::read_dir(src_tmp_dir).map_err(|e| {
+        format!(
+            "Failed to read tmp directory {}: {}",
+            src_tmp_dir.display(),
+            e
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if parse_dynmat_index(&name).is_none() {
+            continue;
+        }
+        copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, Path::new(&name))?;
+    }
+
+    // Copy lightweight QE recovery metadata from _ph0 (without heavy wavefunction files).
+    for rel in [
+        "_ph0/qcortado_scf.phsave/status_run.xml",
+        "_ph0/qcortado_scf.phsave/control_ph.xml",
+        "_ph0/qcortado_scf.phsave/patterns.xml",
+        "_ph0/qcortado_scf.save/data-file-schema.xml",
+    ] {
+        copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, Path::new(rel))?;
     }
 
     Ok(())
@@ -490,8 +675,7 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
 /// Copies contents of a directory to another directory (public helper for bands calculation)
 pub fn copy_dir_contents(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     if !dst.exists() {
-        fs::create_dir_all(dst)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -502,12 +686,148 @@ pub fn copy_dir_contents(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
         if path.is_dir() {
             copy_dir_recursive(&path, &dest_path)?;
         } else {
-            fs::copy(&path, &dest_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
+            fs::copy(&path, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
         }
     }
 
     Ok(())
+}
+
+/// Recovers a completed phonon run from an existing temporary working directory
+/// and saves it as a project calculation entry.
+#[tauri::command]
+pub fn recover_phonon_calculation(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    working_dir: String,
+    source_scf_id: Option<String>,
+    q_grid: Option<[u32; 3]>,
+    tr2_ph: Option<f64>,
+    q_path: Option<String>,
+) -> Result<CalculationRun, String> {
+    let tmp_dir = PathBuf::from(&working_dir);
+    if !tmp_dir.exists() || !tmp_dir.is_dir() {
+        return Err(format!(
+            "Recovery directory not found: {}",
+            tmp_dir.display()
+        ));
+    }
+
+    if !looks_like_completed_phonon_run(&tmp_dir) {
+        return Err(
+            "Could not confirm a completed phonon run. Expected JOB DONE in dynmat output or status_run.xml at dynmatrix stage."
+                .to_string(),
+        );
+    }
+
+    let dispersion_source = if tmp_dir.join("phonon_freq.gp").exists() {
+        tmp_dir.join("phonon_freq.gp")
+    } else if tmp_dir.join("phonon_freq").exists() {
+        tmp_dir.join("phonon_freq")
+    } else {
+        return Err("Missing phonon_freq.gp / phonon_freq in recovery directory".to_string());
+    };
+
+    let dispersion = read_phonon_dispersion_file(&dispersion_source).map_err(|e| {
+        format!(
+            "Failed to parse recovered phonon dispersion from {}: {}",
+            dispersion_source.display(),
+            e
+        )
+    })?;
+
+    let dos_data = {
+        let dos_file = tmp_dir.join("phonon_dos");
+        if dos_file.exists() {
+            match read_phonon_dos_file(&dos_file) {
+                Ok(dos) => Some(dos),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+
+    let raw_output = if let Some(dynmat_path) = find_latest_dynmat_file(&tmp_dir) {
+        fs::read_to_string(&dynmat_path).unwrap_or_default()
+    } else {
+        fs::read_to_string(tmp_dir.join("ph_recover.stdout")).unwrap_or_default()
+    };
+
+    let n_modes = dispersion.n_modes;
+    let irreducible_qpoints = count_irreducible_qpoints(&tmp_dir)?;
+    let n_qpoints = if irreducible_qpoints > 0 {
+        irreducible_qpoints
+    } else {
+        dispersion.n_qpoints as u32
+    };
+
+    let mut parameters = serde_json::json!({
+        "source_scf_id": source_scf_id,
+        "q_grid": q_grid,
+        "tr2_ph": tr2_ph,
+        "calculate_dos": dos_data.is_some(),
+        "calculate_dispersion": true,
+        "n_qpoints": n_qpoints,
+        "n_modes": n_modes,
+        "recovered_from_tmp": true,
+        "recovery_source_dir": working_dir,
+    });
+    if let Some(path) = q_path {
+        parameters["q_path"] = serde_json::Value::String(path);
+    }
+
+    let result = QEResult {
+        converged: true,
+        total_energy: None,
+        fermi_energy: None,
+        total_magnetization: None,
+        forces: None,
+        stress: None,
+        n_scf_steps: None,
+        wall_time_seconds: None,
+        eigenvalues: None,
+        raw_output: raw_output.clone(),
+        band_data: None,
+        phonon_data: Some(serde_json::json!({
+            "dos_data": dos_data,
+            "dispersion_data": dispersion,
+        })),
+    };
+
+    let input_content = fs::read_to_string(tmp_dir.join("ph.in")).unwrap_or_default();
+    let completed_at = now_iso();
+    let started_at = completed_at.clone();
+
+    let calc_data = SaveCalculationData {
+        calc_type: "phonon".to_string(),
+        parameters,
+        result,
+        started_at,
+        completed_at,
+        input_content,
+        output_content: raw_output,
+        tags: vec![],
+    };
+
+    // Stage a compact tmp snapshot to avoid copying large wavefunction archives.
+    let staging_tmp_dir =
+        std::env::temp_dir().join(format!("qcortado_phonon_recovery_{}", generate_id()));
+    copy_compact_phonon_artifacts(&tmp_dir, &staging_tmp_dir)?;
+
+    let save_result = save_calculation(
+        app,
+        project_id,
+        cif_id,
+        calc_data,
+        Some(staging_tmp_dir.to_string_lossy().to_string()),
+    );
+
+    // Cleanup staging directory regardless of save outcome.
+    let _ = fs::remove_dir_all(&staging_tmp_dir);
+
+    save_result
 }
 
 /// Deletes a project
@@ -520,8 +840,7 @@ pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> 
         return Err(format!("Project not found: {}", project_id));
     }
 
-    fs::remove_dir_all(&project_dir)
-        .map_err(|e| format!("Failed to delete project: {}", e))?;
+    fs::remove_dir_all(&project_dir).map_err(|e| format!("Failed to delete project: {}", e))?;
 
     Ok(())
 }
@@ -549,11 +868,15 @@ pub fn delete_calculation(
         .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
     // Find the CIF variant and remove the calculation
-    let variant = project.cif_variants.iter_mut()
+    let variant = project
+        .cif_variants
+        .iter_mut()
         .find(|v| v.id == cif_id)
         .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
 
-    let calc_index = variant.calculations.iter()
+    let calc_index = variant
+        .calculations
+        .iter()
         .position(|c| c.id == calc_id)
         .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
 
@@ -697,7 +1020,9 @@ pub fn get_cif_crystal_data(
         return Err(format!("Project not found: {}", project_id));
     }
 
-    let crystal_json_path = project_dir.join("structures").join(format!("{}.json", cif_id));
+    let crystal_json_path = project_dir
+        .join("structures")
+        .join(format!("{}.json", cif_id));
     if !crystal_json_path.exists() {
         return Err(format!("Crystal data not found for CIF: {}", cif_id));
     }
@@ -705,8 +1030,7 @@ pub fn get_cif_crystal_data(
     let content = fs::read_to_string(&crystal_json_path)
         .map_err(|e| format!("Failed to read crystal data: {}", e))?;
 
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse crystal data: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse crystal data: {}", e))
 }
 
 /// Gets the raw CIF content for a CIF variant
@@ -723,13 +1047,14 @@ pub fn get_cif_content(
         return Err(format!("Project not found: {}", project_id));
     }
 
-    let cif_path = project_dir.join("structures").join(format!("{}.cif", cif_id));
+    let cif_path = project_dir
+        .join("structures")
+        .join(format!("{}.cif", cif_id));
     if !cif_path.exists() {
         return Err(format!("CIF file not found: {}", cif_id));
     }
 
-    fs::read_to_string(&cif_path)
-        .map_err(|e| format!("Failed to read CIF file: {}", e))
+    fs::read_to_string(&cif_path).map_err(|e| format!("Failed to read CIF file: {}", e))
 }
 
 /// Loads saved phonon DOS/dispersion data for a calculation, including recovery
@@ -766,7 +1091,10 @@ pub fn get_saved_phonon_data(
             found_calc = true;
 
             if calc.calc_type != "phonon" {
-                return Err(format!("Calculation {} is not a phonon calculation", calc_id));
+                return Err(format!(
+                    "Calculation {} is not a phonon calculation",
+                    calc_id
+                ));
             }
 
             let mut dos_data = calc
@@ -792,10 +1120,9 @@ pub fn get_saved_phonon_data(
                 let dos_file = tmp_dir.join("phonon_dos");
                 if dos_file.exists() {
                     if let Ok(dos) = read_phonon_dos_file(&dos_file) {
-                        dos_data = Some(
-                            serde_json::to_value(dos)
-                                .map_err(|e| format!("Failed to serialize recovered DOS data: {}", e))?,
-                        );
+                        dos_data = Some(serde_json::to_value(dos).map_err(|e| {
+                            format!("Failed to serialize recovered DOS data: {}", e)
+                        })?);
                         did_recover = true;
                     }
                 }
@@ -817,10 +1144,9 @@ pub fn get_saved_phonon_data(
                 };
                 if let Some(source_file) = source_file {
                     if let Ok(dispersion) = read_phonon_dispersion_file(&source_file) {
-                        dispersion_data = Some(
-                            serde_json::to_value(dispersion)
-                                .map_err(|e| format!("Failed to serialize recovered dispersion data: {}", e))?,
-                        );
+                        dispersion_data = Some(serde_json::to_value(dispersion).map_err(|e| {
+                            format!("Failed to serialize recovered dispersion data: {}", e)
+                        })?);
                         did_recover = true;
                     }
                 }
@@ -863,7 +1189,9 @@ pub fn get_saved_phonon_data(
                 .iter()
                 .flat_map(|variant| variant.calculations.iter())
                 .find(|calc| calc.id == calc_id)
-                .ok_or_else(|| format!("Calculation not found while writing calc.json: {}", calc_id))?;
+                .ok_or_else(|| {
+                    format!("Calculation not found while writing calc.json: {}", calc_id)
+                })?;
             let calc_json = serde_json::to_string_pretty(calc)
                 .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
             fs::write(&calc_json_path, calc_json)
@@ -871,8 +1199,10 @@ pub fn get_saved_phonon_data(
         }
     }
 
-    Ok(response.unwrap_or_else(|| serde_json::json!({
-        "dos_data": serde_json::Value::Null,
-        "dispersion_data": serde_json::Value::Null,
-    })))
+    Ok(response.unwrap_or_else(|| {
+        serde_json::json!({
+            "dos_data": serde_json::Value::Null,
+            "dispersion_data": serde_json::Value::Null,
+        })
+    }))
 }

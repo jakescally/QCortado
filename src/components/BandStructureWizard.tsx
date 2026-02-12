@@ -11,6 +11,7 @@ import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
+import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
 
 interface CalculationRun {
@@ -800,6 +801,7 @@ export function BandStructureWizard({
           phase={progress.phase}
           detail={progress.detail}
         />
+        <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
 
         <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
           {output || "Starting calculation..."}

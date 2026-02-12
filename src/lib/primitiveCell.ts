@@ -19,30 +19,44 @@ function getBaseElement(symbol: string): string {
 }
 
 /**
+ * Normalize Hermann-Mauguin space group strings so common formatting variants
+ * (spaces, underscores, unicode minus) can be matched reliably.
+ */
+function normalizeSpaceGroupHM(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[−–—]/g, "-")
+    .replace(/[\s_]/g, "");
+}
+
+/**
  * Check if a structure is FCC diamond (like silicon, germanium, diamond).
  * Space group 227 (Fd-3m) is the diamond structure.
  */
 export function isFCCDiamond(crystalData: CrystalData): boolean {
   const sgHM = crystalData.space_group_HM || "";
   const sgNum = crystalData.space_group_IT_number;
+  const normalizedHM = normalizeSpaceGroupHM(sgHM);
 
   // Check by space group number first (most reliable)
-  if (sgNum === 227 || sgNum === 225) {
+  // 227: Fd-3m (diamond), 225: Fm-3m (FCC metals), 216: F-43m (zincblende)
+  if (sgNum === 227 || sgNum === 225 || sgNum === 216) {
     return true;
   }
 
-  // Check for diamond structure space group (227 = Fd-3m)
-  if (sgHM === "Fd-3m" || sgHM === "F d -3 m" || sgHM === "Fd3m") {
+  // Check common HM notations for FCC/diamond/zincblende families.
+  if (normalizedHM === "fd-3m" || normalizedHM === "fd3m") {
     return true;
   }
-
-  // Check for FCC metals (space group 225 = Fm-3m)
-  if (sgHM === "Fm-3m" || sgHM === "F m -3 m" || sgHM === "Fm3m") {
+  if (normalizedHM === "fm-3m" || normalizedHM === "fm3m") {
+    return true;
+  }
+  if (normalizedHM === "f-43m" || normalizedHM === "f43m") {
     return true;
   }
 
   // Also check if the string contains the number
-  if (sgHM.includes("227") || sgHM.includes("225")) {
+  if (normalizedHM.includes("227") || normalizedHM.includes("225") || normalizedHM.includes("216")) {
     return true;
   }
 
@@ -56,13 +70,14 @@ export function isFCCDiamond(crystalData: CrystalData): boolean {
 export function isBCC(crystalData: CrystalData): boolean {
   const sgHM = crystalData.space_group_HM || "";
   const sgNum = crystalData.space_group_IT_number;
+  const normalizedHM = normalizeSpaceGroupHM(sgHM);
 
   // Check by space group number first
   if (sgNum === 229) {
     return true;
   }
 
-  if (sgHM === "Im-3m" || sgHM === "I m -3 m" || sgHM === "Im3m") {
+  if (normalizedHM === "im-3m" || normalizedHM === "im3m") {
     return true;
   }
 

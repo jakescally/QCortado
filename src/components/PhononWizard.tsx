@@ -8,7 +8,40 @@ import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./PhononPlot";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
+import { ElapsedTimer } from "./ElapsedTimer";
+import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
+
+function Tooltip({ text }: { text: string }) {
+  return (
+    <span className="tooltip-container">
+      <span className="tooltip-icon">?</span>
+      <span className="tooltip-text">{text}</span>
+    </span>
+  );
+}
+
+function parseOptionalPositiveNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseOptionalPositiveInt(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isOptionalPositiveNumberValid(value: string): boolean {
+  return value.trim() === "" || parseOptionalPositiveNumber(value) !== null;
+}
+
+function isOptionalPositiveIntValid(value: string): boolean {
+  return value.trim() === "" || parseOptionalPositiveInt(value) !== null;
+}
 
 interface CalculationRun {
   id: string;
@@ -153,10 +186,47 @@ export function PhononWizard({
   const [qGrid, setQGrid] = useState<[number, number, number]>([4, 4, 4]);
   const [tr2Ph, setTr2Ph] = useState<number>(1e-12);
   const [tr2PhInput, setTr2PhInput] = useState<string>("1e-12");
+  const [asr, setAsr] = useState<"none" | "simple" | "crystal" | "one-dim" | "zero-dim">("crystal");
+  const [recover, setRecover] = useState(false);
+  const [trans, setTrans] = useState(true);
+  const [epsil, setEpsil] = useState(false);
+  const [fpol, setFpol] = useState(false);
+  const [lraman, setLraman] = useState(false);
+  const [verbosity, setVerbosity] = useState<"default" | "high" | "debug">("default");
+  const [nmixPhInput, setNmixPhInput] = useState<string>("");
+  const [niterPhInput, setNiterPhInput] = useState<string>("");
+  const [alphaMixInput, setAlphaMixInput] = useState<string>("");
+  const [startQInput, setStartQInput] = useState<string>("");
+  const [lastQInput, setLastQInput] = useState<string>("");
+  const [startIrrInput, setStartIrrInput] = useState<string>("");
+  const [lastIrrInput, setLastIrrInput] = useState<string>("");
+  const [electronPhononMode, setElectronPhononMode] = useState<"none" | "interpolated" | "lambda_tetra" | "gamma_tetra">("none");
+  const [elPhSigmaInput, setElPhSigmaInput] = useState<string>("0.02");
+  const [elPhNsigmaInput, setElPhNsigmaInput] = useState<string>("10");
+  const [fildvscfEnabled, setFildvscfEnabled] = useState(false);
+  const [fildvscf, setFildvscf] = useState("dvscf");
+  const [epwPreparationEnabled, setEpwPreparationEnabled] = useState(false);
+  const [preserveFullArtifacts, setPreserveFullArtifacts] = useState(true);
+
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    solver: false,
+    longRange: false,
+    electronPhonon: false,
+    epw: true,
+    execution: false,
+    dos: true,
+    dispersion: true,
+    mpi: false,
+  });
+
+  const toggleSection = (section: string) => {
+    setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
 
   // Step 3: Options
   const [calculateDos, setCalculateDos] = useState(true);
   const [dosGrid, setDosGrid] = useState<[number, number, number]>([20, 20, 20]);
+  const [dosDeltaEInput, setDosDeltaEInput] = useState<string>("1.0");
   const [calculateDispersion, setCalculateDispersion] = useState(true);
   const [qPath, setQPath] = useState<KPathPoint[]>([]);
   const [pointsPerSegment, setPointsPerSegment] = useState(20);
@@ -209,6 +279,14 @@ export function PhononWizard({
     init();
   }, []);
 
+  useEffect(() => {
+    if (!epwPreparationEnabled) return;
+    if (!fildvscfEnabled) setFildvscfEnabled(true);
+    if (electronPhononMode === "none") {
+      setElectronPhononMode("interpolated");
+    }
+  }, [epwPreparationEnabled, fildvscfEnabled, electronPhononMode]);
+
   // Auto-scroll output only if user is at the bottom
   useEffect(() => {
     const el = outputRef.current;
@@ -233,6 +311,74 @@ export function PhononWizard({
       setError("Select at least 2 Q-path points for dispersion, or disable dispersion.");
       return;
     }
+
+    const parsedDosDeltaE = parseOptionalPositiveNumber(dosDeltaEInput);
+    if (calculateDos && parsedDosDeltaE === null) {
+      setError("Invalid DOS frequency step. Use a positive number (e.g. 1.0).");
+      return;
+    }
+
+    const nmixPh = parseOptionalPositiveInt(nmixPhInput);
+    if (nmixPhInput.trim() && nmixPh === null) {
+      setError("Response mixing history must be a positive integer (`nmix_ph`).");
+      return;
+    }
+    const niterPh = parseOptionalPositiveInt(niterPhInput);
+    if (niterPhInput.trim() && niterPh === null) {
+      setError("Max DFPT iterations must be a positive integer (`niter_ph`).");
+      return;
+    }
+    const alphaMix = parseOptionalPositiveNumber(alphaMixInput);
+    if (alphaMixInput.trim() && alphaMix === null) {
+      setError("Initial response mixing factor must be a positive number (`alpha_mix(1)`).");
+      return;
+    }
+
+    const startQ = parseOptionalPositiveInt(startQInput);
+    if (startQInput.trim() && startQ === null) {
+      setError("Q-range start index must be a positive integer (`start_q`).");
+      return;
+    }
+    const lastQ = parseOptionalPositiveInt(lastQInput);
+    if (lastQInput.trim() && lastQ === null) {
+      setError("Q-range end index must be a positive integer (`last_q`).");
+      return;
+    }
+    if (startQ !== null && lastQ !== null && startQ > lastQ) {
+      setError("Q-range start index (`start_q`) cannot be greater than end index (`last_q`).");
+      return;
+    }
+
+    const startIrr = parseOptionalPositiveInt(startIrrInput);
+    if (startIrrInput.trim() && startIrr === null) {
+      setError("Irreducible-representation start index must be a positive integer (`start_irr`).");
+      return;
+    }
+    const lastIrr = parseOptionalPositiveInt(lastIrrInput);
+    if (lastIrrInput.trim() && lastIrr === null) {
+      setError("Irreducible-representation end index must be a positive integer (`last_irr`).");
+      return;
+    }
+    if (startIrr !== null && lastIrr !== null && startIrr > lastIrr) {
+      setError("Irreducible-representation start index (`start_irr`) cannot be greater than end index (`last_irr`).");
+      return;
+    }
+
+    const electronPhonon = electronPhononMode === "none" ? null : electronPhononMode;
+    const elPhSigma = electronPhonon ? parseOptionalPositiveNumber(elPhSigmaInput) : null;
+    const elPhNsigma = electronPhonon ? parseOptionalPositiveInt(elPhNsigmaInput) : null;
+    if (electronPhonon && elPhSigma === null) {
+      setError("E-ph smearing width must be a positive number when electron-phonon mode is enabled (`el_ph_sigma`).");
+      return;
+    }
+    if (electronPhonon && elPhNsigma === null) {
+      setError("Number of smearing samples must be a positive integer when electron-phonon mode is enabled (`el_ph_nsigma`).");
+      return;
+    }
+
+    const fildvscfPath = fildvscfEnabled ? (fildvscf.trim() || "dvscf") : null;
+    const verbosityValue = verbosity === "default" ? null : verbosity;
+    const shouldPreserveFullArtifacts = epwPreparationEnabled && preserveFullArtifacts;
 
     setIsRunning(true);
     followOutputRef.current = true;
@@ -267,11 +413,28 @@ export function PhononWizard({
           nq: qGrid,
           tr2_ph: tr2Ph,
           ldisp: true,
-          recover: false,
-          asr: "crystal",
+          recover,
+          trans,
+          epsil,
+          fpol,
+          lraman,
+          fildvscf: fildvscfPath,
+          electron_phonon: electronPhonon,
+          el_ph_sigma: elPhSigma,
+          el_ph_nsigma: elPhNsigma,
+          nmix_ph: nmixPh,
+          niter_ph: niterPh,
+          alpha_mix: alphaMix,
+          start_q: startQ,
+          last_q: lastQ,
+          start_irr: startIrr,
+          last_irr: lastIrr,
+          verbosity: verbosityValue,
+          asr,
         },
         calculate_dos: calculateDos,
         dos_grid: calculateDos ? dosGrid : null,
+        dos_delta_e: calculateDos ? parsedDosDeltaE : null,
         calculate_dispersion: shouldCalculateDispersion,
         q_path: shouldCalculateDispersion ? qPath.map(p => ({
           label: p.label,
@@ -314,11 +477,36 @@ export function PhononWizard({
               source_scf_id: selectedScf.id,
               q_grid: qGrid,
               tr2_ph: tr2Ph,
+              asr,
+              recover,
+              trans,
+              epsil,
+              fpol,
+              lraman,
+              nmix_ph: nmixPh,
+              niter_ph: niterPh,
+              alpha_mix: alphaMix,
+              start_q: startQ,
+              last_q: lastQ,
+              start_irr: startIrr,
+              last_irr: lastIrr,
+              verbosity: verbosityValue,
+              electron_phonon: electronPhonon,
+              el_ph_sigma: elPhSigma,
+              el_ph_nsigma: elPhNsigma,
+              fildvscf: fildvscfPath,
               calculate_dos: calculateDos,
               dos_grid: calculateDos ? dosGrid : null,
+              dos_delta_e: calculateDos ? parsedDosDeltaE : null,
               calculate_dispersion: shouldCalculateDispersion,
               q_path: pathString,
               points_per_segment: pointsPerSegment,
+              epw_preparation: {
+                enabled: epwPreparationEnabled,
+                preserve_full_artifacts: shouldPreserveFullArtifacts,
+                fildvscf: fildvscfPath,
+                electron_phonon: electronPhonon,
+              },
               n_qpoints: result.n_qpoints,
               n_modes: result.n_modes,
             },
@@ -480,77 +668,480 @@ export function PhononWizard({
             disabled={!selectedScf}
             onClick={() => setStep("qgrid")}
           >
-            Next: Q-Grid
+            Next: ph.x Setup
           </button>
         </div>
       </div>
     );
   };
 
-  // Step 2: Q-Grid configuration
+  // Step 2: ph.x + EPW configuration
   const renderQGridStep = () => {
     const totalQPoints = qGrid[0] * qGrid[1] * qGrid[2];
     const parsedTr2Ph = Number(tr2PhInput);
     const isTr2PhValid = Number.isFinite(parsedTr2Ph) && parsedTr2Ph > 0;
+    const isNmixValid = isOptionalPositiveIntValid(nmixPhInput);
+    const isNiterValid = isOptionalPositiveIntValid(niterPhInput);
+    const isAlphaMixValid = isOptionalPositiveNumberValid(alphaMixInput);
+    const isStartQValid = isOptionalPositiveIntValid(startQInput);
+    const isLastQValid = isOptionalPositiveIntValid(lastQInput);
+    const isStartIrrValid = isOptionalPositiveIntValid(startIrrInput);
+    const isLastIrrValid = isOptionalPositiveIntValid(lastIrrInput);
+    const parsedStartQ = parseOptionalPositiveInt(startQInput);
+    const parsedLastQ = parseOptionalPositiveInt(lastQInput);
+    const parsedStartIrr = parseOptionalPositiveInt(startIrrInput);
+    const parsedLastIrr = parseOptionalPositiveInt(lastIrrInput);
+    const hasQRangeError =
+      parsedStartQ !== null && parsedLastQ !== null && parsedStartQ > parsedLastQ;
+    const hasIrrRangeError =
+      parsedStartIrr !== null && parsedLastIrr !== null && parsedStartIrr > parsedLastIrr;
+    const electronPhEnabled = electronPhononMode !== "none";
+    const isElPhSigmaValid =
+      !electronPhEnabled || parseOptionalPositiveNumber(elPhSigmaInput) !== null;
+    const isElPhNsigmaValid =
+      !electronPhEnabled || parseOptionalPositiveInt(elPhNsigmaInput) !== null;
+    const isFildvscfValid = !fildvscfEnabled || fildvscf.trim().length > 0;
+    const canContinue =
+      isTr2PhValid &&
+      isNmixValid &&
+      isNiterValid &&
+      isAlphaMixValid &&
+      isStartQValid &&
+      isLastQValid &&
+      isStartIrrValid &&
+      isLastIrrValid &&
+      !hasQRangeError &&
+      !hasIrrRangeError &&
+      isElPhSigmaValid &&
+      isElPhNsigmaValid &&
+      isFildvscfValid;
 
     return (
       <div className="wizard-step qgrid-step">
-        <h3>Q-Point Grid Configuration</h3>
+        <h3>ph.x + EPW Setup</h3>
         <p className="step-description">
-          Configure the q-point grid for phonon calculations.
-          More q-points = more accurate but slower.
+          Configure `ph.x` input options and optional EPW-ready outputs. Denser grids and tighter thresholds improve accuracy but increase compute time.
         </p>
 
-        <div className="param-section">
-          <label>Q-point grid:</label>
-          <div className="qgrid-inputs">
-            <input
-              type="number"
-              min={1}
-              max={20}
-              value={qGrid[0]}
-              onChange={(e) => setQGrid([parseInt(e.target.value) || 1, qGrid[1], qGrid[2]])}
-            />
-            <span>x</span>
-            <input
-              type="number"
-              min={1}
-              max={20}
-              value={qGrid[1]}
-              onChange={(e) => setQGrid([qGrid[0], parseInt(e.target.value) || 1, qGrid[2]])}
-            />
-            <span>x</span>
-            <input
-              type="number"
-              min={1}
-              max={20}
-              value={qGrid[2]}
-              onChange={(e) => setQGrid([qGrid[0], qGrid[1], parseInt(e.target.value) || 1])}
-            />
+        <div className="option-section">
+          <h4>Core ph.x Controls</h4>
+          <div className="phonon-grid">
+            <div className="phonon-field">
+              <label>
+                Q-point grid
+                <Tooltip text="Phonon dynamical matrices are computed on this coarse reciprocal-space mesh (`nq1`, `nq2`, `nq3`). Larger meshes improve interpolation and thermodynamics, but cost scales quickly." />
+              </label>
+              <div className="qgrid-inputs">
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={qGrid[0]}
+                  onChange={(e) => setQGrid([parseInt(e.target.value) || 1, qGrid[1], qGrid[2]])}
+                />
+                <span>x</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={qGrid[1]}
+                  onChange={(e) => setQGrid([qGrid[0], parseInt(e.target.value) || 1, qGrid[2]])}
+                />
+                <span>x</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={qGrid[2]}
+                  onChange={(e) => setQGrid([qGrid[0], qGrid[1], parseInt(e.target.value) || 1])}
+                />
+              </div>
+              <span className="param-hint">{totalQPoints} total q-points</span>
+            </div>
+
+            <div className="phonon-field">
+              <label>
+                DFPT convergence threshold
+                <Tooltip text="QE variable: `tr2_ph`. Linear-response convergence threshold. Tighter values reduce force-constant noise but increase SCF iterations per perturbation." />
+              </label>
+              <input
+                type="text"
+                value={tr2PhInput}
+                onChange={(e) => {
+                  const value = e.target.value.trim();
+                  setTr2PhInput(value);
+                  const parsed = Number(value);
+                  if (Number.isFinite(parsed) && parsed > 0) {
+                    setTr2Ph(parsed);
+                  }
+                }}
+                placeholder="e.g. 1e-12"
+                spellCheck={false}
+              />
+              {!isTr2PhValid && (
+                <span className="param-hint input-error">Enter a positive number (e.g. 1e-12).</span>
+              )}
+            </div>
+
+            <div className="phonon-field">
+              <label>
+                Acoustic sum rule
+                <Tooltip text="QE variable: `asr` (used by `q2r.x`/`matdyn.x`). Enforces translational invariance of acoustic modes. `crystal` is typically best for periodic bulk systems." />
+              </label>
+              <select
+                value={asr}
+                onChange={(e) => setAsr(e.target.value as "none" | "simple" | "crystal" | "one-dim" | "zero-dim")}
+              >
+                <option value="crystal">crystal</option>
+                <option value="simple">simple</option>
+                <option value="none">none</option>
+                <option value="one-dim">one-dim</option>
+                <option value="zero-dim">zero-dim</option>
+              </select>
+            </div>
           </div>
-          <span className="param-hint">{totalQPoints} total q-points</span>
         </div>
 
-        <div className="param-section">
-          <label>
-            Convergence threshold (tr2_ph):
-            <input
-              type="text"
-              value={tr2PhInput}
-              onChange={(e) => {
-                const value = e.target.value.trim();
-                setTr2PhInput(value);
-                const parsed = Number(value);
-                if (Number.isFinite(parsed) && parsed > 0) {
-                  setTr2Ph(parsed);
-                }
-              }}
-              placeholder="e.g. 1e-12"
-              spellCheck={false}
-            />
-          </label>
-          {!isTr2PhValid && (
-            <span className="param-hint">Enter a positive number (e.g. 1e-12).</span>
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("solver")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.solver ? "expanded" : ""}`}>▶</span>
+            Convergence & Solver Settings
+            <Tooltip text="Advanced `ph.x` solver controls (`nmix_ph`, `niter_ph`, `alpha_mix(1)`, `verbosity`)." />
+          </h4>
+          {expandedSections.solver && (
+            <div className="option-params">
+              <div className="phonon-grid">
+                <div className="phonon-field">
+                  <label>
+                    Response mixing history
+                    <Tooltip text="QE variable: `nmix_ph`. Number of mixed iterations retained in linear-response SCF. Larger values can stabilize difficult cases but cost more memory/time." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nmixPhInput}
+                    onChange={(e) => setNmixPhInput(e.target.value)}
+                    placeholder="default"
+                    spellCheck={false}
+                  />
+                  {!isNmixValid && <span className="param-hint input-error">Use a positive integer.</span>}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Max DFPT iterations
+                    <Tooltip text="QE variable: `niter_ph`. Maximum DFPT self-consistency iterations per perturbation. Raise for hard-to-converge metallic or magnetic systems." />
+                  </label>
+                  <input
+                    type="text"
+                    value={niterPhInput}
+                    onChange={(e) => setNiterPhInput(e.target.value)}
+                    placeholder="default"
+                    spellCheck={false}
+                  />
+                  {!isNiterValid && <span className="param-hint input-error">Use a positive integer.</span>}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Initial response mixing factor
+                    <Tooltip text="QE variable: `alpha_mix(1)`. Lower values can help convergence in difficult cases, but usually require more iterations." />
+                  </label>
+                  <input
+                    type="text"
+                    value={alphaMixInput}
+                    onChange={(e) => setAlphaMixInput(e.target.value)}
+                    placeholder="default"
+                    spellCheck={false}
+                  />
+                  {!isAlphaMixValid && <span className="param-hint input-error">Use a positive number.</span>}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Output detail level
+                    <Tooltip text="QE variable: `verbosity`. Higher verbosity helps debugging but increases output size." />
+                  </label>
+                  <select
+                    value={verbosity}
+                    onChange={(e) => setVerbosity(e.target.value as "default" | "high" | "debug")}
+                  >
+                    <option value="default">default</option>
+                    <option value="high">high</option>
+                    <option value="debug">debug</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("longRange")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.longRange ? "expanded" : ""}`}>▶</span>
+            Long-Range & Spectroscopy
+            <Tooltip text="Optional long-range electrostatics and spectroscopy outputs (`epsil`, `fpol`, `lraman`)." />
+          </h4>
+          {expandedSections.longRange && (
+            <div className="option-params">
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={epsil}
+                  onChange={(e) => setEpsil(e.target.checked)}
+                />
+                <span>
+                  Compute dielectric tensor and Born charges
+                  <Tooltip text="QE variable: `epsil`. Computes dielectric tensor and Born effective charges for non-metallic systems; required for LO-TO splitting analysis at Γ." />
+                </span>
+              </label>
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={fpol}
+                  onChange={(e) => setFpol(e.target.checked)}
+                />
+                <span>
+                  Compute polarizability derivatives
+                  <Tooltip text="QE variable: `fpol`. Enables additional response quantities used by optical analyses; adds DFPT workload." />
+                </span>
+              </label>
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={lraman}
+                  onChange={(e) => setLraman(e.target.checked)}
+                />
+                <span>
+                  Compute Raman tensors
+                  <Tooltip text="QE variable: `lraman`. Computes Raman tensors from DFPT response. Useful for spectroscopy, but significantly increases runtime." />
+                </span>
+              </label>
+            </div>
+          )}
+        </div>
+
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("electronPhonon")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.electronPhonon ? "expanded" : ""}`}>▶</span>
+            Electron-Phonon & Partial Run
+            <Tooltip text="Electron-phonon mode and optional partial-range execution (`electron_phonon`, `el_ph_sigma`, `el_ph_nsigma`, `start_q`, `last_q`, `start_irr`, `last_irr`)." />
+          </h4>
+          {expandedSections.electronPhonon && (
+            <div className="option-params">
+              <div className="phonon-grid">
+                <div className="phonon-field">
+                  <label>
+                    Electron-phonon mode
+                    <Tooltip text="QE variable: `electron_phonon`. Keep `none` for pure vibrational runs; enable for coupling workflows." />
+                  </label>
+                  <select
+                    value={electronPhononMode}
+                    onChange={(e) => setElectronPhononMode(e.target.value as "none" | "interpolated" | "lambda_tetra" | "gamma_tetra")}
+                  >
+                    <option value="none">none</option>
+                    <option value="interpolated">interpolated</option>
+                    <option value="lambda_tetra">lambda_tetra</option>
+                    <option value="gamma_tetra">gamma_tetra</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    E-ph smearing width
+                    <Tooltip text="QE variable: `el_ph_sigma`. Smearing width used in electron-phonon integrations. Larger broadening smooths noisy integrals but can blur fine features." />
+                  </label>
+                  <input
+                    type="text"
+                    value={elPhSigmaInput}
+                    onChange={(e) => setElPhSigmaInput(e.target.value)}
+                    placeholder="e.g. 0.02"
+                    spellCheck={false}
+                  />
+                  {!isElPhSigmaValid && (
+                    <span className="param-hint input-error">Use a positive number when electron-phonon mode is enabled.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Number of smearing samples
+                    <Tooltip text="QE variable: `el_ph_nsigma`. Number of sigma values sampled in electron-phonon integrations. More values improve convergence checks but increase cost." />
+                  </label>
+                  <input
+                    type="text"
+                    value={elPhNsigmaInput}
+                    onChange={(e) => setElPhNsigmaInput(e.target.value)}
+                    placeholder="e.g. 10"
+                    spellCheck={false}
+                  />
+                  {!isElPhNsigmaValid && (
+                    <span className="param-hint input-error">Use a positive integer when electron-phonon mode is enabled.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Q-point index range
+                    <Tooltip text="QE variables: `start_q`, `last_q`. Run only a subset of irreducible q-points (1-based indices). Useful for restart/debug or distributed job splitting." />
+                  </label>
+                  <div className="dual-input">
+                    <input
+                      type="text"
+                      value={startQInput}
+                      onChange={(e) => setStartQInput(e.target.value)}
+                      placeholder="start_q"
+                      spellCheck={false}
+                    />
+                    <input
+                      type="text"
+                      value={lastQInput}
+                      onChange={(e) => setLastQInput(e.target.value)}
+                      placeholder="last_q"
+                      spellCheck={false}
+                    />
+                  </div>
+                  {(!isStartQValid || !isLastQValid) && (
+                    <span className="param-hint input-error">Use positive integers.</span>
+                  )}
+                  {hasQRangeError && (
+                    <span className="param-hint input-error">Start index must be less than or equal to end index.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Irreducible-representation range
+                    <Tooltip text="QE variables: `start_irr`, `last_irr`. Restrict irreducible representation range for each q-point. Primarily for advanced restart and debugging workflows." />
+                  </label>
+                  <div className="dual-input">
+                    <input
+                      type="text"
+                      value={startIrrInput}
+                      onChange={(e) => setStartIrrInput(e.target.value)}
+                      placeholder="start_irr"
+                      spellCheck={false}
+                    />
+                    <input
+                      type="text"
+                      value={lastIrrInput}
+                      onChange={(e) => setLastIrrInput(e.target.value)}
+                      placeholder="last_irr"
+                      spellCheck={false}
+                    />
+                  </div>
+                  {(!isStartIrrValid || !isLastIrrValid) && (
+                    <span className="param-hint input-error">Use positive integers.</span>
+                  )}
+                  {hasIrrRangeError && (
+                    <span className="param-hint input-error">Start index must be less than or equal to end index.</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="option-section epw-prep-section config-section collapsible">
+          <h4 onClick={() => toggleSection("epw")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.epw ? "expanded" : ""}`}>▶</span>
+            EPW Preparation
+            <Tooltip text="Prepare additional artifacts for later EPW workflows (`fildvscf`, artifact retention)." />
+          </h4>
+          {expandedSections.epw && (
+            <div className="option-params">
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={epwPreparationEnabled}
+                  onChange={(e) => setEpwPreparationEnabled(e.target.checked)}
+                />
+                <span>
+                  Enable EPW-ready artifact preparation
+                  <Tooltip text="Turns on options commonly needed before EPW (dvscf outputs and preservation controls). This does not run `epw.x`; it prepares prerequisite phonon data." />
+                </span>
+              </label>
+              <div className="option-params">
+                <label className="option-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={fildvscfEnabled}
+                    onChange={(e) => setFildvscfEnabled(e.target.checked)}
+                  />
+                  <span>
+                    Write perturbation potentials
+                    <Tooltip text="QE variable: `fildvscf`. Stores dvscf files used by electron-phonon workflows. Increases on-disk data substantially." />
+                  </span>
+                </label>
+                {fildvscfEnabled && (
+                  <div className="phonon-field inline-field">
+                    <label>
+                      Perturbation potential filename root
+                      <Tooltip text="QE variable: `fildvscf`. Base filename used for perturbation-potential files." />
+                    </label>
+                    <input
+                      type="text"
+                      value={fildvscf}
+                      onChange={(e) => setFildvscf(e.target.value)}
+                      placeholder="dvscf"
+                      spellCheck={false}
+                    />
+                    {!isFildvscfValid && (
+                      <span className="param-hint input-error">Filename root cannot be empty when enabled.</span>
+                    )}
+                  </div>
+                )}
+                <label className="option-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={preserveFullArtifacts}
+                    onChange={(e) => setPreserveFullArtifacts(e.target.checked)}
+                  />
+                  <span>
+                    Preserve full phonon scratch artifacts on save
+                    <Tooltip text="Keeps complete phonon temporary data in the project instead of compact copy. Needed for maximum EPW flexibility, but can consume many GB." />
+                  </span>
+                </label>
+                {epwPreparationEnabled && !preserveFullArtifacts && (
+                  <div className="epw-warning">
+                    EPW prep is enabled, but compact-save mode may omit intermediate files needed by some EPW post-processing paths.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("execution")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.execution ? "expanded" : ""}`}>▶</span>
+            Execution Behavior
+            <Tooltip text="Runtime behavior flags (`recover`, `trans`)." />
+          </h4>
+          {expandedSections.execution && (
+            <div className="option-params">
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={recover}
+                  onChange={(e) => setRecover(e.target.checked)}
+                />
+                <span>
+                  Resume from checkpoints
+                  <Tooltip text="QE variable: `recover`. Attempts to resume from existing phonon checkpoints in the working directory. Helpful after interrupted long runs." />
+                </span>
+              </label>
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={trans}
+                  onChange={(e) => setTrans(e.target.checked)}
+                />
+                <span>
+                  Use Cartesian-transform output
+                  <Tooltip text="QE variable: `trans`. Controls representation transform in `ph.x` output. Leave enabled unless you need specific low-level output conventions." />
+                </span>
+              </label>
+            </div>
           )}
         </div>
 
@@ -562,148 +1153,212 @@ export function PhononWizard({
           </button>
           <button
             className="primary-button"
-            disabled={!isTr2PhValid}
+            disabled={!canContinue}
             onClick={() => {
               setTr2Ph(parsedTr2Ph);
               setStep("options");
             }}
           >
-            Next: Options
+            Next: Post-Processing
           </button>
         </div>
       </div>
     );
   };
 
-  // Step 3: Options (DOS + Dispersion)
+  // Step 3: post-processing and run
   const renderOptionsStep = () => {
+    const parsedDosDeltaE = parseOptionalPositiveNumber(dosDeltaEInput);
+    const isDosDeltaEValid = !calculateDos || parsedDosDeltaE !== null;
+    const dispersionReady = !calculateDispersion || qPath.length >= 2;
+    const canRun = (calculateDos || calculateDispersion) && isDosDeltaEValid && dispersionReady;
+
     return (
       <div className="wizard-step options-step">
-        <h3>Calculation Options</h3>
+        <h3>Post-Processing + Run</h3>
+        <p className="step-description">
+          Configure `matdyn.x` post-processing (DOS and/or dispersion) and parallel execution.
+        </p>
 
-        {/* DOS Options */}
-        <div className="option-section">
-          <label className="option-checkbox">
-            <input
-              type="checkbox"
-              checked={calculateDos}
-              onChange={(e) => setCalculateDos(e.target.checked)}
-            />
-            <span>Calculate Phonon DOS</span>
-          </label>
-
-          {calculateDos && (
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("dos")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.dos ? "expanded" : ""}`}>▶</span>
+            Phonon Density of States (matdyn.x)
+            <Tooltip text="Configure DOS post-processing with `matdyn.x` (`dos=.true.`, `nk1/nk2/nk3`, `deltaE`)." />
+          </h4>
+          {expandedSections.dos && (
             <div className="option-params">
-              <label>DOS sampling grid:</label>
-              <div className="qgrid-inputs">
-                <input
-                  type="number"
-                  min={5}
-                  max={50}
-                  value={dosGrid[0]}
-                  onChange={(e) => setDosGrid([parseInt(e.target.value) || 10, dosGrid[1], dosGrid[2]])}
-                />
-                <span>x</span>
-                <input
-                  type="number"
-                  min={5}
-                  max={50}
-                  value={dosGrid[1]}
-                  onChange={(e) => setDosGrid([dosGrid[0], parseInt(e.target.value) || 10, dosGrid[2]])}
-                />
-                <span>x</span>
-                <input
-                  type="number"
-                  min={5}
-                  max={50}
-                  value={dosGrid[2]}
-                  onChange={(e) => setDosGrid([dosGrid[0], dosGrid[1], parseInt(e.target.value) || 10])}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Dispersion Options */}
-        <div className="option-section">
-          <label className="option-checkbox">
-            <input
-              type="checkbox"
-              checked={calculateDispersion}
-              onChange={(e) => setCalculateDispersion(e.target.checked)}
-            />
-            <span>Calculate Phonon Dispersion</span>
-          </label>
-
-          {calculateDispersion && (
-            <div className="option-params">
-              <div className="crystal-info">
-                {crystalData.space_group_HM && (
-                  <div className="info-row">
-                    <span className="label">Space Group:</span>
-                    <span className="value">
-                      {crystalData.space_group_HM}
-                      {crystalData.space_group_IT_number && ` (#${crystalData.space_group_IT_number})`}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              <BrillouinZoneViewer
-                crystalData={crystalData}
-                onPathChange={handleQPathChange}
-                initialPath={qPath}
-                pointsPerSegment={pointsPerSegment}
-              />
-
-              <div className="points-per-segment">
-                <label>
-                  Points per segment:
-                  <input
-                    type="number"
-                    min={5}
-                    max={100}
-                    value={pointsPerSegment}
-                    onChange={(e) => setPointsPerSegment(parseInt(e.target.value) || 20)}
-                  />
-                </label>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* MPI Settings */}
-        <div className="mpi-section">
-          <h4>Parallelization</h4>
-          {mpiAvailable ? (
-            <div className="mpi-toggle">
-              <label>
+              <label className="option-checkbox">
                 <input
                   type="checkbox"
-                  checked={mpiEnabled}
-                  onChange={(e) => setMpiEnabled(e.target.checked)}
+                  checked={calculateDos}
+                  onChange={(e) => setCalculateDos(e.target.checked)}
                 />
-                Enable MPI ({cpuCount} cores available)
+                <span>
+                  Compute phonon density of states
+                  <Tooltip text="Computes vibrational density of states from force constants. Useful for thermodynamics and spectral comparisons." />
+                </span>
               </label>
-              {mpiEnabled && (
-                <div className="mpi-procs">
-                  <label>
-                    Number of processes:
-                    <input
-                      type="number"
-                      min={1}
-                      max={cpuCount}
-                      value={mpiProcs}
-                      onChange={(e) => setMpiProcs(parseInt(e.target.value) || 1)}
-                    />
-                  </label>
+
+              {calculateDos && (
+                <div className="option-params">
+                  <div className="phonon-grid">
+                    <div className="phonon-field">
+                      <label>
+                        DOS sampling grid
+                        <Tooltip text="`matdyn.x` integration grid (`nk1`, `nk2`, `nk3`). Dense q sampling smooths DOS and improves integrated thermodynamic quantities, at additional cost." />
+                      </label>
+                      <div className="qgrid-inputs">
+                        <input
+                          type="number"
+                          min={5}
+                          max={60}
+                          value={dosGrid[0]}
+                          onChange={(e) => setDosGrid([parseInt(e.target.value) || 10, dosGrid[1], dosGrid[2]])}
+                        />
+                        <span>x</span>
+                        <input
+                          type="number"
+                          min={5}
+                          max={60}
+                          value={dosGrid[1]}
+                          onChange={(e) => setDosGrid([dosGrid[0], parseInt(e.target.value) || 10, dosGrid[2]])}
+                        />
+                        <span>x</span>
+                        <input
+                          type="number"
+                          min={5}
+                          max={60}
+                          value={dosGrid[2]}
+                          onChange={(e) => setDosGrid([dosGrid[0], dosGrid[1], parseInt(e.target.value) || 10])}
+                        />
+                      </div>
+                    </div>
+                    <div className="phonon-field">
+                      <label>
+                        DOS frequency bin width (cm^-1)
+                        <Tooltip text="`matdyn.x` variable: `deltaE`. Smaller values give finer spectra but larger files and potentially noisier curves." />
+                      </label>
+                      <input
+                        type="text"
+                        value={dosDeltaEInput}
+                        onChange={(e) => setDosDeltaEInput(e.target.value)}
+                        placeholder="1.0"
+                        spellCheck={false}
+                      />
+                      {!isDosDeltaEValid && (
+                        <span className="param-hint input-error">Use a positive number.</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
-          ) : (
-            <p className="mpi-unavailable">
-              MPI not available. Running in serial mode.
-            </p>
+          )}
+        </div>
+
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("dispersion")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.dispersion ? "expanded" : ""}`}>▶</span>
+            Phonon Dispersion (matdyn.x)
+            <Tooltip text="Configure band-structure-style phonon interpolation along a high-symmetry path." />
+          </h4>
+          {expandedSections.dispersion && (
+            <div className="option-params">
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={calculateDispersion}
+                  onChange={(e) => setCalculateDispersion(e.target.checked)}
+                />
+                <span>
+                  Compute phonon dispersion
+                  <Tooltip text="Computes phonon branches along a high-symmetry path. Essential for diagnosing dynamical stability and mode character." />
+                </span>
+              </label>
+
+              {calculateDispersion && (
+                <div className="option-params">
+                  <div className="crystal-info">
+                    {crystalData.space_group_HM && (
+                      <div className="info-row">
+                        <span className="label">Space Group:</span>
+                        <span className="value">
+                          {crystalData.space_group_HM}
+                          {crystalData.space_group_IT_number && ` (#${crystalData.space_group_IT_number})`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <BrillouinZoneViewer
+                    crystalData={crystalData}
+                    onPathChange={handleQPathChange}
+                    initialPath={qPath}
+                    pointsPerSegment={pointsPerSegment}
+                  />
+
+                  <div className="points-per-segment">
+                    <label>
+                      Points per path segment
+                      <Tooltip text="Number of interpolated points between adjacent high-symmetry nodes in `matdyn.x` path generation. Higher values produce smoother curves with longer runs." />
+                      <input
+                        type="number"
+                        min={5}
+                        max={100}
+                        value={pointsPerSegment}
+                        onChange={(e) => setPointsPerSegment(parseInt(e.target.value) || 20)}
+                      />
+                    </label>
+                    {!dispersionReady && (
+                      <span className="param-hint input-error">Select at least 2 Q-path points.</span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="option-section mpi-section config-section collapsible">
+          <h4 onClick={() => toggleSection("mpi")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
+            Parallelization
+            <Tooltip text="Controls process-level parallel execution. More MPI processes often reduce wall time, but scaling depends on system size and workload balance." />
+          </h4>
+          {expandedSections.mpi && (
+            <div className="option-params">
+              {mpiAvailable ? (
+                <div className="mpi-toggle">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={mpiEnabled}
+                      onChange={(e) => setMpiEnabled(e.target.checked)}
+                    />
+                    Enable MPI ({cpuCount} cores available)
+                  </label>
+                  {mpiEnabled && (
+                    <div className="mpi-procs">
+                      <label>
+                        Number of processes:
+                        <input
+                          type="number"
+                          min={1}
+                          max={cpuCount}
+                          value={mpiProcs}
+                          onChange={(e) => setMpiProcs(parseInt(e.target.value) || 1)}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="mpi-unavailable">
+                  MPI not available. Running in serial mode.
+                </p>
+              )}
+            </div>
           )}
         </div>
 
@@ -715,7 +1370,7 @@ export function PhononWizard({
           </button>
           <button
             className="primary-button"
-            disabled={!calculateDos && !calculateDispersion}
+            disabled={!canRun}
             onClick={runCalculation}
           >
             Run Calculation
@@ -727,6 +1382,12 @@ export function PhononWizard({
 
   // Step 4: Running
   const renderRunStep = () => {
+    const phononMeta = progress.meta?.phonon;
+    const completedQPoints = phononMeta?.completedQPoints
+      ? new Set(phononMeta.completedQPoints).size
+      : 0;
+    const totalQPoints = phononMeta?.totalQPoints;
+
     return (
       <div className="wizard-step run-step">
         <h3>{isRunning ? "Running Phonon Calculation" : "Phonon Output"}</h3>
@@ -740,6 +1401,14 @@ export function PhononWizard({
           phase={progress.phase}
           detail={progress.detail}
         />
+        <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+        <EstimatedRemainingTime
+          startedAt={calcStartTime}
+          isRunning={isRunning}
+          completedUnits={completedQPoints}
+          totalUnits={totalQPoints}
+          label="ETA (q-points)"
+        />
 
         <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
           {output || "Starting calculation..."}
@@ -748,7 +1417,7 @@ export function PhononWizard({
         {error && (
           <div className="error-actions">
             <button className="secondary-button" onClick={() => setStep("options")}>
-              Back to Options
+              Back to Post-Processing
             </button>
           </div>
         )}
@@ -763,7 +1432,7 @@ export function PhononWizard({
         <div className="wizard-step results-step">
           <h3>No Results</h3>
           <button className="secondary-button" onClick={() => setStep("options")}>
-            Try Again
+            Back to Post-Processing
           </button>
         </div>
       );
@@ -877,10 +1546,10 @@ export function PhononWizard({
             1. Source
           </span>
           <span className={step === "qgrid" ? "active" : ["options", "run", "results"].includes(step) ? "completed" : ""}>
-            2. Q-Grid
+            2. ph.x + EPW
           </span>
           <span className={step === "options" ? "active" : ["run", "results"].includes(step) ? "completed" : ""}>
-            3. Options
+            3. Post-Processing
           </span>
           <span className={step === "run" ? "active" : step === "results" ? "completed" : ""}>
             4. Run

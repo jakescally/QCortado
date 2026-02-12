@@ -74,7 +74,9 @@ impl QERunner {
         input: &str,
         working_dir: &PathBuf,
     ) -> Result<QEResult, RunnerError> {
-        let (output, _) = self.run_executable("pw.x", input, working_dir, None).await?;
+        let (output, _) = self
+            .run_executable("pw.x", input, working_dir, None)
+            .await?;
         Ok(parse_pw_output(&output))
     }
 
@@ -85,15 +87,21 @@ impl QERunner {
         &self,
         input: &str,
         working_dir: &PathBuf,
-    ) -> Result<(mpsc::Receiver<String>, tokio::task::JoinHandle<Result<QEResult, RunnerError>>), RunnerError> {
+    ) -> Result<
+        (
+            mpsc::Receiver<String>,
+            tokio::task::JoinHandle<Result<QEResult, RunnerError>>,
+        ),
+        RunnerError,
+    > {
         let (tx, rx) = mpsc::channel(100);
 
-        let (output, _) = self.run_executable("pw.x", input, working_dir, Some(tx.clone())).await?;
+        let (output, _) = self
+            .run_executable("pw.x", input, working_dir, Some(tx.clone()))
+            .await?;
 
         // Parse the final output
-        let handle = tokio::spawn(async move {
-            Ok(parse_pw_output(&output))
-        });
+        let handle = tokio::spawn(async move { Ok(parse_pw_output(&output)) });
 
         Ok((rx, handle))
     }
@@ -135,7 +143,9 @@ impl QERunner {
         // Write input to stdin
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin.write_all(input.as_bytes()).await
+            stdin
+                .write_all(input.as_bytes())
+                .await
                 .map_err(|e| RunnerError::InputWrite(e.to_string()))?;
             // stdin is dropped here, closing the pipe
         }
@@ -212,17 +222,17 @@ impl QERunner {
         input: &str,
         working_dir: &PathBuf,
     ) -> Result<String, RunnerError> {
-        let (output, _) = self.run_executable("bands.x", input, working_dir, None).await?;
+        let (output, _) = self
+            .run_executable("bands.x", input, working_dir, None)
+            .await?;
         Ok(output)
     }
 
     /// Runs dos.x for DOS calculation.
-    pub async fn run_dos(
-        &self,
-        input: &str,
-        working_dir: &PathBuf,
-    ) -> Result<String, RunnerError> {
-        let (output, _) = self.run_executable("dos.x", input, working_dir, None).await?;
+    pub async fn run_dos(&self, input: &str, working_dir: &PathBuf) -> Result<String, RunnerError> {
+        let (output, _) = self
+            .run_executable("dos.x", input, working_dir, None)
+            .await?;
         Ok(output)
     }
 
@@ -232,7 +242,9 @@ impl QERunner {
         input: &str,
         working_dir: &PathBuf,
     ) -> Result<String, RunnerError> {
-        let (output, _) = self.run_executable("projwfc.x", input, working_dir, None).await?;
+        let (output, _) = self
+            .run_executable("projwfc.x", input, working_dir, None)
+            .await?;
         Ok(output)
     }
 
@@ -242,7 +254,9 @@ impl QERunner {
         input: &str,
         working_dir: &PathBuf,
     ) -> Result<String, RunnerError> {
-        let (output, _) = self.run_executable("ph.x", input, working_dir, None).await?;
+        let (output, _) = self
+            .run_executable("ph.x", input, working_dir, None)
+            .await?;
         Ok(output)
     }
 }

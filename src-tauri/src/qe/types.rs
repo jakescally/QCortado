@@ -381,6 +381,54 @@ pub struct PhononCalculation {
     pub ldisp: bool,
     /// Whether to recover from an interrupted calculation
     pub recover: bool,
+    /// Whether to transform the representation from crystal to Cartesian
+    #[serde(default = "default_trans")]
+    pub trans: bool,
+    /// Compute dielectric tensor and Born effective charges (for insulators)
+    #[serde(default)]
+    pub epsil: bool,
+    /// Compute polarizability derivatives
+    #[serde(default)]
+    pub fpol: bool,
+    /// Compute Raman coefficients (requires non-metallic setup)
+    #[serde(default)]
+    pub lraman: bool,
+    /// File root for dvscf perturbation potentials (useful for EPW workflows)
+    #[serde(default)]
+    pub fildvscf: Option<String>,
+    /// Electron-phonon mode (e.g. "interpolated", "lambda_tetra")
+    #[serde(default)]
+    pub electron_phonon: Option<String>,
+    /// Smearing width for electron-phonon integration
+    #[serde(default)]
+    pub el_ph_sigma: Option<f64>,
+    /// Number of smearing values for electron-phonon integration
+    #[serde(default)]
+    pub el_ph_nsigma: Option<u32>,
+    /// Number of old mixes kept in phonon self-consistency
+    #[serde(default)]
+    pub nmix_ph: Option<u32>,
+    /// Maximum linear-response SCF iterations
+    #[serde(default)]
+    pub niter_ph: Option<u32>,
+    /// Mixing factor for linear-response potential updates
+    #[serde(default)]
+    pub alpha_mix: Option<f64>,
+    /// Start index of q-point to compute (1-based)
+    #[serde(default)]
+    pub start_q: Option<u32>,
+    /// Last index of q-point to compute (1-based)
+    #[serde(default)]
+    pub last_q: Option<u32>,
+    /// Start irreducible representation index (1-based)
+    #[serde(default)]
+    pub start_irr: Option<u32>,
+    /// Last irreducible representation index (1-based)
+    #[serde(default)]
+    pub last_irr: Option<u32>,
+    /// Verbosity level for ph.x output
+    #[serde(default)]
+    pub verbosity: Option<String>,
     /// Acoustic sum rule (none, simple, crystal, one-dim, zero-dim)
     #[serde(default = "default_asr")]
     pub asr: String,
@@ -388,6 +436,10 @@ pub struct PhononCalculation {
 
 fn default_asr() -> String {
     "crystal".to_string()
+}
+
+fn default_trans() -> bool {
+    true
 }
 
 impl Default for PhononCalculation {
@@ -401,6 +453,22 @@ impl Default for PhononCalculation {
             ldisp: true,
             recover: false,
             asr: "crystal".to_string(),
+            trans: true,
+            epsil: false,
+            fpol: false,
+            lraman: false,
+            fildvscf: None,
+            electron_phonon: None,
+            el_ph_sigma: None,
+            el_ph_nsigma: None,
+            nmix_ph: None,
+            niter_ph: None,
+            alpha_mix: None,
+            start_q: None,
+            last_q: None,
+            start_irr: None,
+            last_irr: None,
+            verbosity: None,
         }
     }
 }
@@ -551,6 +619,9 @@ pub struct PhononPipelineConfig {
     pub calculate_dos: bool,
     /// DOS grid dimensions (if calculating DOS)
     pub dos_grid: Option<[u32; 3]>,
+    /// DOS energy/frequency step in cm^-1 (if calculating DOS)
+    #[serde(default)]
+    pub dos_delta_e: Option<f64>,
     /// Whether to calculate dispersion
     pub calculate_dispersion: bool,
     /// Q-path for dispersion (if calculating dispersion)

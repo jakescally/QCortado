@@ -14,7 +14,7 @@ use std::path::Path;
 pub struct KPathPoint {
     pub label: String,
     pub coords: [f64; 3],
-    pub npoints: u32,  // 0 for last point in a segment
+    pub npoints: u32, // 0 for last point in a segment
 }
 
 /// Band gap information
@@ -93,7 +93,12 @@ pub fn generate_bands_x_input(config: &BandsXConfig) -> String {
     writeln!(output, "  prefix = '{}',", config.prefix).unwrap();
     writeln!(output, "  outdir = '{}',", config.outdir).unwrap();
     writeln!(output, "  filband = '{}',", config.filband).unwrap();
-    writeln!(output, "  lsym = .{}.,", if config.lsym { "true" } else { "false" }).unwrap();
+    writeln!(
+        output,
+        "  lsym = .{}.,",
+        if config.lsym { "true" } else { "false" }
+    )
+    .unwrap();
     writeln!(output, "/").unwrap();
 
     output
@@ -138,7 +143,9 @@ pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, Str
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
             let k: f64 = parts[0].parse().map_err(|_| "Failed to parse k value")?;
-            let e: f64 = parts[1].parse().map_err(|_| "Failed to parse energy value")?;
+            let e: f64 = parts[1]
+                .parse()
+                .map_err(|_| "Failed to parse energy value")?;
             current_band.push((k, e));
         }
     }
@@ -181,8 +188,12 @@ pub fn parse_bands_gnu(content: &str, fermi_energy: f64) -> Result<BandData, Str
     let mut e_max = f64::MIN;
     for band in &energies {
         for &e in band {
-            if e < e_min { e_min = e; }
-            if e > e_max { e_max = e; }
+            if e < e_min {
+                e_min = e;
+            }
+            if e > e_max {
+                e_max = e;
+            }
         }
     }
 
@@ -265,8 +276,8 @@ fn calculate_band_gap(
 
 /// Read bands.dat.gnu file from disk
 pub fn read_bands_gnu_file(path: &Path, fermi_energy: f64) -> Result<BandData, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read bands file: {}", e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read bands file: {}", e))?;
     parse_bands_gnu(&content, fermi_energy)
 }
 
@@ -276,10 +287,7 @@ pub fn read_bands_gnu_file(path: &Path, fermi_energy: f64) -> Result<BandData, S
 /// where each npoints value indicates how many k-points in the segment TO that point.
 /// High-symmetry points occur at cumulative indices: 0, 20, 40, 60.
 /// We read the actual k-distance from the parsed band data at those indices.
-pub fn add_symmetry_markers(
-    data: &mut BandData,
-    k_path: &[KPathPoint],
-) {
+pub fn add_symmetry_markers(data: &mut BandData, k_path: &[KPathPoint]) {
     if k_path.is_empty() || data.k_points.is_empty() {
         return;
     }
@@ -360,6 +368,6 @@ mod tests {
         // Verify the energies are correctly organized
         assert!((data.energies[0][0] - (-6.12)).abs() < 0.01); // Band 0, k-point 0
         assert!((data.energies[1][0] - (-1.23)).abs() < 0.01); // Band 1, k-point 0
-        assert!((data.energies[2][2] - 4.85).abs() < 0.01);    // Band 2, k-point 2
+        assert!((data.energies[2][2] - 4.85).abs() < 0.01); // Band 2, k-point 2
     }
 }

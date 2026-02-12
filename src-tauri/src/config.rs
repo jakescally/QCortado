@@ -39,11 +39,10 @@ pub fn load_config(app: &AppHandle) -> Result<AppConfig, String> {
         return Ok(AppConfig::default());
     }
 
-    let content = fs::read_to_string(&config_path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
+    let content =
+        fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {}", e))?;
 
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))
 }
 
 /// Saves configuration to disk
@@ -53,8 +52,7 @@ pub fn save_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-    fs::write(&config_path, content)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
+    fs::write(&config_path, content).map_err(|e| format!("Failed to write config: {}", e))?;
 
     Ok(())
 }

@@ -87,7 +87,8 @@ fn parse_forces(output: &str) -> Option<Vec<[f64; 3]>> {
     let forces_section = &output[forces_start..];
 
     // Pattern: "atom    1 type  1   force =     0.00000000    0.00000000    0.00000000"
-    let re = Regex::new(r"atom\s+\d+\s+type\s+\d+\s+force\s+=\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)").ok()?;
+    let re = Regex::new(r"atom\s+\d+\s+type\s+\d+\s+force\s+=\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)")
+        .ok()?;
 
     let mut forces = Vec::new();
 

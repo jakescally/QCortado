@@ -55,6 +55,9 @@ interface PhononData {
 }
 
 type PhononViewMode = "bands" | "dos";
+type PhononFrequencyUnit = "cm-1" | "thz";
+type PhononBandFocus = "full" | "acoustic" | "optical";
+const CM1_TO_THZ = 0.0299792458;
 
 function toBandDataFromPhononDispersion(phononDispersion: any): BandData {
   return {
@@ -72,18 +75,85 @@ function toBandDataFromPhononDispersion(phononDispersion: any): BandData {
   };
 }
 
+function convertPhononBandDataUnit(data: BandData, unit: PhononFrequencyUnit): BandData {
+  if (unit === "cm-1") {
+    return data;
+  }
+
+  const scale = CM1_TO_THZ;
+  return {
+    ...data,
+    energies: data.energies.map((band) => band.map((freq) => freq * scale)),
+    energy_range: [
+      data.energy_range[0] * scale,
+      data.energy_range[1] * scale,
+    ],
+  };
+}
+
 function getPhononViewerRange(phononBandData: BandData): [number, number] {
   const rawMin = Number(phononBandData.energy_range?.[0]);
   const rawMax = Number(phononBandData.energy_range?.[1]);
   const safeMax = Number.isFinite(rawMax) ? rawMax : 0;
   const upperBase = Math.max(safeMax, 1);
-  const padding = Math.max(5, upperBase * 0.08);
+  const padding = Math.max(0.2, upperBase * 0.08);
   const lower = 0;
   const upper = upperBase + padding;
   if (Number.isFinite(rawMin) && rawMin > upper) {
     return [0, rawMin + padding];
   }
   return [lower, upper];
+}
+
+function getFrequencyBounds(modes: number[][]): [number, number] | null {
+  let min = Infinity;
+  let max = -Infinity;
+
+  for (const mode of modes) {
+    for (const value of mode) {
+      if (!Number.isFinite(value)) continue;
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return null;
+  }
+
+  return [min, max];
+}
+
+function getPhononFocusRanges(phononBandData: BandData): {
+  full: [number, number];
+  acoustic: [number, number] | null;
+  optical: [number, number] | null;
+} {
+  const full = getPhononViewerRange(phononBandData);
+  const acousticCount = Math.min(3, phononBandData.energies.length);
+
+  let acoustic: [number, number] | null = null;
+  if (acousticCount > 0) {
+    const acousticBounds = getFrequencyBounds(phononBandData.energies.slice(0, acousticCount));
+    if (acousticBounds) {
+      const upperBase = Math.max(acousticBounds[1], 1);
+      const span = Math.max(upperBase - Math.max(acousticBounds[0], 0), 1);
+      const padding = Math.max(0.2, span * 0.08);
+      acoustic = [0, upperBase + padding];
+    }
+  }
+
+  let optical: [number, number] | null = null;
+  if (phononBandData.energies.length > acousticCount) {
+    const opticalBounds = getFrequencyBounds(phononBandData.energies.slice(acousticCount));
+    if (opticalBounds) {
+      const span = Math.max(opticalBounds[1] - opticalBounds[0], 1);
+      const padding = Math.max(0.2, span * 0.08);
+      optical = [Math.max(0, opticalBounds[0] - padding * 0.6), opticalBounds[1] + padding];
+    }
+  }
+
+  return { full, acoustic, optical };
 }
 
 function App() {
@@ -110,6 +180,8 @@ function App() {
 
   // Context for viewing saved phonon data
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
+  const [phononBandsUnit, setPhononBandsUnit] = useState<PhononFrequencyUnit>("cm-1");
+  const [phononBandFocus, setPhononBandFocus] = useState<PhononBandFocus>("full");
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -237,6 +309,30 @@ function App() {
     const phononBandData = hasDispersion
       ? toBandDataFromPhononDispersion(phononData.dispersion_data)
       : null;
+    const displayPhononBandData = phononBandData
+      ? convertPhononBandDataUnit(phononBandData, phononBandsUnit)
+      : null;
+    const phononUnitLabel = phononBandsUnit === "thz" ? "THz" : "cm^-1";
+    const focusRanges = displayPhononBandData ? getPhononFocusRanges(displayPhononBandData) : null;
+    const canShowAcoustic = focusRanges?.acoustic !== null;
+    const canShowOptical = focusRanges?.optical !== null;
+    const resolvedFocus: PhononBandFocus =
+      phononBandFocus === "acoustic" && !canShowAcoustic
+        ? "full"
+        : phononBandFocus === "optical" && !canShowOptical
+          ? "full"
+          : phononBandFocus;
+    const activePhononRange =
+      !focusRanges
+        ? null
+        : resolvedFocus === "acoustic"
+          ? focusRanges.acoustic
+          : resolvedFocus === "optical"
+            ? focusRanges.optical
+            : focusRanges.full;
+    const plotKey = activePhononRange
+      ? `${phononBandsUnit}-${resolvedFocus}-${activePhononRange[0].toFixed(6)}-${activePhononRange[1].toFixed(6)}`
+      : `${phononBandsUnit}-${resolvedFocus}`;
 
     return (
       <div className="phonon-viewer-container">
@@ -251,20 +347,66 @@ function App() {
             ← Back to Dashboard
           </button>
           <h2>{showingBands ? "Phonon Bands" : "Phonon DOS"}</h2>
+          {showingBands && displayPhononBandData && (
+            <div className="phonon-view-controls">
+              <div className="phonon-unit-toggle" role="group" aria-label="Phonon frequency units">
+                <button
+                  type="button"
+                  className={`phonon-unit-btn ${phononBandsUnit === "cm-1" ? "active" : ""}`}
+                  onClick={() => setPhononBandsUnit("cm-1")}
+                >
+                  cm^-1
+                </button>
+                <button
+                  type="button"
+                  className={`phonon-unit-btn ${phononBandsUnit === "thz" ? "active" : ""}`}
+                  onClick={() => setPhononBandsUnit("thz")}
+                >
+                  THz
+                </button>
+              </div>
+              <div className="phonon-focus-toggle" role="group" aria-label="Phonon frequency focus">
+                <button
+                  type="button"
+                  className={`phonon-focus-btn ${resolvedFocus === "full" ? "active" : ""}`}
+                  onClick={() => setPhononBandFocus("full")}
+                >
+                  Full
+                </button>
+                <button
+                  type="button"
+                  className={`phonon-focus-btn ${resolvedFocus === "acoustic" ? "active" : ""}`}
+                  onClick={() => setPhononBandFocus("acoustic")}
+                  disabled={!canShowAcoustic}
+                >
+                  Acoustic
+                </button>
+                <button
+                  type="button"
+                  className={`phonon-focus-btn ${resolvedFocus === "optical" ? "active" : ""}`}
+                  onClick={() => setPhononBandFocus("optical")}
+                  disabled={!canShowOptical}
+                >
+                  Optical
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="phonon-viewer-content">
-          {showingBands && phononBandData ? (
+          {showingBands && displayPhononBandData && activePhononRange ? (
             <BandPlot
-              data={phononBandData}
+              key={plotKey}
+              data={displayPhononBandData}
               width={900}
               height={600}
-              energyRange={getPhononViewerRange(phononBandData)}
+              energyRange={activePhononRange}
               showFermiLevel={false}
-              yAxisLabel="Frequency (cm^-1)"
+              yAxisLabel={`Frequency (${phononUnitLabel})`}
               pointLabel="Mode"
               valueLabel="Frequency"
-              valueUnit="cm^-1"
-              valueDecimals={1}
+              valueUnit={phononUnitLabel}
+              valueDecimals={phononBandsUnit === "thz" ? 3 : 1}
               primaryCountLabel="modes"
               secondaryCountLabel="q-points"
               scrollHint="Scroll: zoom frequency | Shift+Scroll: pan"

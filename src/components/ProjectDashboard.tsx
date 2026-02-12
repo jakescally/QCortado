@@ -453,6 +453,8 @@ export function ProjectDashboard({
 
   // Import state
   const [isImporting, setIsImporting] = useState(false);
+  const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -672,6 +674,68 @@ export function ProjectDashboard({
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     onRunPhonons(selectedCifId, crystalData, variant.calculations);
+  }
+
+  async function handleRecoverPhonon() {
+    if (!selectedCifId) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+
+    const defaultTmpDir = "/tmp/qcortado_phonon";
+
+    const fallbackScf = variant.calculations
+      .filter((calc) => calc.calc_type === "scf" && calc.result?.converged)
+      .sort((a, b) => {
+        const aTime = a.completed_at ?? a.started_at;
+        const bTime = b.completed_at ?? b.started_at;
+        return bTime.localeCompare(aTime);
+      })[0];
+
+    setIsRecoveringPhonon(true);
+    setError(null);
+    setInfoMessage(null);
+    try {
+      // First try the default pipeline scratch path automatically.
+      try {
+        await invoke("recover_phonon_calculation", {
+          projectId,
+          cifId: selectedCifId,
+          workingDir: defaultTmpDir,
+          sourceScfId: fallbackScf?.id ?? null,
+        });
+        await loadProject();
+        setInfoMessage(`Recovered phonon calculation from ${defaultTmpDir}.`);
+        return;
+      } catch {
+        // If default location is unavailable, let the user pick a folder.
+      }
+
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        defaultPath: defaultTmpDir,
+        title: "Select phonon scratch directory",
+      });
+
+      if (!selected || Array.isArray(selected)) {
+        setInfoMessage("Phonon recovery canceled.");
+        return;
+      }
+
+      await invoke("recover_phonon_calculation", {
+        projectId,
+        cifId: selectedCifId,
+        workingDir: selected,
+        sourceScfId: fallbackScf?.id ?? null,
+      });
+      await loadProject();
+      setInfoMessage(`Recovered phonon calculation from ${selected}.`);
+    } catch (e) {
+      console.error("Failed to recover phonon calculation:", e);
+      setError(`Phonon recovery failed: ${e}`);
+    } finally {
+      setIsRecoveringPhonon(false);
+    }
   }
 
   async function handleViewPhonon(
@@ -913,6 +977,7 @@ export function ProjectDashboard({
           </button>
           <h2>Error</h2>
         </div>
+        {infoMessage && <div className="info-banner">{infoMessage}</div>}
         <div className="error-banner">{error}</div>
       </div>
     );
@@ -947,6 +1012,7 @@ export function ProjectDashboard({
           </div>
         </div>
 
+        {infoMessage && <div className="info-banner">{infoMessage}</div>}
         {error && <div className="error-banner">{error}</div>}
 
         <div className="dashboard-content">
@@ -1023,6 +1089,7 @@ export function ProjectDashboard({
         </div>
       </div>
 
+      {infoMessage && <div className="info-banner">{infoMessage}</div>}
       {error && <div className="error-banner">{error}</div>}
 
       <div className="dashboard-content">
@@ -1144,6 +1211,17 @@ export function ProjectDashboard({
               <span className="calc-action-icon">Opt</span>
               <span className="calc-action-label">Geometry Optimization</span>
               <span className="calc-action-hint">VC-Relax preset</span>
+            </button>
+            <button
+              className="calc-action-btn"
+              onClick={handleRecoverPhonon}
+              disabled={isRecoveringPhonon}
+            >
+              <span className="calc-action-icon">Rec</span>
+              <span className="calc-action-label">Recover Phonon</span>
+              <span className="calc-action-hint">
+                {isRecoveringPhonon ? "Recovering..." : "Import completed tmp run"}
+              </span>
             </button>
           </div>
         </section>
