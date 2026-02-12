@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
@@ -10,6 +11,8 @@ import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
+import { ProcessIndicator } from "./components/ProcessIndicator";
+import { TaskProvider } from "./lib/TaskContext";
 import { CrystalData, SCFPreset, OptimizedStructureOption } from "./lib/types";
 
 interface ProjectSummary {
@@ -156,7 +159,7 @@ function getPhononFocusRanges(phononBandData: BandData): {
   return { full, acoustic, optical };
 }
 
-function App() {
+function AppInner() {
   const [qePath, setQePath] = useState<string | null>(null);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("Not configured");
@@ -165,6 +168,10 @@ function App() {
   const [projectCount, setProjectCount] = useState<number>(0);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // Active task ID for reconnection when navigating to wizard from indicator
+  const [reconnectTaskId, setReconnectTaskId] = useState<string | null>(null);
 
   // Context for running SCF from a project
   const [scfContext, setScfContext] = useState<SCFContext | null>(null);
@@ -187,6 +194,14 @@ function App() {
   useEffect(() => {
     checkQEPath();
     loadProjectCount();
+  }, []);
+
+  // Listen for close confirmation events from backend
+  useEffect(() => {
+    const unlisten = listen("confirm-close", () => {
+      setShowCloseConfirm(true);
+    });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   async function loadProjectCount() {
@@ -241,74 +256,131 @@ function App() {
     }
   }
 
-  if (currentView === "bands-wizard" && qePath && bandsContext) {
+  function handleNavigateToTask(taskId: string, taskType: string) {
+    setReconnectTaskId(taskId);
+    const viewMap: Record<string, AppView> = {
+      scf: "scf-wizard",
+      bands: "bands-wizard",
+      phonon: "phonon-wizard",
+    };
+    const view = viewMap[taskType];
+    if (view) {
+      setCurrentView(view);
+    }
+  }
+
+  async function handleConfirmClose() {
+    setShowCloseConfirm(false);
+    await invoke("shutdown_and_close");
+  }
+
+  // Render the close confirmation modal overlay
+  const closeConfirmModal = showCloseConfirm ? (
+    <div className="close-confirm-overlay" onClick={() => setShowCloseConfirm(false)}>
+      <div className="close-confirm-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Calculations Still Running</h3>
+        <p>
+          One or more calculations are still running. Closing the app will terminate them. Are you sure?
+        </p>
+        <div className="close-confirm-actions">
+          <button onClick={() => setShowCloseConfirm(false)}>Cancel</button>
+          <button className="close-confirm-danger" onClick={handleConfirmClose}>
+            Close Anyway
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  // The process indicator is always rendered
+  const processIndicator = <ProcessIndicator onNavigateToTask={handleNavigateToTask} />;
+
+  if (currentView === "bands-wizard" && qePath && (bandsContext || reconnectTaskId)) {
     return (
-      <BandStructureWizard
-        qePath={qePath}
-        onViewBands={(bandData, fermiEnergy) => {
-          setViewBandsData({ bandData, fermiEnergy });
-          setCurrentView("bands-viewer");
-        }}
-        onBack={() => {
-          setCurrentView("project-dashboard");
-          setBandsContext(null);
-        }}
-        projectId={bandsContext.projectId}
-        cifId={bandsContext.cifId}
-        crystalData={bandsContext.crystalData}
-        scfCalculations={bandsContext.scfCalculations}
-      />
+      <>
+        <BandStructureWizard
+          qePath={qePath}
+          onViewBands={(bandData, fermiEnergy) => {
+            setViewBandsData({ bandData, fermiEnergy });
+            setCurrentView("bands-viewer");
+            setReconnectTaskId(null);
+          }}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setBandsContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={bandsContext?.projectId ?? ""}
+          cifId={bandsContext?.cifId ?? ""}
+          crystalData={bandsContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          scfCalculations={bandsContext?.scfCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
   if (currentView === "bands-viewer" && viewBandsData) {
     return (
-      <div className="bands-viewer-container">
-        <div className="bands-viewer-header">
-          <button
-            className="back-button"
-            onClick={() => {
-              setCurrentView("project-dashboard");
-              setViewBandsData(null);
-            }}
-          >
-            ← Back to Dashboard
-          </button>
-          <h2>Band Structure</h2>
+      <>
+        <div className="bands-viewer-container">
+          <div className="bands-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewBandsData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>Band Structure</h2>
+          </div>
+          <div className="bands-viewer-content">
+            <BandPlot
+              data={viewBandsData.bandData}
+              width={900}
+              height={600}
+              scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
+              viewerType="electronic"
+            />
+          </div>
         </div>
-        <div className="bands-viewer-content">
-          <BandPlot
-            data={viewBandsData.bandData}
-            width={900}
-            height={600}
-            scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
-            viewerType="electronic"
-          />
-        </div>
-      </div>
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
-  if (currentView === "phonon-wizard" && qePath && phononsContext) {
+  if (currentView === "phonon-wizard" && qePath && (phononsContext || reconnectTaskId)) {
     return (
-      <PhononWizard
-        qePath={qePath}
-        onViewPhonons={(phononData, viewMode) => {
-          setViewPhononData({
-            data: phononData,
-            mode: viewMode,
-          });
-          setCurrentView("phonon-viewer");
-        }}
-        onBack={() => {
-          setCurrentView("project-dashboard");
-          setPhononsContext(null);
-        }}
-        projectId={phononsContext.projectId}
-        cifId={phononsContext.cifId}
-        crystalData={phononsContext.crystalData}
-        scfCalculations={phononsContext.scfCalculations}
-      />
+      <>
+        <PhononWizard
+          qePath={qePath}
+          onViewPhonons={(phononData, viewMode) => {
+            setViewPhononData({
+              data: phononData,
+              mode: viewMode,
+            });
+            setCurrentView("phonon-viewer");
+            setReconnectTaskId(null);
+          }}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setPhononsContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={phononsContext?.projectId ?? ""}
+          cifId={phononsContext?.cifId ?? ""}
+          crystalData={phononsContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          scfCalculations={phononsContext?.scfCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
@@ -347,297 +419,326 @@ function App() {
       : `${phononBandsUnit}-${resolvedFocus}`;
 
     return (
-      <div className="phonon-viewer-container">
-        <div className="phonon-viewer-header">
-          <button
-            className="back-button"
-            onClick={() => {
-              setCurrentView("project-dashboard");
-              setViewPhononData(null);
-            }}
-          >
-            ← Back to Dashboard
-          </button>
-          <h2>{showingBands ? "Phonon Bands" : "Phonon DOS"}</h2>
-          {showingBands && displayPhononBandData && (
-            <div className="phonon-view-controls">
-              <div className="phonon-unit-toggle" role="group" aria-label="Phonon frequency units">
-                <button
-                  type="button"
-                  className={`phonon-unit-btn ${phononBandsUnit === "cm-1" ? "active" : ""}`}
-                  onClick={() => setPhononBandsUnit("cm-1")}
-                >
-                  cm^-1
-                </button>
-                <button
-                  type="button"
-                  className={`phonon-unit-btn ${phononBandsUnit === "thz" ? "active" : ""}`}
-                  onClick={() => setPhononBandsUnit("thz")}
-                >
-                  THz
-                </button>
+      <>
+        <div className="phonon-viewer-container">
+          <div className="phonon-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewPhononData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>{showingBands ? "Phonon Bands" : "Phonon DOS"}</h2>
+            {showingBands && displayPhononBandData && (
+              <div className="phonon-view-controls">
+                <div className="phonon-unit-toggle" role="group" aria-label="Phonon frequency units">
+                  <button
+                    type="button"
+                    className={`phonon-unit-btn ${phononBandsUnit === "cm-1" ? "active" : ""}`}
+                    onClick={() => setPhononBandsUnit("cm-1")}
+                  >
+                    cm^-1
+                  </button>
+                  <button
+                    type="button"
+                    className={`phonon-unit-btn ${phononBandsUnit === "thz" ? "active" : ""}`}
+                    onClick={() => setPhononBandsUnit("thz")}
+                  >
+                    THz
+                  </button>
+                </div>
+                <div className="phonon-focus-toggle" role="group" aria-label="Phonon frequency focus">
+                  <button
+                    type="button"
+                    className={`phonon-focus-btn ${resolvedFocus === "full" ? "active" : ""}`}
+                    onClick={() => setPhononBandFocus("full")}
+                  >
+                    Full
+                  </button>
+                  <button
+                    type="button"
+                    className={`phonon-focus-btn ${resolvedFocus === "acoustic" ? "active" : ""}`}
+                    onClick={() => setPhononBandFocus("acoustic")}
+                    disabled={!canShowAcoustic}
+                  >
+                    Acoustic
+                  </button>
+                  <button
+                    type="button"
+                    className={`phonon-focus-btn ${resolvedFocus === "optical" ? "active" : ""}`}
+                    onClick={() => setPhononBandFocus("optical")}
+                    disabled={!canShowOptical}
+                  >
+                    Optical
+                  </button>
+                </div>
               </div>
-              <div className="phonon-focus-toggle" role="group" aria-label="Phonon frequency focus">
-                <button
-                  type="button"
-                  className={`phonon-focus-btn ${resolvedFocus === "full" ? "active" : ""}`}
-                  onClick={() => setPhononBandFocus("full")}
-                >
-                  Full
-                </button>
-                <button
-                  type="button"
-                  className={`phonon-focus-btn ${resolvedFocus === "acoustic" ? "active" : ""}`}
-                  onClick={() => setPhononBandFocus("acoustic")}
-                  disabled={!canShowAcoustic}
-                >
-                  Acoustic
-                </button>
-                <button
-                  type="button"
-                  className={`phonon-focus-btn ${resolvedFocus === "optical" ? "active" : ""}`}
-                  onClick={() => setPhononBandFocus("optical")}
-                  disabled={!canShowOptical}
-                >
-                  Optical
-                </button>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
+          <div className="phonon-viewer-content">
+            {showingBands && displayPhononBandData && activePhononRange ? (
+              <BandPlot
+                key={plotKey}
+                data={displayPhononBandData}
+                width={900}
+                height={600}
+                energyRange={activePhononRange}
+                showFermiLevel={false}
+                yAxisLabel={`Frequency (${phononUnitLabel})`}
+                pointLabel="Mode"
+                valueLabel="Frequency"
+                valueUnit={phononUnitLabel}
+                valueDecimals={phononBandsUnit === "thz" ? 3 : 1}
+                primaryCountLabel="modes"
+                secondaryCountLabel="q-points"
+                scrollHint="Scroll: zoom frequency | Shift+Scroll: pan"
+                yClampRange={null}
+                viewerType="phonon"
+              />
+            ) : showingDos && hasDos ? (
+              <PhononDOSPlot
+                data={phononData.dos_data}
+                width={400}
+                height={600}
+              />
+            ) : (
+              <p>{showingBands ? "No phonon dispersion data available" : "No phonon DOS data available"}</p>
+            )}
+          </div>
         </div>
-        <div className="phonon-viewer-content">
-          {showingBands && displayPhononBandData && activePhononRange ? (
-            <BandPlot
-              key={plotKey}
-              data={displayPhononBandData}
-              width={900}
-              height={600}
-              energyRange={activePhononRange}
-              showFermiLevel={false}
-              yAxisLabel={`Frequency (${phononUnitLabel})`}
-              pointLabel="Mode"
-              valueLabel="Frequency"
-              valueUnit={phononUnitLabel}
-              valueDecimals={phononBandsUnit === "thz" ? 3 : 1}
-              primaryCountLabel="modes"
-              secondaryCountLabel="q-points"
-              scrollHint="Scroll: zoom frequency | Shift+Scroll: pan"
-              yClampRange={null}
-              viewerType="phonon"
-            />
-          ) : showingDos && hasDos ? (
-            <PhononDOSPlot
-              data={phononData.dos_data}
-              width={400}
-              height={600}
-            />
-          ) : (
-            <p>{showingBands ? "No phonon dispersion data available" : "No phonon DOS data available"}</p>
-          )}
-        </div>
-      </div>
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
   if (currentView === "scf-wizard" && qePath) {
     return (
-      <SCFWizard
-        qePath={qePath}
-        onBack={() => {
-          // If we came from a project dashboard, go back there
-          if (scfContext) {
-            setCurrentView("project-dashboard");
-            setScfContext(null);
-          } else {
-            setCurrentView("home");
-          }
-        }}
-        initialCif={scfContext || undefined}
-        initialPreset={scfContext?.initialPreset}
-        presetLock={scfContext?.presetLock}
-        optimizedStructures={scfContext?.optimizedStructures}
-      />
+      <>
+        <SCFWizard
+          qePath={qePath}
+          onBack={() => {
+            if (scfContext) {
+              setCurrentView("project-dashboard");
+              setScfContext(null);
+            } else {
+              setCurrentView("home");
+            }
+            setReconnectTaskId(null);
+          }}
+          initialCif={scfContext || undefined}
+          initialPreset={scfContext?.initialPreset}
+          presetLock={scfContext?.presetLock}
+          optimizedStructures={scfContext?.optimizedStructures}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
   if (currentView === "project-browser") {
     return (
-      <ProjectBrowser
-        onBack={() => {
-          setCurrentView("home");
-          loadProjectCount(); // Refresh count in case projects were added/deleted
-        }}
-        onSelectProject={(projectId) => {
-          setSelectedProjectId(projectId);
-          setCurrentView("project-dashboard");
-        }}
-      />
+      <>
+        <ProjectBrowser
+          onBack={() => {
+            setCurrentView("home");
+            loadProjectCount();
+          }}
+          onSelectProject={(projectId) => {
+            setSelectedProjectId(projectId);
+            setCurrentView("project-dashboard");
+          }}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
   if (currentView === "project-dashboard" && selectedProjectId) {
     return (
-      <ProjectDashboard
-        projectId={selectedProjectId}
-        onBack={() => {
-          setCurrentView("project-browser");
-          setSelectedProjectId(null);
-        }}
-        onDeleted={() => {
-          setCurrentView("project-browser");
-          setSelectedProjectId(null);
-          loadProjectCount();
-        }}
-        onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures) => {
-          setScfContext({
-            cifId,
-            crystalData,
-            cifContent,
-            filename,
-            projectId: selectedProjectId,
-            initialPreset: preset,
-            presetLock,
-            optimizedStructures,
-          });
-          setCurrentView("scf-wizard");
-        }}
-        onRunBands={(cifId, crystalData, scfCalculations) => {
-          setBandsContext({
-            cifId,
-            crystalData,
-            projectId: selectedProjectId,
-            scfCalculations,
-          });
-          setCurrentView("bands-wizard");
-        }}
-        onViewBands={(bandData, fermiEnergy) => {
-          setViewBandsData({ bandData, fermiEnergy });
-          setCurrentView("bands-viewer");
-        }}
-        onRunPhonons={(cifId, crystalData, scfCalculations) => {
-          setPhononsContext({
-            cifId,
-            crystalData,
-            projectId: selectedProjectId,
-            scfCalculations,
-          });
-          setCurrentView("phonon-wizard");
-        }}
-        onViewPhonons={(phononData, viewMode) => {
-          setViewPhononData({
-            data: phononData,
-            mode: viewMode,
-          });
-          setCurrentView("phonon-viewer");
-        }}
-      />
+      <>
+        <ProjectDashboard
+          projectId={selectedProjectId}
+          onBack={() => {
+            setCurrentView("project-browser");
+            setSelectedProjectId(null);
+          }}
+          onDeleted={() => {
+            setCurrentView("project-browser");
+            setSelectedProjectId(null);
+            loadProjectCount();
+          }}
+          onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures) => {
+            setScfContext({
+              cifId,
+              crystalData,
+              cifContent,
+              filename,
+              projectId: selectedProjectId,
+              initialPreset: preset,
+              presetLock,
+              optimizedStructures,
+            });
+            setCurrentView("scf-wizard");
+          }}
+          onRunBands={(cifId, crystalData, scfCalculations) => {
+            setBandsContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            setCurrentView("bands-wizard");
+          }}
+          onViewBands={(bandData, fermiEnergy) => {
+            setViewBandsData({ bandData, fermiEnergy });
+            setCurrentView("bands-viewer");
+          }}
+          onRunPhonons={(cifId, crystalData, scfCalculations) => {
+            setPhononsContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            setCurrentView("phonon-wizard");
+          }}
+          onViewPhonons={(phononData, viewMode) => {
+            setViewPhononData({
+              data: phononData,
+              mode: viewMode,
+            });
+            setCurrentView("phonon-viewer");
+          }}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
     );
   }
 
   return (
-    <main className="container">
-      <header className="header">
-        <h1>QCortado</h1>
-        <p className="subtitle">A Modern Interface for Quantum ESPRESSO</p>
-      </header>
+    <>
+      <main className="container">
+        <header className="header">
+          <h1>QCortado</h1>
+          <p className="subtitle">A Modern Interface for Quantum ESPRESSO</p>
+        </header>
 
-      <section className="config-section">
-        <h2>Configuration</h2>
-        <div className="config-row">
-          <label>QE Installation:</label>
-          {qePath ? (
-            <span className="path">{qePath}</span>
-          ) : (
-            <span className="not-set">Not configured</span>
-          )}
-          <button onClick={selectQEPath}>
-            {qePath ? "Change" : "Configure"}
-          </button>
-        </div>
-
-        <div className="status-row">
-          <label>Status:</label>
-          <span className={`status ${status === "Ready" ? "ready" : "pending"}`}>
-            {status}
-          </span>
-        </div>
-
-        {error && <div className="error">{error}</div>}
-
-        {availableExecutables.length > 0 && (
-          <div className="executables">
-            <label>Available programs:</label>
-            <div className="exe-list">
-              {availableExecutables.map((exe) => (
-                <span key={exe} className="exe-tag">{exe}</span>
-              ))}
-            </div>
+        <section className="config-section">
+          <h2>Configuration</h2>
+          <div className="config-row">
+            <label>QE Installation:</label>
+            {qePath ? (
+              <span className="path">{qePath}</span>
+            ) : (
+              <span className="not-set">Not configured</span>
+            )}
+            <button onClick={selectQEPath}>
+              {qePath ? "Change" : "Configure"}
+            </button>
           </div>
+
+          <div className="status-row">
+            <label>Status:</label>
+            <span className={`status ${status === "Ready" ? "ready" : "pending"}`}>
+              {status}
+            </span>
+          </div>
+
+          {error && <div className="error">{error}</div>}
+
+          {availableExecutables.length > 0 && (
+            <div className="executables">
+              <label>Available programs:</label>
+              <div className="exe-list">
+                {availableExecutables.map((exe) => (
+                  <span key={exe} className="exe-tag">{exe}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {qePath && (
+          <>
+            <section className="actions-section">
+              <h2>Projects</h2>
+              <div className="action-grid">
+                <button className="action-btn" onClick={() => setShowCreateDialog(true)}>
+                  <span className="action-icon">+</span>
+                  <span className="action-label">New Project</span>
+                  <span className="action-hint">Create a project</span>
+                </button>
+                <button
+                  className="action-btn"
+                  onClick={() => setCurrentView("project-browser")}
+                  disabled={projectCount === 0}
+                >
+                  <span className="action-icon">{projectCount}</span>
+                  <span className="action-label">
+                    {projectCount === 1 ? "View Project" : "View Projects"}
+                  </span>
+                  <span className="action-hint">
+                    {projectCount === 0 ? "No projects yet" : "Browse & manage"}
+                  </span>
+                </button>
+              </div>
+            </section>
+
+            <section className="actions-section">
+              <h2>Quick Calculations</h2>
+              <div className="action-grid">
+                <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
+                  <span className="action-icon">SCF</span>
+                  <span className="action-label">SCF Calculation</span>
+                  <span className="action-hint">Import CIF & run</span>
+                </button>
+                <button className="action-btn" disabled>
+                  <span className="action-icon">Band</span>
+                  <span className="action-label">Band Structure</span>
+                  <span className="action-hint">Coming soon</span>
+                </button>
+                <button className="action-btn" disabled>
+                  <span className="action-icon">DOS</span>
+                  <span className="action-label">Density of States</span>
+                  <span className="action-hint">Coming soon</span>
+                </button>
+              </div>
+            </section>
+          </>
         )}
-      </section>
 
-      {qePath && (
-        <>
-          <section className="actions-section">
-            <h2>Projects</h2>
-            <div className="action-grid">
-              <button className="action-btn" onClick={() => setShowCreateDialog(true)}>
-                <span className="action-icon">+</span>
-                <span className="action-label">New Project</span>
-                <span className="action-hint">Create a project</span>
-              </button>
-              <button
-                className="action-btn"
-                onClick={() => setCurrentView("project-browser")}
-                disabled={projectCount === 0}
-              >
-                <span className="action-icon">{projectCount}</span>
-                <span className="action-label">
-                  {projectCount === 1 ? "View Project" : "View Projects"}
-                </span>
-                <span className="action-hint">
-                  {projectCount === 0 ? "No projects yet" : "Browse & manage"}
-                </span>
-              </button>
-            </div>
-          </section>
+        <footer className="footer">
+          <p>QCortado v0.1.0 - Quantum ESPRESSO 7.5 Interface</p>
+        </footer>
 
-          <section className="actions-section">
-            <h2>Quick Calculations</h2>
-            <div className="action-grid">
-              <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
-                <span className="action-icon">SCF</span>
-                <span className="action-label">SCF Calculation</span>
-                <span className="action-hint">Import CIF & run</span>
-              </button>
-              <button className="action-btn" disabled>
-                <span className="action-icon">Band</span>
-                <span className="action-label">Band Structure</span>
-                <span className="action-hint">Coming soon</span>
-              </button>
-              <button className="action-btn" disabled>
-                <span className="action-icon">DOS</span>
-                <span className="action-label">Density of States</span>
-                <span className="action-hint">Coming soon</span>
-              </button>
-            </div>
-          </section>
-        </>
-      )}
+        <CreateProjectDialog
+          isOpen={showCreateDialog}
+          onClose={() => setShowCreateDialog(false)}
+          onCreated={() => {
+            setShowCreateDialog(false);
+            loadProjectCount();
+          }}
+        />
+      </main>
+      {processIndicator}
+      {closeConfirmModal}
+    </>
+  );
+}
 
-      <footer className="footer">
-        <p>QCortado v0.1.0 - Quantum ESPRESSO 7.5 Interface</p>
-      </footer>
-
-      <CreateProjectDialog
-        isOpen={showCreateDialog}
-        onClose={() => setShowCreateDialog(false)}
-        onCreated={() => {
-          setShowCreateDialog(false);
-          loadProjectCount();
-        }}
-      />
-    </main>
+function App() {
+  return (
+    <TaskProvider>
+      <AppInner />
+    </TaskProvider>
   );
 }
 

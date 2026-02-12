@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import {
@@ -20,7 +19,8 @@ import { SaveToProjectDialog } from "./SaveToProjectDialog";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
-import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { useTaskContext } from "../lib/TaskContext";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -48,6 +48,8 @@ interface SCFWizardProps {
   initialPreset?: SCFPreset;
   presetLock?: boolean;
   optimizedStructures?: OptimizedStructureOption[];
+  /** If provided, reconnect to a running/completed background task */
+  reconnectTaskId?: string;
 }
 
 interface SCFConfig {
@@ -131,9 +133,13 @@ export function SCFWizard({
   initialPreset,
   presetLock,
   optimizedStructures = [],
+  reconnectTaskId,
 }: SCFWizardProps) {
+  const taskContext = useTaskContext();
+  // Track background task for this wizard
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   // If we have initial CIF data, skip to configure step
-  const [step, setStep] = useState<WizardStep>(initialCif ? "configure" : "import");
+  const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : (initialCif ? "configure" : "import"));
   const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
   const [cifFilename, setCifFilename] = useState<string>(initialCif?.filename || "");
   const [cifContent, setCifContent] = useState<string>(initialCif?.cifContent || "");
@@ -281,6 +287,47 @@ export function SCFWizard({
       applyPreset(initialPreset);
     }
   }, [initialPreset, applyPreset]);
+
+  // Reconnect to a running/completed background task
+  useEffect(() => {
+    if (!activeTaskId) return;
+    const task = taskContext.getTask(activeTaskId);
+    if (!task) {
+      // Task may not be loaded yet, try reconnecting
+      taskContext.reconnectToTask(activeTaskId);
+      return;
+    }
+
+    // Sync wizard state from task
+    setIsRunning(task.status === "running");
+    setOutput(task.output.join("\n") + "\n");
+    setProgress(task.progress);
+    setCalcStartTime(task.startedAt);
+
+    if (task.status === "completed" && task.result) {
+      setResult(task.result);
+      setCalcEndTime(new Date().toISOString());
+      setStep("results");
+    } else if (task.status === "failed" || task.status === "cancelled") {
+      setError(task.error || "Task failed");
+    } else {
+      setStep("run");
+    }
+  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.status]);
+
+  // When active task updates, sync output/progress
+  useEffect(() => {
+    if (!activeTaskId) return;
+    const task = taskContext.getTask(activeTaskId);
+    if (!task || task.status !== "running") return;
+
+    setOutput(task.output.join("\n") + "\n");
+    setProgress(task.progress);
+
+    if (followOutputRef.current && outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.output.length]);
 
   const lockedPreset = presetLock && initialPreset ? initialPreset : null;
   const isOptimizationWizard = lockedPreset === "relax";
@@ -595,8 +642,7 @@ export function SCFWizard({
     const startTime = new Date().toISOString();
     setCalcStartTime(startTime);
 
-    // Set up event listener for streaming output
-    let unlisten: UnlistenFn | null = null;
+    // Run the calculation as a background task
 
     try {
       const elements = getUniqueElements();
@@ -747,18 +793,36 @@ export function SCFWizard({
       setGeneratedInput(inputText);
       setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running pw.x ===\n`);
 
-      // Listen for streaming output
-      unlisten = await listen<string>("qe-output-line", (event) => {
-        setOutput((prev) => prev + event.payload + "\n");
-        setProgress((prev) => progressReducer("scf", event.payload, prev));
-      });
+      // Build a label for the process indicator
+      const taskLabel = crystalData?.formula_sum || cifFilename || "SCF";
 
-      // Run the calculation with streaming
-      const calcResult = await invoke<any>("run_calculation_streaming", {
+      // Start as a background task
+      const taskId = await taskContext.startTask("scf", {
         calculation,
         workingDir: WORK_DIR,
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      }, `SCF - ${taskLabel}`);
+      setActiveTaskId(taskId);
+
+      // Wait for task completion by polling task state
+      // The sync effects above will update output/progress in real-time
+      await new Promise<void>((resolve) => {
+        const interval = setInterval(() => {
+          const task = taskContext.getTask(taskId);
+          if (task && task.status !== "running") {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
       });
+
+      // Get final task state
+      const finalTask = taskContext.getTask(taskId);
+      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+        throw new Error(finalTask?.error || "Calculation failed");
+      }
+
+      const calcResult = finalTask.result;
 
       // Track calculation end time
       const endTime = new Date().toISOString();
@@ -809,10 +873,6 @@ export function SCFWizard({
         phase: "Error",
       }));
     } finally {
-      // Clean up event listener
-      if (unlisten) {
-        unlisten();
-      }
       setIsRunning(false);
     }
   }
@@ -2120,7 +2180,7 @@ export function SCFWizard({
             </div>
 
             <div className="run-actions">
-              <button onClick={() => handleExitAttempt(() => setStep("configure"))} disabled={isRunning}>
+              <button onClick={() => handleExitAttempt(() => setStep("configure"))}>
                 ← Back to Configure
               </button>
               {result && (

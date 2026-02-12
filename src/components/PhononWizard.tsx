@@ -2,14 +2,14 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
-import { defaultProgressState, progressReducer, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { useTaskContext } from "../lib/TaskContext";
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -162,6 +162,7 @@ interface PhononWizardProps {
   cifId: string;
   crystalData: CrystalData;
   scfCalculations: CalculationRun[];
+  reconnectTaskId?: string;
 }
 
 type WizardStep = "source" | "qgrid" | "options" | "run" | "results";
@@ -174,9 +175,12 @@ export function PhononWizard({
   cifId: _cifId,
   crystalData,
   scfCalculations,
+  reconnectTaskId,
 }: PhononWizardProps) {
+  const taskContext = useTaskContext();
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   // Wizard state
-  const [step, setStep] = useState<WizardStep>("source");
+  const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
 
   // Step 1: Source SCF
@@ -300,6 +304,40 @@ export function PhononWizard({
     el.scrollTop = el.scrollHeight;
   }, [output]);
 
+  // Reconnect to a running/completed background task
+  useEffect(() => {
+    if (!activeTaskId) return;
+    const task = taskContext.getTask(activeTaskId);
+    if (!task) {
+      taskContext.reconnectToTask(activeTaskId);
+      return;
+    }
+
+    setIsRunning(task.status === "running");
+    setOutput(task.output.join("\n") + "\n");
+    setProgress(task.progress);
+    setCalcStartTime(task.startedAt);
+
+    if (task.status === "completed" && task.result) {
+      setPhononResult(task.result as any);
+      setStep("results");
+    } else if (task.status === "failed" || task.status === "cancelled") {
+      setError(task.error || "Task failed");
+    } else {
+      setStep("run");
+    }
+  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.status]);
+
+  // Sync output/progress from active task in real-time
+  useEffect(() => {
+    if (!activeTaskId) return;
+    const task = taskContext.getTask(activeTaskId);
+    if (!task || task.status !== "running") return;
+
+    setOutput(task.output.join("\n") + "\n");
+    setProgress(task.progress);
+  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.output.length]);
+
   // Handle Q-path changes from the BZ viewer
   const handleQPathChange = useCallback((newPath: KPathPoint[]) => {
     setQPath(newPath);
@@ -401,15 +439,7 @@ export function PhononWizard({
     setCalcStartTime(new Date().toISOString());
     setStep("run");
 
-    let unlisten: UnlistenFn | null = null;
-
     try {
-      // Listen for output events
-      unlisten = await listen<string>("qe-output-line", (event) => {
-        setOutput((prev) => prev + event.payload + "\n");
-        setProgress((prev) => progressReducer("phonon", event.payload, prev));
-      });
-
       // Build the phonon configuration
       const phononConfig = {
         phonon: {
@@ -452,13 +482,32 @@ export function PhononWizard({
         scf_calc_id: selectedScf.id,
       };
 
-      // Call the backend
-      const result = await invoke<PhononResult>("run_phonon_calculation", {
+      // Start as a background task
+      const taskLabel = `Phonon - ${crystalData?.formula_sum || ""}`;
+      const taskId = await taskContext.startTask("phonon", {
         config: phononConfig,
         workingDir: "/tmp/qcortado_phonon",
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      }, taskLabel);
+      setActiveTaskId(taskId);
+
+      // Wait for task completion
+      await new Promise<void>((resolve) => {
+        const interval = setInterval(() => {
+          const task = taskContext.getTask(taskId);
+          if (task && task.status !== "running") {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
       });
 
+      const finalTask = taskContext.getTask(taskId);
+      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+        throw new Error(finalTask?.error || "Calculation failed");
+      }
+
+      const result = finalTask.result as PhononResult;
       const endTime = new Date().toISOString();
       setPhononResult(result);
       setStep("results");
@@ -551,7 +600,6 @@ export function PhononWizard({
         phase: "Error",
       }));
     } finally {
-      if (unlisten) unlisten();
       setIsRunning(false);
     }
   };

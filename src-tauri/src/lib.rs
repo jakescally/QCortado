@@ -12,8 +12,11 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
+pub mod process_manager;
 pub mod projects;
 pub mod qe;
+
+use process_manager::ProcessManager;
 
 use qe::{
     add_phonon_symmetry_markers, generate_matdyn_bands_input, generate_matdyn_dos_input,
@@ -35,6 +38,8 @@ pub struct AppState {
     pub execution_prefix: Mutex<Option<String>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
+    /// Background process manager
+    pub process_manager: ProcessManager,
 }
 
 impl Default for AppState {
@@ -43,6 +48,7 @@ impl Default for AppState {
             qe_bin_dir: Mutex::new(None),
             execution_prefix: Mutex::new(None),
             project_dir: Mutex::new(None),
+            process_manager: ProcessManager::new(),
         }
     }
 }
@@ -1674,6 +1680,1120 @@ async fn run_phonon_calculation(
 }
 
 // ============================================================================
+// Background Task Commands (Process Manager)
+// ============================================================================
+
+/// Starts an SCF calculation as a background task. Returns the task_id immediately.
+#[tauri::command]
+async fn start_scf_calculation(
+    app: AppHandle,
+    calculation: QECalculation,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // Reject if a task is already running
+    if state.process_manager.has_running_tasks().await {
+        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("scf".to_string(), label).await;
+
+    // We need to drop the Mutex guard from register before spawning
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_scf_background(
+            app_handle.clone(),
+            &tid,
+            calculation,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(qe_result) => {
+                let json = serde_json::to_value(&qe_result).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+async fn run_scf_background(
+    app: AppHandle,
+    task_id: &str,
+    calculation: QECalculation,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<QEResult, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let input = generate_pw_input(&calculation);
+    let work_path = PathBuf::from(&working_dir);
+
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    let exe_path = bin_dir.join("pw.x");
+    if !exe_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            let line = format!("Starting pw.x with MPI ({} processes)...", mpi.nprocs);
+            let _ = app.emit(&format!("task-output:{}", task_id), &line);
+            pm.append_output(task_id, line).await;
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}. Is MPI installed?", e))?
+        } else {
+            tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
+
+    // Store child PID for cancellation
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write input: {}", e))?;
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_output = String::new();
+
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        // Check cancel flag
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Cancelled by user".to_string());
+        }
+        full_output.push_str(&line);
+        full_output.push('\n');
+        let _ = app.emit(&format!("task-output:{}", task_id), &line);
+        pm.append_output(task_id, line).await;
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Cancelled by user".to_string());
+    }
+
+    if !status.success() {
+        let err_line = format!("\nProcess exited with code: {:?}", status.code());
+        let _ = app.emit(&format!("task-output:{}", task_id), &err_line);
+        pm.append_output(task_id, err_line).await;
+        return Err(format!("pw.x failed with exit code: {:?}", status.code()));
+    }
+
+    Ok(parse_pw_output(&full_output))
+}
+
+/// Starts a band structure calculation as a background task.
+#[tauri::command]
+async fn start_bands_calculation(
+    app: AppHandle,
+    config: BandsCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if state.process_manager.has_running_tasks().await {
+        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("bands".to_string(), label).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_bands_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(band_data) => {
+                let json = serde_json::to_value(&band_data).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_bands_background(
+    app: AppHandle,
+    task_id: &str,
+    config: BandsCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<BandData, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let work_path = PathBuf::from(&working_dir);
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    // Helper to emit output to both the task event and the output buffer
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    // Copy SCF .save directory if provided
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!(format!("SCF tmp dir: {}", scf_tmp_dir.display()));
+            let save_dir = scf_tmp_dir.join("qcortado_scf.save");
+            if save_dir.exists() {
+                emit_line!(format!("Found .save directory: {}", save_dir.display()));
+            } else {
+                emit_line!("WARNING: .save directory not found!".to_string());
+            }
+            emit_line!("Copying SCF data to working directory...".to_string());
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+            let copied_save = work_path.join("qcortado_scf.save");
+            if copied_save.exists() {
+                emit_line!(format!("Verified .save in working dir: {}", copied_save.display()));
+            } else {
+                emit_line!("WARNING: .save not found in working dir after copy!".to_string());
+            }
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
+
+    check_cancel!();
+
+    // Step 1: NSCF along k-path
+    let mut bands_calc = config.base_calculation.clone();
+    bands_calc.calculation = qe::CalculationType::Bands;
+    bands_calc.verbosity = Some("high".to_string());
+
+    let band_path: Vec<qe::BandPathPoint> = config
+        .k_path
+        .iter()
+        .map(|p| qe::BandPathPoint {
+            k: p.coords,
+            npoints: p.npoints,
+            label: Some(p.label.clone()),
+        })
+        .collect();
+    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+
+    let input = generate_pw_input(&bands_calc);
+    std::fs::write(work_path.join("bands.in"), &input)
+        .map_err(|e| format!("Failed to write input file: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("=== Generated K_POINTS section ===".to_string());
+    for line in input.lines() {
+        if line.contains("K_POINTS")
+            || line.trim().starts_with("0.")
+            || line.trim().starts_with("-0.")
+            || line.trim().parse::<i32>().is_ok()
+        {
+            emit_line!(line.to_string());
+        }
+    }
+    emit_line!("=== End K_POINTS ===".to_string());
+    emit_line!("".to_string());
+    emit_line!("=== Starting Band Structure Calculation ===".to_string());
+
+    emit_line!(format!("K-path has {} points:", config.k_path.len()));
+    for (i, point) in config.k_path.iter().enumerate() {
+        emit_line!(format!(
+            "  {}: {} ({:.4}, {:.4}, {:.4}) -> {} points to next",
+            i + 1, point.label, point.coords[0], point.coords[1], point.coords[2], point.npoints
+        ));
+    }
+
+    let projections_enabled = config.projections.as_ref().map(|p| p.enabled).unwrap_or(false);
+    let total_steps = if projections_enabled { 3 } else { 2 };
+    emit_line!(format!("Step 1/{}: Running NSCF calculation along k-path...", total_steps));
+
+    let exe_path = bin_dir.join("pw.x");
+    if !exe_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
+
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes()).await.map_err(|e| format!("Failed to write input: {}", e))?;
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_output = String::new();
+    let mut fermi_energy: Option<f64> = None;
+
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        full_output.push_str(&line);
+        full_output.push('\n');
+        emit_line!(line.clone());
+
+        if line.contains("the Fermi energy is") {
+            if let Some(idx) = line.find("the Fermi energy is") {
+                let rest = &line[idx + 19..];
+                if let Some(ev_idx) = rest.find("ev") {
+                    if let Ok(ef) = rest[..ev_idx].trim().parse::<f64>() {
+                        fermi_energy = Some(ef);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !status.success() {
+        return Err(format!("pw.x failed with exit code: {:?}", status.code()));
+    }
+
+    std::fs::write(work_path.join("bands.out"), &full_output)
+        .map_err(|e| format!("Failed to write output file: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!(format!("Step 2/{}: Running bands.x post-processing...", total_steps));
+
+    // Step 2: bands.x
+    let bands_x_path = bin_dir.join("bands.x");
+    if !bands_x_path.exists() {
+        return Err("bands.x not found. Make sure your QE installation includes bands.x".to_string());
+    }
+
+    let bands_x_config = BandsXConfig {
+        prefix: bands_calc.prefix.clone(),
+        outdir: bands_calc.outdir.clone(),
+        filband: "bands.dat".to_string(),
+        lsym: true,
+    };
+    let bands_x_input = generate_bands_x_input(&bands_x_config);
+    std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
+        .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
+
+    let mut bands_child = tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start bands.x: {}", e))?;
+
+    if let Some(pid) = bands_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = bands_child.stdin.take() {
+        stdin.write_all(bands_x_input.as_bytes()).await.map_err(|e| format!("Failed to write bands.x input: {}", e))?;
+    }
+
+    let bands_stdout = bands_child.stdout.take().ok_or("Failed to capture bands.x stdout")?;
+    let mut bands_reader = BufReader::new(bands_stdout).lines();
+
+    while let Some(line) = bands_reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        emit_line!(line);
+    }
+
+    let bands_status = bands_child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !bands_status.success() {
+        return Err(format!("bands.x failed with exit code: {:?}", bands_status.code()));
+    }
+
+    emit_line!("".to_string());
+    emit_line!("Parsing band structure data...".to_string());
+
+    let gnu_file = work_path.join("bands.dat.gnu");
+    if !gnu_file.exists() {
+        return Err("bands.dat.gnu not found. bands.x may have failed.".to_string());
+    }
+
+    if let Ok(metadata) = std::fs::metadata(&gnu_file) {
+        emit_line!(format!("bands.dat.gnu size: {} bytes", metadata.len()));
+    }
+
+    let ef = fermi_energy.unwrap_or(0.0);
+    emit_line!(format!("Using Fermi energy: {:.4} eV", ef));
+
+    let mut band_data = read_bands_gnu_file(&gnu_file, ef)
+        .map_err(|e| format!("Failed to parse band data: {}", e))?;
+
+    emit_line!(format!(
+        "Parsed: {} bands, {} k-points, energy range [{:.2}, {:.2}] eV",
+        band_data.n_bands, band_data.n_kpoints, band_data.energy_range[0], band_data.energy_range[1]
+    ));
+
+    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+
+    // Step 3: projwfc.x (optional)
+    if projections_enabled {
+        emit_line!("".to_string());
+        emit_line!(format!("Step 3/{}: Running projwfc.x orbital projections...", total_steps));
+
+        let projwfc_x_path = bin_dir.join("projwfc.x");
+        if !projwfc_x_path.exists() {
+            emit_line!("WARNING: projwfc.x not found. Skipping fat-band projection analysis.".to_string());
+        } else {
+            check_cancel!();
+            let projection_options = config.projections.as_ref();
+            let projwfc_config = ProjwfcConfig {
+                prefix: bands_calc.prefix.clone(),
+                outdir: bands_calc.outdir.clone(),
+                filproj: "bands.projwfc.dat".to_string(),
+                lsym: projection_options.and_then(|opts| opts.lsym).unwrap_or(false),
+                diag_basis: projection_options.and_then(|opts| opts.diag_basis).unwrap_or(false),
+                pawproj: projection_options.and_then(|opts| opts.pawproj).unwrap_or(false),
+            };
+            let projwfc_input = generate_projwfc_input(&projwfc_config);
+            std::fs::write(work_path.join("projwfc.in"), &projwfc_input)
+                .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
+
+            let mut projwfc_child = tokio_command_with_prefix(&projwfc_x_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
+
+            if let Some(pid) = projwfc_child.id() {
+                pm.set_child_id(task_id, pid).await;
+            }
+
+            if let Some(mut stdin) = projwfc_child.stdin.take() {
+                stdin.write_all(projwfc_input.as_bytes()).await.map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
+            }
+
+            let projwfc_stdout = projwfc_child.stdout.take().ok_or("Failed to capture projwfc.x stdout")?;
+            let mut projwfc_reader = BufReader::new(projwfc_stdout).lines();
+            let mut projwfc_output = String::new();
+
+            while let Some(line) = projwfc_reader.next_line().await.map_err(|e| e.to_string())? {
+                check_cancel!();
+                projwfc_output.push_str(&line);
+                projwfc_output.push('\n');
+                emit_line!(line);
+            }
+
+            let projwfc_status = projwfc_child.wait().await.map_err(|e| e.to_string())?;
+            std::fs::write(work_path.join("projwfc.out"), &projwfc_output)
+                .map_err(|e| format!("Failed to write projwfc.x output: {}", e))?;
+
+            if !projwfc_status.success() {
+                emit_line!(format!(
+                    "WARNING: projwfc.x failed with exit code {:?}. Continuing without projections.",
+                    projwfc_status.code()
+                ));
+            } else {
+                let projection_text = {
+                    let filproj_path = work_path.join(&projwfc_config.filproj);
+                    if filproj_path.exists() {
+                        std::fs::read_to_string(&filproj_path).unwrap_or_else(|_| projwfc_output.clone())
+                    } else {
+                        projwfc_output.clone()
+                    }
+                };
+
+                if projection_text.trim().is_empty() {
+                    emit_line!("WARNING: projwfc output was empty. Continuing without projections.".to_string());
+                } else {
+                    match parse_projwfc_projection_groups(&projection_text, band_data.n_bands, band_data.n_kpoints) {
+                        Ok(projections) => {
+                            let atom_count = projections.atom_groups.len();
+                            let orbital_count = projections.orbital_groups.len();
+                            band_data.projections = Some(projections);
+                            emit_line!(format!(
+                                "Projection groups parsed: {} atom groups, {} orbital groups.",
+                                atom_count, orbital_count
+                            ));
+                        }
+                        Err(parse_error) => {
+                            emit_line!(format!(
+                                "WARNING: Could not parse projwfc projections ({}). Continuing without projections.",
+                                parse_error
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    emit_line!("=== Band Structure Complete ===".to_string());
+    emit_line!(format!("  {} bands, {} k-points", band_data.n_bands, band_data.n_kpoints));
+    if let Some(ref gap) = band_data.band_gap {
+        let gap_type = if gap.is_direct { "direct" } else { "indirect" };
+        emit_line!(format!("  Band gap: {:.3} eV ({})", gap.value, gap_type));
+    }
+
+    Ok(band_data)
+}
+
+/// Starts a phonon calculation as a background task.
+#[tauri::command]
+async fn start_phonon_calculation(
+    app: AppHandle,
+    config: PhononPipelineConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if state.process_manager.has_running_tasks().await {
+        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("phonon".to_string(), label).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_phonon_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(phonon_result) => {
+                let json = serde_json::to_value(&phonon_result).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_phonon_background(
+    app: AppHandle,
+    task_id: &str,
+    config: PhononPipelineConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<PhononResult, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let work_path = PathBuf::from(&working_dir);
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    let mut full_output = String::new();
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    // Copy SCF .save directory
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!(format!("Copying SCF data from: {}", scf_tmp_dir.display()));
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
+
+    check_cancel!();
+
+    // Step 1: ph.x
+    emit_line!("".to_string());
+    emit_line!("=== Step 1/4: Running ph.x Phonon Calculation ===".to_string());
+    emit_line!(format!("Q-grid: {}×{}×{}", config.phonon.nq[0], config.phonon.nq[1], config.phonon.nq[2]));
+
+    let ph_exe = bin_dir.join("ph.x");
+    if !ph_exe.exists() {
+        return Err("ph.x not found. Make sure your QE installation includes ph.x".to_string());
+    }
+
+    let ph_input = generate_ph_input(&config.phonon);
+    std::fs::write(work_path.join("ph.in"), &ph_input)
+        .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
+
+    let mut ph_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&ph_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start ph.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start ph.x: {}", e))?
+    };
+
+    if let Some(pid) = ph_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = ph_child.stdin.take() {
+        stdin.write_all(ph_input.as_bytes()).await.map_err(|e| format!("Failed to write ph.x input: {}", e))?;
+    }
+
+    let ph_stdout = ph_child.stdout.take().ok_or("Failed to capture ph.x stdout")?;
+    let mut ph_reader = BufReader::new(ph_stdout).lines();
+
+    while let Some(line) = ph_reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        full_output.push_str(&line);
+        full_output.push('\n');
+        emit_line!(line);
+    }
+
+    let ph_status = ph_child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+
+    let (converged, n_qpoints) = parse_ph_output(&full_output);
+    if !ph_status.success() {
+        if converged {
+            emit_line!(format!(
+                "Warning: ph.x exited with code {:?} but output contains JOB DONE. Continuing with recovery mode.",
+                ph_status.code()
+            ));
+        } else {
+            return Err(format!("ph.x failed with exit code: {:?}", ph_status.code()));
+        }
+    }
+    if !converged {
+        return Err("ph.x did not converge successfully".to_string());
+    }
+    emit_line!(format!("ph.x completed: {} q-points calculated", n_qpoints));
+
+    // Step 2: q2r.x
+    emit_line!("".to_string());
+    emit_line!("=== Step 2/4: Running q2r.x (Force Constants) ===".to_string());
+    check_cancel!();
+
+    let q2r_exe = bin_dir.join("q2r.x");
+    if !q2r_exe.exists() {
+        return Err("q2r.x not found".to_string());
+    }
+
+    let q2r_calc = Q2RCalculation {
+        fildyn: config.phonon.fildyn.clone(),
+        flfrc: "force_constants".to_string(),
+        zasr: config.phonon.asr.clone(),
+    };
+    let q2r_input = generate_q2r_input(&q2r_calc);
+    std::fs::write(work_path.join("q2r.in"), &q2r_input)
+        .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
+
+    let mut q2r_child = tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start q2r.x: {}", e))?;
+
+    if let Some(pid) = q2r_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = q2r_child.stdin.take() {
+        stdin.write_all(q2r_input.as_bytes()).await.map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
+    }
+
+    let q2r_stdout = q2r_child.stdout.take().ok_or("Failed to capture q2r.x stdout")?;
+    let mut q2r_reader = BufReader::new(q2r_stdout).lines();
+
+    while let Some(line) = q2r_reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        emit_line!(line);
+    }
+
+    let q2r_status = q2r_child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !q2r_status.success() {
+        return Err(format!("q2r.x failed with exit code: {:?}", q2r_status.code()));
+    }
+    emit_line!("q2r.x completed successfully".to_string());
+
+    let mut dos_data = None;
+    let mut dispersion_data = None;
+
+    // Step 3: matdyn.x for DOS
+    if config.calculate_dos {
+        emit_line!("".to_string());
+        emit_line!("=== Step 3/4: Running matdyn.x (Phonon DOS) ===".to_string());
+        check_cancel!();
+
+        let matdyn_exe = bin_dir.join("matdyn.x");
+        if !matdyn_exe.exists() {
+            return Err("matdyn.x not found".to_string());
+        }
+
+        let dos_grid = config.dos_grid.unwrap_or([20, 20, 20]);
+        let dos_delta_e = config.dos_delta_e.unwrap_or(1.0);
+        emit_line!(format!("DOS grid: {}×{}×{}", dos_grid[0], dos_grid[1], dos_grid[2]));
+        emit_line!(format!("DOS deltaE: {:.4} cm^-1", dos_delta_e));
+
+        let matdyn_dos_calc = MatdynCalculation {
+            flfrc: "force_constants".to_string(),
+            asr: config.phonon.asr.clone(),
+            dos: true,
+            fldos: Some("phonon_dos".to_string()),
+            nk: Some(dos_grid),
+            delta_e: Some(dos_delta_e),
+            q_path: None,
+            flfrq: None,
+        };
+        let matdyn_dos_input = generate_matdyn_dos_input(&matdyn_dos_calc);
+        std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
+            .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
+
+        let mut matdyn_dos_child = tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+
+        if let Some(pid) = matdyn_dos_child.id() {
+            pm.set_child_id(task_id, pid).await;
+        }
+
+        if let Some(mut stdin) = matdyn_dos_child.stdin.take() {
+            stdin.write_all(matdyn_dos_input.as_bytes()).await.map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
+        }
+
+        let matdyn_dos_stdout = matdyn_dos_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+        let mut matdyn_dos_reader = BufReader::new(matdyn_dos_stdout).lines();
+
+        while let Some(line) = matdyn_dos_reader.next_line().await.map_err(|e| e.to_string())? {
+            check_cancel!();
+            emit_line!(line);
+        }
+
+        let matdyn_dos_status = matdyn_dos_child.wait().await.map_err(|e| e.to_string())?;
+        check_cancel!();
+        if !matdyn_dos_status.success() {
+            emit_line!("Warning: matdyn.x DOS calculation failed".to_string());
+        } else {
+            let dos_file = work_path.join("phonon_dos");
+            if dos_file.exists() {
+                match read_phonon_dos_file(&dos_file) {
+                    Ok(dos) => {
+                        emit_line!(format!(
+                            "Phonon DOS: {} points, frequency range [{:.1}, {:.1}] cm^-1",
+                            dos.frequencies.len(), dos.omega_min, dos.omega_max
+                        ));
+                        dos_data = Some(dos);
+                    }
+                    Err(e) => {
+                        emit_line!(format!("Warning: Failed to parse phonon DOS: {}", e));
+                    }
+                }
+            }
+        }
+    } else {
+        emit_line!("".to_string());
+        emit_line!("=== Step 3/4: Skipping DOS calculation ===".to_string());
+    }
+
+    // Step 4: matdyn.x for dispersion
+    if config.calculate_dispersion {
+        emit_line!("".to_string());
+        emit_line!("=== Step 4/4: Running matdyn.x (Phonon Dispersion) ===".to_string());
+        check_cancel!();
+
+        let matdyn_exe = bin_dir.join("matdyn.x");
+        if !matdyn_exe.exists() {
+            return Err("matdyn.x not found".to_string());
+        }
+
+        if let Some(ref q_path) = config.q_path {
+            emit_line!(format!("Q-path: {} points", q_path.len()));
+
+            let q_path_with_points: Vec<QPathPoint> = q_path
+                .iter()
+                .enumerate()
+                .map(|(i, p)| QPathPoint {
+                    label: p.label.clone(),
+                    coords: p.coords,
+                    npoints: if i < q_path.len() - 1 { config.points_per_segment } else { 0 },
+                })
+                .collect();
+
+            let matdyn_bands_calc = MatdynCalculation {
+                flfrc: "force_constants".to_string(),
+                asr: config.phonon.asr.clone(),
+                dos: false,
+                fldos: None,
+                nk: None,
+                delta_e: None,
+                q_path: Some(q_path_with_points.clone()),
+                flfrq: Some("phonon_freq".to_string()),
+            };
+            let matdyn_bands_input = generate_matdyn_bands_input(&matdyn_bands_calc);
+            std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
+                .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
+
+            let mut matdyn_bands_child = tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+
+            if let Some(pid) = matdyn_bands_child.id() {
+                pm.set_child_id(task_id, pid).await;
+            }
+
+            if let Some(mut stdin) = matdyn_bands_child.stdin.take() {
+                stdin.write_all(matdyn_bands_input.as_bytes()).await.map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
+            }
+
+            let matdyn_bands_stdout = matdyn_bands_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+            let mut matdyn_bands_reader = BufReader::new(matdyn_bands_stdout).lines();
+
+            while let Some(line) = matdyn_bands_reader.next_line().await.map_err(|e| e.to_string())? {
+                check_cancel!();
+                emit_line!(line);
+            }
+
+            let matdyn_bands_status = matdyn_bands_child.wait().await.map_err(|e| e.to_string())?;
+            check_cancel!();
+            if !matdyn_bands_status.success() {
+                emit_line!("Warning: matdyn.x dispersion calculation failed".to_string());
+            } else {
+                let freq_gp_file = work_path.join("phonon_freq.gp");
+                let freq_file = work_path.join("phonon_freq");
+                let source_file = if freq_gp_file.exists() {
+                    Some(freq_gp_file)
+                } else if freq_file.exists() {
+                    Some(freq_file)
+                } else {
+                    None
+                };
+
+                if let Some(source_file) = source_file {
+                    match read_phonon_dispersion_file(&source_file) {
+                        Ok(mut disp) => {
+                            add_phonon_symmetry_markers(&mut disp, &q_path_with_points);
+                            emit_line!(format!(
+                                "Phonon dispersion: {} modes, {} q-points, frequency range [{:.1}, {:.1}] cm^-1",
+                                disp.n_modes, disp.n_qpoints, disp.frequency_range[0], disp.frequency_range[1]
+                            ));
+                            dispersion_data = Some(disp);
+                        }
+                        Err(e) => {
+                            emit_line!(format!("Warning: Failed to parse phonon dispersion: {}", e));
+                        }
+                    }
+                } else {
+                    emit_line!("Warning: No phonon dispersion output file found".to_string());
+                }
+            }
+        } else {
+            emit_line!("No Q-path specified, skipping dispersion".to_string());
+        }
+    } else {
+        emit_line!("".to_string());
+        emit_line!("=== Step 4/4: Skipping dispersion calculation ===".to_string());
+    }
+
+    let n_modes = dispersion_data.as_ref().map(|d| d.n_modes).unwrap_or(0);
+
+    emit_line!("".to_string());
+    emit_line!("=== Phonon Calculation Complete ===".to_string());
+    emit_line!(format!("  {} q-points, {} modes", n_qpoints, n_modes));
+    if dos_data.is_some() {
+        emit_line!("  DOS: calculated".to_string());
+    }
+    if dispersion_data.is_some() {
+        emit_line!("  Dispersion: calculated".to_string());
+    }
+
+    Ok(PhononResult {
+        converged: true,
+        n_qpoints,
+        n_modes,
+        dos_data,
+        dispersion_data,
+        raw_output: full_output,
+    })
+}
+
+// ============================================================================
+// Task Management Commands
+// ============================================================================
+
+#[tauri::command]
+async fn list_running_tasks(
+    state: State<'_, AppState>,
+) -> Result<Vec<process_manager::TaskSummary>, String> {
+    Ok(state.process_manager.list_tasks().await)
+}
+
+#[tauri::command]
+async fn get_task_info(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<process_manager::TaskInfo, String> {
+    state
+        .process_manager
+        .get_task(&task_id)
+        .await
+        .ok_or_else(|| format!("Task not found: {}", task_id))
+}
+
+#[tauri::command]
+async fn get_task_output(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    state
+        .process_manager
+        .get_output(&task_id)
+        .await
+        .ok_or_else(|| format!("Task not found: {}", task_id))
+}
+
+#[tauri::command]
+async fn cancel_task(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.process_manager.cancel(&task_id).await
+}
+
+#[tauri::command]
+async fn dismiss_task(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.process_manager.remove(&task_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn shutdown_and_close(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.process_manager.kill_all().await;
+    // Give processes a moment to die
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    app.exit(0);
+    Ok(())
+}
+
+// ============================================================================
 // Application Entry Point
 // ============================================================================
 
@@ -1714,9 +2834,27 @@ pub fn run() {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
                 execution_prefix: Mutex::new(execution_prefix),
                 project_dir: Mutex::new(None),
+                process_manager: ProcessManager::new(),
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle().clone();
+                let pm = app.state::<AppState>().process_manager.clone();
+                let window_clone = window.clone();
+                // Check if tasks are running; if so, prevent close and ask user
+                api.prevent_close();
+                tauri::async_runtime::spawn(async move {
+                    if pm.has_running_tasks().await {
+                        let _ = window_clone.emit("confirm-close", ());
+                    } else {
+                        // No running tasks, just close
+                        let _ = window_clone.destroy();
+                    }
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             set_qe_path,
@@ -1738,6 +2876,16 @@ pub fn run() {
             get_project_dir,
             list_pseudopotentials,
             load_sssp_data,
+            // Background task commands
+            start_scf_calculation,
+            start_bands_calculation,
+            start_phonon_calculation,
+            list_running_tasks,
+            get_task_info,
+            get_task_output,
+            cancel_task,
+            dismiss_task,
+            shutdown_and_close,
             // Project management commands
             projects::list_projects,
             projects::create_project,

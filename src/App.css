@@ -4792,6 +4792,232 @@ h3 .tooltip-text::after {
   margin-right: auto;
 }
 
+/* ============================================================================
+   Process Indicator (floating)
+   ============================================================================ */
+
+.process-indicator {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  width: 320px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: stretch;
+  z-index: 9999;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+
+.process-indicator.running {
+  border-color: #4299e1;
+}
+
+.process-indicator.completed {
+  border-color: #48bb78;
+}
+
+.process-indicator.failed {
+  border-color: #f56565;
+}
+
+.process-indicator-content {
+  flex: 1;
+  padding: 10px 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.process-indicator-content:hover {
+  background: #f7fafc;
+}
+
+.process-indicator-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.process-indicator-type {
+  font-weight: 700;
+  color: #2d3748;
+  white-space: nowrap;
+}
+
+.process-indicator-label {
+  color: #718096;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.process-indicator-header .elapsed-time {
+  font-size: 11px;
+  color: #a0aec0;
+  white-space: nowrap;
+}
+
+.process-indicator-header .elapsed-time-label {
+  display: none;
+}
+
+.process-indicator-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.process-indicator-track {
+  height: 4px;
+  background: #e2e8f0;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.process-indicator-track.indeterminate .process-indicator-fill {
+  width: 40%;
+  animation: indicator-slide 1.5s ease-in-out infinite;
+}
+
+@keyframes indicator-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.process-indicator-fill {
+  height: 100%;
+  background: #4299e1;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.completed .process-indicator-fill {
+  background: #48bb78;
+}
+
+.process-indicator-phase {
+  font-size: 11px;
+  color: #4a5568;
+}
+
+.process-indicator-detail {
+  font-size: 10px;
+  color: #a0aec0;
+}
+
+.process-indicator-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: #48bb78;
+}
+
+.process-indicator-error {
+  color: #f56565;
+}
+
+.process-indicator-actions {
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  border-left: 1px solid #e2e8f0;
+}
+
+.process-indicator-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: #a0aec0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.process-indicator-btn:hover {
+  background: #edf2f7;
+  color: #4a5568;
+}
+
+.process-indicator-cancel {
+  font-size: 11px;
+  color: #e53e3e;
+}
+
+.process-indicator-cancel:hover {
+  background: #fff5f5;
+  color: #c53030;
+}
+
+/* Close confirmation modal */
+.close-confirm-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.close-confirm-dialog {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 400px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.close-confirm-dialog h3 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  color: #1a202c;
+}
+
+.close-confirm-dialog p {
+  margin: 0 0 20px 0;
+  font-size: 14px;
+  color: #4a5568;
+}
+
+.close-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.close-confirm-actions button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #4a5568;
+}
+
+.close-confirm-actions button:hover {
+  background: #f7fafc;
+}
+
+.close-confirm-actions .close-confirm-danger {
+  background: #e53e3e;
+  color: #fff;
+  border-color: #e53e3e;
+}
+
+.close-confirm-actions .close-confirm-danger:hover {
+  background: #c53030;
+}
+
 @media (prefers-color-scheme: dark) {
   .header,
   .browser-header,
@@ -4803,5 +5029,62 @@ h3 .tooltip-text::after {
 
   .wizard-container > .wizard-header {
     background: rgba(45, 55, 72, 0.95);
+  }
+
+  .process-indicator {
+    background: #1a202c;
+    border-color: #2d3748;
+  }
+
+  .process-indicator-content:hover {
+    background: #2d3748;
+  }
+
+  .process-indicator-type {
+    color: #e2e8f0;
+  }
+
+  .process-indicator-label {
+    color: #a0aec0;
+  }
+
+  .process-indicator-track {
+    background: #2d3748;
+  }
+
+  .process-indicator-phase {
+    color: #cbd5e0;
+  }
+
+  .process-indicator-actions {
+    border-left-color: #2d3748;
+  }
+
+  .process-indicator-btn:hover {
+    background: #2d3748;
+    color: #e2e8f0;
+  }
+
+  .close-confirm-dialog {
+    background: #1a202c;
+    border: 1px solid #2d3748;
+  }
+
+  .close-confirm-dialog h3 {
+    color: #e2e8f0;
+  }
+
+  .close-confirm-dialog p {
+    color: #a0aec0;
+  }
+
+  .close-confirm-actions button {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .close-confirm-actions button:hover {
+    background: #4a5568;
   }
 }

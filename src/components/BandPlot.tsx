@@ -25,6 +25,7 @@ export interface BandProjectionData {
   source: string;
   atom_groups: BandProjectionGroup[];
   orbital_groups: BandProjectionGroup[];
+  element_orbital_groups?: BandProjectionGroup[];
 }
 
 export interface BandData {
@@ -74,6 +75,12 @@ type RainbowPalette = "jet" | "sinebow";
 type ProjectionMode = "atom" | "orbital";
 type ProjectionNormalizeMode = "global" | "band";
 type FatColorMode = "accent" | "band";
+
+interface OrbitalElementOption {
+  key: string;
+  label: string;
+  groups: BandProjectionGroup[];
+}
 
 // Format high-symmetry point labels (handle Greek letters)
 function formatLabel(label: string): string {
@@ -199,6 +206,84 @@ function aggregateElementProjectionGroups(
   return Array.from(grouped.values()).sort((a, b) => a.label.localeCompare(b.label));
 }
 
+function buildTotalProjectionGroup(
+  groups: BandProjectionGroup[],
+  id: string,
+  label: string,
+  nBands: number,
+  nKpoints: number,
+  kind: BandProjectionGroup["kind"] = "orbital",
+): BandProjectionGroup | null {
+  if (groups.length === 0) return null;
+  const totalGroup: BandProjectionGroup = {
+    id,
+    label,
+    kind,
+    weights: createZeroWeightGrid(nBands, nKpoints),
+  };
+  for (const group of groups) {
+    addWeightsInPlace(totalGroup.weights, group.weights);
+  }
+  return totalGroup;
+}
+
+function parseElementOrbitalIdentity(group: BandProjectionGroup): {
+  elementKey: string;
+  elementLabel: string;
+  orbitalKey: string;
+} {
+  const idMatch = group.id.match(/^element-orbital-([a-z0-9_+]+)-([a-z0-9_+\-]+)$/i);
+  if (idMatch) {
+    const elementKey = idMatch[1].toLowerCase();
+    const elementLabel = elementKey.length <= 1
+      ? elementKey.toUpperCase()
+      : elementKey.charAt(0).toUpperCase() + elementKey.slice(1).toLowerCase();
+    return {
+      elementKey,
+      elementLabel,
+      orbitalKey: idMatch[2].toLowerCase(),
+    };
+  }
+
+  const labelMatch = group.label.match(/^([A-Za-z][A-Za-z]?)\s+([A-Za-z0-9]+)\s+orbitals$/i);
+  if (labelMatch) {
+    return {
+      elementKey: labelMatch[1].toLowerCase(),
+      elementLabel:
+        labelMatch[1].length <= 1
+          ? labelMatch[1].toUpperCase()
+          : labelMatch[1].charAt(0).toUpperCase() + labelMatch[1].slice(1).toLowerCase(),
+      orbitalKey: labelMatch[2].toLowerCase(),
+    };
+  }
+
+  return {
+    elementKey: "all",
+    elementLabel: "All elements",
+    orbitalKey: "other",
+  };
+}
+
+function orbitalSortRank(group: BandProjectionGroup): number {
+  const orbitalKey = parseElementOrbitalIdentity(group).orbitalKey;
+  const orbitalOrder: Record<string, number> = {
+    s: 0,
+    p: 1,
+    d: 2,
+    f: 3,
+    g: 4,
+    other: 99,
+  };
+  if (orbitalKey in orbitalOrder) {
+    return orbitalOrder[orbitalKey];
+  }
+  const lMatch = orbitalKey.match(/^l(\d+)$/i);
+  if (lMatch) {
+    return 10 + Number.parseInt(lMatch[1], 10);
+  }
+  return 98;
+}
+
 function Tooltip({ text }: { text: string }) {
   return (
     <span className="tooltip-container">
@@ -238,13 +323,14 @@ export function BandPlot({
   // Appearance controls
   const [lineWidth, setLineWidth] = useState(1.5);
   const [lineOpacity, setLineOpacity] = useState(0.85);
-  const [colorMode, setColorMode] = useState<ColorMode>("single");
+  const [colorMode, setColorMode] = useState<ColorMode>("rainbow");
   const [singleBandColor, setSingleBandColor] = useState("#1565c0");
   const [rainbowPalette, setRainbowPalette] = useState<RainbowPalette>("jet");
 
   // Fat-band controls
   const [fatBandsEnabled, setFatBandsEnabled] = useState(false);
   const [projectionMode, setProjectionMode] = useState<ProjectionMode>("atom");
+  const [selectedOrbitalElementKey, setSelectedOrbitalElementKey] = useState("");
   const [selectedProjectionId, setSelectedProjectionId] = useState("");
   const [projectionNormalizeMode, setProjectionNormalizeMode] =
     useState<ProjectionNormalizeMode>("global");
@@ -339,8 +425,81 @@ export function BandPlot({
   const hasProjectionData = useMemo(() => {
     const atomCount = data.projections?.atom_groups?.length ?? 0;
     const orbitalCount = data.projections?.orbital_groups?.length ?? 0;
-    return atomCount > 0 || orbitalCount > 0;
+    const elementOrbitalCount = data.projections?.element_orbital_groups?.length ?? 0;
+    return atomCount > 0 || orbitalCount > 0 || elementOrbitalCount > 0;
   }, [data.projections]);
+
+  const orbitalElementOptions = useMemo((): OrbitalElementOption[] => {
+    const groups = data.projections?.element_orbital_groups ?? [];
+    if (groups.length === 0) return [];
+
+    const grouped = new Map<string, OrbitalElementOption>();
+    for (const group of groups) {
+      const parsed = parseElementOrbitalIdentity(group);
+      const existing = grouped.get(parsed.elementKey);
+      if (existing) {
+        existing.groups.push(group);
+      } else {
+        grouped.set(parsed.elementKey, {
+          key: parsed.elementKey,
+          label: parsed.elementLabel,
+          groups: [group],
+        });
+      }
+    }
+
+    const options = Array.from(grouped.values());
+    for (const option of options) {
+      option.groups.sort((a, b) => {
+        const rankDiff = orbitalSortRank(a) - orbitalSortRank(b);
+        if (rankDiff !== 0) return rankDiff;
+        return a.label.localeCompare(b.label);
+      });
+    }
+    options.sort((a, b) => a.label.localeCompare(b.label));
+    return options;
+  }, [data.projections]);
+
+  const hasElementResolvedOrbitals = orbitalElementOptions.length > 0;
+
+  const orbitalProjectionGroups = useMemo(() => {
+    if (projectionMode !== "orbital") return [];
+    if (!hasElementResolvedOrbitals) {
+      const globalOrbitalGroups = data.projections?.orbital_groups ?? [];
+      const totalGroup = buildTotalProjectionGroup(
+        globalOrbitalGroups,
+        "orbital-total",
+        "Total (all orbitals)",
+        data.n_bands,
+        data.n_kpoints,
+      );
+      return totalGroup ? [totalGroup, ...globalOrbitalGroups] : globalOrbitalGroups;
+    }
+    const selectedElement =
+      orbitalElementOptions.find((option) => option.key === selectedOrbitalElementKey) ??
+      orbitalElementOptions[0];
+    const selectedGroups = selectedElement?.groups ?? [];
+    if (!selectedElement || selectedGroups.length === 0) {
+      return selectedGroups;
+    }
+    const totalGroup = buildTotalProjectionGroup(
+      selectedGroups,
+      `element-orbital-total-${selectedElement.key}`,
+      `${selectedElement.label} total (all orbitals)`,
+      data.n_bands,
+      data.n_kpoints,
+      "element_orbital",
+    );
+    return totalGroup ? [totalGroup, ...selectedGroups] : selectedGroups;
+  }, [
+    data.n_bands,
+    data.n_kpoints,
+    data.projections,
+    hasElementResolvedOrbitals,
+    orbitalElementOptions,
+    projectionMode,
+    selectedOrbitalElementKey,
+  ]);
 
   const projectionGroups = useMemo(() => {
     if (!hasProjectionData) return [];
@@ -348,8 +507,34 @@ export function BandPlot({
       const atomGroups = data.projections?.atom_groups ?? [];
       return aggregateElementProjectionGroups(atomGroups, data.n_bands, data.n_kpoints);
     }
-    return data.projections?.orbital_groups ?? [];
-  }, [data.projections, data.n_bands, data.n_kpoints, hasProjectionData, projectionMode]);
+    return orbitalProjectionGroups;
+  }, [
+    data.projections,
+    data.n_bands,
+    data.n_kpoints,
+    hasProjectionData,
+    orbitalProjectionGroups,
+    projectionMode,
+  ]);
+
+  useEffect(() => {
+    if (projectionMode !== "orbital") return;
+    if (!hasElementResolvedOrbitals) {
+      setSelectedOrbitalElementKey("");
+      return;
+    }
+    const stillValid = orbitalElementOptions.some(
+      (element) => element.key === selectedOrbitalElementKey,
+    );
+    if (!stillValid) {
+      setSelectedOrbitalElementKey(orbitalElementOptions[0].key);
+    }
+  }, [
+    hasElementResolvedOrbitals,
+    orbitalElementOptions,
+    projectionMode,
+    selectedOrbitalElementKey,
+  ]);
 
   useEffect(() => {
     if (projectionGroups.length === 0) {
@@ -803,7 +988,7 @@ export function BandPlot({
                     <div className="band-control-row">
                       <label>
                         Projection Group Type
-                        <Tooltip text="Choose whether projection weights are grouped by chemical element totals (all sites summed) or by orbital angular momentum (s/p/d/f)." />
+                        <Tooltip text="Choose whether projection weights are grouped by chemical element totals (all sites summed) or by orbital channel. Orbital mode can be filtered by element when available." />
                       </label>
                       <select
                         value={projectionMode}
@@ -816,9 +1001,37 @@ export function BandPlot({
                       </select>
                     </div>
 
+                    {projectionMode === "orbital" && hasElementResolvedOrbitals && (
+                      <div className="band-control-row">
+                        <label>
+                          Element for Orbital Projection
+                          <Tooltip text="Select which chemical element to inspect before choosing an orbital channel (for example Ni then d)." />
+                        </label>
+                        <select
+                          value={selectedOrbitalElementKey}
+                          onChange={(event) => setSelectedOrbitalElementKey(event.target.value)}
+                        >
+                          {orbitalElementOptions.map((option) => (
+                            <option key={option.key} value={option.key}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {projectionMode === "orbital" && !hasElementResolvedOrbitals && (
+                      <div className="band-control-warning">
+                        Element-resolved orbital channels are unavailable for this saved result.
+                        Showing global orbital totals.
+                      </div>
+                    )}
+
                     <div className="band-control-row">
                       <label>
-                        Selected Contribution
+                        {projectionMode === "orbital"
+                          ? "Selected Orbital Channel"
+                          : "Selected Contribution"}
                         <Tooltip text="The selected element-total or orbital channel whose projection weights are used for fat-band sizing." />
                       </label>
                       <select

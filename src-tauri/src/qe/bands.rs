@@ -119,7 +119,7 @@ impl Default for ProjwfcConfig {
 pub struct BandProjectionGroup {
     pub id: String,
     pub label: String,
-    /// "atom" or "orbital"
+    /// "atom", "orbital", or "element_orbital"
     pub kind: String,
     /// Weight matrix [band][k-point]
     pub weights: Vec<Vec<f64>>,
@@ -130,8 +130,13 @@ pub struct BandProjectionGroup {
 pub struct BandProjectionData {
     /// Data source used to build these groups.
     pub source: String,
+    #[serde(default)]
     pub atom_groups: Vec<BandProjectionGroup>,
+    #[serde(default)]
     pub orbital_groups: Vec<BandProjectionGroup>,
+    /// Element-resolved orbital groups (e.g., Ni-d, Si-p) for detailed fat-band filtering.
+    #[serde(default)]
+    pub element_orbital_groups: Vec<BandProjectionGroup>,
 }
 
 impl Default for BandsXConfig {
@@ -349,13 +354,21 @@ fn normalize_element_symbol(raw: &str) -> (String, String) {
     (display.to_ascii_lowercase(), display)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProjectionGroupIndices {
+    atom_group_idx: usize,
+    orbital_group_idx: usize,
+    element_orbital_group_idx: usize,
+}
+
 fn commit_projection_buffer(
     current_k: Option<usize>,
     current_band: Option<usize>,
     buffer: &mut Vec<(usize, f64)>,
-    state_to_groups: &HashMap<usize, (usize, usize)>,
+    state_to_groups: &HashMap<usize, ProjectionGroupIndices>,
     atom_groups: &mut [BandProjectionGroup],
     orbital_groups: &mut [BandProjectionGroup],
+    element_orbital_groups: &mut [BandProjectionGroup],
     n_bands: usize,
     n_kpoints: usize,
 ) -> bool {
@@ -373,9 +386,11 @@ fn commit_projection_buffer(
         if !weight.is_finite() || weight <= 0.0 {
             continue;
         }
-        if let Some((atom_group_idx, orbital_group_idx)) = state_to_groups.get(&state_id).copied() {
-            atom_groups[atom_group_idx].weights[band_idx][k_idx] += weight;
-            orbital_groups[orbital_group_idx].weights[band_idx][k_idx] += weight;
+        if let Some(group_indices) = state_to_groups.get(&state_id).copied() {
+            atom_groups[group_indices.atom_group_idx].weights[band_idx][k_idx] += weight;
+            orbital_groups[group_indices.orbital_group_idx].weights[band_idx][k_idx] += weight;
+            element_orbital_groups[group_indices.element_orbital_group_idx].weights[band_idx][k_idx] +=
+                weight;
             committed = true;
         }
     }
@@ -446,11 +461,13 @@ pub fn parse_projwfc_projection_groups(
     // Aggregate "atom groups" by chemical species (element) so users get total Ni / total Si etc.
     let mut atom_labels: BTreeMap<String, String> = BTreeMap::new();
     let mut orbital_labels: BTreeSet<String> = BTreeSet::new();
+    let mut element_orbital_labels: BTreeSet<(String, String)> = BTreeSet::new();
     for info in states.values() {
         atom_labels
             .entry(info.atom_symbol_key.clone())
             .or_insert_with(|| info.atom_symbol_display.clone());
         orbital_labels.insert(info.orbital.clone());
+        element_orbital_labels.insert((info.atom_symbol_key.clone(), info.orbital.clone()));
     }
 
     let mut atom_groups: Vec<BandProjectionGroup> = atom_labels
@@ -471,6 +488,21 @@ pub fn parse_projwfc_projection_groups(
             weights: vec![vec![0.0; n_kpoints]; n_bands],
         })
         .collect();
+    let mut element_orbital_groups: Vec<BandProjectionGroup> = element_orbital_labels
+        .iter()
+        .map(|(atom_key, orbital)| {
+            let atom_symbol = atom_labels
+                .get(atom_key)
+                .cloned()
+                .unwrap_or_else(|| atom_key.to_uppercase());
+            BandProjectionGroup {
+                id: format!("element-orbital-{}-{}", atom_key, orbital),
+                label: format!("{} {} orbitals", atom_symbol, orbital.to_uppercase()),
+                kind: "element_orbital".to_string(),
+                weights: vec![vec![0.0; n_kpoints]; n_bands],
+            }
+        })
+        .collect();
 
     let atom_lookup: HashMap<String, usize> = atom_labels
         .keys()
@@ -482,8 +514,13 @@ pub fn parse_projwfc_projection_groups(
         .enumerate()
         .map(|(idx, orbital)| (orbital.clone(), idx))
         .collect();
+    let element_orbital_lookup: HashMap<(String, String), usize> = element_orbital_labels
+        .iter()
+        .enumerate()
+        .map(|(idx, key)| (key.clone(), idx))
+        .collect();
 
-    let mut state_to_groups: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut state_to_groups: HashMap<usize, ProjectionGroupIndices> = HashMap::new();
     for (state_id, info) in &states {
         let Some(atom_group_idx) = atom_lookup.get(&info.atom_symbol_key).copied() else {
             continue;
@@ -491,7 +528,20 @@ pub fn parse_projwfc_projection_groups(
         let Some(orbital_group_idx) = orbital_lookup.get(&info.orbital).copied() else {
             continue;
         };
-        state_to_groups.insert(*state_id, (atom_group_idx, orbital_group_idx));
+        let Some(element_orbital_group_idx) = element_orbital_lookup
+            .get(&(info.atom_symbol_key.clone(), info.orbital.clone()))
+            .copied()
+        else {
+            continue;
+        };
+        state_to_groups.insert(
+            *state_id,
+            ProjectionGroupIndices {
+                atom_group_idx,
+                orbital_group_idx,
+                element_orbital_group_idx,
+            },
+        );
     }
 
     let mut current_k: Option<usize> = None;
@@ -508,6 +558,7 @@ pub fn parse_projwfc_projection_groups(
                 &state_to_groups,
                 &mut atom_groups,
                 &mut orbital_groups,
+                &mut element_orbital_groups,
                 n_bands,
                 n_kpoints,
             ) {
@@ -526,6 +577,7 @@ pub fn parse_projwfc_projection_groups(
                 &state_to_groups,
                 &mut atom_groups,
                 &mut orbital_groups,
+                &mut element_orbital_groups,
                 n_bands,
                 n_kpoints,
             ) {
@@ -570,6 +622,7 @@ pub fn parse_projwfc_projection_groups(
         &state_to_groups,
         &mut atom_groups,
         &mut orbital_groups,
+        &mut element_orbital_groups,
         n_bands,
         n_kpoints,
     ) {
@@ -586,6 +639,7 @@ pub fn parse_projwfc_projection_groups(
         source: "projwfc".to_string(),
         atom_groups,
         orbital_groups,
+        element_orbital_groups,
     })
 }
 
@@ -786,6 +840,7 @@ state #   2: atom   2 (B  ) wfc  2 (l=1 m=1)
         let parsed = parse_projwfc_projection_groups(content, 2, 2).unwrap();
         assert_eq!(parsed.atom_groups.len(), 2);
         assert_eq!(parsed.orbital_groups.len(), 2);
+        assert_eq!(parsed.element_orbital_groups.len(), 2);
 
         // Element-total Si channel has weight on band 1 at both k-points.
         let si_total = parsed
@@ -804,6 +859,14 @@ state #   2: atom   2 (B  ) wfc  2 (l=1 m=1)
             .unwrap();
         assert!(p_orbital.weights[0][0] > 0.0);
         assert!(p_orbital.weights[1][0] > 0.0);
+
+        let b_p_orbital = parsed
+            .element_orbital_groups
+            .iter()
+            .find(|group| group.id == "element-orbital-b-p")
+            .unwrap();
+        assert!(b_p_orbital.weights[0][0] > 0.0);
+        assert!(b_p_orbital.weights[1][0] > 0.0);
     }
 
     #[test]
@@ -819,11 +882,18 @@ state #   2: atom   2 (Ni2) wfc  2 (l=2 m=2)
 
         let parsed = parse_projwfc_projection_groups(content, 1, 1).unwrap();
         assert_eq!(parsed.atom_groups.len(), 1);
+        assert_eq!(parsed.element_orbital_groups.len(), 1);
         let ni_total = parsed
             .atom_groups
             .iter()
             .find(|group| group.id == "element-ni")
             .unwrap();
         assert!(ni_total.weights[0][0] > 1.2);
+        let ni_d = parsed
+            .element_orbital_groups
+            .iter()
+            .find(|group| group.id == "element-orbital-ni-d")
+            .unwrap();
+        assert!(ni_d.weights[0][0] > 1.2);
     }
 }
