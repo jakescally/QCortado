@@ -13,6 +13,8 @@ import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard"
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskProvider } from "./lib/TaskContext";
+import { ThemeProvider, useTheme } from "./lib/ThemeContext";
+import { useWindowSize } from "./lib/useWindowSize";
 import { CrystalData, SCFPreset, OptimizedStructureOption } from "./lib/types";
 
 interface ProjectSummary {
@@ -160,6 +162,11 @@ function getPhononFocusRanges(phononBandData: BandData): {
 }
 
 function AppInner() {
+  const { theme, setTheme } = useTheme();
+  const windowSize = useWindowSize();
+  const plotWidth = Math.max(600, windowSize.width - 80);
+  const plotHeight = Math.max(400, windowSize.height - 160);
+
   const [qePath, setQePath] = useState<string | null>(null);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [status, setStatus] = useState<string>("Not configured");
@@ -341,8 +348,6 @@ function AppInner() {
           <div className="bands-viewer-content">
             <BandPlot
               data={viewBandsData.bandData}
-              width={900}
-              height={600}
               scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
               viewerType="electronic"
             />
@@ -483,8 +488,8 @@ function AppInner() {
               <BandPlot
                 key={plotKey}
                 data={displayPhononBandData}
-                width={900}
-                height={600}
+                width={plotWidth}
+                height={plotHeight}
                 energyRange={activePhononRange}
                 showFermiLevel={false}
                 yAxisLabel={`Frequency (${phononUnitLabel})`}
@@ -501,8 +506,8 @@ function AppInner() {
             ) : showingDos && hasDos ? (
               <PhononDOSPlot
                 data={phononData.dos_data}
-                width={400}
-                height={600}
+                width={Math.min(500, windowSize.width - 80)}
+                height={plotHeight}
               />
             ) : (
               <p>{showingBands ? "No phonon dispersion data available" : "No phonon DOS data available"}</p>
@@ -717,6 +722,29 @@ function AppInner() {
 
         <footer className="footer">
           <p>QCortado v0.1.0 - Quantum ESPRESSO 7.5 Interface</p>
+          <div className="theme-toggle-group" role="group" aria-label="Theme">
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
+              onClick={() => setTheme("system")}
+            >
+              System
+            </button>
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+              onClick={() => setTheme("light")}
+            >
+              Light
+            </button>
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+              onClick={() => setTheme("dark")}
+            >
+              Dark
+            </button>
+          </div>
         </footer>
 
         <CreateProjectDialog
@@ -736,9 +764,11 @@ function AppInner() {
 
 function App() {
   return (
-    <TaskProvider>
-      <AppInner />
-    </TaskProvider>
+    <ThemeProvider>
+      <TaskProvider>
+        <AppInner />
+      </TaskProvider>
+    </ThemeProvider>
   );
 }
 

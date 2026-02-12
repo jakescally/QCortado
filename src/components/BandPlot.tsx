@@ -1,4 +1,5 @@
-import { useState, useRef, useMemo, useCallback, useEffect, useId } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect, useId, useLayoutEffect } from "react";
+import { useTheme } from "../lib/ThemeContext";
 
 interface HighSymmetryMarker {
   k_distance: number;
@@ -284,15 +285,6 @@ function orbitalSortRank(group: BandProjectionGroup): number {
   return 98;
 }
 
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
-}
-
 export function BandPlot({
   data,
   width = 700,
@@ -311,10 +303,37 @@ export function BandPlot({
   yClampRange = [-25, 25],
   viewerType = "electronic",
 }: BandPlotProps) {
+  const { isDark } = useTheme();
+  const colors = useMemo(() => isDark
+    ? { bg: "#1e1e2e", axis: "#718096", grid: "#4a5568", text: "#e2e8f0", tooltip: "#2d3748", tooltipBorder: "#4a5568", tooltipText: "#e2e8f0" }
+    : { bg: "#ffffff", axis: "#333", grid: "#999", text: "#000", tooltip: "#fff", tooltipBorder: "#ccc", tooltipText: "#333" },
+  [isDark]);
+
   const svgRef = useRef<SVGSVGElement>(null);
+  const mainRef = useRef<HTMLDivElement>(null);
   const clipPathId = useId();
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | null>(null);
   const [isHoveringPlot, setIsHoveringPlot] = useState(false);
+
+  // Self-sizing via ResizeObserver
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        setContainerSize({
+          width: Math.floor(entry.contentRect.width),
+          height: Math.floor(entry.contentRect.height),
+        });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Y-axis energy window (adjustable via scroll)
   const [yMin, setYMin] = useState<number | null>(null);
@@ -340,15 +359,23 @@ export function BandPlot({
   const [fatAccentColor, setFatAccentColor] = useState("#f57c00");
   const [showLinesWithFat, setShowLinesWithFat] = useState(true);
 
+  // Plot background toggle
+  const [plotBgWhite, setPlotBgWhite] = useState(true);
+
   // UI section toggles
   const [appearanceExpanded, setAppearanceExpanded] = useState(true);
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
 
-  // Margins
+  // Margins & dimensions — prefer ResizeObserver, fall back to props
+  const infoBarHeight = 30;
   const margin = { top: 30, right: 30, bottom: 50, left: 70 };
-  const plotWidth = width - margin.left - margin.right;
-  const plotHeight = height - margin.top - margin.bottom;
+  const fallbackWidth = Math.max(240, width);
+  const fallbackHeight = Math.max(220, height);
+  const resolvedWidth = containerSize ? Math.max(1, containerSize.width) : fallbackWidth;
+  const resolvedHeight = containerSize ? Math.max(1, containerSize.height - infoBarHeight) : fallbackHeight;
+  const plotWidth = Math.max(1, resolvedWidth - margin.left - margin.right);
+  const plotHeight = Math.max(1, resolvedHeight - margin.top - margin.bottom);
 
   // Use SCF Fermi energy if available, otherwise fall back to data.fermi_energy
   const fermiEnergy = scfFermiEnergy ?? data.fermi_energy;
@@ -839,535 +866,507 @@ export function BandPlot({
   const projectionLabel = selectedProjectionGroup?.label || "None";
   const showProjectionSummary = fatBandsActive && selectedProjectionGroup !== null;
 
+  const svgBgFill = plotBgWhite ? "#ffffff" : colors.bg;
+
   return (
-    <div className="band-plot-container">
-      <div className="band-plot-controls">
-        <button onClick={resetView} className="band-plot-reset">
-          Reset View
-        </button>
-        {viewerType === "electronic" && (
-          <button onClick={handleExportPlaceholder} className="band-plot-export">
-            Export (stub)
-          </button>
-        )}
-        <span className="band-plot-hint">{scrollHint}</span>
+    <div className="band-plot-layout">
+      <div className="band-plot-main" ref={mainRef}>
+        <svg
+          ref={svgRef}
+          width={resolvedWidth}
+          height={resolvedHeight}
+          onMouseEnter={() => setIsHoveringPlot(true)}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => {
+            setIsHoveringPlot(false);
+            setHoveredPoint(null);
+          }}
+          onWheel={handleWheel}
+          style={{ cursor: "crosshair", display: "block" }}
+        >
+          <defs>
+            <clipPath id={clipPathId}>
+              <rect x={0} y={0} width={plotWidth} height={plotHeight} />
+            </clipPath>
+          </defs>
+
+          {/* Background */}
+          <rect width={resolvedWidth} height={resolvedHeight} fill={svgBgFill} />
+
+          {/* Plot area */}
+          <g transform={`translate(${margin.left}, ${margin.top})`}>
+            {/* Grid lines */}
+            <g className="grid-lines" opacity={0.3}>
+              {yTicks.map((tick) => (
+                <line
+                  key={tick}
+                  x1={0}
+                  x2={plotWidth}
+                  y1={scales.yScale(tick)}
+                  y2={scales.yScale(tick)}
+                  stroke={colors.grid}
+                  strokeDasharray="2,2"
+                />
+              ))}
+            </g>
+
+            {/* High-symmetry point vertical lines */}
+            {data.high_symmetry_points.map((point, i) => (
+              <g key={i}>
+                <line
+                  x1={scales.xScale(point.k_distance)}
+                  x2={scales.xScale(point.k_distance)}
+                  y1={0}
+                  y2={plotHeight}
+                  stroke={colors.axis}
+                  strokeWidth={0.5}
+                />
+                <text
+                  x={scales.xScale(point.k_distance)}
+                  y={plotHeight + 20}
+                  textAnchor="middle"
+                  fill={colors.text}
+                  fontSize={14}
+                  fontFamily="serif"
+                  fontStyle="italic"
+                >
+                  {formatLabel(point.label)}
+                </text>
+              </g>
+            ))}
+
+            {/* Fermi level at E - E_F = 0 */}
+            {showFermiLevel && (
+              <g>
+                <line
+                  x1={0}
+                  x2={plotWidth}
+                  y1={scales.yScale(0)}
+                  y2={scales.yScale(0)}
+                  stroke="#d32f2f"
+                  strokeWidth={1}
+                  strokeDasharray="4,4"
+                />
+                <text
+                  x={plotWidth + 5}
+                  y={scales.yScale(0) + 4}
+                  fill="#d32f2f"
+                  fontSize={11}
+                >
+                  E_F
+                </text>
+              </g>
+            )}
+
+            {/* Band lines + fat points */}
+            <g clipPath={`url(#${clipPathId})`}>
+              {drawBandLines &&
+                shiftedEnergies.map((band, bandIdx) => (
+                  <path
+                    key={bandIdx}
+                    d={bandToPath(band, data.k_points)}
+                    fill="none"
+                    stroke={bandColors[bandIdx]}
+                    strokeWidth={lineWidth}
+                    opacity={lineOpacity}
+                  />
+                ))}
+
+              {fatBandsActive &&
+                fatPoints.map((point) => (
+                  <circle
+                    key={point.key}
+                    cx={point.cx}
+                    cy={point.cy}
+                    r={point.r}
+                    fill={point.fill}
+                    opacity={point.opacity}
+                  />
+                ))}
+            </g>
+
+            {/* Hover point */}
+            {hoveredPoint && (
+              <g>
+                <circle
+                  cx={hoveredPoint.x}
+                  cy={hoveredPoint.y}
+                  r={5}
+                  fill="#ff9800"
+                  stroke="#fff"
+                  strokeWidth={2}
+                />
+              </g>
+            )}
+
+            {/* Y-axis */}
+            <g>
+              <line x1={0} y1={0} x2={0} y2={plotHeight} stroke={colors.axis} />
+              {yTicks.map((tick) => (
+                <g key={tick}>
+                  <line
+                    x1={-5}
+                    x2={0}
+                    y1={scales.yScale(tick)}
+                    y2={scales.yScale(tick)}
+                    stroke={colors.axis}
+                  />
+                  <text
+                    x={-10}
+                    y={scales.yScale(tick) + 4}
+                    textAnchor="end"
+                    fill={colors.text}
+                    fontSize={11}
+                  >
+                    {tick.toFixed(1)}
+                  </text>
+                </g>
+              ))}
+              <text
+                transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
+                textAnchor="middle"
+                fill={colors.text}
+                fontSize={14}
+              >
+                {yAxisLabel}
+              </text>
+            </g>
+
+            {/* X-axis line */}
+            <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
+          </g>
+
+          {/* Tooltip */}
+          {hoveredPoint && (
+            <g
+              transform={`translate(${margin.left + hoveredPoint.x + 10}, ${
+                margin.top + hoveredPoint.y - 10
+              })`}
+            >
+              <rect
+                x={0}
+                y={-42}
+                width={190}
+                height={
+                  hoveredPoint.projectionWeight !== undefined &&
+                  hoveredPoint.projectionWeightNormalized !== undefined
+                    ? 66
+                    : 48
+                }
+                fill={colors.tooltip}
+                stroke={colors.tooltipBorder}
+                rx={4}
+                filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
+              />
+              <text x={8} y={-24} fill={colors.tooltipText} fontSize={11}>
+                {pointLabel} {hoveredPoint.band}
+              </text>
+              <text x={8} y={-8} fill="#1565c0" fontSize={11}>
+                {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
+              </text>
+              {hoveredPoint.projectionWeight !== undefined &&
+                hoveredPoint.projectionWeightNormalized !== undefined && (
+                  <text x={8} y={10} fill="#6d4c41" fontSize={11}>
+                    Weight = {hoveredPoint.projectionWeight.toExponential(2)} (
+                    {(hoveredPoint.projectionWeightNormalized * 100).toFixed(1)}%)
+                  </text>
+                )}
+            </g>
+          )}
+        </svg>
+
+        {/* Info panel */}
+        <div className="band-plot-info">
+          <span>
+            {data.n_bands} {primaryCountLabel}
+          </span>
+          <span>
+            {data.n_kpoints} {secondaryCountLabel}
+          </span>
+          {showFermiLevel && (
+            <span>
+              E_F = {scfFermiEnergy != null ? `${scfFermiEnergy.toFixed(3)} eV` : "N/A"}
+            </span>
+          )}
+          {showProjectionSummary && (
+            <span className="band-plot-projection-pill">
+              Fat bands: {projectionLabel}
+            </span>
+          )}
+        </div>
       </div>
 
-      {exportNote && <div className="band-plot-export-note">{exportNote}</div>}
-
-      <div className="band-plot-control-panel">
-        <div className="band-control-section">
-          <button
-            type="button"
-            className="band-control-header"
-            onClick={() => setAppearanceExpanded((prev) => !prev)}
-          >
-            <span className={`collapse-icon ${appearanceExpanded ? "expanded" : ""}`}>▶</span>
-            Appearance
+      <div className="band-plot-sidebar">
+        <div className="band-plot-controls">
+          <button onClick={resetView} className="band-plot-reset">
+            Reset View
           </button>
-          {appearanceExpanded && (
-            <div className="band-control-grid">
-              <div className="band-control-row">
-                <label>
-                  Line Thickness
-                  <span className="band-control-tech-name">strokeWidth</span>
-                  <Tooltip text="Controls the line width for each band trajectory. Thicker lines improve readability for dense plots but can obscure close crossings." />
-                </label>
-                <input
-                  type="range"
-                  min={0.5}
-                  max={5}
-                  step={0.1}
-                  value={lineWidth}
-                  onChange={(event) => setLineWidth(Number.parseFloat(event.target.value))}
-                />
-                <span className="band-control-value">{lineWidth.toFixed(1)} px</span>
-              </div>
+          {viewerType === "electronic" && (
+            <button onClick={handleExportPlaceholder} className="band-plot-export">
+              Export (stub)
+            </button>
+          )}
+          <span className="band-plot-hint">{scrollHint}</span>
+        </div>
 
-              <div className="band-control-row">
-                <label>
-                  Line Opacity
-                  <span className="band-control-tech-name">opacity</span>
-                  <Tooltip text="Lower opacity helps visualize many bands simultaneously and keeps fat-band overlays visible." />
-                </label>
-                <input
-                  type="range"
-                  min={0.1}
-                  max={1}
-                  step={0.05}
-                  value={lineOpacity}
-                  onChange={(event) => setLineOpacity(Number.parseFloat(event.target.value))}
-                />
-                <span className="band-control-value">{lineOpacity.toFixed(2)}</span>
-              </div>
+        {exportNote && <div className="band-plot-export-note">{exportNote}</div>}
 
-              <div className="band-control-row">
-                <label>
-                  Band Color Mode
-                  <span className="band-control-tech-name">plot style</span>
-                  <Tooltip text="Single color gives the traditional publication look. Rainbow assigns each band a distinct color, similar to your group notebook style." />
-                </label>
-                <select
-                  value={colorMode}
-                  onChange={(event) => setColorMode(event.target.value as ColorMode)}
-                >
-                  <option value="single">Single color</option>
-                  <option value="rainbow">Rainbow by band</option>
-                </select>
-              </div>
-
-              {colorMode === "single" && (
+        <div className="band-plot-control-panel">
+          <div className="band-control-section">
+            <button
+              type="button"
+              className="band-control-header"
+              onClick={() => setAppearanceExpanded((prev) => !prev)}
+            >
+              <span className={`collapse-icon ${appearanceExpanded ? "expanded" : ""}`}>▶</span>
+              Appearance
+            </button>
+            {appearanceExpanded && (
+              <div className="band-control-grid">
                 <div className="band-control-row">
-                  <label>
-                    Band Color
-                    <Tooltip text="Primary color for all bands when single-color mode is active." />
-                  </label>
+                  <label>Line Thickness</label>
                   <input
-                    type="color"
-                    value={singleBandColor}
-                    onChange={(event) => setSingleBandColor(event.target.value)}
+                    type="range"
+                    min={0.5}
+                    max={5}
+                    step={0.1}
+                    value={lineWidth}
+                    onChange={(event) => setLineWidth(Number.parseFloat(event.target.value))}
                   />
+                  <span className="band-control-value">{lineWidth.toFixed(1)} px</span>
                 </div>
-              )}
 
-              {colorMode === "rainbow" && (
                 <div className="band-control-row">
-                  <label>
-                    Rainbow Palette
-                    <Tooltip text="`jet` mirrors classic scientific plotting palettes; `sinebow` gives smoother hue transitions." />
-                  </label>
+                  <label>Line Opacity</label>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={1}
+                    step={0.05}
+                    value={lineOpacity}
+                    onChange={(event) => setLineOpacity(Number.parseFloat(event.target.value))}
+                  />
+                  <span className="band-control-value">{lineOpacity.toFixed(2)}</span>
+                </div>
+
+                <div className="band-control-row">
+                  <label>Band Color Mode</label>
                   <select
-                    value={rainbowPalette}
-                    onChange={(event) =>
-                      setRainbowPalette(event.target.value as RainbowPalette)
-                    }
+                    value={colorMode}
+                    onChange={(event) => setColorMode(event.target.value as ColorMode)}
                   >
-                    <option value="jet">Jet-like</option>
-                    <option value="sinebow">Sinebow</option>
+                    <option value="single">Single color</option>
+                    <option value="rainbow">Rainbow by band</option>
                   </select>
+                </div>
+
+                {colorMode === "single" && (
+                  <div className="band-control-row">
+                    <label>Band Color</label>
+                    <input
+                      type="color"
+                      value={singleBandColor}
+                      onChange={(event) => setSingleBandColor(event.target.value)}
+                    />
+                  </div>
+                )}
+
+                {colorMode === "rainbow" && (
+                  <div className="band-control-row">
+                    <label>Rainbow Palette</label>
+                    <select
+                      value={rainbowPalette}
+                      onChange={(event) =>
+                        setRainbowPalette(event.target.value as RainbowPalette)
+                      }
+                    >
+                      <option value="jet">Jet-like</option>
+                      <option value="sinebow">Sinebow</option>
+                    </select>
+                  </div>
+                )}
+
+                <div className="band-control-row">
+                  <label>Plot Background</label>
+                  <select
+                    value={plotBgWhite ? "white" : "theme"}
+                    onChange={(event) => setPlotBgWhite(event.target.value === "white")}
+                  >
+                    <option value="white">Always White</option>
+                    <option value="theme">Match Theme</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {viewerType === "electronic" && (
+            <div className="band-control-section">
+              <button
+                type="button"
+                className="band-control-header"
+                onClick={() => setProjectionExpanded((prev) => !prev)}
+              >
+                <span className={`collapse-icon ${projectionExpanded ? "expanded" : ""}`}>▶</span>
+                Fat Bands & Projections
+              </button>
+              {projectionExpanded && (
+                <div className="band-control-grid">
+                  <div className="band-control-row">
+                    <label>
+                      Enable Fat Bands
+                      <span className="band-control-tech-name">projwfc.x</span>
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={fatBandsEnabled}
+                      disabled={!hasProjectionData}
+                      onChange={(event) => setFatBandsEnabled(event.target.checked)}
+                    />
+                  </div>
+
+                  {!hasProjectionData && (
+                    <div className="band-control-warning">
+                      Projection data not found. Re-run with orbital projections enabled.
+                    </div>
+                  )}
+
+                  {hasProjectionData && (
+                    <>
+                      <div className="band-control-row">
+                        <label>Projection Group Type</label>
+                        <select
+                          value={projectionMode}
+                          onChange={(event) =>
+                            setProjectionMode(event.target.value as ProjectionMode)
+                          }
+                        >
+                          <option value="atom">By element</option>
+                          <option value="orbital">By orbital</option>
+                        </select>
+                      </div>
+
+                      {projectionMode === "orbital" && hasElementResolvedOrbitals && (
+                        <div className="band-control-row">
+                          <label>Element for Orbital</label>
+                          <select
+                            value={selectedOrbitalElementKey}
+                            onChange={(event) => setSelectedOrbitalElementKey(event.target.value)}
+                          >
+                            {orbitalElementOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {projectionMode === "orbital" && !hasElementResolvedOrbitals && (
+                        <div className="band-control-warning">
+                          Element-resolved orbital channels are unavailable for this saved result.
+                          Showing global orbital totals.
+                        </div>
+                      )}
+
+                      <div className="band-control-row">
+                        <label>
+                          {projectionMode === "orbital"
+                            ? "Orbital Channel"
+                            : "Contribution"}
+                        </label>
+                        <select
+                          value={selectedProjectionId}
+                          onChange={(event) => setSelectedProjectionId(event.target.value)}
+                        >
+                          {projectionGroups.map((group) => (
+                            <option key={group.id} value={group.id}>
+                              {group.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="band-control-row">
+                        <label>Weight Normalization</label>
+                        <select
+                          value={projectionNormalizeMode}
+                          onChange={(event) =>
+                            setProjectionNormalizeMode(
+                              event.target.value as ProjectionNormalizeMode,
+                            )
+                          }
+                        >
+                          <option value="global">Global</option>
+                          <option value="band">Per band</option>
+                        </select>
+                      </div>
+
+                      <div className="band-control-row">
+                        <label>Fat-Band Scale</label>
+                        <input
+                          type="range"
+                          min={2}
+                          max={20}
+                          step={0.5}
+                          value={fatScale}
+                          onChange={(event) => setFatScale(Number.parseFloat(event.target.value))}
+                        />
+                        <span className="band-control-value">{fatScale.toFixed(1)}</span>
+                      </div>
+
+                      <div className="band-control-row">
+                        <label>Fat-Band Opacity</label>
+                        <input
+                          type="range"
+                          min={0.05}
+                          max={1}
+                          step={0.05}
+                          value={fatOpacity}
+                          onChange={(event) =>
+                            setFatOpacity(Number.parseFloat(event.target.value))
+                          }
+                        />
+                        <span className="band-control-value">{fatOpacity.toFixed(2)}</span>
+                      </div>
+
+                      <div className="band-control-row">
+                        <label>Fat-Band Color Mode</label>
+                        <select
+                          value={fatColorMode}
+                          onChange={(event) => setFatColorMode(event.target.value as FatColorMode)}
+                        >
+                          <option value="band">Match band color</option>
+                          <option value="accent">Single accent color</option>
+                        </select>
+                      </div>
+
+                      {fatColorMode === "accent" && (
+                        <div className="band-control-row">
+                          <label>Accent Color</label>
+                          <input
+                            type="color"
+                            value={fatAccentColor}
+                            onChange={(event) => setFatAccentColor(event.target.value)}
+                          />
+                        </div>
+                      )}
+
+                      <div className="band-control-row">
+                        <label>Keep Band Lines Visible</label>
+                        <input
+                          type="checkbox"
+                          checked={showLinesWithFat}
+                          onChange={(event) => setShowLinesWithFat(event.target.checked)}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
           )}
         </div>
-
-        {viewerType === "electronic" && (
-          <div className="band-control-section">
-            <button
-              type="button"
-              className="band-control-header"
-              onClick={() => setProjectionExpanded((prev) => !prev)}
-            >
-              <span className={`collapse-icon ${projectionExpanded ? "expanded" : ""}`}>▶</span>
-              Fat Bands & Projections
-            </button>
-            {projectionExpanded && (
-              <div className="band-control-grid">
-                <div className="band-control-row">
-                  <label>
-                    Enable Fat Bands
-                    <span className="band-control-tech-name">projwfc.x</span>
-                    <Tooltip text="Uses QE orbital projection weights to draw point thickness/intensity. Requires projections to be computed during the band run." />
-                  </label>
-                  <input
-                    type="checkbox"
-                    checked={fatBandsEnabled}
-                    disabled={!hasProjectionData}
-                    onChange={(event) => setFatBandsEnabled(event.target.checked)}
-                  />
-                </div>
-
-                {!hasProjectionData && (
-                  <div className="band-control-warning">
-                    Projection data not found. Re-run with orbital projections enabled.
-                  </div>
-                )}
-
-                {hasProjectionData && (
-                  <>
-                    <div className="band-control-row">
-                      <label>
-                        Projection Group Type
-                        <Tooltip text="Choose whether projection weights are grouped by chemical element totals (all sites summed) or by orbital channel. Orbital mode can be filtered by element when available." />
-                      </label>
-                      <select
-                        value={projectionMode}
-                        onChange={(event) =>
-                          setProjectionMode(event.target.value as ProjectionMode)
-                        }
-                      >
-                        <option value="atom">By element</option>
-                        <option value="orbital">By orbital</option>
-                      </select>
-                    </div>
-
-                    {projectionMode === "orbital" && hasElementResolvedOrbitals && (
-                      <div className="band-control-row">
-                        <label>
-                          Element for Orbital Projection
-                          <Tooltip text="Select which chemical element to inspect before choosing an orbital channel (for example Ni then d)." />
-                        </label>
-                        <select
-                          value={selectedOrbitalElementKey}
-                          onChange={(event) => setSelectedOrbitalElementKey(event.target.value)}
-                        >
-                          {orbitalElementOptions.map((option) => (
-                            <option key={option.key} value={option.key}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {projectionMode === "orbital" && !hasElementResolvedOrbitals && (
-                      <div className="band-control-warning">
-                        Element-resolved orbital channels are unavailable for this saved result.
-                        Showing global orbital totals.
-                      </div>
-                    )}
-
-                    <div className="band-control-row">
-                      <label>
-                        {projectionMode === "orbital"
-                          ? "Selected Orbital Channel"
-                          : "Selected Contribution"}
-                        <Tooltip text="The selected element-total or orbital channel whose projection weights are used for fat-band sizing." />
-                      </label>
-                      <select
-                        value={selectedProjectionId}
-                        onChange={(event) => setSelectedProjectionId(event.target.value)}
-                      >
-                        {projectionGroups.map((group) => (
-                          <option key={group.id} value={group.id}>
-                            {group.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="band-control-row">
-                      <label>
-                        Weight Normalization
-                        <span className="band-control-tech-name">weight scaling</span>
-                        <Tooltip text="Global uses one maximum across all bands; per-band normalization boosts weak bands and emphasizes shape over absolute intensity." />
-                      </label>
-                      <select
-                        value={projectionNormalizeMode}
-                        onChange={(event) =>
-                          setProjectionNormalizeMode(
-                            event.target.value as ProjectionNormalizeMode,
-                          )
-                        }
-                      >
-                        <option value="global">Global</option>
-                        <option value="band">Per band</option>
-                      </select>
-                    </div>
-
-                    <div className="band-control-row">
-                      <label>
-                        Fat-Band Scale
-                        <Tooltip text="Multiplies marker radius from projection weight. Larger values increase visual contrast but can overfill dense regions." />
-                      </label>
-                      <input
-                        type="range"
-                        min={2}
-                        max={20}
-                        step={0.5}
-                        value={fatScale}
-                        onChange={(event) => setFatScale(Number.parseFloat(event.target.value))}
-                      />
-                      <span className="band-control-value">{fatScale.toFixed(1)}</span>
-                    </div>
-
-                    <div className="band-control-row">
-                      <label>
-                        Fat-Band Opacity
-                        <Tooltip text="Opacity for projection markers. Lower opacity helps retain underlying band lines in crowded regions." />
-                      </label>
-                      <input
-                        type="range"
-                        min={0.05}
-                        max={1}
-                        step={0.05}
-                        value={fatOpacity}
-                        onChange={(event) =>
-                          setFatOpacity(Number.parseFloat(event.target.value))
-                        }
-                      />
-                      <span className="band-control-value">{fatOpacity.toFixed(2)}</span>
-                    </div>
-
-                    <div className="band-control-row">
-                      <label>
-                        Fat-Band Color Mode
-                        <Tooltip text="Match-band uses each band's line color (including rainbow). Accent uses one projection color for all markers." />
-                      </label>
-                      <select
-                        value={fatColorMode}
-                        onChange={(event) => setFatColorMode(event.target.value as FatColorMode)}
-                      >
-                        <option value="band">Match band color</option>
-                        <option value="accent">Single accent color</option>
-                      </select>
-                    </div>
-
-                    {fatColorMode === "accent" && (
-                      <div className="band-control-row">
-                        <label>
-                          Fat-Band Accent Color
-                          <Tooltip text="Used when color mode is set to single accent." />
-                        </label>
-                        <input
-                          type="color"
-                          value={fatAccentColor}
-                          onChange={(event) => setFatAccentColor(event.target.value)}
-                        />
-                      </div>
-                    )}
-
-                    <div className="band-control-row">
-                      <label>
-                        Keep Band Lines Visible
-                        <Tooltip text="When enabled, the regular band lines stay visible underneath fat-band markers." />
-                      </label>
-                      <input
-                        type="checkbox"
-                        checked={showLinesWithFat}
-                        onChange={(event) => setShowLinesWithFat(event.target.checked)}
-                      />
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <svg
-        ref={svgRef}
-        width={width}
-        height={height}
-        onMouseEnter={() => setIsHoveringPlot(true)}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => {
-          setIsHoveringPlot(false);
-          setHoveredPoint(null);
-        }}
-        onWheel={handleWheel}
-        style={{ cursor: "crosshair" }}
-      >
-        <defs>
-          <clipPath id={clipPathId}>
-            <rect x={0} y={0} width={plotWidth} height={plotHeight} />
-          </clipPath>
-        </defs>
-
-        {/* White background */}
-        <rect width={width} height={height} fill="#ffffff" />
-
-        {/* Plot area */}
-        <g transform={`translate(${margin.left}, ${margin.top})`}>
-          {/* Grid lines */}
-          <g className="grid-lines" opacity={0.3}>
-            {yTicks.map((tick) => (
-              <line
-                key={tick}
-                x1={0}
-                x2={plotWidth}
-                y1={scales.yScale(tick)}
-                y2={scales.yScale(tick)}
-                stroke="#999"
-                strokeDasharray="2,2"
-              />
-            ))}
-          </g>
-
-          {/* High-symmetry point vertical lines */}
-          {data.high_symmetry_points.map((point, i) => (
-            <g key={i}>
-              <line
-                x1={scales.xScale(point.k_distance)}
-                x2={scales.xScale(point.k_distance)}
-                y1={0}
-                y2={plotHeight}
-                stroke="#333"
-                strokeWidth={0.5}
-              />
-              <text
-                x={scales.xScale(point.k_distance)}
-                y={plotHeight + 20}
-                textAnchor="middle"
-                fill="#000"
-                fontSize={14}
-                fontFamily="serif"
-                fontStyle="italic"
-              >
-                {formatLabel(point.label)}
-              </text>
-            </g>
-          ))}
-
-          {/* Fermi level at E - E_F = 0 */}
-          {showFermiLevel && (
-            <g>
-              <line
-                x1={0}
-                x2={plotWidth}
-                y1={scales.yScale(0)}
-                y2={scales.yScale(0)}
-                stroke="#d32f2f"
-                strokeWidth={1}
-                strokeDasharray="4,4"
-              />
-              <text
-                x={plotWidth + 5}
-                y={scales.yScale(0) + 4}
-                fill="#d32f2f"
-                fontSize={11}
-              >
-                E_F
-              </text>
-            </g>
-          )}
-
-          {/* Band lines + fat points */}
-          <g clipPath={`url(#${clipPathId})`}>
-            {drawBandLines &&
-              shiftedEnergies.map((band, bandIdx) => (
-                <path
-                  key={bandIdx}
-                  d={bandToPath(band, data.k_points)}
-                  fill="none"
-                  stroke={bandColors[bandIdx]}
-                  strokeWidth={lineWidth}
-                  opacity={lineOpacity}
-                />
-              ))}
-
-            {fatBandsActive &&
-              fatPoints.map((point) => (
-                <circle
-                  key={point.key}
-                  cx={point.cx}
-                  cy={point.cy}
-                  r={point.r}
-                  fill={point.fill}
-                  opacity={point.opacity}
-                />
-              ))}
-          </g>
-
-          {/* Hover point */}
-          {hoveredPoint && (
-            <g>
-              <circle
-                cx={hoveredPoint.x}
-                cy={hoveredPoint.y}
-                r={5}
-                fill="#ff9800"
-                stroke="#fff"
-                strokeWidth={2}
-              />
-            </g>
-          )}
-
-          {/* Y-axis */}
-          <g>
-            <line x1={0} y1={0} x2={0} y2={plotHeight} stroke="#333" />
-            {yTicks.map((tick) => (
-              <g key={tick}>
-                <line
-                  x1={-5}
-                  x2={0}
-                  y1={scales.yScale(tick)}
-                  y2={scales.yScale(tick)}
-                  stroke="#333"
-                />
-                <text
-                  x={-10}
-                  y={scales.yScale(tick) + 4}
-                  textAnchor="end"
-                  fill="#333"
-                  fontSize={11}
-                >
-                  {tick.toFixed(1)}
-                </text>
-              </g>
-            ))}
-            <text
-              transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
-              textAnchor="middle"
-              fill="#333"
-              fontSize={14}
-            >
-              {yAxisLabel}
-            </text>
-          </g>
-
-          {/* X-axis line */}
-          <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke="#333" />
-        </g>
-
-        {/* Tooltip */}
-        {hoveredPoint && (
-          <g
-            transform={`translate(${margin.left + hoveredPoint.x + 10}, ${
-              margin.top + hoveredPoint.y - 10
-            })`}
-          >
-            <rect
-              x={0}
-              y={-42}
-              width={190}
-              height={
-                hoveredPoint.projectionWeight !== undefined &&
-                hoveredPoint.projectionWeightNormalized !== undefined
-                  ? 66
-                  : 48
-              }
-              fill="#fff"
-              stroke="#ccc"
-              rx={4}
-              filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
-            />
-            <text x={8} y={-24} fill="#333" fontSize={11}>
-              {pointLabel} {hoveredPoint.band}
-            </text>
-            <text x={8} y={-8} fill="#1565c0" fontSize={11}>
-              {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
-            </text>
-            {hoveredPoint.projectionWeight !== undefined &&
-              hoveredPoint.projectionWeightNormalized !== undefined && (
-                <text x={8} y={10} fill="#6d4c41" fontSize={11}>
-                  Weight = {hoveredPoint.projectionWeight.toExponential(2)} (
-                  {(hoveredPoint.projectionWeightNormalized * 100).toFixed(1)}%)
-                </text>
-              )}
-          </g>
-        )}
-      </svg>
-
-      {/* Info panel */}
-      <div className="band-plot-info">
-        <span>
-          {data.n_bands} {primaryCountLabel}
-        </span>
-        <span>
-          {data.n_kpoints} {secondaryCountLabel}
-        </span>
-        {showFermiLevel && (
-          <span>
-            E_F = {scfFermiEnergy != null ? `${scfFermiEnergy.toFixed(3)} eV` : "N/A"}
-          </span>
-        )}
-        {showProjectionSummary && (
-          <span className="band-plot-projection-pill">
-            Fat bands: {projectionLabel}
-          </span>
-        )}
       </div>
     </div>
   );
