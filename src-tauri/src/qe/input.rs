@@ -371,6 +371,33 @@ pub fn generate_q2r_input(calc: &super::types::Q2RCalculation) -> String {
     output
 }
 
+/// Generates input for dos.x (electronic DOS post-processing)
+pub fn generate_dos_input(calc: &super::types::DosCalculation) -> String {
+    let mut output = String::new();
+
+    writeln!(output, "&DOS").unwrap();
+    writeln!(output, "  prefix = '{}',", calc.prefix).unwrap();
+    writeln!(output, "  outdir = '{}',", calc.outdir).unwrap();
+    writeln!(output, "  fildos = '{}',", calc.fildos).unwrap();
+
+    if let Some(degauss) = calc.degauss {
+        writeln!(output, "  degauss = {},", degauss).unwrap();
+    }
+    if let Some(emin) = calc.emin {
+        writeln!(output, "  Emin = {},", emin).unwrap();
+    }
+    if let Some(emax) = calc.emax {
+        writeln!(output, "  Emax = {},", emax).unwrap();
+    }
+    if let Some(delta_e) = calc.delta_e {
+        writeln!(output, "  DeltaE = {},", delta_e).unwrap();
+    }
+
+    writeln!(output, "/").unwrap();
+
+    output
+}
+
 /// Generates input for matdyn.x (phonon DOS calculation)
 pub fn generate_matdyn_dos_input(calc: &super::types::MatdynCalculation) -> String {
     let mut output = String::new();
@@ -541,6 +568,32 @@ mod tests {
         assert!(input.contains("fildyn = 'silicon.dyn'"));
         assert!(input.contains("flfrc = 'silicon.fc'"));
         assert!(input.contains("zasr = 'crystal'"));
+    }
+
+    #[test]
+    fn test_dos_input() {
+        use super::super::types::DosCalculation;
+
+        let calc = DosCalculation {
+            prefix: "silicon".to_string(),
+            outdir: "./tmp".to_string(),
+            fildos: "silicon.dos".to_string(),
+            degauss: Some(0.02),
+            emin: Some(-12.0),
+            emax: Some(12.0),
+            delta_e: Some(0.02),
+        };
+
+        let input = generate_dos_input(&calc);
+
+        assert!(input.contains("&DOS"));
+        assert!(input.contains("prefix = 'silicon'"));
+        assert!(input.contains("outdir = './tmp'"));
+        assert!(input.contains("fildos = 'silicon.dos'"));
+        assert!(input.contains("degauss = 0.02"));
+        assert!(input.contains("Emin = -12"));
+        assert!(input.contains("Emax = 12"));
+        assert!(input.contains("DeltaE = 0.02"));
     }
 
     #[test]

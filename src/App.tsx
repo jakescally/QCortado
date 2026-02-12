@@ -6,6 +6,8 @@ import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { BandStructureWizard } from "./components/BandStructureWizard";
 import { BandData, BandPlot } from "./components/BandPlot";
+import { ElectronicDOSWizard } from "./components/ElectronicDOSWizard";
+import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
 import { PhononWizard } from "./components/PhononWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
@@ -27,7 +29,7 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard";
 
 interface SCFContext {
   cifId: string;
@@ -41,6 +43,13 @@ interface SCFContext {
 }
 
 interface BandsContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  scfCalculations: CalculationRun[];
+}
+
+interface DosContext {
   cifId: string;
   crystalData: CrystalData;
   projectId: string;
@@ -189,6 +198,12 @@ function AppInner() {
   // Context for viewing saved band data
   const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
 
+  // Context for running Electronic DOS from a project
+  const [dosContext, setDosContext] = useState<DosContext | null>(null);
+
+  // Context for viewing saved DOS data
+  const [viewDosData, setViewDosData] = useState<{ dosData: ElectronicDOSData; fermiEnergy: number | null } | null>(null);
+
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
 
@@ -268,6 +283,7 @@ function AppInner() {
     const viewMap: Record<string, AppView> = {
       scf: "scf-wizard",
       bands: "bands-wizard",
+      dos: "dos-wizard",
       phonon: "phonon-wizard",
     };
     const view = viewMap[taskType];
@@ -350,6 +366,66 @@ function AppInner() {
               data={viewBandsData.bandData}
               scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
               viewerType="electronic"
+            />
+          </div>
+        </div>
+        {processIndicator}
+        {closeConfirmModal}
+      </>
+    );
+  }
+
+  if (currentView === "dos-wizard" && qePath && (dosContext || reconnectTaskId)) {
+    return (
+      <>
+        <ElectronicDOSWizard
+          qePath={qePath}
+          onViewDos={(dosData, fermiEnergy) => {
+            setViewDosData({ dosData, fermiEnergy });
+            setCurrentView("dos-viewer");
+            setReconnectTaskId(null);
+          }}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setDosContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={dosContext?.projectId ?? ""}
+          cifId={dosContext?.cifId ?? ""}
+          crystalData={dosContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          scfCalculations={dosContext?.scfCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {processIndicator}
+        {closeConfirmModal}
+      </>
+    );
+  }
+
+  if (currentView === "dos-viewer" && viewDosData) {
+    return (
+      <>
+        <div className="bands-viewer-container">
+          <div className="bands-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewDosData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>Electronic DOS</h2>
+          </div>
+          <div className="bands-viewer-content">
+            <ElectronicDOSPlot
+              data={{
+                ...viewDosData.dosData,
+                fermi_energy: viewDosData.dosData.fermi_energy ?? viewDosData.fermiEnergy,
+              }}
+              width={plotWidth}
+              height={plotHeight}
             />
           </div>
         </div>
@@ -604,6 +680,19 @@ function AppInner() {
           onViewBands={(bandData, fermiEnergy) => {
             setViewBandsData({ bandData, fermiEnergy });
             setCurrentView("bands-viewer");
+          }}
+          onRunDos={(cifId, crystalData, scfCalculations) => {
+            setDosContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            setCurrentView("dos-wizard");
+          }}
+          onViewDos={(dosData, fermiEnergy) => {
+            setViewDosData({ dosData, fermiEnergy });
+            setCurrentView("dos-viewer");
           }}
           onRunPhonons={(cifId, crystalData, scfCalculations) => {
             setPhononsContext({

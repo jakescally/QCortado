@@ -48,6 +48,7 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
   const typeLabels: Record<string, string> = {
     scf: "SCF",
     bands: "Band Structure",
+    dos: "Electronic DOS",
     phonon: "Phonon",
   };
   const typeLabel = typeLabels[task.taskType] || task.taskType.toUpperCase();

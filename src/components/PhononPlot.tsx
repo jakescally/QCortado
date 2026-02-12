@@ -1,4 +1,5 @@
 import { useMemo, useCallback, useRef, useState } from "react";
+import { useTheme } from "../lib/ThemeContext";
 
 // Phonon data interfaces
 interface PhononDOS {
@@ -56,6 +57,12 @@ export function PhononDOSPlot({
   freqMin,
   freqMax,
 }: PhononDOSPlotProps) {
+  const { isDark } = useTheme();
+  const colors = useMemo(() => isDark
+    ? { bg: "#1e1e2e", axis: "#718096", grid: "#4a5568", text: "#e2e8f0" }
+    : { bg: "#ffffff", axis: "#333", grid: "#999", text: "#000" },
+  [isDark]);
+
   const margin = { top: 30, right: 20, bottom: 50, left: 50 };
   const plotWidth = width - margin.left - margin.right;
   const plotHeight = height - margin.top - margin.bottom;
@@ -108,7 +115,7 @@ export function PhononDOSPlot({
 
   return (
     <svg width={width} height={height}>
-      <rect width={width} height={height} fill="#ffffff" />
+      <rect width={width} height={height} fill={colors.bg} />
 
       <g transform={`translate(${margin.left}, ${margin.top})`}>
         {/* Grid lines */}
@@ -120,7 +127,7 @@ export function PhononDOSPlot({
               x2={plotWidth}
               y1={scales.yScale(tick)}
               y2={scales.yScale(tick)}
-              stroke="#999"
+              stroke={colors.grid}
               strokeDasharray="2,2"
             />
           ))}
@@ -144,12 +151,12 @@ export function PhononDOSPlot({
 
         {/* Y-axis */}
         <g>
-          <line x1={0} y1={0} x2={0} y2={plotHeight} stroke="#333" />
+          <line x1={0} y1={0} x2={0} y2={plotHeight} stroke={colors.axis} />
           {!sharedYScale &&
             yTicks.map((tick) => (
               <g key={tick}>
-                <line x1={-5} x2={0} y1={scales.yScale(tick)} y2={scales.yScale(tick)} stroke="#333" />
-                <text x={-10} y={scales.yScale(tick) + 4} textAnchor="end" fill="#333" fontSize={11}>
+                <line x1={-5} x2={0} y1={scales.yScale(tick)} y2={scales.yScale(tick)} stroke={colors.axis} />
+                <text x={-10} y={scales.yScale(tick) + 4} textAnchor="end" fill={colors.text} fontSize={11}>
                   {tick}
                 </text>
               </g>
@@ -158,7 +165,7 @@ export function PhononDOSPlot({
             <text
               transform={`translate(-40, ${plotHeight / 2}) rotate(-90)`}
               textAnchor="middle"
-              fill="#333"
+              fill={colors.text}
               fontSize={12}
             >
               Frequency (cm⁻¹)
@@ -168,8 +175,8 @@ export function PhononDOSPlot({
 
         {/* X-axis */}
         <g>
-          <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke="#333" />
-          <text x={plotWidth / 2} y={plotHeight + 35} textAnchor="middle" fill="#333" fontSize={12}>
+          <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
+          <text x={plotWidth / 2} y={plotHeight + 35} textAnchor="middle" fill={colors.text} fontSize={12}>
             DOS
           </text>
         </g>
@@ -199,6 +206,12 @@ export function PhononDispersionPlot({
   freqMin,
   freqMax,
 }: PhononDispersionPlotProps) {
+  const { isDark } = useTheme();
+  const colors = useMemo(() => isDark
+    ? { bg: "#1e1e2e", axis: "#718096", grid: "#4a5568", text: "#e2e8f0", tooltip: "#2d3748", tooltipBorder: "#4a5568", tooltipText: "#e2e8f0" }
+    : { bg: "#ffffff", axis: "#333", grid: "#999", text: "#000", tooltip: "#fff", tooltipBorder: "#ccc", tooltipText: "#333" },
+  [isDark]);
+
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredPoint, setHoveredPoint] = useState<{
     mode: number;
@@ -398,7 +411,7 @@ export function PhononDispersionPlot({
           </clipPath>
         </defs>
 
-        <rect width={width} height={height} fill="#ffffff" />
+        <rect width={width} height={height} fill={colors.bg} />
 
         <g transform={`translate(${margin.left}, ${margin.top})`}>
           {/* Grid lines */}
@@ -410,7 +423,7 @@ export function PhononDispersionPlot({
                 x2={plotWidth}
                 y1={scales.yScale(tick)}
                 y2={scales.yScale(tick)}
-                stroke="#999"
+                stroke={colors.grid}
                 strokeDasharray="2,2"
               />
             ))}
@@ -424,14 +437,14 @@ export function PhononDispersionPlot({
                 x2={scales.xScale(point.q_distance)}
                 y1={0}
                 y2={plotHeight}
-                stroke="#333"
+                stroke={colors.axis}
                 strokeWidth={0.5}
               />
               <text
                 x={scales.xScale(point.q_distance)}
                 y={plotHeight + 20}
                 textAnchor="middle"
-                fill="#000"
+                fill={colors.text}
                 fontSize={14}
                 fontFamily="serif"
                 fontStyle="italic"
@@ -482,11 +495,11 @@ export function PhononDispersionPlot({
 
           {/* Y-axis */}
           <g>
-            <line x1={0} y1={0} x2={0} y2={plotHeight} stroke="#333" />
+            <line x1={0} y1={0} x2={0} y2={plotHeight} stroke={colors.axis} />
             {yTicks.map((tick) => (
               <g key={tick}>
-                <line x1={-5} x2={0} y1={scales.yScale(tick)} y2={scales.yScale(tick)} stroke="#333" />
-                <text x={-10} y={scales.yScale(tick) + 4} textAnchor="end" fill="#333" fontSize={11}>
+                <line x1={-5} x2={0} y1={scales.yScale(tick)} y2={scales.yScale(tick)} stroke={colors.axis} />
+                <text x={-10} y={scales.yScale(tick) + 4} textAnchor="end" fill={colors.text} fontSize={11}>
                   {tick}
                 </text>
               </g>
@@ -494,7 +507,7 @@ export function PhononDispersionPlot({
             <text
               transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
               textAnchor="middle"
-              fill="#333"
+              fill={colors.text}
               fontSize={14}
             >
               Frequency (cm⁻¹)
@@ -502,7 +515,7 @@ export function PhononDispersionPlot({
           </g>
 
           {/* X-axis line */}
-          <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke="#333" />
+          <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
         </g>
 
         {/* Tooltip */}
@@ -515,12 +528,12 @@ export function PhononDispersionPlot({
               y={-30}
               width={130}
               height={40}
-              fill="#fff"
-              stroke="#ccc"
+              fill={colors.tooltip}
+              stroke={colors.tooltipBorder}
               rx={4}
               filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
             />
-            <text x={8} y={-12} fill="#333" fontSize={11}>
+            <text x={8} y={-12} fill={colors.tooltipText} fontSize={11}>
               Mode {hoveredPoint.mode}
             </text>
             <text x={8} y={4} fill="#1565c0" fontSize={11}>

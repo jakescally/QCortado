@@ -4,7 +4,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "phonon";
+export type TaskType = "scf" | "bands" | "dos" | "phonon";
 
 export interface TaskState {
   taskId: string;
@@ -190,6 +190,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       const commandMap: Record<TaskType, string> = {
         scf: "start_scf_calculation",
         bands: "start_bands_calculation",
+        dos: "start_dos_calculation",
         phonon: "start_phonon_calculation",
       };
 
@@ -210,6 +211,8 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             ? "Starting..."
             : type === "bands"
               ? "Starting..."
+              : type === "dos"
+                ? "Starting..."
               : "Starting...",
         ),
         output: [],

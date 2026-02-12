@@ -339,6 +339,9 @@ pub struct QEResult {
     /// Full phonon data (for phonon calculations)
     #[serde(default)]
     pub phonon_data: Option<serde_json::Value>,
+    /// Full electronic DOS data (for DOS calculations)
+    #[serde(default)]
+    pub dos_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -356,6 +359,7 @@ impl Default for QEResult {
             raw_output: String::new(),
             band_data: None,
             phonon_data: None,
+            dos_data: None,
         }
     }
 }
@@ -526,6 +530,43 @@ impl Default for MatdynCalculation {
             delta_e: Some(1.0),
             q_path: None,
             flfrq: None,
+        }
+    }
+}
+
+/// Configuration for dos.x electronic DOS calculation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DosCalculation {
+    /// Prefix used in pw.x runs
+    pub prefix: String,
+    /// Output directory where QE scratch files live
+    pub outdir: String,
+    /// Output file for DOS data
+    pub fildos: String,
+    /// Broadening (Ry) for Gaussian smearing integration
+    #[serde(default)]
+    pub degauss: Option<f64>,
+    /// Minimum energy (eV) for DOS sampling
+    #[serde(default)]
+    pub emin: Option<f64>,
+    /// Maximum energy (eV) for DOS sampling
+    #[serde(default)]
+    pub emax: Option<f64>,
+    /// Energy step (eV)
+    #[serde(default)]
+    pub delta_e: Option<f64>,
+}
+
+impl Default for DosCalculation {
+    fn default() -> Self {
+        Self {
+            prefix: "qcortado_scf".to_string(),
+            outdir: "./tmp".to_string(),
+            fildos: "dos.dat".to_string(),
+            degauss: Some(0.02),
+            emin: None,
+            emax: None,
+            delta_e: Some(0.02),
         }
     }
 }

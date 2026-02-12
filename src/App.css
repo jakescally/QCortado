@@ -2719,6 +2719,26 @@ html[data-theme="dark"] {
   background: #6b46c1;
 }
 
+.dos-item .calculation-header {
+  border-left: 3px solid #1f77b4;
+}
+
+.view-dos-btn {
+  background: #1f77b4;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.view-dos-btn:hover {
+  background: #155a87;
+}
+
 .save-status {
   margin: 1rem 0;
   text-align: center;
@@ -2762,9 +2782,32 @@ html[data-theme="dark"] {
   display: flex;
 }
 
+.electronic-dos-plot {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.electronic-dos-plot svg {
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
 html[data-theme="dark"] {
   .calc-kpath {
     color: #a0aec0;
+  }
+
+  .view-dos-btn {
+    background: #3182ce;
+  }
+
+  .view-dos-btn:hover {
+    background: #2b6cb0;
   }
 
   .bands-viewer-container {
@@ -2777,6 +2820,10 @@ html[data-theme="dark"] {
 
   .bands-viewer-content {
     background: transparent;
+  }
+
+  .electronic-dos-plot svg {
+    border-color: #4a5568;
   }
 }
 
@@ -2968,6 +3015,7 @@ html[data-theme="dark"] {
    ============================================ */
 
 .band-structure-wizard,
+.electronic-dos-wizard,
 .phonon-wizard {
   min-height: 100vh;
   display: flex;
@@ -2977,11 +3025,13 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="dark"] .band-structure-wizard,
+html[data-theme="dark"] .electronic-dos-wizard,
 html[data-theme="dark"] .phonon-wizard {
   background: #1e1e2e;
 }
 
 .band-structure-wizard > .wizard-header,
+.electronic-dos-wizard > .wizard-header,
 .phonon-wizard > .wizard-header {
   display: flex;
   align-items: center;
@@ -2992,11 +3042,13 @@ html[data-theme="dark"] .phonon-wizard {
 }
 
 html[data-theme="dark"] .band-structure-wizard > .wizard-header,
+html[data-theme="dark"] .electronic-dos-wizard > .wizard-header,
 html[data-theme="dark"] .phonon-wizard > .wizard-header {
   border-bottom-color: #45475a;
 }
 
 .band-structure-wizard .wizard-header h2,
+.electronic-dos-wizard .wizard-header h2,
 .phonon-wizard .wizard-header h2 {
   margin: 0;
   font-size: 1.5rem;
@@ -3005,11 +3057,13 @@ html[data-theme="dark"] .phonon-wizard > .wizard-header {
 }
 
 html[data-theme="dark"] .band-structure-wizard .wizard-header h2,
+html[data-theme="dark"] .electronic-dos-wizard .wizard-header h2,
 html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
   color: #f7fafc;
 }
 
 .band-structure-wizard .step-indicator,
+.electronic-dos-wizard .step-indicator,
 .phonon-wizard .step-indicator {
   display: flex;
   gap: 1.5rem;
@@ -3017,6 +3071,7 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 }
 
 .band-structure-wizard .step-indicator span,
+.electronic-dos-wizard .step-indicator span,
 .phonon-wizard .step-indicator span {
   color: #718096;
   padding: 0.25rem 0.5rem;
@@ -3024,11 +3079,13 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span,
+html[data-theme="dark"] .electronic-dos-wizard .step-indicator span,
 html[data-theme="dark"] .phonon-wizard .step-indicator span {
   color: #6c7086;
 }
 
 .band-structure-wizard .step-indicator span.active,
+.electronic-dos-wizard .step-indicator span.active,
 .phonon-wizard .step-indicator span.active {
   background: #4299e1;
   color: #fff;
@@ -3036,22 +3093,26 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span {
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.active,
+html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.active,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.active {
   background: #89b4fa;
   color: #1e1e2e;
 }
 
 .band-structure-wizard .step-indicator span.completed,
+.electronic-dos-wizard .step-indicator span.completed,
 .phonon-wizard .step-indicator span.completed {
   color: #38a169;
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.completed,
+html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.completed,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
   color: #a6e3a1;
 }
 
 .band-structure-wizard .wizard-content,
+.electronic-dos-wizard .wizard-content,
 .phonon-wizard .wizard-content {
   flex: 1;
   padding: 2rem;
@@ -3064,6 +3125,7 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 }
 
 .band-structure-wizard .wizard-step h3,
+.electronic-dos-wizard .wizard-step h3,
 .phonon-wizard .wizard-step h3 {
   margin: 0 0 1rem 0;
   font-size: 1.5rem;
@@ -3071,17 +3133,20 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 }
 
 html[data-theme="dark"] .band-structure-wizard .wizard-step h3,
+html[data-theme="dark"] .electronic-dos-wizard .wizard-step h3,
 html[data-theme="dark"] .phonon-wizard .wizard-step h3 {
   color: #cdd6f4;
 }
 
 .band-structure-wizard .step-description,
+.electronic-dos-wizard .step-description,
 .phonon-wizard .step-description {
   color: #718096;
   margin-bottom: 1.5rem;
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-description,
+html[data-theme="dark"] .electronic-dos-wizard .step-description,
 html[data-theme="dark"] .phonon-wizard .step-description {
   color: #a6adc8;
 }
@@ -5236,6 +5301,7 @@ html[data-theme="dark"] {
 .dashboard-header,
 .wizard-container > .wizard-header,
 .band-structure-wizard > .wizard-header,
+.electronic-dos-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
 .bands-viewer-header,
 .phonon-viewer-header {
@@ -5262,20 +5328,24 @@ html[data-theme="dark"] {
 }
 
 .band-structure-wizard > .wizard-header,
+.electronic-dos-wizard > .wizard-header,
 .phonon-wizard > .wizard-header {
   background: rgba(248, 250, 252, 0.96);
 }
 
 .wizard-container .wizard-content,
 .band-structure-wizard .wizard-content,
+.electronic-dos-wizard .wizard-content,
 .phonon-wizard .wizard-content {
   padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
 }
 
 .wizard-container .run-actions,
 .band-structure-wizard .step-actions,
+.electronic-dos-wizard .step-actions,
 .phonon-wizard .step-actions,
 .band-structure-wizard .error-actions,
+.electronic-dos-wizard .error-actions,
 .phonon-wizard .error-actions {
   display: flex;
   gap: 1rem;
@@ -5296,8 +5366,10 @@ html[data-theme="dark"] {
 
 .wizard-container .run-actions > button,
 .band-structure-wizard .step-actions > button,
+.electronic-dos-wizard .step-actions > button,
 .phonon-wizard .step-actions > button,
 .band-structure-wizard .error-actions > button,
+.electronic-dos-wizard .error-actions > button,
 .phonon-wizard .error-actions > button {
   pointer-events: auto;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
@@ -5305,8 +5377,10 @@ html[data-theme="dark"] {
 
 .wizard-container .run-actions > button:first-child,
 .band-structure-wizard .step-actions > button:first-child,
+.electronic-dos-wizard .step-actions > button:first-child,
 .phonon-wizard .step-actions > button:first-child,
 .band-structure-wizard .error-actions > button:first-child,
+.electronic-dos-wizard .error-actions > button:first-child,
 .phonon-wizard .error-actions > button:first-child {
   margin-right: auto;
 }
@@ -5548,6 +5622,7 @@ html[data-theme="dark"] {
 
   .wizard-container > .wizard-header,
   .band-structure-wizard > .wizard-header,
+  .electronic-dos-wizard > .wizard-header,
   .phonon-wizard > .wizard-header {
     background: rgba(45, 55, 72, 0.95);
   }

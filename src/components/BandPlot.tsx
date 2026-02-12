@@ -792,14 +792,21 @@ export function BandPlot({
         newMax = center + newRange / 2;
       }
 
-      // Clamp to limits if configured
+      // Clamp to limits if configured (preserve window size)
       if (yClampRange) {
         const [minLimit, maxLimit] = yClampRange;
+        const windowSize = newMax - newMin;
+
+        // If panning too far down, clamp to lower limit
         if (newMin < minLimit) {
           newMin = minLimit;
+          newMax = newMin + windowSize;
         }
+
+        // If panning too far up, clamp to upper limit
         if (newMax > maxLimit) {
           newMax = maxLimit;
+          newMin = newMax - windowSize;
         }
       }
 

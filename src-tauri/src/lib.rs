@@ -19,13 +19,13 @@ pub mod qe;
 use process_manager::ProcessManager;
 
 use qe::{
-    add_phonon_symmetry_markers, generate_matdyn_bands_input, generate_matdyn_dos_input,
+    add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input,
     generate_ph_input, generate_q2r_input, parse_ph_output, read_phonon_dispersion_file,
-    read_phonon_dos_file, MatdynCalculation, PhononPipelineConfig, PhononResult, Q2RCalculation,
-    QPathPoint,
+    read_phonon_dos_file, DosCalculation, MatdynCalculation, PhononPipelineConfig, PhononResult,
+    Q2RCalculation, QPathPoint,
 };
 use qe::{
-    generate_bands_x_input, generate_projwfc_input, generate_pw_input,
+    generate_bands_x_input, generate_projwfc_input, generate_pw_input, parse_dos_file,
     parse_projwfc_projection_groups, parse_pw_output, read_bands_gnu_file, BandData, BandsXConfig,
     KPathPoint, ProjwfcConfig, QECalculation, QEResult, QERunner,
 };
@@ -671,6 +671,44 @@ pub struct BandsProjectionOptions {
     pub diag_basis: Option<bool>,
     /// projwfc.x pawproj option
     pub pawproj: Option<bool>,
+}
+
+/// Configuration for electronic DOS calculation (NSCF + dos.x).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ElectronicDosCalculationConfig {
+    /// Base SCF calculation to derive system settings from
+    pub base_calculation: QECalculation,
+    /// Dense automatic k-grid for NSCF DOS run
+    pub k_grid: [u32; 3],
+    /// Optional DOS broadening (Ry)
+    pub degauss: Option<f64>,
+    /// Optional minimum energy window (eV)
+    pub emin: Option<f64>,
+    /// Optional maximum energy window (eV)
+    pub emax: Option<f64>,
+    /// Optional DOS energy step (eV)
+    pub delta_e: Option<f64>,
+    /// Project ID containing the source SCF calculation
+    pub project_id: Option<String>,
+    /// SCF calculation ID to get the .save directory from
+    pub scf_calc_id: Option<String>,
+}
+
+/// Parsed electronic DOS data returned to the frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ElectronicDosData {
+    /// Energy samples in eV
+    pub energies: Vec<f64>,
+    /// DOS values for each energy sample
+    pub dos: Vec<f64>,
+    /// Fermi energy in eV (if detected from NSCF output)
+    pub fermi_energy: Option<f64>,
+    /// [min, max] sampled energy range
+    pub energy_range: [f64; 2],
+    /// Maximum DOS value in sampled data
+    pub max_dos: f64,
+    /// Number of sampled DOS points
+    pub points: usize,
 }
 
 /// Runs a band structure calculation (NSCF + bands.x) with streaming output.
@@ -2272,6 +2310,341 @@ async fn run_bands_background(
     Ok(band_data)
 }
 
+/// Starts an electronic DOS calculation as a background task.
+#[tauri::command]
+async fn start_dos_calculation(
+    app: AppHandle,
+    config: ElectronicDosCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if state.process_manager.has_running_tasks().await {
+        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("dos".to_string(), label).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_dos_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(dos_data) => {
+                let json = serde_json::to_value(&dos_data).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_dos_background(
+    app: AppHandle,
+    task_id: &str,
+    config: ElectronicDosCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<ElectronicDosData, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let work_path = PathBuf::from(&working_dir);
+    std::fs::create_dir_all(&work_path)
+        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    // Copy SCF .save directory if provided
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!(format!("Copying SCF data from: {}", scf_tmp_dir.display()));
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
+
+    check_cancel!();
+
+    let mut nscf_calc = config.base_calculation.clone();
+    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.verbosity = Some("high".to_string());
+    nscf_calc.kpoints = qe::KPoints::Automatic {
+        grid: config.k_grid,
+        offset: [0, 0, 0],
+    };
+
+    if nscf_calc.system.degauss.is_none() {
+        nscf_calc.system.degauss = config.degauss;
+    }
+    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe::Occupations::Smearing;
+        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        if nscf_calc.system.degauss.is_none() {
+            nscf_calc.system.degauss = Some(0.02);
+        }
+    }
+
+    let nscf_input = generate_pw_input(&nscf_calc);
+    std::fs::write(work_path.join("nscf.in"), &nscf_input)
+        .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("=== Starting Electronic DOS Calculation ===".to_string());
+    emit_line!(format!(
+        "Dense k-grid: {}×{}×{}",
+        config.k_grid[0], config.k_grid[1], config.k_grid[2]
+    ));
+    emit_line!("Step 1/2: Running NSCF on dense k-grid...".to_string());
+
+    let exe_path = bin_dir.join("pw.x");
+    if !exe_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&exe_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&exe_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
+
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(nscf_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture pw.x stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_nscf_output = String::new();
+    let mut fermi_energy: Option<f64> = None;
+
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        full_nscf_output.push_str(&line);
+        full_nscf_output.push('\n');
+        emit_line!(line.clone());
+
+        if line.contains("the Fermi energy is") {
+            if let Some(idx) = line.find("the Fermi energy is") {
+                let rest = &line[idx + 19..];
+                if let Some(ev_idx) = rest.find("ev") {
+                    if let Ok(ef) = rest[..ev_idx].trim().parse::<f64>() {
+                        fermi_energy = Some(ef);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !status.success() {
+        return Err(format!("pw.x (NSCF) failed with exit code: {:?}", status.code()));
+    }
+
+    std::fs::write(work_path.join("nscf.out"), &full_nscf_output)
+        .map_err(|e| format!("Failed to write NSCF output: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("Step 2/2: Running dos.x post-processing...".to_string());
+
+    let dos_path = bin_dir.join("dos.x");
+    if !dos_path.exists() {
+        return Err("dos.x not found. Make sure your QE installation includes dos.x".to_string());
+    }
+
+    let dos_calc = DosCalculation {
+        prefix: nscf_calc.prefix.clone(),
+        outdir: nscf_calc.outdir.clone(),
+        fildos: "dos.dat".to_string(),
+        degauss: config.degauss.or(nscf_calc.system.degauss),
+        emin: config.emin,
+        emax: config.emax,
+        delta_e: config.delta_e,
+    };
+
+    let dos_input = generate_dos_input(&dos_calc);
+    std::fs::write(work_path.join("dos.in"), &dos_input)
+        .map_err(|e| format!("Failed to write dos.x input: {}", e))?;
+
+    let mut dos_child = tokio_command_with_prefix(&dos_path, execution_prefix.as_deref())
+        .current_dir(&work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start dos.x: {}", e))?;
+
+    if let Some(pid) = dos_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = dos_child.stdin.take() {
+        stdin
+            .write_all(dos_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write dos.x input: {}", e))?;
+    }
+
+    let dos_stdout = dos_child.stdout.take().ok_or("Failed to capture dos.x stdout")?;
+    let mut dos_reader = BufReader::new(dos_stdout).lines();
+    let mut dos_output = String::new();
+
+    while let Some(line) = dos_reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        dos_output.push_str(&line);
+        dos_output.push('\n');
+        emit_line!(line);
+    }
+
+    let dos_status = dos_child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !dos_status.success() {
+        return Err(format!("dos.x failed with exit code: {:?}", dos_status.code()));
+    }
+
+    std::fs::write(work_path.join("dos.out"), &dos_output)
+        .map_err(|e| format!("Failed to write dos.x output: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("Parsing DOS data...".to_string());
+
+    let dos_file = work_path.join(&dos_calc.fildos);
+    if !dos_file.exists() {
+        return Err(format!(
+            "DOS file not found: {}",
+            dos_file.display()
+        ));
+    }
+
+    let dos_content = std::fs::read_to_string(&dos_file)
+        .map_err(|e| format!("Failed to read DOS file {}: {}", dos_file.display(), e))?;
+    let (energies, dos_values) = parse_dos_file(&dos_content)
+        .ok_or_else(|| format!("Failed to parse DOS data from {}", dos_file.display()))?;
+
+    if energies.is_empty() || dos_values.is_empty() {
+        return Err("Parsed DOS output is empty".to_string());
+    }
+
+    let e_min = energies
+        .iter()
+        .fold(f64::INFINITY, |current, value| current.min(*value));
+    let e_max = energies
+        .iter()
+        .fold(f64::NEG_INFINITY, |current, value| current.max(*value));
+    let max_dos = dos_values
+        .iter()
+        .fold(f64::NEG_INFINITY, |current, value| current.max(*value));
+    let points = energies.len();
+
+    let dos_data = ElectronicDosData {
+        energies,
+        dos: dos_values,
+        fermi_energy,
+        energy_range: [e_min, e_max],
+        max_dos: if max_dos.is_finite() { max_dos.max(0.0) } else { 0.0 },
+        points,
+    };
+
+    emit_line!("=== Electronic DOS Complete ===".to_string());
+    emit_line!(format!(
+        "  {} points, energy range [{:.3}, {:.3}] eV",
+        dos_data.points, dos_data.energy_range[0], dos_data.energy_range[1]
+    ));
+
+    Ok(dos_data)
+}
+
 /// Starts a phonon calculation as a background task.
 #[tauri::command]
 async fn start_phonon_calculation(
@@ -2879,6 +3252,7 @@ pub fn run() {
             // Background task commands
             start_scf_calculation,
             start_bands_calculation,
+            start_dos_calculation,
             start_phonon_calculation,
             list_running_tasks,
             get_task_info,

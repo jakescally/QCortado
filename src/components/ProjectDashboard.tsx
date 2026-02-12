@@ -8,6 +8,7 @@ import { parseCIF } from "../lib/cifParser";
 import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, SavedStructureData } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { useTheme } from "../lib/ThemeContext";
 
 interface QEResult {
   converged: boolean;
@@ -17,6 +18,7 @@ interface QEResult {
   wall_time_seconds: number | null;
   raw_output: string;
   band_data?: any;  // Band structure data for bands calculations
+  dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
 }
 
@@ -28,6 +30,7 @@ export interface CalculationRun {
   started_at: string;
   completed_at: string | null;
   tags?: string[];
+  storage_bytes?: number | null;
 }
 
 interface CifVariant {
@@ -62,6 +65,8 @@ interface ProjectDashboardProps {
   ) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
+  onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
 }
@@ -69,7 +74,7 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "phonon" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "phonon" | "optimization";
 
 interface DisplayCellMetrics {
   a: number;
@@ -217,11 +222,49 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
   }
 
   // Orbital projection/fat-band marker
-  if (Array.isArray(calc.tags) && (calc.tags.includes("Orb") || calc.tags.includes("orb"))) {
-    pushTag("Orb", "feature");
-  } else if (params.fat_bands_requested) {
-    // Backward compatibility for entries created before explicit `orb` tag support
-    pushTag("Orb", "feature");
+  const hasProjectionTag = Array.isArray(calc.tags)
+    && calc.tags.some((tag) => {
+      const normalized = String(tag).trim().toLowerCase();
+      return normalized === "proj" || normalized === "orb";
+    });
+  if (hasProjectionTag || params.fat_bands_requested) {
+    // Backward compatibility: legacy entries may still use the older `orb` marker.
+    pushTag("Proj", "feature");
+  }
+
+  return tags;
+}
+
+// Helper to generate electronic DOS-specific tags
+function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (params.dos_k_grid) {
+    const [k1, k2, k3] = params.dos_k_grid;
+    pushTag(`${k1}×${k2}×${k3} K`, "info");
+  }
+
+  if (params.n_points) {
+    pushTag(`${params.n_points} pts`, "info");
+  }
+
+  if (params.lspinorb) {
+    pushTag("SOC", "feature");
+  }
+  if (params.nspin === 2) {
+    pushTag("Magnetic", "feature");
+  }
+  if (params.lda_plus_u) {
+    pushTag("DFT+U", "feature");
+  }
+  if (params.vdw_corr && params.vdw_corr !== "none") {
+    pushTag("vdW", "feature");
   }
 
   return tags;
@@ -303,6 +346,12 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     const forceScore = getThresholdTightness(params.forc_conv_thr);
     const energyScore = getThresholdTightness(params.etot_conv_thr);
     return convergedBonus + (2 * kScore) + (2 * convScore) + (4 * forceScore) + (3 * energyScore) + socBonus;
+  }
+
+  if (category === "dos") {
+    const kScore = Math.log2(Math.max(1, getMeshProduct(params.dos_k_grid)));
+    const resolutionScore = getThresholdTightness(params.dos_delta_e, 12);
+    return convergedBonus + (4 * kScore) + (2 * resolutionScore) + socBonus;
   }
 
   // Bands: prioritize denser path sampling, then inherited SCF settings when present.
@@ -443,9 +492,12 @@ export function ProjectDashboard({
   onRunSCF,
   onRunBands,
   onViewBands,
+  onRunDos,
+  onViewDos,
   onRunPhonons,
   onViewPhonons,
 }: ProjectDashboardProps) {
+  const { theme, setTheme } = useTheme();
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -567,8 +619,11 @@ export function ProjectDashboard({
     }
   }
 
-  async function loadProject() {
-    setIsLoading(true);
+  async function loadProject(options: { showLoading?: boolean; refreshSelectedCif?: boolean } = {}) {
+    const { showLoading = true, refreshSelectedCif = true } = options;
+    if (showLoading) {
+      setIsLoading(true);
+    }
     setError(null);
     try {
       const proj = await invoke<Project>("get_project", { projectId });
@@ -576,18 +631,34 @@ export function ProjectDashboard({
 
       // Determine which CIF to show
       if (proj.cif_variants.length > 0) {
-        const cifToOpen = proj.last_opened_cif_id &&
-          proj.cif_variants.some(v => v.id === proj.last_opened_cif_id)
-          ? proj.last_opened_cif_id
-          : proj.cif_variants[0].id;
+        const selectedStillExists =
+          selectedCifId !== null && proj.cif_variants.some((variant) => variant.id === selectedCifId);
+        const cifToOpen =
+          selectedStillExists
+            ? selectedCifId
+            : proj.last_opened_cif_id &&
+                proj.cif_variants.some((variant) => variant.id === proj.last_opened_cif_id)
+              ? proj.last_opened_cif_id
+              : proj.cif_variants[0].id;
 
-        await selectCif(cifToOpen);
+        if (!cifToOpen) return;
+
+        if (refreshSelectedCif || cifToOpen !== selectedCifId || !crystalData) {
+          await selectCif(cifToOpen);
+        }
+      } else {
+        setSelectedCifId(null);
+        setCrystalData(null);
+        setCifContent("");
+        setExpandedCalc(null);
       }
     } catch (e) {
       console.error("Failed to load project:", e);
       setError(String(e));
     } finally {
-      setIsLoading(false);
+      if (showLoading) {
+        setIsLoading(false);
+      }
     }
   }
 
@@ -686,16 +757,23 @@ export function ProjectDashboard({
     if (!calcToDelete || !selectedCifId) return;
 
     setIsDeletingCalc(true);
+    const scrollY = window.scrollY;
     try {
       await invoke("delete_calculation", {
         projectId,
         cifId: selectedCifId,
         calcId: calcToDelete.calcId,
       });
-      // Reload project to reflect changes
-      await loadProject();
+      // Refresh the data in-place so the viewport position is preserved.
+      await loadProject({ showLoading: false, refreshSelectedCif: false });
+      if (expandedCalc === calcToDelete.calcId) {
+        setExpandedCalc(null);
+      }
       setShowDeleteCalcDialog(false);
       setCalcToDelete(null);
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: scrollY, left: 0, behavior: "auto" });
+      });
     } catch (e) {
       console.error("Failed to delete calculation:", e);
       setError(String(e));
@@ -759,6 +837,13 @@ export function ProjectDashboard({
     if (!variant) return;
     // Pass all calculations for this CIF - the wizard will filter for SCF
     onRunBands(selectedCifId, crystalData, variant.calculations);
+  }
+
+  function handleRunDos() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunDos(selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunPhonons() {
@@ -965,6 +1050,15 @@ export function ProjectDashboard({
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
+  const dosCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "dos") || [],
+      calculationSortMode,
+      "dos",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
   const phononCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "phonon") || [],
@@ -1092,6 +1186,50 @@ export function ProjectDashboard({
           {tempStorageStatus && (
             <div className="settings-menu-status">{tempStorageStatus}</div>
           )}
+        </div>
+        <div className="settings-menu-divider" />
+        <div className="settings-menu-section">
+          <label className="settings-menu-label">Recovery</label>
+          <p className="settings-menu-hint">
+            Import a completed phonon scratch run into the current structure history.
+          </p>
+          <button
+            className="settings-menu-item"
+            onClick={() => {
+              setShowSettingsMenu(false);
+              void handleRecoverPhonon();
+            }}
+            disabled={isRecoveringPhonon || !selectedCifId}
+          >
+            {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
+          </button>
+        </div>
+        <div className="settings-menu-divider" />
+        <div className="settings-menu-section">
+          <label className="settings-menu-label">Theme</label>
+          <div className="theme-toggle-group" role="group" aria-label="Theme">
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
+              onClick={() => setTheme("system")}
+            >
+              System
+            </button>
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+              onClick={() => setTheme("light")}
+            >
+              Light
+            </button>
+            <button
+              type="button"
+              className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+              onClick={() => setTheme("dark")}
+            >
+              Dark
+            </button>
+          </div>
         </div>
         <div className="settings-menu-divider" />
         <button className="settings-menu-item danger" onClick={openDeleteDialog}>
@@ -1340,6 +1478,17 @@ export function ProjectDashboard({
             </button>
             <button
               className="calc-action-btn"
+              onClick={handleRunDos}
+              disabled={!hasConvergedSCF()}
+            >
+              <span className="calc-action-icon">DOS</span>
+              <span className="calc-action-label">Electronic DOS</span>
+              <span className="calc-action-hint">
+                {hasConvergedSCF() ? "Total density of states" : "Requires SCF"}
+              </span>
+            </button>
+            <button
+              className="calc-action-btn"
               onClick={handleRunPhonons}
               disabled={!hasConvergedSCF()}
             >
@@ -1353,17 +1502,6 @@ export function ProjectDashboard({
               <span className="calc-action-icon">Opt</span>
               <span className="calc-action-label">Geometry Optimization</span>
               <span className="calc-action-hint">VC-Relax preset</span>
-            </button>
-            <button
-              className="calc-action-btn"
-              onClick={handleRecoverPhonon}
-              disabled={isRecoveringPhonon}
-            >
-              <span className="calc-action-icon">Rec</span>
-              <span className="calc-action-label">Recover Phonon</span>
-              <span className="calc-action-hint">
-                {isRecoveringPhonon ? "Recovering..." : "Import completed tmp run"}
-              </span>
             </button>
           </div>
         </section>
@@ -1427,6 +1565,9 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
                         <span className="expand-icon">
                           {expandedCalc === calc.id ? "▼" : "▶"}
                         </span>
@@ -1533,6 +1674,9 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
                         <span className="expand-icon">
                           {expandedCalc === calc.id ? "▼" : "▶"}
                         </span>
@@ -1575,6 +1719,132 @@ export function ProjectDashboard({
                               }}
                             >
                               View Bands
+                            </button>
+                          )}
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Electronic DOS Calculations */}
+        {dosCalculations.length > 0 && (
+          <section className="history-section dos-section">
+            <h3>Electronic DOS</h3>
+            <div className="calculations-list">
+              {dosCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const dosData = calc.result?.dos_data ?? null;
+                const energyMin = Number(calc.parameters?.dos_emin);
+                const energyMax = Number(calc.parameters?.dos_emax);
+                return (
+                  <div key={calc.id} className="calculation-item dos-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">DOS</span>
+                        <div className="calc-tags">
+                          {getDosTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>DOS K-Grid</label>
+                            <span>
+                              {calc.parameters?.dos_k_grid
+                                ? `${calc.parameters.dos_k_grid[0]}×${calc.parameters.dos_k_grid[1]}×${calc.parameters.dos_k_grid[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>DeltaE</label>
+                            <span>{calc.parameters?.dos_delta_e ?? "N/A"} eV</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Energy Window</label>
+                            <span>
+                              {Number.isFinite(energyMin) && Number.isFinite(energyMax)
+                                ? `${energyMin.toFixed(2)} to ${energyMax.toFixed(2)} eV`
+                                : "Auto"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>DOS Points</label>
+                            <span>{calc.parameters?.n_points || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                          {calc.result?.fermi_energy != null && (
+                            <div className="detail-item">
+                              <label>Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="calc-actions">
+                          {dosData && (
+                            <button
+                              className="view-dos-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewDos(dosData, calc.result?.fermi_energy ?? null);
+                              }}
+                            >
+                              View DOS
                             </button>
                           )}
                           <button
@@ -1658,6 +1928,9 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
                         <span className="expand-icon">
                           {expandedCalc === calc.id ? "▼" : "▶"}
                         </span>
@@ -1857,6 +2130,9 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
                         <span className="expand-icon">
                           {expandedCalc === calc.id ? "▼" : "▶"}
                         </span>

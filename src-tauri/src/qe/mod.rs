@@ -22,8 +22,8 @@ pub use bands::{
     BandProjectionGroup, BandsXConfig, KPathPoint, ProjwfcConfig,
 };
 pub use input::{
-    generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_pw_input,
-    generate_q2r_input,
+    generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input,
+    generate_pw_input, generate_q2r_input,
 };
 pub use output::{parse_dos_file, parse_pw_output};
 pub use phonon::{

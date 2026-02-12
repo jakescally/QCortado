@@ -572,7 +572,7 @@ export function BandStructureWizard({
             input_content: "", // TODO: store bands input
             output_content: output,
             tags: [
-              ...(enableProjections ? ["Orb"] : []),
+              ...(enableProjections ? ["Proj"] : []),
             ],
           },
           workingDir: "/tmp/qcortado_bands",

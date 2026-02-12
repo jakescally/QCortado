@@ -49,6 +49,9 @@ pub struct CalculationRun {
     /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Total on-disk bytes used by this saved calculation directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_bytes: Option<u64>,
 }
 
 /// Summary info for project listing (lighter than full Project)
@@ -108,6 +111,61 @@ pub fn ensure_projects_dir(app: &AppHandle) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to create projects directory: {}", e))?;
     }
     Ok(projects_dir)
+}
+
+/// Recursively computes the total size of regular files inside a directory.
+fn calculate_directory_size(path: &Path) -> Result<u64, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if !path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path.display()));
+    }
+
+    let mut total = 0_u64;
+    let entries = fs::read_dir(path)
+        .map_err(|e| format!("Failed to read directory {}: {}", path.display(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", entry_path.display(), e))?;
+
+        if file_type.is_dir() {
+            total = total.saturating_add(calculate_directory_size(&entry_path)?);
+            continue;
+        }
+        if file_type.is_file() {
+            let metadata = entry
+                .metadata()
+                .map_err(|e| format!("Failed to read metadata for {}: {}", entry_path.display(), e))?;
+            total = total.saturating_add(metadata.len());
+        }
+    }
+
+    Ok(total)
+}
+
+/// Fills missing `storage_bytes` values for legacy calculations.
+fn hydrate_missing_calculation_sizes(project: &mut Project, project_dir: &Path) -> Result<bool, String> {
+    let mut changed = false;
+
+    for variant in &mut project.cif_variants {
+        for calculation in &mut variant.calculations {
+            if calculation.storage_bytes.is_some() {
+                continue;
+            }
+
+            let calc_dir = project_dir.join("calculations").join(&calculation.id);
+            let size = calculate_directory_size(&calc_dir)?;
+            calculation.storage_bytes = Some(size);
+            changed = true;
+        }
+    }
+
+    Ok(changed)
 }
 
 /// Generates a unique ID based on timestamp and random suffix
@@ -306,7 +364,17 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let content = fs::read_to_string(&project_json)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
 
-    serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))
+    let mut project: Project =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if hydrate_missing_calculation_sizes(&mut project, &project_dir)? {
+        let updated_project = serde_json::to_string_pretty(&project)
+            .map_err(|e| format!("Failed to serialize project: {}", e))?;
+        fs::write(&project_json, updated_project)
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    }
+
+    Ok(project)
 }
 
 /// Adds a CIF file to a project
@@ -466,6 +534,8 @@ pub fn save_calculation(
         }
     }
 
+    let storage_bytes = Some(calculate_directory_size(&calc_dir)?);
+
     // Create calculation run record
     let calc_run = CalculationRun {
         id: calc_id,
@@ -475,6 +545,7 @@ pub fn save_calculation(
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
         tags: calc_data.tags,
+        storage_bytes,
     };
 
     // Save calc.json
@@ -790,6 +861,7 @@ pub fn recover_phonon_calculation(
         eigenvalues: None,
         raw_output: raw_output.clone(),
         band_data: None,
+        dos_data: None,
         phonon_data: Some(serde_json::json!({
             "dos_data": dos_data,
             "dispersion_data": dispersion,

@@ -114,6 +114,30 @@ export function updateBandsProgress(line: string, state: ProgressState): Progres
   return next;
 }
 
+export function updateDosProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const dosStepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (dosStepMatch) {
+    const step = Number.parseInt(dosStepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 15, phase: "NSCF on dense k-grid" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 70, phase: "dos.x post-processing" };
+    }
+  }
+
+  if (line.includes("Parsing DOS data")) {
+    return { ...next, percent: 92, phase: "Parsing DOS" };
+  }
+  if (line.includes("=== Electronic DOS Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
 export function updatePhononProgress(line: string, state: ProgressState): ProgressState {
   let next: ProgressState = { ...state, status: "running" };
   const meta = { ...(state.meta?.phonon ?? {}) };
@@ -191,7 +215,7 @@ export function updatePhononProgress(line: string, state: ProgressState): Progre
   return attachMeta(next);
 }
 
-type ProgressKind = "scf" | "bands" | "phonon";
+type ProgressKind = "scf" | "bands" | "dos" | "phonon";
 
 export function progressReducer(
   kind: ProgressKind,
@@ -203,6 +227,8 @@ export function progressReducer(
       return updateScfProgress(line, state);
     case "bands":
       return updateBandsProgress(line, state);
+    case "dos":
+      return updateDosProgress(line, state);
     case "phonon":
       return updatePhononProgress(line, state);
     default:
