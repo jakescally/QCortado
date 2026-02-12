@@ -17,8 +17,9 @@ pub mod types;
 
 // Re-export commonly used items
 pub use bands::{
-    generate_bands_x_input, parse_bands_gnu, read_bands_gnu_file, BandData, BandsXConfig,
-    KPathPoint,
+    generate_bands_x_input, generate_projwfc_input, parse_bands_gnu,
+    parse_projwfc_projection_groups, read_bands_gnu_file, BandData, BandProjectionData,
+    BandProjectionGroup, BandsXConfig, KPathPoint, ProjwfcConfig,
 };
 pub use input::{
     generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_pw_input,

@@ -185,24 +185,37 @@ function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcT
 function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
 
   // K-points info
   if (params.total_k_points) {
-    tags.push({ label: `${params.total_k_points} k-pts`, type: "info" });
+    pushTag(`${params.total_k_points} k-pts`, "info");
   }
 
   // Inherited feature tags from SCF
   if (params.lspinorb) {
-    tags.push({ label: "SOC", type: "feature" });
+    pushTag("SOC", "feature");
   }
   if (params.nspin === 2) {
-    tags.push({ label: "Magnetic", type: "feature" });
+    pushTag("Magnetic", "feature");
   }
   if (params.lda_plus_u) {
-    tags.push({ label: "DFT+U", type: "feature" });
+    pushTag("DFT+U", "feature");
   }
   if (params.vdw_corr && params.vdw_corr !== "none") {
-    tags.push({ label: "vdW", type: "feature" });
+    pushTag("vdW", "feature");
+  }
+
+  // Orbital projection/fat-band marker
+  if (Array.isArray(calc.tags) && (calc.tags.includes("Orb") || calc.tags.includes("orb"))) {
+    pushTag("Orb", "feature");
+  } else if (params.fat_bands_requested) {
+    // Backward compatibility for entries created before explicit `orb` tag support
+    pushTag("Orb", "feature");
   }
 
   return tags;

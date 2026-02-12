@@ -245,6 +245,10 @@ function App() {
     return (
       <BandStructureWizard
         qePath={qePath}
+        onViewBands={(bandData, fermiEnergy) => {
+          setViewBandsData({ bandData, fermiEnergy });
+          setCurrentView("bands-viewer");
+        }}
         onBack={() => {
           setCurrentView("project-dashboard");
           setBandsContext(null);
@@ -278,6 +282,7 @@ function App() {
             width={900}
             height={600}
             scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
+            viewerType="electronic"
           />
         </div>
       </div>
@@ -288,6 +293,13 @@ function App() {
     return (
       <PhononWizard
         qePath={qePath}
+        onViewPhonons={(phononData, viewMode) => {
+          setViewPhononData({
+            data: phononData,
+            mode: viewMode,
+          });
+          setCurrentView("phonon-viewer");
+        }}
         onBack={() => {
           setCurrentView("project-dashboard");
           setPhononsContext(null);
@@ -411,6 +423,7 @@ function App() {
               secondaryCountLabel="q-points"
               scrollHint="Scroll: zoom frequency | Shift+Scroll: pan"
               yClampRange={null}
+              viewerType="phonon"
             />
           ) : showingDos && hasDos ? (
             <PhononDOSPlot

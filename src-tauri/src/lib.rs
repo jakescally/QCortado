@@ -21,8 +21,9 @@ use qe::{
     QPathPoint,
 };
 use qe::{
-    generate_bands_x_input, generate_pw_input, parse_pw_output, read_bands_gnu_file, BandData,
-    BandsXConfig, KPathPoint, QECalculation, QEResult, QERunner,
+    generate_bands_x_input, generate_projwfc_input, generate_pw_input,
+    parse_projwfc_projection_groups, parse_pw_output, read_bands_gnu_file, BandData, BandsXConfig,
+    KPathPoint, ProjwfcConfig, QECalculation, QEResult, QERunner,
 };
 
 /// Application state shared across commands.
@@ -449,6 +450,20 @@ pub struct BandsCalculationConfig {
     pub project_id: Option<String>,
     /// SCF calculation ID to get the .save directory from
     pub scf_calc_id: Option<String>,
+    /// Optional projection analysis settings for fat-band rendering
+    pub projections: Option<BandsProjectionOptions>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BandsProjectionOptions {
+    /// Run projwfc.x after bands.x and attach projection groups to the returned band data
+    pub enabled: bool,
+    /// projwfc.x lsym option (symmetrize projections)
+    pub lsym: Option<bool>,
+    /// projwfc.x diag_basis option
+    pub diag_basis: Option<bool>,
+    /// projwfc.x pawproj option
+    pub pawproj: Option<bool>,
 }
 
 /// Runs a band structure calculation (NSCF + bands.x) with streaming output.
@@ -603,9 +618,15 @@ async fn run_bands_calculation(
         );
     }
 
+    let projections_enabled = config.projections.as_ref().map(|p| p.enabled).unwrap_or(false);
+    let total_steps = if projections_enabled { 3 } else { 2 };
+
     let _ = app.emit(
         "qe-output-line",
-        "Step 1/2: Running NSCF calculation along k-path...",
+        format!(
+            "Step 1/{}: Running NSCF calculation along k-path...",
+            total_steps
+        ),
     );
 
     // Step 2: Run pw.x for bands
@@ -694,7 +715,7 @@ async fn run_bands_calculation(
     let _ = app.emit("qe-output-line", "");
     let _ = app.emit(
         "qe-output-line",
-        "Step 2/2: Running bands.x post-processing...",
+        format!("Step 2/{}: Running bands.x post-processing...", total_steps),
     );
 
     // Step 3: Run bands.x
@@ -738,8 +759,11 @@ async fn run_bands_calculation(
         .take()
         .ok_or("Failed to capture bands.x stdout")?;
     let mut bands_reader = BufReader::new(bands_stdout).lines();
+    let mut bands_output = String::new();
 
     while let Some(line) = bands_reader.next_line().await.map_err(|e| e.to_string())? {
+        bands_output.push_str(&line);
+        bands_output.push('\n');
         let _ = app.emit("qe-output-line", &line);
     }
 
@@ -750,6 +774,9 @@ async fn run_bands_calculation(
             bands_status.code()
         ));
     }
+
+    std::fs::write(work_path.join("bands_pp.out"), &bands_output)
+        .map_err(|e| format!("Failed to write bands.x output: {}", e))?;
 
     let _ = app.emit("qe-output-line", "");
     let _ = app.emit("qe-output-line", "Parsing band structure data...");
@@ -792,7 +819,128 @@ async fn run_bands_calculation(
     // Add high-symmetry point markers
     qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
 
-    let _ = app.emit("qe-output-line", format!("=== Band Structure Complete ==="));
+    if projections_enabled {
+        let _ = app.emit("qe-output-line", "");
+        let _ = app.emit(
+            "qe-output-line",
+            format!(
+                "Step 3/{}: Running projwfc.x orbital projections...",
+                total_steps
+            ),
+        );
+
+        let projwfc_x_path = bin_dir.join("projwfc.x");
+        if !projwfc_x_path.exists() {
+            let _ = app.emit(
+                "qe-output-line",
+                "WARNING: projwfc.x not found. Skipping fat-band projection analysis.",
+            );
+        } else {
+            let projection_options = config.projections.as_ref();
+            let projwfc_config = ProjwfcConfig {
+                prefix: bands_calc.prefix.clone(),
+                outdir: bands_calc.outdir.clone(),
+                filproj: "bands.projwfc.dat".to_string(),
+                lsym: projection_options.and_then(|opts| opts.lsym).unwrap_or(false),
+                diag_basis: projection_options
+                    .and_then(|opts| opts.diag_basis)
+                    .unwrap_or(false),
+                pawproj: projection_options.and_then(|opts| opts.pawproj).unwrap_or(false),
+            };
+            let projwfc_input = generate_projwfc_input(&projwfc_config);
+
+            std::fs::write(work_path.join("projwfc.in"), &projwfc_input)
+                .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
+
+            let mut projwfc_child = tokio::process::Command::new(&projwfc_x_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
+
+            if let Some(mut stdin) = projwfc_child.stdin.take() {
+                stdin
+                    .write_all(projwfc_input.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
+            }
+
+            let projwfc_stdout = projwfc_child
+                .stdout
+                .take()
+                .ok_or("Failed to capture projwfc.x stdout")?;
+            let mut projwfc_reader = BufReader::new(projwfc_stdout).lines();
+            let mut projwfc_output = String::new();
+
+            while let Some(line) = projwfc_reader.next_line().await.map_err(|e| e.to_string())? {
+                projwfc_output.push_str(&line);
+                projwfc_output.push('\n');
+                let _ = app.emit("qe-output-line", &line);
+            }
+
+            let projwfc_status = projwfc_child.wait().await.map_err(|e| e.to_string())?;
+            std::fs::write(work_path.join("projwfc.out"), &projwfc_output)
+                .map_err(|e| format!("Failed to write projwfc.x output: {}", e))?;
+
+            if !projwfc_status.success() {
+                let _ = app.emit(
+                    "qe-output-line",
+                    format!(
+                        "WARNING: projwfc.x failed with exit code {:?}. Continuing without projections.",
+                        projwfc_status.code()
+                    ),
+                );
+            } else {
+                let projection_text = {
+                    let filproj_path = work_path.join(&projwfc_config.filproj);
+                    if filproj_path.exists() {
+                        std::fs::read_to_string(&filproj_path).unwrap_or_else(|_| projwfc_output.clone())
+                    } else {
+                        projwfc_output.clone()
+                    }
+                };
+
+                if projection_text.trim().is_empty() {
+                    let _ = app.emit(
+                        "qe-output-line",
+                        "WARNING: projwfc output was empty. Continuing without projections.",
+                    );
+                } else {
+                    match parse_projwfc_projection_groups(
+                        &projection_text,
+                        band_data.n_bands,
+                        band_data.n_kpoints,
+                    ) {
+                        Ok(projections) => {
+                            let atom_count = projections.atom_groups.len();
+                            let orbital_count = projections.orbital_groups.len();
+                            band_data.projections = Some(projections);
+                            let _ = app.emit(
+                                "qe-output-line",
+                                format!(
+                                    "Projection groups parsed: {} atom groups, {} orbital groups.",
+                                    atom_count, orbital_count
+                                ),
+                            );
+                        }
+                        Err(parse_error) => {
+                            let _ = app.emit(
+                                "qe-output-line",
+                                format!(
+                                    "WARNING: Could not parse projwfc projections ({}). Continuing without projections.",
+                                    parse_error
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = app.emit("qe-output-line", "=== Band Structure Complete ===");
     let _ = app.emit(
         "qe-output-line",
         format!(

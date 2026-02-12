@@ -5,7 +5,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
-import { PhononPlot, PhononDOSPlot, PhononDispersionPlot } from "./PhononPlot";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
@@ -150,8 +149,14 @@ interface PhononResult {
   raw_output: string;
 }
 
+interface PhononViewerData {
+  dos_data: PhononDOS | null;
+  dispersion_data: PhononDispersion | null;
+}
+
 interface PhononWizardProps {
   onBack: () => void;
+  onViewPhonons: (phononData: PhononViewerData, viewMode: "bands" | "dos") => void;
   qePath: string;
   projectId: string;
   cifId: string;
@@ -163,6 +168,7 @@ type WizardStep = "source" | "qgrid" | "options" | "run" | "results";
 
 export function PhononWizard({
   onBack,
+  onViewPhonons,
   qePath: _qePath,
   projectId,
   cifId: _cifId,
@@ -1444,40 +1450,9 @@ export function PhononWizard({
     return (
       <div className="wizard-step results-step">
         <h3>Phonon Calculation Results</h3>
-
-        {/* Combined plot if both DOS and dispersion are available */}
-        {hasDos && hasDispersion && phononResult.dos_data && phononResult.dispersion_data && (
-          <div className="phonon-plot-wrapper combined">
-            <PhononPlot
-              dos={phononResult.dos_data}
-              dispersion={phononResult.dispersion_data}
-              width={900}
-              height={500}
-            />
-          </div>
-        )}
-
-        {/* DOS only */}
-        {hasDos && !hasDispersion && phononResult.dos_data && (
-          <div className="phonon-plot-wrapper dos-only">
-            <PhononDOSPlot
-              data={phononResult.dos_data}
-              width={400}
-              height={500}
-            />
-          </div>
-        )}
-
-        {/* Dispersion only */}
-        {hasDispersion && !hasDos && phononResult.dispersion_data && (
-          <div className="phonon-plot-wrapper dispersion-only">
-            <PhononDispersionPlot
-              data={phononResult.dispersion_data}
-              width={700}
-              height={500}
-            />
-          </div>
-        )}
+        <p className="step-description">
+          Calculation complete. Use the main Phonon viewer for full plotting controls.
+        </p>
 
         <div className="results-summary">
           <div className="summary-grid">
@@ -1526,6 +1501,38 @@ export function PhononWizard({
           <button className="secondary-button" onClick={onBack}>
             Back to Dashboard
           </button>
+          {hasDispersion && (
+            <button
+              className="primary-button"
+              onClick={() =>
+                onViewPhonons(
+                  {
+                    dos_data: phononResult.dos_data,
+                    dispersion_data: phononResult.dispersion_data,
+                  },
+                  "bands",
+                )
+              }
+            >
+              View Phonon Bands
+            </button>
+          )}
+          {hasDos && (
+            <button
+              className="primary-button"
+              onClick={() =>
+                onViewPhonons(
+                  {
+                    dos_data: phononResult.dos_data,
+                    dispersion_data: phononResult.dispersion_data,
+                  },
+                  "dos",
+                )
+              }
+            >
+              View Phonon DOS
+            </button>
+          )}
           <button className="primary-button" onClick={() => setStep("options")}>
             Run Another
           </button>

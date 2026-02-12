@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
-import { BandPlot, BandData } from "./BandPlot";
+import { BandData } from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
@@ -89,8 +89,18 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
   return tags;
 }
 
+function Tooltip({ text }: { text: string }) {
+  return (
+    <span className="tooltip-container">
+      <span className="tooltip-icon">?</span>
+      <span className="tooltip-text">{text}</span>
+    </span>
+  );
+}
+
 interface BandStructureWizardProps {
   onBack: () => void;
+  onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
   qePath: string;
   projectId: string;
   cifId: string;
@@ -102,6 +112,7 @@ type WizardStep = "source" | "kpath" | "parameters" | "run" | "results";
 
 export function BandStructureWizard({
   onBack,
+  onViewBands,
   qePath,
   projectId,
   cifId: _cifId,
@@ -127,6 +138,10 @@ export function BandStructureWizard({
 
   // Step 3: Parameters
   const [nbnd, setNbnd] = useState<number | "auto">("auto");
+  const [enableProjections, setEnableProjections] = useState(false);
+  const [projectionLsym, setProjectionLsym] = useState(false);
+  const [projectionDiagBasis, setProjectionDiagBasis] = useState(false);
+  const [projectionPawproj, setProjectionPawproj] = useState(false);
 
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
@@ -444,6 +459,12 @@ export function BandStructureWizard({
           nbnd: nbnd === "auto" ? null : nbnd,
           project_id: projectId,
           scf_calc_id: selectedScf.id,
+          projections: {
+            enabled: enableProjections,
+            lsym: projectionLsym,
+            diag_basis: projectionDiagBasis,
+            pawproj: projectionPawproj,
+          },
         },
         workingDir: "/tmp/qcortado_bands",
         mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
@@ -482,6 +503,10 @@ export function BandStructureWizard({
               lspinorb: scfParams.lspinorb,
               lda_plus_u: scfParams.lda_plus_u,
               vdw_corr: scfParams.vdw_corr,
+              fat_bands_requested: enableProjections,
+              projection_lsym: projectionLsym,
+              projection_diag_basis: projectionDiagBasis,
+              projection_pawproj: projectionPawproj,
             },
             result: {
               converged: true,
@@ -497,6 +522,9 @@ export function BandStructureWizard({
             completed_at: endTime,
             input_content: "", // TODO: store bands input
             output_content: output,
+            tags: [
+              ...(enableProjections ? ["Orb"] : []),
+            ],
           },
           workingDir: "/tmp/qcortado_bands",
         });
@@ -724,6 +752,69 @@ export function BandStructureWizard({
           </label>
         </div>
 
+        <div className="projection-section">
+          <h4>
+            Projection Controls
+            <Tooltip text="Fat-band plotting requires running `projwfc.x` after bands.x. This computes orbital/atomic projections at each (k,band) point and increases total runtime and storage." />
+          </h4>
+          <div className="param-grid">
+            <div className="param-row">
+              <label>
+                Enable Orbital Projections (Fat Bands)
+                <Tooltip text="Technical: runs `projwfc.x` after the band calculation. Required for atom/orbital-resolved fat-band visualization." />
+              </label>
+              <input
+                type="checkbox"
+                checked={enableProjections}
+                onChange={(e) => setEnableProjections(e.target.checked)}
+              />
+            </div>
+
+            {enableProjections && (
+              <>
+                <div className="param-row">
+                  <label>
+                    Symmetrize Projection Weights
+                    <span className="band-control-tech-name">lsym</span>
+                    <Tooltip text="Applies symmetry averaging to projected weights. Can smooth equivalent channels, but may hide small symmetry-breaking effects." />
+                  </label>
+                  <input
+                    type="checkbox"
+                    checked={projectionLsym}
+                    onChange={(e) => setProjectionLsym(e.target.checked)}
+                  />
+                </div>
+
+                <div className="param-row">
+                  <label>
+                    Local Crystal-Field Basis
+                    <span className="band-control-tech-name">diag_basis</span>
+                    <Tooltip text="Rotates local orbital basis into a diagonal crystal-field frame. Useful for clearer local orbital interpretation in low-symmetry environments." />
+                  </label>
+                  <input
+                    type="checkbox"
+                    checked={projectionDiagBasis}
+                    onChange={(e) => setProjectionDiagBasis(e.target.checked)}
+                  />
+                </div>
+
+                <div className="param-row">
+                  <label>
+                    PAW Projection Correction
+                    <span className="band-control-tech-name">pawproj</span>
+                    <Tooltip text="Use PAW-specific treatment for projections when PAW pseudopotentials are used. May improve projection fidelity but can add overhead." />
+                  </label>
+                  <input
+                    type="checkbox"
+                    checked={projectionPawproj}
+                    onChange={(e) => setProjectionPawproj(e.target.checked)}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
         <div className="calculation-summary">
           <h4>Summary</h4>
           <div className="summary-row">
@@ -737,6 +828,10 @@ export function BandStructureWizard({
           <div className="summary-row">
             <span>Source SCF energy:</span>
             <span>{selectedScf?.result?.total_energy?.toFixed(6)} Ry</span>
+          </div>
+          <div className="summary-row">
+            <span>Fat-band projections:</span>
+            <span>{enableProjections ? "Enabled (projwfc.x)" : "Disabled"}</span>
           </div>
         </div>
 
@@ -834,15 +929,9 @@ export function BandStructureWizard({
     return (
       <div className="wizard-step results-step">
         <h3>Band Structure Results</h3>
-
-        <div className="band-plot-wrapper">
-          <BandPlot
-            data={bandData}
-            width={800}
-            height={500}
-            scfFermiEnergy={scfFermiEnergy ?? undefined}
-          />
-        </div>
+        <p className="step-description">
+          Calculation complete. Use the main Bands viewer for full plotting controls.
+        </p>
 
         <div className="results-summary">
           <div className="summary-grid">
@@ -904,6 +993,12 @@ export function BandStructureWizard({
         <div className="step-actions">
           <button className="secondary-button" onClick={onBack}>
             Back to Dashboard
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => onViewBands(bandData, scfFermiEnergy)}
+          >
+            View Bands
           </button>
           <button className="primary-button" onClick={() => setStep("parameters")}>
             Run Another

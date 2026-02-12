@@ -86,11 +86,23 @@ export function updateScfProgress(line: string, state: ProgressState): ProgressS
 export function updateBandsProgress(line: string, state: ProgressState): ProgressState {
   let next: ProgressState = { ...state, status: "running" };
 
-  if (line.includes("Step 1/2: Running NSCF")) {
-    return { ...next, percent: 10, phase: "NSCF along k-path" };
-  }
-  if (line.includes("Step 2/2: Running bands.x")) {
-    return { ...next, percent: 80, phase: "bands.x post-processing" };
+  const bandsStepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (bandsStepMatch) {
+    const step = Number.parseInt(bandsStepMatch[1], 10);
+    const total = Number.parseInt(bandsStepMatch[2], 10);
+    if (step === 1) {
+      return { ...next, percent: 10, phase: "NSCF along k-path" };
+    }
+    if (step === 2) {
+      return {
+        ...next,
+        percent: total >= 3 ? 60 : 80,
+        phase: "bands.x post-processing",
+      };
+    }
+    if (step === 3) {
+      return { ...next, percent: 90, phase: "projwfc.x projections" };
+    }
   }
   if (line.includes("Parsing band structure data")) {
     return { ...next, percent: 95, phase: "Parsing bands" };
