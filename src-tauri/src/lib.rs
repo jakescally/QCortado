@@ -34,6 +34,8 @@ use qe::{
 pub struct AppState {
     /// Path to QE bin directory
     pub qe_bin_dir: Mutex<Option<PathBuf>>,
+    /// Path to FermiSurfer executable
+    pub fermi_surfer_path: Mutex<Option<PathBuf>>,
     /// Optional command prefix prepended before all QE launches
     pub execution_prefix: Mutex<Option<String>>,
     /// Current project directory
@@ -46,6 +48,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             qe_bin_dir: Mutex::new(None),
+            fermi_surfer_path: Mutex::new(None),
             execution_prefix: Mutex::new(None),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
@@ -55,6 +58,17 @@ impl Default for AppState {
 
 fn normalize_execution_prefix(prefix: Option<String>) -> Option<String> {
     prefix.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_optional_path(path: Option<String>) -> Option<String> {
+    path.and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             None
@@ -295,6 +309,49 @@ fn get_qe_path(state: State<AppState>) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Sets the path to the FermiSurfer executable.
+#[tauri::command]
+fn set_fermi_surfer_path(
+    app: AppHandle,
+    path: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let normalized = normalize_optional_path(path);
+
+    let validated_path = if let Some(path_str) = normalized.clone() {
+        let path_buf = PathBuf::from(&path_str);
+        if !path_buf.exists() {
+            return Err(format!(
+                "FermiSurfer executable not found at {}",
+                path_buf.display()
+            ));
+        }
+        if !path_buf.is_file() {
+            return Err(format!(
+                "FermiSurfer path is not a file: {}",
+                path_buf.display()
+            ));
+        }
+        Some(path_buf)
+    } else {
+        None
+    };
+
+    *state.fermi_surfer_path.lock().unwrap() = validated_path;
+    config::update_fermi_surfer_path(&app, normalized)
+}
+
+/// Gets the current FermiSurfer executable path.
+#[tauri::command]
+fn get_fermi_surfer_path(state: State<AppState>) -> Option<String> {
+    state
+        .fermi_surfer_path
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 /// Sets a command prefix prepended to all QE launches (e.g. "mpirun").
 #[tauri::command]
 fn set_execution_prefix(
@@ -323,6 +380,7 @@ fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
         "pw.x",
         "bands.x",
         "dos.x",
+        "fs.x",
         "projwfc.x",
         "pp.x",
         "ph.x",
@@ -684,6 +742,8 @@ pub struct BandsCalculationConfig {
     pub scf_calc_id: Option<String>,
     /// Optional projection analysis settings for fat-band rendering
     pub projections: Option<BandsProjectionOptions>,
+    /// Optional bands.x post-processing settings
+    pub bands_x: Option<BandsPostProcessingOptions>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -696,6 +756,16 @@ pub struct BandsProjectionOptions {
     pub diag_basis: Option<bool>,
     /// projwfc.x pawproj option
     pub pawproj: Option<bool>,
+    /// projwfc.x output file name (filproj)
+    pub filproj: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BandsPostProcessingOptions {
+    /// bands.x output file (filband)
+    pub filband: Option<String>,
+    /// bands.x lsym option (print symmetry labels/order)
+    pub lsym: Option<bool>,
 }
 
 /// Configuration for electronic DOS calculation (NSCF + dos.x).
@@ -734,6 +804,373 @@ pub struct ElectronicDosData {
     pub max_dos: f64,
     /// Number of sampled DOS points
     pub points: usize,
+}
+
+/// Configuration for Fermi surface generation (NSCF + fs.x).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FermiSurfaceCalculationConfig {
+    /// Base SCF calculation to derive system settings from
+    pub base_calculation: QECalculation,
+    /// Dense automatic k-grid for NSCF run
+    pub k_grid: [u32; 3],
+    /// Optional automatic k-grid offset (0/1 for each reciprocal direction)
+    pub k_offset: Option<[u32; 3]>,
+    /// Optional number of bands for NSCF (auto if None)
+    pub nbnd: Option<u32>,
+    /// Optional fs.x energy tolerance (eV)
+    pub delta_e: Option<f64>,
+    /// Optional fs.x output stem (filfermi)
+    pub fil_fermi: Option<String>,
+    /// Project ID containing the source SCF calculation
+    pub project_id: Option<String>,
+    /// SCF calculation ID to get the .save directory from
+    pub scf_calc_id: Option<String>,
+}
+
+/// Generated BXSF file metadata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BxsfFileData {
+    /// File name in the working directory
+    pub file_name: String,
+    /// File size in bytes
+    pub size_bytes: u64,
+}
+
+/// Parsed Fermi surface generation output returned to the frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FermiSurfaceData {
+    /// Dense NSCF mesh used for generation
+    pub k_grid: [u32; 3],
+    /// Fermi energy in eV (if detected from NSCF output)
+    pub fermi_energy: Option<f64>,
+    /// fs.x DeltaE parameter in eV, if supplied
+    pub delta_e: Option<f64>,
+    /// fs.x filfermi stem used for output
+    pub fil_fermi: String,
+    /// Preferred BXSF file to open by default
+    pub primary_file: String,
+    /// All generated BXSF files
+    pub bxsf_files: Vec<BxsfFileData>,
+}
+
+fn generate_fs_input(
+    prefix: &str,
+    outdir: &str,
+    fil_fermi: Option<&str>,
+    delta_e: Option<f64>,
+) -> String {
+    let mut output = String::new();
+    output.push_str("&FERMI\n");
+    output.push_str(&format!("  prefix = '{}',\n", prefix));
+    output.push_str(&format!("  outdir = '{}',\n", outdir));
+    if let Some(stem) = fil_fermi {
+        output.push_str(&format!("  filfermi = '{}',\n", stem));
+    }
+    if let Some(delta) = delta_e {
+        output.push_str(&format!("  DeltaE = {},\n", delta));
+    }
+    output.push_str("/\n");
+    output
+}
+
+fn fs_output_has_namelist_error(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("reading fermi namelist")
+        || (lower.contains("error in routine fermi") && lower.contains("namelist"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fsx_attempt(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    fs_path: &Path,
+    work_path: &Path,
+    execution_prefix: Option<&str>,
+    cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fs_input: &str,
+) -> Result<(std::process::ExitStatus, String), String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Cancelled by user".to_string());
+    }
+
+    let mut fs_child = tokio_command_with_prefix(fs_path, execution_prefix)
+        .current_dir(work_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start fs.x: {}", e))?;
+
+    if let Some(pid) = fs_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = fs_child.stdin.take() {
+        stdin
+            .write_all(fs_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write fs.x input: {}", e))?;
+    }
+
+    let fs_stdout = fs_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture fs.x stdout")?;
+    let mut fs_reader = BufReader::new(fs_stdout).lines();
+    let mut fs_output = String::new();
+
+    while let Some(line) = fs_reader.next_line().await.map_err(|e| e.to_string())? {
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Cancelled by user".to_string());
+        }
+        fs_output.push_str(&line);
+        fs_output.push('\n');
+        let _ = app.emit(&format!("task-output:{}", task_id), &line);
+        pm.append_output(task_id, line).await;
+    }
+
+    let fs_status = fs_child.wait().await.map_err(|e| e.to_string())?;
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Cancelled by user".to_string());
+    }
+
+    Ok((fs_status, fs_output))
+}
+
+fn sanitize_output_stem(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "fermi_surface".to_string();
+    }
+
+    let mut sanitized: String = trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    sanitized = sanitized.trim_matches('_').to_string();
+
+    if sanitized.is_empty() {
+        "fermi_surface".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sanitize_output_filename(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+
+    let mut sanitized: String = trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    sanitized = sanitized.trim_matches('_').to_string();
+
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn insert_system_namelist_line(input: &str, line_to_insert: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(input.len() + line_to_insert.len() + 16);
+    let mut in_system = false;
+    let mut inserted = false;
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("&SYSTEM") {
+            in_system = true;
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        if in_system && trimmed == "/" {
+            output.push_str("  ");
+            output.push_str(line_to_insert);
+            output.push('\n');
+            inserted = true;
+            in_system = false;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    if inserted {
+        Ok(output)
+    } else {
+        Err("Could not locate &SYSTEM namelist in pw.x input".to_string())
+    }
+}
+
+fn collect_bxsf_files(work_path: &Path) -> Result<Vec<BxsfFileData>, String> {
+    let entries = std::fs::read_dir(work_path).map_err(|e| {
+        format!(
+            "Failed to inspect working directory {}: {}",
+            work_path.display(),
+            e
+        )
+    })?;
+
+    let mut files: Vec<BxsfFileData> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_bxsf = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("bxsf"))
+            .unwrap_or(false);
+        if !is_bxsf {
+            continue;
+        }
+
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        files.push(BxsfFileData {
+            file_name,
+            size_bytes,
+        });
+    }
+
+    files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    Ok(files)
+}
+
+fn is_safe_bxsf_file_name(file_name: &str) -> bool {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return false;
+    }
+    if path.file_name().and_then(|value| value.to_str()) != Some(trimmed) {
+        return false;
+    }
+    if !path
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("bxsf"))
+        .unwrap_or(false)
+}
+
+/// Launches FermiSurfer for a saved Fermi-surface calculation BXSF file.
+#[tauri::command]
+fn launch_fermi_surface_viewer(
+    app: AppHandle,
+    project_id: String,
+    calculation_id: String,
+    bxsf_file: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let fermi_surfer_path = {
+        let guard = state.fermi_surfer_path.lock().unwrap();
+        guard
+            .as_ref()
+            .ok_or("FermiSurfer path not configured. Configure it on the home page.")?
+            .clone()
+    };
+
+    if !fermi_surfer_path.exists() || !fermi_surfer_path.is_file() {
+        return Err(format!(
+            "Configured FermiSurfer executable is invalid: {}",
+            fermi_surfer_path.display()
+        ));
+    }
+
+    let projects_dir = projects::get_projects_dir(&app)?;
+    let calc_tmp_dir = projects_dir
+        .join(&project_id)
+        .join("calculations")
+        .join(&calculation_id)
+        .join("tmp");
+    if !calc_tmp_dir.exists() {
+        return Err(format!(
+            "Calculation working directory not found: {}",
+            calc_tmp_dir.display()
+        ));
+    }
+
+    let available_files = collect_bxsf_files(&calc_tmp_dir)?;
+    if available_files.is_empty() {
+        return Err("No .bxsf files found for this Fermi-surface calculation.".to_string());
+    }
+
+    let requested_file = bxsf_file.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let selected_file_name = if let Some(requested) = requested_file {
+        if !is_safe_bxsf_file_name(&requested) {
+            return Err("Invalid BXSF file name.".to_string());
+        }
+        if !available_files
+            .iter()
+            .any(|file| file.file_name == requested)
+        {
+            return Err(format!("Requested BXSF file not found: {}", requested));
+        }
+        requested
+    } else {
+        available_files[0].file_name.clone()
+    };
+
+    let bxsf_path = calc_tmp_dir.join(&selected_file_name);
+    if !bxsf_path.exists() || !bxsf_path.is_file() {
+        return Err(format!(
+            "BXSF file does not exist: {}",
+            bxsf_path.display()
+        ));
+    }
+
+    std::process::Command::new(&fermi_surfer_path)
+        .arg(&bxsf_path)
+        .current_dir(&calc_tmp_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to launch FermiSurfer: {}", e))?;
+
+    Ok(())
 }
 
 /// Runs a band structure calculation (NSCF + bands.x) with streaming output.
@@ -826,7 +1263,9 @@ async fn run_bands_calculation(
     // Step 1: Create bands calculation from base SCF
     let mut bands_calc = config.base_calculation.clone();
     bands_calc.calculation = qe::CalculationType::Bands;
-    bands_calc.verbosity = Some("high".to_string());
+    if bands_calc.verbosity.is_none() {
+        bands_calc.verbosity = Some("high".to_string());
+    }
 
     // Convert k_path to KPoints::CrystalB
     let band_path: Vec<qe::BandPathPoint> = config
@@ -841,7 +1280,11 @@ async fn run_bands_calculation(
     bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
 
     // Generate input
-    let input = generate_pw_input(&bands_calc);
+    let mut input = generate_pw_input(&bands_calc);
+    if let Some(nbnd) = config.nbnd {
+        input = insert_system_namelist_line(&input, &format!("nbnd = {},", nbnd))?;
+        let _ = app.emit("qe-output-line", format!("Requested nbnd = {}", nbnd));
+    }
 
     // Save input file for reference
     std::fs::write(work_path.join("bands.in"), &input)
@@ -999,11 +1442,18 @@ async fn run_bands_calculation(
         );
     }
 
+    let bands_x_options = config.bands_x.as_ref();
+    let bands_filband = bands_x_options
+        .and_then(|opts| opts.filband.as_deref())
+        .map(|raw| sanitize_output_filename(raw, "bands.dat"))
+        .unwrap_or_else(|| "bands.dat".to_string());
+    let bands_lsym = bands_x_options.and_then(|opts| opts.lsym).unwrap_or(true);
+
     let bands_x_config = BandsXConfig {
         prefix: bands_calc.prefix.clone(),
         outdir: bands_calc.outdir.clone(),
-        filband: "bands.dat".to_string(),
-        lsym: true,
+        filband: bands_filband.clone(),
+        lsym: bands_lsym,
     };
     let bands_x_input = generate_bands_x_input(&bands_x_config);
 
@@ -1055,16 +1505,17 @@ async fn run_bands_calculation(
     let _ = app.emit("qe-output-line", "Parsing band structure data...");
 
     // Step 4: Parse the output
-    let gnu_file = work_path.join("bands.dat.gnu");
+    let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
+    let gnu_file = work_path.join(&gnu_file_name);
     if !gnu_file.exists() {
-        return Err("bands.dat.gnu not found. bands.x may have failed.".to_string());
+        return Err(format!("{} not found. bands.x may have failed.", gnu_file_name));
     }
 
     // Log file size for debugging
     if let Ok(metadata) = std::fs::metadata(&gnu_file) {
         let _ = app.emit(
             "qe-output-line",
-            format!("bands.dat.gnu size: {} bytes", metadata.len()),
+            format!("{} size: {} bytes", gnu_file_name, metadata.len()),
         );
     }
 
@@ -1110,10 +1561,14 @@ async fn run_bands_calculation(
             );
         } else {
             let projection_options = config.projections.as_ref();
+            let projection_file = projection_options
+                .and_then(|opts| opts.filproj.as_deref())
+                .map(|raw| sanitize_output_filename(raw, "bands.projwfc.dat"))
+                .unwrap_or_else(|| "bands.projwfc.dat".to_string());
             let projwfc_config = ProjwfcConfig {
                 prefix: bands_calc.prefix.clone(),
                 outdir: bands_calc.outdir.clone(),
-                filproj: "bands.projwfc.dat".to_string(),
+                filproj: projection_file,
                 lsym: projection_options
                     .and_then(|opts| opts.lsym)
                     .unwrap_or(false),
@@ -2041,7 +2496,9 @@ async fn run_bands_background(
     // Step 1: NSCF along k-path
     let mut bands_calc = config.base_calculation.clone();
     bands_calc.calculation = qe::CalculationType::Bands;
-    bands_calc.verbosity = Some("high".to_string());
+    if bands_calc.verbosity.is_none() {
+        bands_calc.verbosity = Some("high".to_string());
+    }
 
     let band_path: Vec<qe::BandPathPoint> = config
         .k_path
@@ -2054,7 +2511,11 @@ async fn run_bands_background(
         .collect();
     bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
 
-    let input = generate_pw_input(&bands_calc);
+    let mut input = generate_pw_input(&bands_calc);
+    if let Some(nbnd) = config.nbnd {
+        input = insert_system_namelist_line(&input, &format!("nbnd = {},", nbnd))?;
+        emit_line!(format!("Requested nbnd = {}", nbnd));
+    }
     std::fs::write(work_path.join("bands.in"), &input)
         .map_err(|e| format!("Failed to write input file: {}", e))?;
 
@@ -2190,11 +2651,18 @@ async fn run_bands_background(
         );
     }
 
+    let bands_x_options = config.bands_x.as_ref();
+    let bands_filband = bands_x_options
+        .and_then(|opts| opts.filband.as_deref())
+        .map(|raw| sanitize_output_filename(raw, "bands.dat"))
+        .unwrap_or_else(|| "bands.dat".to_string());
+    let bands_lsym = bands_x_options.and_then(|opts| opts.lsym).unwrap_or(true);
+
     let bands_x_config = BandsXConfig {
         prefix: bands_calc.prefix.clone(),
         outdir: bands_calc.outdir.clone(),
-        filband: "bands.dat".to_string(),
-        lsym: true,
+        filband: bands_filband.clone(),
+        lsym: bands_lsym,
     };
     let bands_x_input = generate_bands_x_input(&bands_x_config);
     std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
@@ -2242,13 +2710,14 @@ async fn run_bands_background(
     emit_line!("".to_string());
     emit_line!("Parsing band structure data...".to_string());
 
-    let gnu_file = work_path.join("bands.dat.gnu");
+    let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
+    let gnu_file = work_path.join(&gnu_file_name);
     if !gnu_file.exists() {
-        return Err("bands.dat.gnu not found. bands.x may have failed.".to_string());
+        return Err(format!("{} not found. bands.x may have failed.", gnu_file_name));
     }
 
     if let Ok(metadata) = std::fs::metadata(&gnu_file) {
-        emit_line!(format!("bands.dat.gnu size: {} bytes", metadata.len()));
+        emit_line!(format!("{} size: {} bytes", gnu_file_name, metadata.len()));
     }
 
     let ef = fermi_energy.unwrap_or(0.0);
@@ -2283,10 +2752,14 @@ async fn run_bands_background(
         } else {
             check_cancel!();
             let projection_options = config.projections.as_ref();
+            let projection_file = projection_options
+                .and_then(|opts| opts.filproj.as_deref())
+                .map(|raw| sanitize_output_filename(raw, "bands.projwfc.dat"))
+                .unwrap_or_else(|| "bands.projwfc.dat".to_string());
             let projwfc_config = ProjwfcConfig {
                 prefix: bands_calc.prefix.clone(),
                 outdir: bands_calc.outdir.clone(),
-                filproj: "bands.projwfc.dat".to_string(),
+                filproj: projection_file,
                 lsym: projection_options
                     .and_then(|opts| opts.lsym)
                     .unwrap_or(false),
@@ -2749,6 +3222,346 @@ async fn run_dos_background(
     ));
 
     Ok(dos_data)
+}
+
+/// Starts a Fermi surface generation task (NSCF + fs.x).
+#[tauri::command]
+async fn start_fermi_surface_calculation(
+    app: AppHandle,
+    config: FermiSurfaceCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if state.process_manager.has_running_tasks().await {
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("fermi_surface".to_string(), label).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_fermi_surface_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(fermi_data) => {
+                let json = serde_json::to_value(&fermi_data).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fermi_surface_background(
+    app: AppHandle,
+    task_id: &str,
+    config: FermiSurfaceCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<FermiSurfaceData, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let work_path = PathBuf::from(&working_dir);
+    prepare_working_directory(&work_path, false)?;
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    // Copy SCF .save directory if provided.
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!(format!("Copying SCF data from: {}", scf_tmp_dir.display()));
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+        } else {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+    }
+
+    check_cancel!();
+
+    let mut nscf_calc = config.base_calculation.clone();
+    nscf_calc.calculation = qe::CalculationType::Nscf;
+    if nscf_calc.verbosity.is_none() {
+        nscf_calc.verbosity = Some("high".to_string());
+    }
+    let k_offset = config.k_offset.unwrap_or([0, 0, 0]).map(|value| u32::from(value > 0));
+    nscf_calc.kpoints = qe::KPoints::Automatic {
+        grid: config.k_grid,
+        offset: k_offset,
+    };
+
+    if nscf_calc.system.degauss.is_none() {
+        nscf_calc.system.degauss = Some(0.02);
+    }
+
+    let mut nscf_input = generate_pw_input(&nscf_calc);
+    if let Some(nbnd) = config.nbnd {
+        nscf_input = insert_system_namelist_line(&nscf_input, &format!("nbnd = {},", nbnd))?;
+        emit_line!(format!("Requested nbnd = {}", nbnd));
+    }
+    std::fs::write(work_path.join("nscf.in"), &nscf_input)
+        .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("=== Starting Fermi Surface Generation ===".to_string());
+    emit_line!(format!(
+        "Dense k-grid: {}×{}×{}",
+        config.k_grid[0], config.k_grid[1], config.k_grid[2]
+    ));
+    emit_line!(format!(
+        "K-point offset: {} {} {}",
+        k_offset[0], k_offset[1], k_offset[2]
+    ));
+    emit_line!("Step 1/2: Running NSCF on dense k-grid...".to_string());
+
+    let pw_path = bin_dir.join("pw.x");
+    if !pw_path.exists() {
+        return Err("pw.x not found".to_string());
+    }
+
+    let mut nscf_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&pw_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio_command_with_prefix(&pw_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&pw_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+    };
+
+    if let Some(pid) = nscf_child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(mut stdin) = nscf_child.stdin.take() {
+        stdin
+            .write_all(nscf_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
+    }
+
+    let nscf_stdout = nscf_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture pw.x stdout")?;
+    let mut nscf_reader = BufReader::new(nscf_stdout).lines();
+    let mut nscf_output = String::new();
+    let mut fermi_energy: Option<f64> = None;
+
+    while let Some(line) = nscf_reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        nscf_output.push_str(&line);
+        nscf_output.push('\n');
+        emit_line!(line.clone());
+
+        if line.contains("the Fermi energy is") {
+            if let Some(idx) = line.find("the Fermi energy is") {
+                let rest = &line[idx + 19..];
+                if let Some(ev_idx) = rest.find("ev") {
+                    if let Ok(ef) = rest[..ev_idx].trim().parse::<f64>() {
+                        fermi_energy = Some(ef);
+                    }
+                }
+            }
+        }
+    }
+
+    let nscf_status = nscf_child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !nscf_status.success() {
+        return Err(format!(
+            "pw.x (NSCF) failed with exit code: {:?}",
+            nscf_status.code()
+        ));
+    }
+
+    std::fs::write(work_path.join("nscf.out"), &nscf_output)
+        .map_err(|e| format!("Failed to write NSCF output: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("Step 2/2: Running fs.x post-processing...".to_string());
+
+    let fs_path = bin_dir.join("fs.x");
+    if !fs_path.exists() {
+        return Err("fs.x not found. Make sure your QE installation includes fs.x".to_string());
+    }
+
+    let requested_stem = config.fil_fermi.as_deref().unwrap_or("fermi_surface");
+    let fil_fermi = sanitize_output_stem(requested_stem);
+    if fil_fermi != requested_stem {
+        emit_line!(format!(
+            "Output stem sanitized to '{}' for filesystem safety.",
+            fil_fermi
+        ));
+    }
+
+    let fs_input = generate_fs_input(
+        &nscf_calc.prefix,
+        &nscf_calc.outdir,
+        Some(&fil_fermi),
+        config.delta_e,
+    );
+    std::fs::write(work_path.join("fs.in"), &fs_input)
+        .map_err(|e| format!("Failed to write fs.x input: {}", e))?;
+
+    let (mut fs_status, mut fs_output) = run_fsx_attempt(
+        &app,
+        &pm,
+        task_id,
+        &fs_path,
+        &work_path,
+        execution_prefix.as_deref(),
+        &cancel_flag,
+        &fs_input,
+    )
+    .await?;
+
+    if !fs_status.success() && fs_output_has_namelist_error(&fs_output) {
+        emit_line!("fs.x rejected extended namelist; retrying with minimal input.".to_string());
+        let compat_input = generate_fs_input(&nscf_calc.prefix, &nscf_calc.outdir, None, None);
+        std::fs::write(work_path.join("fs_compat.in"), &compat_input)
+            .map_err(|e| format!("Failed to write compatibility fs.x input: {}", e))?;
+
+        let (compat_status, compat_output) = run_fsx_attempt(
+            &app,
+            &pm,
+            task_id,
+            &fs_path,
+            &work_path,
+            execution_prefix.as_deref(),
+            &cancel_flag,
+            &compat_input,
+        )
+        .await?;
+
+        fs_output.push_str("\n--- compatibility retry ---\n");
+        fs_output.push_str(&compat_output);
+        fs_status = compat_status;
+    }
+
+    if !fs_status.success() {
+        return Err(format!(
+            "fs.x failed with exit code: {:?}",
+            fs_status.code()
+        ));
+    }
+
+    std::fs::write(work_path.join("fs.out"), &fs_output)
+        .map_err(|e| format!("Failed to write fs.x output: {}", e))?;
+
+    emit_line!("".to_string());
+    emit_line!("Collecting BXSF artifacts...".to_string());
+
+    let bxsf_files = collect_bxsf_files(&work_path)?;
+    if bxsf_files.is_empty() {
+        return Err(
+            "No .bxsf files were generated. fs.x completed without producing expected output."
+                .to_string(),
+        );
+    }
+
+    let preferred_name = format!("{}_fs.bxsf", fil_fermi);
+    let primary_file = bxsf_files
+        .iter()
+        .find(|file| file.file_name == preferred_name)
+        .map(|file| file.file_name.clone())
+        .unwrap_or_else(|| bxsf_files[0].file_name.clone());
+
+    emit_line!("=== Fermi Surface Generation Complete ===".to_string());
+    emit_line!(format!("  Generated {} BXSF file(s)", bxsf_files.len()));
+    emit_line!(format!("  Primary file: {}", primary_file));
+
+    Ok(FermiSurfaceData {
+        k_grid: config.k_grid,
+        fermi_energy,
+        delta_e: config.delta_e,
+        fil_fermi,
+        primary_file,
+        bxsf_files,
+    })
 }
 
 /// Starts a phonon calculation as a background task.
@@ -3340,6 +4153,7 @@ pub fn run() {
 
             // Load saved configuration
             let mut qe_bin_dir: Option<PathBuf> = None;
+            let mut fermi_surfer_path: Option<PathBuf> = None;
             let mut execution_prefix: Option<String> = None;
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
@@ -3348,6 +4162,12 @@ pub fn run() {
                         // Only use if pw.x still exists
                         if path_buf.join("pw.x").exists() {
                             qe_bin_dir = Some(path_buf);
+                        }
+                    }
+                    if let Some(path) = cfg.fermi_surfer_path {
+                        let path_buf = PathBuf::from(&path);
+                        if path_buf.exists() && path_buf.is_file() {
+                            fermi_surfer_path = Some(path_buf);
                         }
                     }
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
@@ -3360,6 +4180,7 @@ pub fn run() {
             // Initialize AppState with loaded config
             app.manage(AppState {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
+                fermi_surfer_path: Mutex::new(fermi_surfer_path),
                 execution_prefix: Mutex::new(execution_prefix),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
@@ -3387,9 +4208,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_qe_path,
             get_qe_path,
+            set_fermi_surfer_path,
+            get_fermi_surfer_path,
             set_execution_prefix,
             get_execution_prefix,
             clear_temp_storage,
+            launch_fermi_surface_viewer,
             check_qe_executables,
             generate_input,
             validate_calculation,
@@ -3408,6 +4232,7 @@ pub fn run() {
             start_scf_calculation,
             start_bands_calculation,
             start_dos_calculation,
+            start_fermi_surface_calculation,
             start_phonon_calculation,
             list_running_tasks,
             get_task_info,

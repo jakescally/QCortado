@@ -69,6 +69,7 @@ interface ProjectDashboardProps {
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
   onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
+  onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
 }
@@ -76,7 +77,7 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "dos" | "phonon" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "optimization";
 
 interface DisplayCellMetrics {
   a: number;
@@ -272,6 +273,40 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
   return tags;
 }
 
+function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (params.fermi_k_grid) {
+    const [k1, k2, k3] = params.fermi_k_grid;
+    pushTag(`${k1}×${k2}×${k3} K`, "info");
+  }
+
+  if (params.n_bxsf_files) {
+    pushTag(`${params.n_bxsf_files} BXSF`, "info");
+  }
+
+  if (params.lspinorb) {
+    pushTag("SOC", "feature");
+  }
+  if (params.nspin === 2) {
+    pushTag("Magnetic", "feature");
+  }
+  if (params.lda_plus_u) {
+    pushTag("DFT+U", "feature");
+  }
+  if (params.vdw_corr && params.vdw_corr !== "none") {
+    pushTag("vdW", "feature");
+  }
+
+  return tags;
+}
+
 // Helper to generate phonon-specific tags
 function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
   const tags: { label: string; type: "info" | "feature" }[] = [];
@@ -348,6 +383,12 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     const forceScore = getThresholdTightness(params.forc_conv_thr);
     const energyScore = getThresholdTightness(params.etot_conv_thr);
     return convergedBonus + (2 * kScore) + (2 * convScore) + (4 * forceScore) + (3 * energyScore) + socBonus;
+  }
+
+  if (category === "fermi_surface") {
+    const kScore = Math.log2(Math.max(1, getMeshProduct(params.fermi_k_grid)));
+    const resolutionScore = getThresholdTightness(params.fermi_delta_e, 12);
+    return convergedBonus + (4 * kScore) + (2 * resolutionScore) + socBonus;
   }
 
   if (category === "dos") {
@@ -498,6 +539,7 @@ export function ProjectDashboard({
   onViewBands,
   onRunDos,
   onViewDos,
+  onRunFermiSurface,
   onRunPhonons,
   onViewPhonons,
 }: ProjectDashboardProps) {
@@ -535,6 +577,7 @@ export function ProjectDashboard({
   const [isImporting, setIsImporting] = useState(false);
   const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -850,6 +893,33 @@ export function ProjectDashboard({
     onRunDos(selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunFermiSurface() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunFermiSurface(selectedCifId, crystalData, variant.calculations);
+  }
+
+  async function handleViewFermiSurface(calc: CalculationRun, bxsfFile: string | null) {
+    setLaunchingFermiCalcId(calc.id);
+    setError(null);
+    try {
+      await invoke("launch_fermi_surface_viewer", {
+        projectId,
+        calculationId: calc.id,
+        bxsfFile,
+      });
+      setInfoMessage(
+        `Opened ${bxsfFile ?? "primary .bxsf"} in FermiSurfer.`,
+      );
+    } catch (e) {
+      console.error("Failed to launch FermiSurfer:", e);
+      setError(`Failed to launch FermiSurfer: ${e}`);
+    } finally {
+      setLaunchingFermiCalcId((current) => (current === calc.id ? null : current));
+    }
+  }
+
   function handleRunPhonons() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -1059,6 +1129,15 @@ export function ProjectDashboard({
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "dos") || [],
       calculationSortMode,
       "dos",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
+  const fermiSurfaceCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "fermi_surface") || [],
+      calculationSortMode,
+      "fermi_surface",
       pinnedCalcIds,
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
@@ -1494,6 +1573,17 @@ export function ProjectDashboard({
             </button>
             <button
               className="calc-action-btn"
+              onClick={handleRunFermiSurface}
+              disabled={!hasConvergedSCF()}
+            >
+              <span className="calc-action-icon">FS</span>
+              <span className="calc-action-label">Fermi Surface</span>
+              <span className="calc-action-hint">
+                {hasConvergedSCF() ? "Generate BXSF" : "Requires SCF"}
+              </span>
+            </button>
+            <button
+              className="calc-action-btn"
               onClick={handleRunPhonons}
               disabled={!hasConvergedSCF()}
             >
@@ -1852,6 +1942,141 @@ export function ProjectDashboard({
                               View DOS
                             </button>
                           )}
+                          <button
+                            className="delete-calc-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDeleteCalcDialog(calc.id, calc.calc_type);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Fermi Surface Calculations */}
+        {fermiSurfaceCalculations.length > 0 && (
+          <section className="history-section fermi-surface-section">
+            <h3>Fermi Surface</h3>
+            <div className="calculations-list">
+              {fermiSurfaceCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const bxsfFiles = Array.isArray(calc.parameters?.bxsf_files)
+                  ? calc.parameters.bxsf_files
+                  : [];
+                const primaryFile = calc.parameters?.primary_bxsf_file
+                  ?? (bxsfFiles.length > 0 ? bxsfFiles[0] : null);
+                const totalBytes = Number(calc.parameters?.total_bxsf_bytes);
+                const deltaE = Number(calc.parameters?.fermi_delta_e);
+                return (
+                  <div key={calc.id} className="calculation-item fermi-surface-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">FERMI</span>
+                        <div className="calc-tags">
+                          {getFermiSurfaceTags(calc).map((tag, i) => (
+                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Dense K-Grid</label>
+                            <span>
+                              {calc.parameters?.fermi_k_grid
+                                ? `${calc.parameters.fermi_k_grid[0]}×${calc.parameters.fermi_k_grid[1]}×${calc.parameters.fermi_k_grid[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>DeltaE</label>
+                            <span>{Number.isFinite(deltaE) ? `${deltaE} eV` : "Default"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>BXSF Files</label>
+                            <span>{calc.parameters?.n_bxsf_files ?? bxsfFiles.length ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Primary BXSF</label>
+                            <span>{primaryFile || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Total BXSF Size</label>
+                            <span>{Number.isFinite(totalBytes) ? formatBytes(totalBytes) : "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                          {calc.result?.fermi_energy != null && (
+                            <div className="detail-item">
+                              <label>Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                        </div>
+                        {bxsfFiles.length > 0 && (
+                          <div className="detail-item parameters">
+                            <label>BXSF Files</label>
+                            <pre>{JSON.stringify(bxsfFiles, null, 2)}</pre>
+                          </div>
+                        )}
+                        <div className="calc-actions">
+                          <button
+                            className="view-fermi-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleViewFermiSurface(calc, primaryFile);
+                            }}
+                            disabled={launchingFermiCalcId === calc.id || (!primaryFile && bxsfFiles.length === 0)}
+                          >
+                            {launchingFermiCalcId === calc.id ? "Launching..." : "View Fermi Surface"}
+                          </button>
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {

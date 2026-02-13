@@ -78,32 +78,56 @@ section h2 {
 
 /* Configuration Section */
 .config-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   margin-bottom: 1rem;
 }
 
 .config-row label {
   font-weight: 500;
   color: #4a5568;
-  min-width: 120px;
+  min-width: 0;
 }
 
-.config-row .path {
+.config-path-input {
+  width: 100%;
   font-family: "SF Mono", Monaco, Consolas, monospace;
   font-size: 0.9rem;
+  border: 1px solid #e2e8f0;
   background: #edf2f7;
-  padding: 0.4rem 0.8rem;
+  padding: 0.5rem 0.8rem;
   border-radius: 6px;
   color: #2d3748;
-  flex: 1;
+  min-height: 38px;
 }
 
-.config-row .not-set {
-  color: #a0aec0;
-  font-style: italic;
-  flex: 1;
+.config-path-input:focus {
+  outline: none;
+  border-color: #4299e1;
+  box-shadow: 0 0 0 1px rgba(66, 153, 225, 0.35);
+}
+
+.config-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.config-row-actions button {
+  white-space: nowrap;
+}
+
+@media (max-width: 840px) {
+  .config-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .config-row-actions {
+    justify-content: flex-start;
+  }
 }
 
 .status-row {
@@ -129,6 +153,10 @@ section h2 {
 
 .status.pending {
   color: #d69e2e;
+}
+
+.status.error {
+  color: #e53e3e;
 }
 
 .error {
@@ -166,6 +194,11 @@ section h2 {
   border-radius: 4px;
   font-size: 0.85rem;
   font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.exe-tag-fermisurfer {
+  background: #fff1e6;
+  color: #9c4221;
 }
 
 /* Buttons */
@@ -277,8 +310,9 @@ html[data-theme="dark"] {
     color: #a0aec0;
   }
 
-  .config-row .path {
+  .config-path-input {
     background: #4a5568;
+    border-color: #4a5568;
     color: #e2e8f0;
   }
 
@@ -300,6 +334,11 @@ html[data-theme="dark"] {
   .exe-tag {
     background: #2c7a7b;
     color: #b2f5ea;
+  }
+
+  .exe-tag-fermisurfer {
+    background: #7b341e;
+    color: #fed7aa;
   }
 
   .action-btn {
@@ -3187,6 +3226,10 @@ html[data-theme="dark"] {
   border-left: 3px solid #1f77b4;
 }
 
+.fermi-surface-item .calculation-header {
+  border-left: 3px solid #0f766e;
+}
+
 .view-dos-btn {
   background: #1f77b4;
   color: white;
@@ -3201,6 +3244,22 @@ html[data-theme="dark"] {
 
 .view-dos-btn:hover {
   background: #155a87;
+}
+
+.view-fermi-btn {
+  background: #0f766e;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.view-fermi-btn:hover {
+  background: #0b5b55;
 }
 
 .save-status {
@@ -3298,6 +3357,14 @@ html[data-theme="dark"] {
 
   .view-dos-btn:hover {
     background: #2b6cb0;
+  }
+
+  .view-fermi-btn {
+    background: #0d9488;
+  }
+
+  .view-fermi-btn:hover {
+    background: #0f766e;
   }
 
   .bands-viewer-container {
@@ -5247,7 +5314,24 @@ html[data-theme="dark"] .warning-banner {
   text-align: center;
 }
 
+.qgrid-inputs select {
+  width: 60px;
+  padding: 0.35rem 0.45rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  color: #2d3748;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
 html[data-theme="dark"] .qgrid-inputs input {
+  background: #313244;
+  border-color: #45475a;
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .qgrid-inputs select {
   background: #313244;
   border-color: #45475a;
   color: #cdd6f4;
@@ -5813,6 +5897,19 @@ html[data-theme="dark"] {
   z-index: 120;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
+}
+
+html[data-platform="linux"] .header,
+html[data-platform="linux"] .browser-header,
+html[data-platform="linux"] .dashboard-header,
+html[data-platform="linux"] .wizard-container > .wizard-header,
+html[data-platform="linux"] .band-structure-wizard > .wizard-header,
+html[data-platform="linux"] .electronic-dos-wizard > .wizard-header,
+html[data-platform="linux"] .phonon-wizard > .wizard-header,
+html[data-platform="linux"] .bands-viewer-header,
+html[data-platform="linux"] .phonon-viewer-header {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .header {

@@ -98,6 +98,59 @@ function Tooltip({ text }: { text: string }) {
   );
 }
 
+function parseOptionalNumber(input: string, label: string): number | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${label}.`);
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveNumber(input: string, label: string): number | null {
+  const parsed = parseOptionalNumber(input, label);
+  if (parsed == null) return null;
+  if (parsed <= 0) {
+    throw new Error(`${label} must be positive.`);
+  }
+  return parsed;
+}
+
+function parseOptionalPositiveInt(input: string, label: string): number | null {
+  const parsed = parseOptionalNumber(input, label);
+  if (parsed == null) return null;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function sanitizeOutputFilename(raw: string, fallback: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return fallback;
+  const sanitized = trimmed
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return sanitized.length > 0 ? sanitized : fallback;
+}
+
+function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input" | "tetrahedra" {
+  const lowered = String(raw || "smearing").toLowerCase();
+  if (lowered === "fixed") return "fixed";
+  if (lowered === "from_input") return "from_input";
+  if (lowered === "tetrahedra") return "tetrahedra";
+  return "smearing";
+}
+
+function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || "gaussian").toLowerCase();
+  if (lowered === "methfessel-paxton") return "methfessel-paxton";
+  if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
+  if (lowered === "fermi-dirac") return "fermi-dirac";
+  return "gaussian";
+}
+
 interface BandStructureWizardProps {
   onBack: () => void;
   onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
@@ -153,10 +206,26 @@ export function BandStructureWizard({
 
   // Step 3: Parameters
   const [nbnd, setNbnd] = useState<number | "auto">("auto");
+  const [nscfConvThrInput, setNscfConvThrInput] = useState("1e-8");
+  const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState("0.7");
+  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">("smearing");
+  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("gaussian");
+  const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
+  const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
+  const [bandsFilbandInput, setBandsFilbandInput] = useState("bands.dat");
+  const [bandsLsym, setBandsLsym] = useState(true);
   const [enableProjections, setEnableProjections] = useState(false);
   const [projectionLsym, setProjectionLsym] = useState(false);
   const [projectionDiagBasis, setProjectionDiagBasis] = useState(false);
   const [projectionPawproj, setProjectionPawproj] = useState(false);
+  const [projectionFilprojInput, setProjectionFilprojInput] = useState("bands.projwfc.dat");
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    core: true,
+    nscf: true,
+    post: true,
+    projections: true,
+    mpi: false,
+  });
 
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
@@ -169,6 +238,9 @@ export function BandStructureWizard({
     if (!el) return;
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     followOutputRef.current = distanceToBottom <= 16;
+  };
+  const toggleSection = (section: string) => {
+    setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
@@ -252,6 +324,49 @@ export function BandStructureWizard({
 
     return centeringMap[bravaisType] || "P";
   }, [crystalData]);
+
+  const applyScfDefaults = useCallback((scf: CalculationRun) => {
+    const params = scf.parameters || {};
+    const convThr = Number(params.conv_thr);
+    if (Number.isFinite(convThr) && convThr > 0) {
+      setNscfConvThrInput(String(convThr));
+    }
+
+    const mixingBeta = Number(params.mixing_beta);
+    if (Number.isFinite(mixingBeta) && mixingBeta > 0) {
+      setNscfMixingBetaInput(String(mixingBeta));
+    }
+
+    setNscfOccupations(normalizeOccupations(params.occupations));
+    setNscfSmearing(normalizeSmearing(params.smearing));
+
+    const degauss = Number(params.degauss);
+    if (Number.isFinite(degauss) && degauss > 0) {
+      setNscfDegaussInput(String(degauss));
+    } else {
+      setNscfDegaussInput("");
+    }
+
+    const verbosityRaw = String(params.verbosity || "high").toLowerCase();
+    if (verbosityRaw === "low" || verbosityRaw === "debug") {
+      setNscfVerbosity(verbosityRaw);
+    } else {
+      setNscfVerbosity("high");
+    }
+
+    const sourceNbnd = Number(params.nbnd);
+    if (Number.isInteger(sourceNbnd) && sourceNbnd > 0) {
+      setNbnd(sourceNbnd);
+    } else {
+      setNbnd("auto");
+    }
+  }, []);
+
+  const selectSourceScf = useCallback((scf: CalculationRun) => {
+    setSelectedScf(scf);
+    setScfFermiEnergy(scf.result?.fermi_energy ?? null);
+    applyScfDefaults(scf);
+  }, [applyScfDefaults]);
 
   // Load MPI info and pseudopotentials
   useEffect(() => {
@@ -342,17 +457,54 @@ export function BandStructureWizard({
       throw new Error("Please select at least 2 points for the k-path");
     }
 
-    // Get the SCF parameters for cutoffs, etc.
+    const parsedConvThr = parseOptionalPositiveNumber(nscfConvThrInput, "NSCF convergence threshold");
+    if (parsedConvThr == null) {
+      throw new Error("Please enter a valid positive NSCF convergence threshold.");
+    }
+
+    const parsedMixingBeta = parseOptionalPositiveNumber(nscfMixingBetaInput, "NSCF mixing beta");
+    if (parsedMixingBeta == null) {
+      throw new Error("Please enter a valid positive NSCF mixing beta.");
+    }
+    if (parsedMixingBeta > 1.0) {
+      throw new Error("NSCF mixing beta should typically be in the range (0, 1].");
+    }
+
+    const parsedDegauss = nscfOccupations === "smearing"
+      ? parseOptionalPositiveNumber(nscfDegaussInput, "NSCF degauss")
+      : null;
+    if (nscfOccupations === "smearing" && parsedDegauss == null) {
+      throw new Error("Please provide a positive degauss value when using smearing occupations.");
+    }
+
+    const manualNbnd = nbnd === "auto"
+      ? null
+      : parseOptionalPositiveInt(String(nbnd), "number of bands");
+
+    const bandsFilband = sanitizeOutputFilename(bandsFilbandInput, "bands.dat");
+    const projectionFilproj = sanitizeOutputFilename(projectionFilprojInput, "bands.projwfc.dat");
+
+    // Get the SCF parameters for inherited defaults and tags.
     const scfParams = selectedScf.parameters || {};
+    const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
+      ? scfParams.selected_pseudos as Record<string, string>
+      : {};
 
     // Get unique elements from crystal data
     const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
 
-    // Check we have pseudopotentials for all elements
+    // Resolve pseudopotentials, preferring the source SCF mapping.
+    const resolvedPseudos: Record<string, string> = {};
     for (const el of elements) {
-      if (!selectedPseudos[el]) {
+      const savedPseudo = savedPseudoMap[el];
+      const detectedPseudo = selectedPseudos[el];
+      const resolvedPseudo = (typeof savedPseudo === "string" && savedPseudo.length > 0)
+        ? savedPseudo
+        : detectedPseudo;
+      if (!resolvedPseudo) {
         throw new Error(`No pseudopotential selected for element ${el}`);
       }
+      resolvedPseudos[el] = resolvedPseudo;
     }
 
     // Build the full calculation config from crystalData
@@ -360,6 +512,15 @@ export function BandStructureWizard({
     // SCFWizard uses "qcortado_scf" as the prefix
     const scfPrefix = scfParams.prefix || "qcortado_scf";
     const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+
+    const ecutwfcValue = Number(scfParams.ecutwfc);
+    const ecutwfc = Number.isFinite(ecutwfcValue) && ecutwfcValue > 0 ? ecutwfcValue : 40;
+    const ecutrhoValue = Number(scfParams.ecutrho);
+    const ecutrho = Number.isFinite(ecutrhoValue) && ecutrhoValue > 0
+      ? ecutrhoValue
+      : ecutwfc * 8;
+    const sourceNspin = Number(scfParams.nspin);
+    const nspin = Number.isFinite(sourceNspin) && sourceNspin > 0 ? sourceNspin : 1;
 
     // Check if this is an FCC structure (diamond, zincblende) that should use primitive cell
     // Using primitive cell with ibrav=2 gives correct band structure matching literature
@@ -389,7 +550,7 @@ export function BandStructureWizard({
           species: elements.map((el) => ({
             symbol: el,
             mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: selectedPseudos[el],
+            pseudopotential: resolvedPseudos[el],
           })),
           atoms: primitiveCell.atoms.map((atom) => ({
             symbol: atom.symbol,
@@ -397,21 +558,21 @@ export function BandStructureWizard({
             if_pos: [true, true, true],
           })),
           position_units: "crystal",
-          ecutwfc: scfParams.ecutwfc || 40,
-          ecutrho: scfParams.ecutrho || 320,
-          nspin: 1,
-          occupations: "smearing",
-          smearing: "gaussian",
-          degauss: 0.01,
+          ecutwfc,
+          ecutrho,
+          nspin,
+          occupations: nscfOccupations,
+          smearing: nscfSmearing,
+          degauss: parsedDegauss,
         },
         kpoints: { type: "gamma" }, // Will be replaced by backend
-        conv_thr: scfParams.conv_thr || 1e-6,
-        mixing_beta: scfParams.mixing_beta || 0.7,
+        conv_thr: parsedConvThr,
+        mixing_beta: parsedMixingBeta,
         tprnfor: false,
         tstress: false,
         forc_conv_thr: null,
         etot_conv_thr: null,
-        verbosity: "high",
+        verbosity: nscfVerbosity,
       };
 
       // For primitive cell, k-points are already in the correct basis
@@ -442,7 +603,7 @@ export function BandStructureWizard({
           species: elements.map((el) => ({
             symbol: el,
             mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: selectedPseudos[el],
+            pseudopotential: resolvedPseudos[el],
           })),
           atoms: crystalData.atom_sites.map((site) => ({
             symbol: getBaseElement(site.type_symbol),
@@ -450,21 +611,21 @@ export function BandStructureWizard({
             if_pos: [true, true, true],
           })),
           position_units: "crystal",
-          ecutwfc: scfParams.ecutwfc || 40,
-          ecutrho: scfParams.ecutrho || 320,
-          nspin: 1,
-          occupations: "smearing",
-          smearing: "gaussian",
-          degauss: 0.01,
+          ecutwfc,
+          ecutrho,
+          nspin,
+          occupations: nscfOccupations,
+          smearing: nscfSmearing,
+          degauss: parsedDegauss,
         },
         kpoints: { type: "gamma" }, // Will be replaced by backend
-        conv_thr: scfParams.conv_thr || 1e-6,
-        mixing_beta: scfParams.mixing_beta || 0.7,
+        conv_thr: parsedConvThr,
+        mixing_beta: parsedMixingBeta,
         tprnfor: false,
         tstress: false,
         forc_conv_thr: null,
         etot_conv_thr: null,
-        verbosity: "high",
+        verbosity: nscfVerbosity,
       };
 
       // Transform k-points from primitive to conventional reciprocal lattice
@@ -482,11 +643,16 @@ export function BandStructureWizard({
       config: {
         base_calculation: baseCalculation,
         k_path: transformedKPath,
-        nbnd: nbnd === "auto" ? null : nbnd,
+        nbnd: manualNbnd,
         project_id: projectId,
         scf_calc_id: selectedScf.id,
+        bands_x: {
+          filband: bandsFilband,
+          lsym: bandsLsym,
+        },
         projections: {
           enabled: enableProjections,
+          filproj: projectionFilproj,
           lsym: projectionLsym,
           diag_basis: projectionDiagBasis,
           pawproj: projectionPawproj,
@@ -502,7 +668,16 @@ export function BandStructureWizard({
       k_path: pathString,
       points_per_segment: pointsPerSegment,
       total_k_points: null,
-      n_bands: nbnd === "auto" ? null : nbnd,
+      n_bands: manualNbnd,
+      n_bands_requested: manualNbnd,
+      nscf_conv_thr: parsedConvThr,
+      nscf_mixing_beta: parsedMixingBeta,
+      nscf_occupations: nscfOccupations,
+      nscf_smearing: nscfSmearing,
+      nscf_degauss: parsedDegauss,
+      nscf_verbosity: nscfVerbosity,
+      bands_x_filband: bandsFilband,
+      bands_x_lsym: bandsLsym,
       // Inherit SCF parameters for tags
       ecutwfc: scfParams.ecutwfc,
       nspin: scfParams.nspin,
@@ -510,6 +685,7 @@ export function BandStructureWizard({
       lda_plus_u: scfParams.lda_plus_u,
       vdw_corr: scfParams.vdw_corr,
       fat_bands_requested: enableProjections,
+      projection_filproj: projectionFilproj,
       projection_lsym: projectionLsym,
       projection_diag_basis: projectionDiagBasis,
       projection_pawproj: projectionPawproj,
@@ -697,19 +873,13 @@ export function BandStructureWizard({
             <div
               key={scf.id}
               className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
-              onClick={() => {
-                setSelectedScf(scf);
-                setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-              }}
+              onClick={() => selectSourceScf(scf)}
             >
               <div className="scf-option-header">
                 <input
                   type="radio"
                   checked={selectedScf?.id === scf.id}
-                  onChange={() => {
-                    setSelectedScf(scf);
-                    setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-                  }}
+                  onChange={() => selectSourceScf(scf)}
                 />
                 <span className="scf-date">
                   {new Date(scf.started_at).toLocaleDateString()}
@@ -810,95 +980,348 @@ export function BandStructureWizard({
     const totalKPoints = kPath.reduce((sum, p) => sum + p.npoints, 0);
     // Format path for display
     const pathString = kPath.map((p) => p.label).join(" → ");
+    const safeParsePositive = (value: string): number | null => {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed <= 0) return null;
+      return parsed;
+    };
+    const parsedConvThr = safeParsePositive(nscfConvThrInput);
+    const parsedMixingBeta = safeParsePositive(nscfMixingBetaInput);
+    const parsedDegauss = safeParsePositive(nscfDegaussInput);
+    const degaussRequired = nscfOccupations === "smearing";
+    const isNbndValid = nbnd === "auto" || (Number.isInteger(nbnd) && nbnd > 0);
+    const isConvThrValid = parsedConvThr !== null;
+    const isMixingBetaValid = parsedMixingBeta !== null && parsedMixingBeta <= 1.0;
+    const isDegaussValid = !degaussRequired || parsedDegauss !== null;
+    const bandsFilband = sanitizeOutputFilename(bandsFilbandInput, "bands.dat");
+    const projectionFilproj = sanitizeOutputFilename(projectionFilprojInput, "bands.projwfc.dat");
+    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid;
 
     return (
       <div className="wizard-step parameters-step">
-        <h3>Calculation Parameters</h3>
+        <h3>Band Structure Parameters</h3>
+        <p className="step-description">
+          Configure NSCF electronic settings and post-processing options for `bands.x` and optional `projwfc.x`.
+        </p>
 
-        <div className="param-section">
-          <label>
-            Number of bands:
-            <div className="nbnd-input">
-              <select
-                value={nbnd === "auto" ? "auto" : "manual"}
-                onChange={(e) => setNbnd(e.target.value === "auto" ? "auto" : 20)}
-              >
-                <option value="auto">Auto (recommended)</option>
-                <option value="manual">Manual</option>
-              </select>
-              {nbnd !== "auto" && (
-                <input
-                  type="number"
-                  min={1}
-                  value={nbnd}
-                  onChange={(e) => setNbnd(parseInt(e.target.value) || 20)}
-                />
-              )}
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("core")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.core ? "expanded" : ""}`}>▶</span>
+            Core Band Sampling
+            <Tooltip text="Primary controls for the NSCF band path run, including explicit band count selection." />
+          </h4>
+          {expandedSections.core && (
+            <div className="option-params">
+              <div className="phonon-grid">
+                <div className="phonon-field">
+                  <label>
+                    Number of bands
+                    <Tooltip text="QE variable: `nbnd` in `pw.x` NSCF run. Use manual mode to force more conduction bands for crossings/high-energy features." />
+                  </label>
+                  <div className="nbnd-input">
+                    <select
+                      value={nbnd === "auto" ? "auto" : "manual"}
+                      onChange={(e) => setNbnd(e.target.value === "auto" ? "auto" : 20)}
+                    >
+                      <option value="auto">Auto (QE default)</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                    {nbnd !== "auto" && (
+                      <input
+                        type="number"
+                        min={1}
+                        value={nbnd}
+                        onChange={(e) => setNbnd(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      />
+                    )}
+                  </div>
+                  {!isNbndValid && (
+                    <span className="param-hint input-error">Use a positive integer for manual `nbnd`.</span>
+                  )}
+                </div>
+              </div>
             </div>
-          </label>
+          )}
         </div>
 
-        <div className="projection-section">
-          <h4>
-            Projection Controls
-            <Tooltip text="Fat-band plotting requires running `projwfc.x` after bands.x. This computes orbital/atomic projections at each (k,band) point and increases total runtime and storage." />
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("nscf")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.nscf ? "expanded" : ""}`}>▶</span>
+            NSCF Electronic Controls
+            <Tooltip text="Advanced `pw.x` NSCF settings: convergence (`conv_thr`), mixing (`mixing_beta`), occupations/smearing, and verbosity." />
           </h4>
-          <div className="param-grid">
-            <div className="param-row">
-              <label>
-                Enable Orbital Projections (Fat Bands)
-                <Tooltip text="Technical: runs `projwfc.x` after the band calculation. Required for atom/orbital-resolved fat-band visualization." />
-              </label>
-              <input
-                type="checkbox"
-                checked={enableProjections}
-                onChange={(e) => setEnableProjections(e.target.checked)}
-              />
+          {expandedSections.nscf && (
+            <div className="option-params">
+              <div className="phonon-grid">
+                <div className="phonon-field">
+                  <label>
+                    NSCF convergence threshold
+                    <Tooltip text="QE variable: `conv_thr` in `&ELECTRONS`. Tighter thresholds reduce numerical noise in near-degenerate regions at higher cost." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nscfConvThrInput}
+                    onChange={(e) => setNscfConvThrInput(e.target.value)}
+                    placeholder="1e-8"
+                    spellCheck={false}
+                  />
+                  {!isConvThrValid && (
+                    <span className="param-hint input-error">Use a positive number (e.g. `1e-8`).</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Mixing beta
+                    <Tooltip text="QE variable: `mixing_beta` in `&ELECTRONS`. Typical stable range is 0.2-0.8; values above 1 are generally unstable." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nscfMixingBetaInput}
+                    onChange={(e) => setNscfMixingBetaInput(e.target.value)}
+                    placeholder="0.7"
+                    spellCheck={false}
+                  />
+                  {!isMixingBetaValid && (
+                    <span className="param-hint input-error">Use a positive number in the range (0, 1].</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Occupations
+                    <Tooltip text="QE variable: `occupations` in `&SYSTEM`. Use smearing for metals and challenging Fermi-level crossings." />
+                  </label>
+                  <select
+                    value={nscfOccupations}
+                    onChange={(e) => setNscfOccupations(e.target.value as "fixed" | "smearing" | "from_input" | "tetrahedra")}
+                  >
+                    <option value="smearing">smearing</option>
+                    <option value="fixed">fixed</option>
+                    <option value="tetrahedra">tetrahedra</option>
+                    <option value="from_input">from_input</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Smearing type
+                    <Tooltip text="QE variable: `smearing`. Only used when occupations = smearing." />
+                  </label>
+                  <select
+                    value={nscfSmearing}
+                    onChange={(e) => setNscfSmearing(e.target.value as "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac")}
+                    disabled={nscfOccupations !== "smearing"}
+                  >
+                    <option value="gaussian">gaussian</option>
+                    <option value="methfessel-paxton">methfessel-paxton</option>
+                    <option value="marzari-vanderbilt">marzari-vanderbilt</option>
+                    <option value="fermi-dirac">fermi-dirac</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Degauss (Ry)
+                    <Tooltip text="QE variable: `degauss`. Required when using smearing occupations; controls broadening width in Ry." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nscfDegaussInput}
+                    onChange={(e) => setNscfDegaussInput(e.target.value)}
+                    placeholder={nscfOccupations === "smearing" ? "0.02" : "unused"}
+                    spellCheck={false}
+                    disabled={nscfOccupations !== "smearing"}
+                  />
+                  {!isDegaussValid && (
+                    <span className="param-hint input-error">Provide a positive degauss when occupations = smearing.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Output detail level
+                    <Tooltip text="QE variable: `verbosity` in `&CONTROL`. Higher verbosity helps debugging but increases output volume." />
+                  </label>
+                  <select
+                    value={nscfVerbosity}
+                    onChange={(e) => setNscfVerbosity(e.target.value as "low" | "high" | "debug")}
+                  >
+                    <option value="low">low</option>
+                    <option value="high">high</option>
+                    <option value="debug">debug</option>
+                  </select>
+                </div>
+              </div>
             </div>
+          )}
+        </div>
 
-            {enableProjections && (
-              <>
-                <div className="param-row">
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("post")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.post ? "expanded" : ""}`}>▶</span>
+            bands.x Post-Processing
+            <Tooltip text="Configure `bands.x` output file and symmetry labeling (`filband`, `lsym`)." />
+          </h4>
+          {expandedSections.post && (
+            <div className="option-params">
+              <div className="phonon-grid">
+                <div className="phonon-field">
                   <label>
-                    Symmetrize Projection Weights
-                    <span className="band-control-tech-name">lsym</span>
-                    <Tooltip text="Applies symmetry averaging to projected weights. Can smooth equivalent channels, but may hide small symmetry-breaking effects." />
+                    bands.x output file
+                    <span className="band-control-tech-name">filband</span>
+                    <Tooltip text="QE variable: `filband` in `&BANDS`. The parsed file is `<filband>.gnu`." />
                   </label>
                   <input
-                    type="checkbox"
-                    checked={projectionLsym}
-                    onChange={(e) => setProjectionLsym(e.target.checked)}
+                    type="text"
+                    value={bandsFilbandInput}
+                    onChange={(e) => setBandsFilbandInput(e.target.value)}
+                    placeholder="bands.dat"
                   />
+                  <span className="param-hint">Resolved name: `{bandsFilband}`</span>
                 </div>
+              </div>
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={bandsLsym}
+                  onChange={(e) => setBandsLsym(e.target.checked)}
+                />
+                <span>
+                  Enable symmetry handling in bands.x
+                  <span className="band-control-tech-name">lsym</span>
+                  <Tooltip text="QE variable: `lsym` in `&BANDS`. Enables symmetry treatment/labeling in post-processing output." />
+                </span>
+              </label>
+            </div>
+          )}
+        </div>
 
-                <div className="param-row">
-                  <label>
-                    Local Crystal-Field Basis
-                    <span className="band-control-tech-name">diag_basis</span>
-                    <Tooltip text="Rotates local orbital basis into a diagonal crystal-field frame. Useful for clearer local orbital interpretation in low-symmetry environments." />
-                  </label>
-                  <input
-                    type="checkbox"
-                    checked={projectionDiagBasis}
-                    onChange={(e) => setProjectionDiagBasis(e.target.checked)}
-                  />
-                </div>
+        <div className="option-section config-section collapsible">
+          <h4 onClick={() => toggleSection("projections")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.projections ? "expanded" : ""}`}>▶</span>
+            Projection Controls (projwfc.x)
+            <Tooltip text="Fat-band projection settings and projwfc.x output controls." />
+          </h4>
+          {expandedSections.projections && (
+            <div className="option-params">
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={enableProjections}
+                  onChange={(e) => setEnableProjections(e.target.checked)}
+                />
+                <span>
+                  Enable orbital projections (fat bands)
+                  <Tooltip text="Runs `projwfc.x` after bands.x and attaches parsed projection groups to the result." />
+                </span>
+              </label>
 
-                <div className="param-row">
-                  <label>
-                    PAW Projection Correction
-                    <span className="band-control-tech-name">pawproj</span>
-                    <Tooltip text="Use PAW-specific treatment for projections when PAW pseudopotentials are used. May improve projection fidelity but can add overhead." />
+              {enableProjections && (
+                <div className="option-params">
+                  <div className="phonon-grid">
+                    <div className="phonon-field">
+                      <label>
+                        projwfc output file
+                        <span className="band-control-tech-name">filproj</span>
+                        <Tooltip text="QE variable: `filproj` in `&PROJWFC`. Parsed from this file when available." />
+                      </label>
+                      <input
+                        type="text"
+                        value={projectionFilprojInput}
+                        onChange={(e) => setProjectionFilprojInput(e.target.value)}
+                        placeholder="bands.projwfc.dat"
+                      />
+                      <span className="param-hint">Resolved name: `{projectionFilproj}`</span>
+                    </div>
+                  </div>
+
+                  <label className="option-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={projectionLsym}
+                      onChange={(e) => setProjectionLsym(e.target.checked)}
+                    />
+                    <span>
+                      Symmetrize projection weights
+                      <span className="band-control-tech-name">lsym</span>
+                      <Tooltip text="projwfc.x `lsym`: symmetry-averages projection weights." />
+                    </span>
                   </label>
-                  <input
-                    type="checkbox"
-                    checked={projectionPawproj}
-                    onChange={(e) => setProjectionPawproj(e.target.checked)}
-                  />
+
+                  <label className="option-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={projectionDiagBasis}
+                      onChange={(e) => setProjectionDiagBasis(e.target.checked)}
+                    />
+                    <span>
+                      Local crystal-field basis
+                      <span className="band-control-tech-name">diag_basis</span>
+                      <Tooltip text="projwfc.x `diag_basis`: rotates local orbital basis into a diagonal crystal-field frame." />
+                    </span>
+                  </label>
+
+                  <label className="option-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={projectionPawproj}
+                      onChange={(e) => setProjectionPawproj(e.target.checked)}
+                    />
+                    <span>
+                      PAW projection correction
+                      <span className="band-control-tech-name">pawproj</span>
+                      <Tooltip text="projwfc.x `pawproj`: PAW-specific projection treatment." />
+                    </span>
+                  </label>
                 </div>
-              </>
-            )}
-          </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="option-section mpi-section config-section collapsible">
+          <h4 onClick={() => toggleSection("mpi")} className="section-header">
+            <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
+            Parallelization
+            <Tooltip text="Process-level MPI controls for the NSCF stage." />
+          </h4>
+          {expandedSections.mpi && (
+            <div className="option-params">
+              {mpiAvailable ? (
+                <div className="mpi-toggle">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={mpiEnabled}
+                      onChange={(e) => setMpiEnabled(e.target.checked)}
+                    />
+                    Enable MPI ({cpuCount} cores available)
+                  </label>
+                  {mpiEnabled && (
+                    <div className="mpi-procs">
+                      <label>
+                        Number of processes:
+                        <input
+                          type="number"
+                          min={1}
+                          max={cpuCount}
+                          value={mpiProcs}
+                          onChange={(e) => setMpiProcs(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="mpi-unavailable">
+                  MPI not available. Running in serial mode.
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="calculation-summary">
@@ -912,48 +1335,17 @@ export function BandStructureWizard({
             <span>{totalKPoints}</span>
           </div>
           <div className="summary-row">
-            <span>Source SCF energy:</span>
-            <span>{selectedScf?.result?.total_energy?.toFixed(6)} Ry</span>
+            <span>Requested `nbnd`:</span>
+            <span>{nbnd === "auto" ? "Auto" : nbnd}</span>
+          </div>
+          <div className="summary-row">
+            <span>bands.x output:</span>
+            <span>{bandsFilband}.gnu</span>
           </div>
           <div className="summary-row">
             <span>Fat-band projections:</span>
-            <span>{enableProjections ? "Enabled (projwfc.x)" : "Disabled"}</span>
+            <span>{enableProjections ? `Enabled (${projectionFilproj})` : "Disabled"}</span>
           </div>
-        </div>
-
-        {/* MPI Settings */}
-        <div className="mpi-section">
-          <h4>Parallelization</h4>
-          {mpiAvailable ? (
-            <div className="mpi-toggle">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={mpiEnabled}
-                  onChange={(e) => setMpiEnabled(e.target.checked)}
-                />
-                Enable MPI ({cpuCount} cores available)
-              </label>
-              {mpiEnabled && (
-                <div className="mpi-procs">
-                  <label>
-                    Number of processes:
-                    <input
-                      type="number"
-                      min={1}
-                      max={cpuCount}
-                      value={mpiProcs}
-                      onChange={(e) => setMpiProcs(parseInt(e.target.value) || 1)}
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
-          ) : (
-            <p className="mpi-unavailable">
-              MPI not available. Running in serial mode.
-            </p>
-          )}
         </div>
 
         {error && <div className="error-message">{error}</div>}
@@ -962,10 +1354,10 @@ export function BandStructureWizard({
           <button className="secondary-button" onClick={() => setStep("kpath")}>
             Back
           </button>
-          <button className="secondary-button" onClick={queueCalculation}>
+          <button className="secondary-button" onClick={queueCalculation} disabled={!canRun}>
             Queue Task
           </button>
-          <button className="primary-button" onClick={runCalculation} disabled={hasExternalRunningTask}>
+          <button className="primary-button" onClick={runCalculation} disabled={!canRun || hasExternalRunningTask}>
             Run Calculation
           </button>
         </div>

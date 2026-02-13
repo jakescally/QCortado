@@ -4,7 +4,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "phonon";
+export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -41,7 +41,7 @@ interface QueueSaveSpec {
   projectId: string;
   cifId: string;
   workingDir?: string | null;
-  calcType: "scf" | "bands" | "dos" | "phonon" | "optimization";
+  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "optimization";
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
@@ -99,6 +99,7 @@ const COMMAND_MAP: Record<TaskType, string> = {
   scf: "start_scf_calculation",
   bands: "start_bands_calculation",
   dos: "start_dos_calculation",
+  fermi_surface: "start_fermi_surface_calculation",
   phonon: "start_phonon_calculation",
 };
 
@@ -119,7 +120,7 @@ function isBusyError(error: unknown): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "phonon") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon") {
     return taskType;
   }
   return "scf";
@@ -169,6 +170,24 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
     };
   }
 
+  if (taskType === "fermi_surface") {
+    const resultEf = Number(taskResult?.fermi_energy);
+    const fallbackEf = Number(parameters?.scf_fermi_energy);
+    const fermiEnergy = Number.isFinite(resultEf)
+      ? resultEf
+      : Number.isFinite(fallbackEf)
+        ? fallbackEf
+        : null;
+    return {
+      converged: true,
+      total_energy: null,
+      fermi_energy: fermiEnergy,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+    };
+  }
+
   const converged = taskResult?.converged ?? true;
   return {
     converged,
@@ -197,6 +216,22 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
   } else if (taskType === "dos") {
     if (next.n_points == null && Number.isFinite(Number(taskResult?.points))) {
       next.n_points = Number(taskResult.points);
+    }
+  } else if (taskType === "fermi_surface") {
+    if (next.n_bxsf_files == null && Array.isArray(taskResult?.bxsf_files)) {
+      next.n_bxsf_files = taskResult.bxsf_files.length;
+    }
+    if ((!Array.isArray(next.bxsf_files) || next.bxsf_files.length === 0) && Array.isArray(taskResult?.bxsf_files)) {
+      next.bxsf_files = taskResult.bxsf_files.map((entry: any) => entry?.file_name).filter(Boolean);
+    }
+    if (next.primary_bxsf_file == null && typeof taskResult?.primary_file === "string") {
+      next.primary_bxsf_file = taskResult.primary_file;
+    }
+    if (next.total_bxsf_bytes == null && Array.isArray(taskResult?.bxsf_files)) {
+      next.total_bxsf_bytes = taskResult.bxsf_files.reduce(
+        (sum: number, entry: any) => sum + (Number(entry?.size_bytes) || 0),
+        0,
+      );
     }
   } else if (taskType === "phonon") {
     if (next.n_qpoints == null && Number.isFinite(Number(taskResult?.n_qpoints))) {

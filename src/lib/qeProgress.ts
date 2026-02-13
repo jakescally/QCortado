@@ -138,6 +138,30 @@ export function updateDosProgress(line: string, state: ProgressState): ProgressS
   return next;
 }
 
+export function updateFermiSurfaceProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 15, phase: "NSCF on dense k-grid" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 72, phase: "fs.x post-processing" };
+    }
+  }
+
+  if (line.includes("Collecting BXSF artifacts")) {
+    return { ...next, percent: 92, phase: "Collecting BXSF files" };
+  }
+  if (line.includes("=== Fermi Surface Generation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
 export function updatePhononProgress(line: string, state: ProgressState): ProgressState {
   let next: ProgressState = { ...state, status: "running" };
   const meta = { ...(state.meta?.phonon ?? {}) };
@@ -215,7 +239,7 @@ export function updatePhononProgress(line: string, state: ProgressState): Progre
   return attachMeta(next);
 }
 
-type ProgressKind = "scf" | "bands" | "dos" | "phonon";
+type ProgressKind = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
 
 export function progressReducer(
   kind: ProgressKind,
@@ -229,6 +253,8 @@ export function progressReducer(
       return updateBandsProgress(line, state);
     case "dos":
       return updateDosProgress(line, state);
+    case "fermi_surface":
+      return updateFermiSurfaceProgress(line, state);
     case "phonon":
       return updatePhononProgress(line, state);
     default:

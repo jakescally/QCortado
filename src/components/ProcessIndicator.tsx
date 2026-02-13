@@ -49,6 +49,7 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
     scf: "SCF",
     bands: "Band Structure",
     dos: "Electronic DOS",
+    fermi_surface: "Fermi Surface",
     phonon: "Phonon",
   };
   const typeLabel = typeLabels[task.taskType] || task.taskType.toUpperCase();

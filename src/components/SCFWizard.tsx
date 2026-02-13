@@ -1255,11 +1255,15 @@ export function SCFWizard({
       parameters: {
         prefix: "qcortado_scf",
         calculation_mode: config.calculation,
+        occupations: config.occupations,
+        smearing: config.occupations === "smearing" ? config.smearing : null,
+        degauss: config.occupations === "smearing" ? config.degauss : null,
         ecutwfc: config.ecutwfc,
         ecutrho: config.ecutrho,
         kgrid: config.kgrid,
         conv_thr: config.conv_thr,
         mixing_beta: config.mixing_beta,
+        selected_pseudos: selectedPseudos,
         structure_source: sourceDescriptor,
         source_structure: sourceStructure,
         // Feature flags for tags

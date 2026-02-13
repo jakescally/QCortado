@@ -8,6 +8,7 @@ import { BandStructureWizard } from "./components/BandStructureWizard";
 import { BandData, BandPlot } from "./components/BandPlot";
 import { ElectronicDOSWizard } from "./components/ElectronicDOSWizard";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
+import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
 import { PhononWizard } from "./components/PhononWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
@@ -59,8 +60,9 @@ interface SettingsProjectSnapshot {
 }
 
 const DELETE_CONFIRM_TEXT = "delete my project for good";
+const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue";
 
 interface SCFContext {
   cifId: string;
@@ -81,6 +83,13 @@ interface BandsContext {
 }
 
 interface DosContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  scfCalculations: CalculationRun[];
+}
+
+interface FermiSurfaceContext {
   cifId: string;
   crystalData: CrystalData;
   projectId: string;
@@ -207,8 +216,13 @@ function AppInner() {
   const plotHeight = Math.max(400, windowSize.height - 160);
 
   const [qePath, setQePath] = useState<string | null>(null);
+  const [qePathInput, setQePathInput] = useState("");
+  const [fermiSurferPathInput, setFermiSurferPathInput] = useState(DEFAULT_FERMI_SURFER_PATH);
+  const [isSavingQePath, setIsSavingQePath] = useState(false);
+  const [isSavingFermiSurferPath, setIsSavingFermiSurferPath] = useState(false);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
-  const [status, setStatus] = useState<string>("Not configured");
+  const [qeStatus, setQeStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
+  const [fermiSurferStatus, setFermiSurferStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [error, setError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("home");
   const [projectCount, setProjectCount] = useState<number>(0);
@@ -251,6 +265,9 @@ function AppInner() {
   // Context for viewing saved DOS data
   const [viewDosData, setViewDosData] = useState<{ dosData: ElectronicDOSData; fermiEnergy: number | null } | null>(null);
 
+  // Context for running Fermi-surface generation from a project
+  const [fermiSurfaceContext, setFermiSurfaceContext] = useState<FermiSurfaceContext | null>(null);
+
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
 
@@ -263,6 +280,7 @@ function AppInner() {
   useEffect(() => {
     checkQEPath();
     loadProjectCount();
+    void loadFermiSurferPath();
     void loadExecutionPrefix();
   }, []);
 
@@ -301,11 +319,20 @@ function AppInner() {
       const path = await invoke<string | null>("get_qe_path");
       if (path) {
         setQePath(path);
+        setQePathInput(path);
         await loadExecutables();
-        setStatus("Ready");
+      } else {
+        setQePath(null);
+        setQePathInput("");
+        setAvailableExecutables([]);
+        setQeStatus("Not configured");
       }
     } catch (e) {
       console.log("No QE path configured yet");
+      setQePath(null);
+      setQePathInput("");
+      setAvailableExecutables([]);
+      setQeStatus("Not configured");
     }
   }
 
@@ -313,8 +340,11 @@ function AppInner() {
     try {
       const exes = await invoke<string[]>("check_qe_executables");
       setAvailableExecutables(exes);
+      setQeStatus(exes.includes("pw.x") ? "Found" : "Not found");
       setError(null);
     } catch (e) {
+      setAvailableExecutables([]);
+      setQeStatus("Not found");
       setError(String(e));
     }
   }
@@ -328,14 +358,90 @@ function AppInner() {
       });
 
       if (selected && typeof selected === "string") {
-        await invoke("set_qe_path", { path: selected });
-        setQePath(selected);
-        await loadExecutables();
-        setStatus("Ready");
+        setQePathInput(selected);
         setError(null);
       }
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  async function saveQEPath() {
+    const normalized = qePathInput.trim();
+    if (!normalized) {
+      setError("QE path cannot be empty.");
+      return;
+    }
+
+    setIsSavingQePath(true);
+    try {
+      await invoke("set_qe_path", { path: normalized });
+      setQePath(normalized);
+      setQePathInput(normalized);
+      await loadExecutables();
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsSavingQePath(false);
+    }
+  }
+
+  async function loadFermiSurferPath() {
+    try {
+      const path = await invoke<string | null>("get_fermi_surfer_path");
+      if (path) {
+        setFermiSurferPathInput(path);
+        setFermiSurferStatus("Found");
+      } else {
+        setFermiSurferPathInput(DEFAULT_FERMI_SURFER_PATH);
+        setFermiSurferStatus("Not configured");
+      }
+    } catch (e) {
+      console.error("Failed to load FermiSurfer path:", e);
+      setFermiSurferPathInput(DEFAULT_FERMI_SURFER_PATH);
+      setFermiSurferStatus("Not found");
+    }
+  }
+
+  async function selectFermiSurferPath() {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: fermiSurferPathInput || qePath || "/usr/local/bin",
+        title: "Select FermiSurfer executable",
+      });
+
+      if (selected && typeof selected === "string") {
+        setFermiSurferPathInput(selected);
+        setError(null);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function saveFermiSurferPath() {
+    const normalized = fermiSurferPathInput.trim();
+    setIsSavingFermiSurferPath(true);
+    try {
+      await invoke("set_fermi_surfer_path", {
+        path: normalized.length > 0 ? normalized : null,
+      });
+      if (normalized.length > 0) {
+        setFermiSurferPathInput(normalized);
+        setFermiSurferStatus("Found");
+      } else {
+        setFermiSurferPathInput(DEFAULT_FERMI_SURFER_PATH);
+        setFermiSurferStatus("Not configured");
+      }
+      setError(null);
+    } catch (e) {
+      setFermiSurferStatus("Not found");
+      setError(String(e));
+    } finally {
+      setIsSavingFermiSurferPath(false);
     }
   }
 
@@ -497,6 +603,7 @@ function AppInner() {
       setScfContext(null);
       setBandsContext(null);
       setDosContext(null);
+      setFermiSurfaceContext(null);
       setPhononsContext(null);
       setViewBandsData(null);
       setViewDosData(null);
@@ -519,6 +626,7 @@ function AppInner() {
       scf: "scf-wizard",
       bands: "bands-wizard",
       dos: "dos-wizard",
+      fermi_surface: "fermi-surface-wizard",
       phonon: "phonon-wizard",
     };
     const view = viewMap[taskType];
@@ -900,6 +1008,27 @@ function AppInner() {
     );
   }
 
+  if (currentView === "fermi-surface-wizard" && qePath && (fermiSurfaceContext || reconnectTaskId)) {
+    return (
+      <>
+        <FermiSurfaceWizard
+          qePath={qePath}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setFermiSurfaceContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={fermiSurfaceContext?.projectId ?? ""}
+          cifId={fermiSurfaceContext?.cifId ?? ""}
+          crystalData={fermiSurfaceContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          scfCalculations={fermiSurfaceContext?.scfCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
   if (currentView === "phonon-wizard" && qePath && (phononsContext || reconnectTaskId)) {
     return (
       <>
@@ -1158,6 +1287,15 @@ function AppInner() {
             setViewDosData({ dosData, fermiEnergy });
             setCurrentView("dos-viewer");
           }}
+          onRunFermiSurface={(cifId, crystalData, scfCalculations) => {
+            setFermiSurfaceContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            setCurrentView("fermi-surface-wizard");
+          }}
           onRunPhonons={(cifId, crystalData, scfCalculations) => {
             setPhononsContext({
               cifId,
@@ -1180,6 +1318,17 @@ function AppInner() {
     );
   }
 
+  const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" }> = [
+    ...availableExecutables.map((name) => ({ name, type: "qe" as const })),
+    ...(fermiSurferStatus === "Found"
+      ? [{ name: "fermisurfer", type: "fermisurfer" as const }]
+      : []),
+  ];
+
+  const qeStatusClass = qeStatus === "Found" ? "ready" : qeStatus === "Not found" ? "error" : "pending";
+  const fermiStatusClass =
+    fermiSurferStatus === "Found" ? "ready" : fermiSurferStatus === "Not found" ? "error" : "pending";
+
   return (
     <>
       <main className="container">
@@ -1192,31 +1341,79 @@ function AppInner() {
           <h2>Configuration</h2>
           <div className="config-row">
             <label>QE Installation:</label>
-            {qePath ? (
-              <span className="path">{qePath}</span>
-            ) : (
-              <span className="not-set">Not configured</span>
-            )}
-            <button onClick={selectQEPath}>
-              {qePath ? "Change" : "Configure"}
-            </button>
+            <input
+              type="text"
+              className="config-path-input"
+              value={qePathInput}
+              onChange={(e) => {
+                setQePathInput(e.target.value);
+                setError(null);
+              }}
+              placeholder="/path/to/qe/bin"
+              spellCheck={false}
+            />
+            <div className="config-row-actions">
+              <button onClick={selectQEPath}>Browse</button>
+              <button
+                onClick={() => void saveQEPath()}
+                disabled={isSavingQePath || qePathInput.trim().length === 0}
+              >
+                {isSavingQePath ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+
+          <div className="config-row">
+            <label>FermiSurfer:</label>
+            <input
+              type="text"
+              className="config-path-input"
+              value={fermiSurferPathInput}
+              onChange={(e) => {
+                setFermiSurferPathInput(e.target.value);
+                setError(null);
+              }}
+              placeholder={DEFAULT_FERMI_SURFER_PATH}
+              spellCheck={false}
+            />
+            <div className="config-row-actions">
+              <button onClick={selectFermiSurferPath}>Browse</button>
+              <button
+                onClick={() => void saveFermiSurferPath()}
+                disabled={isSavingFermiSurferPath}
+              >
+                {isSavingFermiSurferPath ? "Saving..." : "Save"}
+              </button>
+            </div>
           </div>
 
           <div className="status-row">
-            <label>Status:</label>
-            <span className={`status ${status === "Ready" ? "ready" : "pending"}`}>
-              {status}
+            <label>QE Status:</label>
+            <span className={`status ${qeStatusClass}`}>
+              {qeStatus}
+            </span>
+          </div>
+
+          <div className="status-row">
+            <label>FermiSurfer Status:</label>
+            <span className={`status ${fermiStatusClass}`}>
+              {fermiSurferStatus}
             </span>
           </div>
 
           {error && <div className="error">{error}</div>}
 
-          {availableExecutables.length > 0 && (
+          {availablePrograms.length > 0 && (
             <div className="executables">
               <label>Available programs:</label>
               <div className="exe-list">
-                {availableExecutables.map((exe) => (
-                  <span key={exe} className="exe-tag">{exe}</span>
+                {availablePrograms.map((program) => (
+                  <span
+                    key={program.name}
+                    className={`exe-tag ${program.type === "fermisurfer" ? "exe-tag-fermisurfer" : ""}`}
+                  >
+                    {program.name}
+                  </span>
                 ))}
               </div>
             </div>
@@ -1249,26 +1446,6 @@ function AppInner() {
               </div>
             </section>
 
-            <section className="actions-section">
-              <h2>Quick Calculations</h2>
-              <div className="action-grid">
-                <button className="action-btn" onClick={() => setCurrentView("scf-wizard")}>
-                  <span className="action-icon">SCF</span>
-                  <span className="action-label">SCF Calculation</span>
-                  <span className="action-hint">Import CIF & run</span>
-                </button>
-                <button className="action-btn" disabled>
-                  <span className="action-icon">Band</span>
-                  <span className="action-label">Band Structure</span>
-                  <span className="action-hint">Coming soon</span>
-                </button>
-                <button className="action-btn" disabled>
-                  <span className="action-icon">DOS</span>
-                  <span className="action-label">Density of States</span>
-                  <span className="action-hint">Coming soon</span>
-                </button>
-              </div>
-            </section>
           </>
         )}
 

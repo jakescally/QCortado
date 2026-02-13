@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
@@ -259,11 +260,21 @@ export function ElectronicDOSWizard({
     }
 
     const scfParams = selectedScf.parameters || {};
+    const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
+      ? scfParams.selected_pseudos as Record<string, string>
+      : {};
     const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
+    const resolvedPseudos: Record<string, string> = {};
     for (const element of elements) {
-      if (!selectedPseudos[element]) {
+      const savedPseudo = savedPseudoMap[element];
+      const detectedPseudo = selectedPseudos[element];
+      const resolvedPseudo = (typeof savedPseudo === "string" && savedPseudo.length > 0)
+        ? savedPseudo
+        : detectedPseudo;
+      if (!resolvedPseudo) {
         throw new Error(`No pseudopotential selected for element ${element}`);
       }
+      resolvedPseudos[element] = resolvedPseudo;
     }
 
     const occupationRaw = String(scfParams.occupations || "smearing").toLowerCase();
@@ -285,62 +296,91 @@ export function ElectronicDOSWizard({
     const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
     const prefix = scfParams.prefix || "qcortado_scf";
 
-    const gammaRadians = (crystalData.cell_angle_gamma.value * Math.PI) / 180;
-    const betaRadians = (crystalData.cell_angle_beta.value * Math.PI) / 180;
-    const alphaRadians = (crystalData.cell_angle_alpha.value * Math.PI) / 180;
-    const c = crystalData.cell_length_c.value;
-    const cVector: [number, number, number] = [
-      c * Math.cos(betaRadians),
-      (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians))) / Math.sin(gammaRadians),
-      Math.sqrt(
-        Math.max(
-          0,
-          c * c
-            - (c * Math.cos(betaRadians)) ** 2
-            - (
-              (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians)))
-              / Math.sin(gammaRadians)
-            ) ** 2,
-        ),
-      ),
-    ];
+    const ecutwfcValue = Number(scfParams.ecutwfc);
+    const ecutwfc = Number.isFinite(ecutwfcValue) && ecutwfcValue > 0 ? ecutwfcValue : 40;
+    const ecutrhoValue = Number(scfParams.ecutrho);
+    const ecutrho = Number.isFinite(ecutrhoValue) && ecutrhoValue > 0
+      ? ecutrhoValue
+      : ecutwfc * 8;
+
+    const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+    const commonSystemFields = {
+      species: elements.map((element) => ({
+        symbol: element,
+        mass: ELEMENT_MASSES[element] || 1.0,
+        pseudopotential: resolvedPseudos[element],
+      })),
+      position_units: "crystal",
+      ecutwfc,
+      ecutrho,
+      nspin: Number(scfParams.nspin) || 1,
+      occupations,
+      smearing,
+      degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
+    };
+
+    const systemConfig = primitiveCell
+      ? {
+        ...commonSystemFields,
+        ibrav: primitiveCell.ibrav,
+        celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
+        cell_parameters: null,
+        cell_units: null,
+        atoms: primitiveCell.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true] as [boolean, boolean, boolean],
+        })),
+      }
+      : (() => {
+        const gammaRadians = (crystalData.cell_angle_gamma.value * Math.PI) / 180;
+        const betaRadians = (crystalData.cell_angle_beta.value * Math.PI) / 180;
+        const alphaRadians = (crystalData.cell_angle_alpha.value * Math.PI) / 180;
+        const c = crystalData.cell_length_c.value;
+        const cVector: [number, number, number] = [
+          c * Math.cos(betaRadians),
+          (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians))) / Math.sin(gammaRadians),
+          Math.sqrt(
+            Math.max(
+              0,
+              c * c
+                - (c * Math.cos(betaRadians)) ** 2
+                - (
+                  (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians)))
+                  / Math.sin(gammaRadians)
+                ) ** 2,
+            ),
+          ),
+        ];
+
+        return {
+          ...commonSystemFields,
+          ibrav: "free" as const,
+          celldm: null,
+          cell_parameters: [
+            [crystalData.cell_length_a.value, 0, 0],
+            [
+              crystalData.cell_length_b.value * Math.cos(gammaRadians),
+              crystalData.cell_length_b.value * Math.sin(gammaRadians),
+              0,
+            ],
+            cVector,
+          ] as [[number, number, number], [number, number, number], [number, number, number]],
+          cell_units: "angstrom" as const,
+          atoms: crystalData.atom_sites.map((site) => ({
+            symbol: getBaseElement(site.type_symbol),
+            position: [site.fract_x, site.fract_y, site.fract_z] as [number, number, number],
+            if_pos: [true, true, true] as [boolean, boolean, boolean],
+          })),
+        };
+      })();
 
     const baseCalculation = {
       calculation: "scf",
       prefix,
       outdir: "./tmp",
       pseudo_dir: pseudoDir,
-      system: {
-        ibrav: "free",
-        celldm: null,
-        cell_parameters: [
-          [crystalData.cell_length_a.value, 0, 0],
-          [
-            crystalData.cell_length_b.value * Math.cos(gammaRadians),
-            crystalData.cell_length_b.value * Math.sin(gammaRadians),
-            0,
-          ],
-          cVector,
-        ],
-        cell_units: "angstrom",
-        species: elements.map((element) => ({
-          symbol: element,
-          mass: ELEMENT_MASSES[element] || 1.0,
-          pseudopotential: selectedPseudos[element],
-        })),
-        atoms: crystalData.atom_sites.map((site) => ({
-          symbol: getBaseElement(site.type_symbol),
-          position: [site.fract_x, site.fract_y, site.fract_z],
-          if_pos: [true, true, true],
-        })),
-        position_units: "crystal",
-        ecutwfc: Number(scfParams.ecutwfc) || 40,
-        ecutrho: Number(scfParams.ecutrho) || 320,
-        nspin: Number(scfParams.nspin) || 1,
-        occupations,
-        smearing,
-        degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
-      },
+      system: systemConfig,
       kpoints: { type: "gamma" },
       conv_thr: Number(scfParams.conv_thr) || 1e-8,
       mixing_beta: Number(scfParams.mixing_beta) || 0.7,

@@ -17,6 +17,9 @@ pub struct AppConfig {
     /// Example: "mpirun" or "srun"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_prefix: Option<String>,
+    /// Optional absolute path to the FermiSurfer executable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fermi_surfer_path: Option<String>,
 }
 
 /// Gets the config file path
@@ -72,5 +75,12 @@ pub fn update_qe_path(app: &AppHandle, path: Option<String>) -> Result<(), Strin
 pub fn update_execution_prefix(app: &AppHandle, prefix: Option<String>) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.execution_prefix = prefix;
+    save_config(app, &config)
+}
+
+/// Updates the FermiSurfer executable path and saves
+pub fn update_fermi_surfer_path(app: &AppHandle, path: Option<String>) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.fermi_surfer_path = path;
     save_config(app, &config)
 }
