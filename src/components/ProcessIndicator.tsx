@@ -7,7 +7,7 @@ interface ProcessIndicatorProps {
 }
 
 export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
-  const { activeTasks, cancelTask, dismissTask } = useTaskContext();
+  const { activeTasks, cancelTask, dismissTask, queueSummary } = useTaskContext();
   const [confirmingCancel, setConfirmingCancel] = useState<string | null>(null);
 
   // Show the most relevant task: prefer running, then most recent non-running
@@ -59,6 +59,11 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
         <div className="process-indicator-header">
           <span className="process-indicator-type">{typeLabel}</span>
           <span className="process-indicator-label">{task.label}</span>
+          {queueSummary.total > 0 && queueSummary.activeIndex !== null && (
+            <span className="process-indicator-queue">
+              {queueSummary.activeIndex} of {queueSummary.total} in queue
+            </span>
+          )}
           {isRunning && (
             <ElapsedTimer
               startedAt={task.startedAt}

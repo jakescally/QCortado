@@ -4,9 +4,20 @@
 //! Projects are stored in the app data directory.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
+
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 use crate::qe::{read_phonon_dispersion_file, read_phonon_dos_file, QEResult};
 
@@ -90,6 +101,61 @@ pub struct CifData {
     pub crystal_data: serde_json::Value,
 }
 
+/// Metadata returned after exporting a project archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectArchiveExportResult {
+    pub archive_path: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub archive_size_bytes: u64,
+}
+
+/// Progress payload emitted during archive export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectArchiveExportProgress {
+    pub export_id: String,
+    pub project_id: String,
+    pub phase: String,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+    pub progress_percent: f64,
+}
+
+/// Progress payload emitted during archive import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectArchiveImportProgress {
+    pub import_id: String,
+    pub phase: String,
+    pub processed_bytes: u64,
+    pub total_bytes: u64,
+    pub progress_percent: f64,
+}
+
+/// Metadata returned after importing a project archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectArchiveImportResult {
+    pub project_id: String,
+    pub project_name: String,
+    pub imported_with_new_id: bool,
+}
+
+const PROJECT_ARCHIVE_MAGIC: &[u8; 7] = b"QCPROJ1";
+const PROJECT_ARCHIVE_VERSION: u32 = 2;
+const ARCHIVE_ENTRY_DIR: u8 = 0;
+const ARCHIVE_ENTRY_FILE: u8 = 1;
+const ARCHIVE_ENTRY_END: u8 = 255;
+const ARCHIVE_FILE_COMPRESSION_NONE: u8 = 0;
+const ARCHIVE_FILE_COMPRESSION_GZIP: u8 = 1;
+const EXPORT_PROGRESS_EMIT_INTERVAL_MS: u64 = 200;
+const EXPORT_PROGRESS_EMIT_BYTES: u64 = 8 * 1024 * 1024;
+const IMPORT_PROGRESS_EMIT_INTERVAL_MS: u64 = 200;
+const IMPORT_PROGRESS_EMIT_BYTES: u64 = 8 * 1024 * 1024;
+const EXPORT_COPY_BUFFER_SIZE: usize = 256 * 1024;
+const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
+const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
+
+static EXPORT_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -111,6 +177,687 @@ pub fn ensure_projects_dir(app: &AppHandle) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to create projects directory: {}", e))?;
     }
     Ok(projects_dir)
+}
+
+fn export_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    EXPORT_CANCEL_FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_project_export_cancel_flag(export_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Ok(mut guard) = export_cancel_flags().lock() {
+        guard.insert(export_id.to_string(), flag.clone());
+    }
+    flag
+}
+
+fn unregister_project_export_cancel_flag(export_id: &str) {
+    if let Ok(mut guard) = export_cancel_flags().lock() {
+        guard.remove(export_id);
+    }
+}
+
+fn request_project_export_cancel(export_id: &str) -> bool {
+    if let Ok(guard) = export_cancel_flags().lock() {
+        if let Some(flag) = guard.get(export_id) {
+            flag.store(true, Ordering::Relaxed);
+            return true;
+        }
+    }
+    false
+}
+
+fn export_compression_threads() -> u32 {
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let target = ((available * 8) + 9) / 10;
+    target.max(1).min(available) as u32
+}
+
+fn emit_project_export_progress(
+    app: &AppHandle,
+    export_id: &str,
+    project_id: &str,
+    phase: &str,
+    processed_bytes: u64,
+    total_bytes: u64,
+) {
+    let progress_percent = if total_bytes == 0 {
+        if phase == "done" {
+            100.0
+        } else {
+            0.0
+        }
+    } else {
+        ((processed_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+    };
+
+    let payload = ProjectArchiveExportProgress {
+        export_id: export_id.to_string(),
+        project_id: project_id.to_string(),
+        phase: phase.to_string(),
+        processed_bytes,
+        total_bytes,
+        progress_percent,
+    };
+
+    let _ = app.emit("project-export-progress", payload);
+}
+
+fn emit_project_import_progress(
+    app: &AppHandle,
+    import_id: &str,
+    phase: &str,
+    processed_bytes: u64,
+    total_bytes: u64,
+) {
+    let progress_percent = if total_bytes == 0 {
+        if phase == "done" {
+            100.0
+        } else {
+            0.0
+        }
+    } else {
+        ((processed_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
+    };
+
+    let payload = ProjectArchiveImportProgress {
+        import_id: import_id.to_string(),
+        phase: phase.to_string(),
+        processed_bytes,
+        total_bytes,
+        progress_percent,
+    };
+
+    let _ = app.emit("project-import-progress", payload);
+}
+
+fn write_u32_le<W: Write>(writer: &mut W, value: u32) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|e| format!("Failed to write archive u32: {}", e))
+}
+
+fn write_u64_le<W: Write>(writer: &mut W, value: u64) -> Result<(), String> {
+    writer
+        .write_all(&value.to_le_bytes())
+        .map_err(|e| format!("Failed to write archive u64: {}", e))
+}
+
+fn read_u32_le<R: Read>(reader: &mut R) -> Result<u32, String> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("Failed to read archive u32: {}", e))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_le<R: Read>(reader: &mut R) -> Result<u64, String> {
+    let mut bytes = [0_u8; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("Failed to read archive u64: {}", e))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn relative_path_to_archive_key(path: &Path) -> Result<String, String> {
+    use std::path::Component;
+
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let text = part
+                    .to_str()
+                    .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))?;
+                if text.is_empty() {
+                    return Err("Archive path contains an empty segment".to_string());
+                }
+                parts.push(text);
+            }
+            Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "Archive path contains unsupported segment: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err("Archive path cannot be empty".to_string());
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn archive_key_to_relative_path(raw: &str) -> Result<PathBuf, String> {
+    if raw.trim().is_empty() {
+        return Err("Archive entry path is empty".to_string());
+    }
+
+    let mut path = PathBuf::new();
+    for part in raw.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(format!("Archive entry has invalid path segment: {}", raw));
+        }
+        path.push(part);
+    }
+
+    if path.as_os_str().is_empty() {
+        return Err("Archive entry path resolved to empty".to_string());
+    }
+
+    Ok(path)
+}
+
+fn write_archive_path<W: Write>(writer: &mut W, relative_path: &Path) -> Result<(), String> {
+    let key = relative_path_to_archive_key(relative_path)?;
+    let key_bytes = key.as_bytes();
+    if key_bytes.len() > u32::MAX as usize {
+        return Err(format!(
+            "Archive entry path is too long: {}",
+            relative_path.display()
+        ));
+    }
+
+    write_u32_le(writer, key_bytes.len() as u32)?;
+    writer
+        .write_all(key_bytes)
+        .map_err(|e| format!("Failed to write archive path '{}': {}", key, e))
+}
+
+fn read_archive_path<R: Read>(reader: &mut R) -> Result<PathBuf, String> {
+    let path_len = read_u32_le(reader)? as usize;
+    if path_len == 0 {
+        return Err("Archive entry path length is zero".to_string());
+    }
+
+    let mut path_bytes = vec![0_u8; path_len];
+    reader
+        .read_exact(&mut path_bytes)
+        .map_err(|e| format!("Failed to read archive path: {}", e))?;
+
+    let path_key = String::from_utf8(path_bytes)
+        .map_err(|e| format!("Archive path is not valid UTF-8: {}", e))?;
+    archive_key_to_relative_path(&path_key)
+}
+
+fn write_archive_header<W: Write>(writer: &mut W) -> Result<(), String> {
+    writer
+        .write_all(PROJECT_ARCHIVE_MAGIC)
+        .map_err(|e| format!("Failed to write archive header: {}", e))?;
+    write_u32_le(writer, PROJECT_ARCHIVE_VERSION)
+}
+
+fn read_archive_header<R: Read>(reader: &mut R) -> Result<u32, String> {
+    let mut magic = [0_u8; PROJECT_ARCHIVE_MAGIC.len()];
+    reader
+        .read_exact(&mut magic)
+        .map_err(|e| format!("Failed to read archive header: {}", e))?;
+    if &magic != PROJECT_ARCHIVE_MAGIC {
+        return Err("Invalid project archive signature".to_string());
+    }
+
+    let version = read_u32_le(reader)?;
+    if version != 1 && version != 2 {
+        return Err(format!(
+            "Unsupported archive version: {} (supported: 1, 2)",
+            version
+        ));
+    }
+    Ok(version)
+}
+
+fn write_archive_dir_entry<W: Write>(writer: &mut W, relative_path: &Path) -> Result<(), String> {
+    writer
+        .write_all(&[ARCHIVE_ENTRY_DIR])
+        .map_err(|e| format!("Failed to write archive directory marker: {}", e))?;
+    write_archive_path(writer, relative_path)
+}
+
+struct CountingReader<R: Read> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<R: Read> CountingReader<R> {
+    fn new(inner: R, bytes_read: Arc<AtomicU64>) -> Self {
+        Self { inner, bytes_read }
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buf)?;
+        if count > 0 {
+            self.bytes_read.fetch_add(count as u64, Ordering::Relaxed);
+        }
+        Ok(count)
+    }
+}
+
+fn copy_reader_to_writer_with_progress<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    expected_size: u64,
+    on_progress: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<u64, String> {
+    let mut copied_bytes = 0_u64;
+    let mut buffer = [0_u8; EXPORT_COPY_BUFFER_SIZE];
+
+    loop {
+        let read_count = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed reading archive source data: {}", e))?;
+        if read_count == 0 {
+            break;
+        }
+
+        writer
+            .write_all(&buffer[..read_count])
+            .map_err(|e| format!("Failed writing archive data: {}", e))?;
+        copied_bytes = copied_bytes.saturating_add(read_count as u64);
+        on_progress(read_count as u64)?;
+    }
+
+    if copied_bytes != expected_size {
+        return Err(format!(
+            "Copy size mismatch while writing archive data (expected {}, copied {})",
+            expected_size, copied_bytes
+        ));
+    }
+
+    Ok(copied_bytes)
+}
+
+#[derive(Debug, Clone)]
+struct PreparedArchiveFile {
+    relative_path: PathBuf,
+    source_path: PathBuf,
+    original_size: u64,
+    compressed_temp_path: PathBuf,
+    compressed_size: u64,
+}
+
+fn collect_project_entries(
+    source_root: &Path,
+    current_dir: &Path,
+    dirs: &mut Vec<PathBuf>,
+    files: &mut Vec<(PathBuf, PathBuf, u64)>,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(current_dir)
+        .map_err(|e| format!("Failed to read directory {}: {}", current_dir.display(), e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+        let relative_path = path
+            .strip_prefix(source_root)
+            .map_err(|e| format!("Failed to compute archive path {}: {}", path.display(), e))?
+            .to_path_buf();
+
+        if file_type.is_dir() {
+            dirs.push(relative_path);
+            collect_project_entries(source_root, &path, dirs, files)?;
+        } else if file_type.is_file() {
+            let original_size = entry
+                .metadata()
+                .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?
+                .len();
+            files.push((relative_path, path, original_size));
+        } else if file_type.is_symlink() {
+            return Err(format!(
+                "Project archive does not support symbolic links: {}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn compress_file_to_gzip(
+    source_path: &Path,
+    destination_path: &Path,
+    cancel_flag: &AtomicBool,
+    progress_tx: &mpsc::Sender<u64>,
+) -> Result<u64, String> {
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+    }
+
+    let source_file = fs::File::open(source_path)
+        .map_err(|e| format!("Failed to open {}: {}", source_path.display(), e))?;
+    let destination_file = fs::File::create(destination_path)
+        .map_err(|e| format!("Failed to create {}: {}", destination_path.display(), e))?;
+
+    let mut reader = BufReader::new(source_file);
+    let writer = BufWriter::new(destination_file);
+    let mut encoder = GzEncoder::new(writer, Compression::fast());
+
+    let mut buffer = [0_u8; EXPORT_COPY_BUFFER_SIZE];
+    let mut pending_progress = 0_u64;
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+        }
+
+        let read_count = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read {}: {}", source_path.display(), e))?;
+        if read_count == 0 {
+            break;
+        }
+
+        encoder
+            .write_all(&buffer[..read_count])
+            .map_err(|e| format!("Failed to compress {}: {}", source_path.display(), e))?;
+        pending_progress = pending_progress.saturating_add(read_count as u64);
+        if pending_progress >= EXPORT_PROGRESS_EMIT_BYTES / 4 {
+            let _ = progress_tx.send(pending_progress);
+            pending_progress = 0;
+        }
+    }
+
+    if pending_progress > 0 {
+        let _ = progress_tx.send(pending_progress);
+    }
+
+    let mut writer = encoder.finish().map_err(|e| {
+        format!(
+            "Failed to finalize compression for {}: {}",
+            source_path.display(),
+            e
+        )
+    })?;
+    writer.flush().map_err(|e| {
+        format!(
+            "Failed to flush compressed file {}: {}",
+            destination_path.display(),
+            e
+        )
+    })?;
+    drop(writer);
+
+    let compressed_size = fs::metadata(destination_path)
+        .map_err(|e| {
+            format!(
+                "Failed to read metadata for {}: {}",
+                destination_path.display(),
+                e
+            )
+        })?
+        .len();
+    Ok(compressed_size)
+}
+
+fn read_archive_entry_type<R: Read>(reader: &mut R) -> Result<u8, String> {
+    let mut kind = [0_u8; 1];
+    reader.read_exact(&mut kind).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            "Archive ended unexpectedly before end marker".to_string()
+        } else {
+            format!("Failed to read archive entry marker: {}", e)
+        }
+    })?;
+    Ok(kind[0])
+}
+
+fn extract_archive_file_to_path<R: Read>(
+    reader: &mut R,
+    destination_path: &Path,
+    byte_count: u64,
+    on_progress: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+    }
+
+    let output_file = fs::File::create(destination_path)
+        .map_err(|e| format!("Failed to create {}: {}", destination_path.display(), e))?;
+    let mut writer = BufWriter::new(output_file);
+
+    let mut limited_reader = reader.take(byte_count);
+    let mut emit_progress = |_delta: u64| on_progress();
+    copy_reader_to_writer_with_progress(
+        &mut limited_reader,
+        &mut writer,
+        byte_count,
+        &mut emit_progress,
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to extract {} from archive: {}",
+            destination_path.display(),
+            e
+        )
+    })?;
+    writer
+        .flush()
+        .map_err(|e| format!("Failed to flush {}: {}", destination_path.display(), e))?;
+    on_progress()?;
+
+    Ok(())
+}
+
+fn extract_gzip_archive_file_to_path<R: Read>(
+    reader: &mut R,
+    destination_path: &Path,
+    compressed_bytes: u64,
+    expected_size: u64,
+    on_progress: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+    }
+
+    let output_file = fs::File::create(destination_path)
+        .map_err(|e| format!("Failed to create {}: {}", destination_path.display(), e))?;
+    let mut writer = BufWriter::new(output_file);
+
+    let mut limited_reader = reader.take(compressed_bytes);
+    let mut decoder = GzDecoder::new(&mut limited_reader);
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; EXPORT_COPY_BUFFER_SIZE];
+    loop {
+        let read_count = decoder.read(&mut buffer).map_err(|e| {
+            format!(
+                "Failed to extract gzip payload for {}: {}",
+                destination_path.display(),
+                e
+            )
+        })?;
+        if read_count == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read_count])
+            .map_err(|e| format!("Failed to write {}: {}", destination_path.display(), e))?;
+        copied = copied.saturating_add(read_count as u64);
+        on_progress()?;
+    }
+    drop(decoder);
+
+    // Ensure the source stream advances exactly by the declared payload size.
+    if limited_reader.limit() > 0 {
+        let mut drain_buffer = [0_u8; EXPORT_COPY_BUFFER_SIZE];
+        while limited_reader.limit() > 0 {
+            let read_count = limited_reader
+                .read(&mut drain_buffer)
+                .map_err(|e| format!("Failed to finalize archive payload stream: {}", e))?;
+            if read_count == 0 {
+                break;
+            }
+            on_progress()?;
+        }
+    }
+    if limited_reader.limit() != 0 {
+        return Err(format!(
+            "Archive is truncated while reading compressed payload for {}",
+            destination_path.display()
+        ));
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("Failed to flush {}: {}", destination_path.display(), e))?;
+
+    if copied != expected_size {
+        return Err(format!(
+            "Archive payload size mismatch for {} (expected {}, got {})",
+            destination_path.display(),
+            expected_size,
+            copied
+        ));
+    }
+    on_progress()?;
+
+    Ok(())
+}
+
+fn extract_project_archive_to_directory(
+    archive_path: &Path,
+    destination_dir: &Path,
+    on_progress: &mut dyn FnMut(u64, u64) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut archive_file = fs::File::open(archive_path)
+        .map_err(|e| format!("Failed to open archive {}: {}", archive_path.display(), e))?;
+    let archive_total_bytes = archive_file
+        .metadata()
+        .map_err(|e| format!("Failed to read archive metadata {}: {}", archive_path.display(), e))?
+        .len();
+    let mut magic = [0_u8; 4];
+    let read_count = archive_file
+        .read(&mut magic)
+        .map_err(|e| format!("Failed to inspect archive header: {}", e))?;
+    archive_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| format!("Failed to rewind archive stream: {}", e))?;
+
+    let read_counter = Arc::new(AtomicU64::new(0));
+    let counting_reader = CountingReader::new(archive_file, Arc::clone(&read_counter));
+    let mut decoder: Box<dyn Read> =
+        if read_count >= GZIP_MAGIC_PREFIX.len() && magic[..2] == GZIP_MAGIC_PREFIX {
+            Box::new(GzDecoder::new(BufReader::new(counting_reader)))
+        } else {
+            Box::new(BufReader::new(counting_reader))
+        };
+    let mut emit_stream_progress = || {
+        let processed = read_counter.load(Ordering::Relaxed).min(archive_total_bytes);
+        on_progress(processed, archive_total_bytes)
+    };
+    emit_stream_progress()?;
+
+    let archive_version = read_archive_header(&mut decoder)?;
+    emit_stream_progress()?;
+
+    loop {
+        let entry_kind = read_archive_entry_type(&mut decoder)?;
+        emit_stream_progress()?;
+        if entry_kind == ARCHIVE_ENTRY_END {
+            break;
+        }
+
+        let relative_path = read_archive_path(&mut decoder)?;
+        emit_stream_progress()?;
+        let output_path = destination_dir.join(&relative_path);
+        if !output_path.starts_with(destination_dir) {
+            return Err(format!(
+                "Archive entry escaped destination directory: {}",
+                relative_path.display()
+            ));
+        }
+
+        match entry_kind {
+            ARCHIVE_ENTRY_DIR => {
+                fs::create_dir_all(&output_path).map_err(|e| {
+                    format!(
+                        "Failed to create directory {}: {}",
+                        output_path.display(),
+                        e
+                    )
+                })?;
+                emit_stream_progress()?;
+            }
+            ARCHIVE_ENTRY_FILE => {
+                if archive_version == 1 {
+                    let file_size = read_u64_le(&mut decoder)?;
+                    extract_archive_file_to_path(
+                        &mut decoder,
+                        &output_path,
+                        file_size,
+                        &mut emit_stream_progress,
+                    )?;
+                } else {
+                    let mut compression_method = [0_u8; 1];
+                    decoder
+                        .read_exact(&mut compression_method)
+                        .map_err(|e| format!("Failed to read archive compression method: {}", e))?;
+                    let original_size = read_u64_le(&mut decoder)?;
+                    let payload_size = read_u64_le(&mut decoder)?;
+                    emit_stream_progress()?;
+
+                    match compression_method[0] {
+                        ARCHIVE_FILE_COMPRESSION_NONE => {
+                            extract_archive_file_to_path(
+                                &mut decoder,
+                                &output_path,
+                                payload_size,
+                                &mut emit_stream_progress,
+                            )?;
+                            let actual_size = fs::metadata(&output_path)
+                                .map_err(|e| {
+                                    format!(
+                                        "Failed to read metadata for {}: {}",
+                                        output_path.display(),
+                                        e
+                                    )
+                                })?
+                                .len();
+                            if actual_size != original_size {
+                                return Err(format!(
+                                    "Archive payload size mismatch for {} (expected {}, got {})",
+                                    output_path.display(),
+                                    original_size,
+                                    actual_size
+                                ));
+                            }
+                        }
+                        ARCHIVE_FILE_COMPRESSION_GZIP => {
+                            extract_gzip_archive_file_to_path(
+                                &mut decoder,
+                                &output_path,
+                                payload_size,
+                                original_size,
+                                &mut emit_stream_progress,
+                            )?;
+                        }
+                        other => {
+                            return Err(format!(
+                                "Unsupported file compression method in archive: {}",
+                                other
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return Err(format!("Unsupported archive entry type: {}", entry_kind));
+            }
+        }
+    }
+    emit_stream_progress()?;
+
+    Ok(())
 }
 
 /// Recursively computes the total size of regular files inside a directory.
@@ -138,9 +885,13 @@ fn calculate_directory_size(path: &Path) -> Result<u64, String> {
             continue;
         }
         if file_type.is_file() {
-            let metadata = entry
-                .metadata()
-                .map_err(|e| format!("Failed to read metadata for {}: {}", entry_path.display(), e))?;
+            let metadata = entry.metadata().map_err(|e| {
+                format!(
+                    "Failed to read metadata for {}: {}",
+                    entry_path.display(),
+                    e
+                )
+            })?;
             total = total.saturating_add(metadata.len());
         }
     }
@@ -149,7 +900,10 @@ fn calculate_directory_size(path: &Path) -> Result<u64, String> {
 }
 
 /// Fills missing `storage_bytes` values for legacy calculations.
-fn hydrate_missing_calculation_sizes(project: &mut Project, project_dir: &Path) -> Result<bool, String> {
+fn hydrate_missing_calculation_sizes(
+    project: &mut Project,
+    project_dir: &Path,
+) -> Result<bool, String> {
     let mut changed = false;
 
     for variant in &mut project.cif_variants {
@@ -364,8 +1118,8 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let content = fs::read_to_string(&project_json)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
 
-    let mut project: Project =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
     if hydrate_missing_calculation_sizes(&mut project, &project_dir)? {
         let updated_project = serde_json::to_string_pretty(&project)
@@ -567,8 +1321,18 @@ pub fn save_calculation(
 
 /// Recursively copies a directory
 fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
+    let mut no_progress = |_delta: u64| Ok(());
+    copy_dir_recursive_with_progress(src.as_path(), dst.as_path(), &mut no_progress)
+}
+
+fn copy_dir_recursive_with_progress(
+    src: &Path,
+    dst: &Path,
+    on_progress: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
     if !dst.exists() {
-        fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory {}: {}", dst.display(), e))?;
     }
 
     for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -577,9 +1341,16 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
         let dest_path = dst.join(entry.file_name());
 
         if path.is_dir() {
-            copy_dir_recursive(&path, &dest_path)?;
-        } else {
-            fs::copy(&path, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
+            copy_dir_recursive_with_progress(&path, &dest_path, on_progress)?;
+        } else if path.is_file() {
+            let copied = fs::copy(&path, &dest_path)
+                .map_err(|e| format!("Failed to copy {}: {}", path.display(), e))?;
+            on_progress(copied)?;
+        } else if path.is_symlink() {
+            return Err(format!(
+                "Copy operation does not support symbolic links: {}",
+                path.display()
+            ));
         }
     }
 
@@ -915,6 +1686,538 @@ pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> 
     fs::remove_dir_all(&project_dir).map_err(|e| format!("Failed to delete project: {}", e))?;
 
     Ok(())
+}
+
+/// Exports a project directory into a compressed `.qcproj` archive.
+#[tauri::command]
+pub async fn export_project_archive(
+    app: AppHandle,
+    project_id: String,
+    destination_path: String,
+    export_id: String,
+) -> Result<ProjectArchiveExportResult, String> {
+    let cancel_flag = register_project_export_cancel_flag(&export_id);
+    let app_handle = app.clone();
+    let export_id_for_cleanup = export_id.clone();
+
+    let join_result = tauri::async_runtime::spawn_blocking(move || {
+        let projects_dir = ensure_projects_dir(&app_handle)?;
+        let project_dir = projects_dir.join(&project_id);
+        if !project_dir.exists() || !project_dir.is_dir() {
+            return Err(format!("Project not found: {}", project_id));
+        }
+
+        let destination = PathBuf::from(&destination_path);
+        let destination_parent = destination
+            .parent()
+            .ok_or_else(|| format!("Invalid destination path: {}", destination.display()))?;
+        if !destination_parent.exists() {
+            return Err(format!(
+                "Destination directory does not exist: {}",
+                destination_parent.display()
+            ));
+        }
+
+        let project_json_path = project_dir.join("project.json");
+        let project_json = fs::read_to_string(&project_json_path)
+            .map_err(|e| format!("Failed to read project.json: {}", e))?;
+        let project: Project = serde_json::from_str(&project_json)
+            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+        emit_project_export_progress(&app_handle, &export_id, &project_id, "scanning", 0, 0);
+        let compression_temp_root =
+            std::env::temp_dir().join(format!("qcortado_export_compress_{}", generate_id()));
+        fs::create_dir_all(&compression_temp_root).map_err(|e| {
+            format!(
+                "Failed to create temporary compression directory {}: {}",
+                compression_temp_root.display(),
+                e
+            )
+        })?;
+
+        let export_attempt = (|| -> Result<ProjectArchiveExportResult, String> {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+            }
+
+            let mut dir_entries: Vec<PathBuf> = Vec::new();
+            let mut source_files: Vec<(PathBuf, PathBuf, u64)> = Vec::new();
+            collect_project_entries(
+                &project_dir,
+                &project_dir,
+                &mut dir_entries,
+                &mut source_files,
+            )?;
+
+            let total_bytes = source_files
+                .iter()
+                .fold(0_u64, |acc, (_, _, size)| acc.saturating_add(*size));
+            emit_project_export_progress(
+                &app_handle,
+                &export_id,
+                &project_id,
+                "compressing",
+                0,
+                total_bytes,
+            );
+
+            let mut prepared_files: Vec<PreparedArchiveFile> = source_files
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(idx, (relative_path, source_path, original_size))| PreparedArchiveFile {
+                        relative_path,
+                        source_path,
+                        original_size,
+                        compressed_temp_path: compression_temp_root.join(format!("{:08}.gz", idx)),
+                        compressed_size: 0,
+                    },
+                )
+                .collect();
+
+            if !prepared_files.is_empty() {
+                let thread_count = (export_compression_threads() as usize)
+                    .max(1)
+                    .min(prepared_files.len());
+                let jobs: VecDeque<(usize, PathBuf, PathBuf)> = prepared_files
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, file)| {
+                        (
+                            idx,
+                            file.source_path.clone(),
+                            file.compressed_temp_path.clone(),
+                        )
+                    })
+                    .collect();
+                let jobs = Arc::new(Mutex::new(jobs));
+
+                let (result_tx, result_rx) = mpsc::channel::<(usize, Result<u64, String>)>();
+                let (worker_done_tx, worker_done_rx) = mpsc::channel::<()>();
+                let (progress_tx, progress_rx) = mpsc::channel::<u64>();
+                let mut worker_handles = Vec::with_capacity(thread_count);
+
+                for _ in 0..thread_count {
+                    let jobs = Arc::clone(&jobs);
+                    let result_tx = result_tx.clone();
+                    let worker_done_tx = worker_done_tx.clone();
+                    let progress_tx = progress_tx.clone();
+                    let cancel_flag = Arc::clone(&cancel_flag);
+                    worker_handles.push(std::thread::spawn(move || {
+                        loop {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                break;
+                            }
+
+                            let next_job = match jobs.lock() {
+                                Ok(mut guard) => guard.pop_front(),
+                                Err(_) => {
+                                    let _ = result_tx.send((
+                                        usize::MAX,
+                                        Err("Export worker queue failed due to a poisoned lock."
+                                            .to_string()),
+                                    ));
+                                    cancel_flag.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            };
+
+                            let Some((index, source_path, temp_path)) = next_job else {
+                                break;
+                            };
+
+                            let result = compress_file_to_gzip(
+                                &source_path,
+                                &temp_path,
+                                cancel_flag.as_ref(),
+                                &progress_tx,
+                            );
+                            if result.is_err() {
+                                cancel_flag.store(true, Ordering::Relaxed);
+                            }
+                            let _ = result_tx.send((index, result));
+                        }
+
+                        let _ = worker_done_tx.send(());
+                    }));
+                }
+                drop(result_tx);
+                drop(worker_done_tx);
+                drop(progress_tx);
+
+                let mut first_error: Option<String> = None;
+                let mut processed_bytes = 0_u64;
+                let mut last_emitted_bytes = 0_u64;
+                let mut last_emit_time = Instant::now();
+                let mut completed_workers = 0_usize;
+
+                while completed_workers < thread_count {
+                    while let Ok((index, result)) = result_rx.try_recv() {
+                        match result {
+                            Ok(compressed_size) => {
+                                if let Some(entry) = prepared_files.get_mut(index) {
+                                    entry.compressed_size = compressed_size;
+                                }
+                            }
+                            Err(err) => {
+                                if first_error.is_none() {
+                                    first_error = Some(err);
+                                }
+                                cancel_flag.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    while let Ok(delta) = progress_rx.try_recv() {
+                        processed_bytes = processed_bytes.saturating_add(delta);
+                    }
+
+                    let should_emit = processed_bytes == total_bytes
+                        || processed_bytes.saturating_sub(last_emitted_bytes)
+                            >= EXPORT_PROGRESS_EMIT_BYTES
+                        || last_emit_time.elapsed()
+                            >= Duration::from_millis(EXPORT_PROGRESS_EMIT_INTERVAL_MS);
+                    if should_emit {
+                        last_emitted_bytes = processed_bytes;
+                        last_emit_time = Instant::now();
+                        emit_project_export_progress(
+                            &app_handle,
+                            &export_id,
+                            &project_id,
+                            "compressing",
+                            processed_bytes,
+                            total_bytes,
+                        );
+                    }
+
+                    match worker_done_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(_) => completed_workers += 1,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+
+                while let Ok((index, result)) = result_rx.try_recv() {
+                    match result {
+                        Ok(compressed_size) => {
+                            if let Some(entry) = prepared_files.get_mut(index) {
+                                entry.compressed_size = compressed_size;
+                            }
+                        }
+                        Err(err) => {
+                            if first_error.is_none() {
+                                first_error = Some(err);
+                            }
+                        }
+                    }
+                }
+
+                while let Ok(delta) = progress_rx.try_recv() {
+                    processed_bytes = processed_bytes.saturating_add(delta);
+                }
+
+                emit_project_export_progress(
+                    &app_handle,
+                    &export_id,
+                    &project_id,
+                    "compressing",
+                    processed_bytes.min(total_bytes),
+                    total_bytes,
+                );
+
+                for handle in worker_handles {
+                    handle
+                        .join()
+                        .map_err(|_| "Export worker thread panicked".to_string())?;
+                }
+
+                if let Some(err) = first_error {
+                    return Err(err);
+                }
+
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+                }
+            }
+
+            emit_project_export_progress(
+                &app_handle,
+                &export_id,
+                &project_id,
+                "finalizing",
+                total_bytes,
+                total_bytes,
+            );
+
+            let archive_file = fs::File::create(&destination).map_err(|e| {
+                format!("Failed to create archive {}: {}", destination.display(), e)
+            })?;
+            let mut writer = BufWriter::new(archive_file);
+
+            write_archive_header(&mut writer)?;
+            for relative_path in &dir_entries {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+                }
+                write_archive_dir_entry(&mut writer, relative_path)?;
+            }
+
+            for file in &prepared_files {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+                }
+
+                writer
+                    .write_all(&[ARCHIVE_ENTRY_FILE])
+                    .map_err(|e| format!("Failed to write archive file marker: {}", e))?;
+                write_archive_path(&mut writer, &file.relative_path)?;
+                writer
+                    .write_all(&[ARCHIVE_FILE_COMPRESSION_GZIP])
+                    .map_err(|e| format!("Failed to write archive compression method: {}", e))?;
+                write_u64_le(&mut writer, file.original_size)?;
+                write_u64_le(&mut writer, file.compressed_size)?;
+
+                let compressed_file = fs::File::open(&file.compressed_temp_path).map_err(|e| {
+                    format!(
+                        "Failed to open temporary compressed file {}: {}",
+                        file.compressed_temp_path.display(),
+                        e
+                    )
+                })?;
+                let mut compressed_reader = BufReader::new(compressed_file);
+                let mut cancellation_check = |_delta: u64| -> Result<(), String> {
+                    if cancel_flag.load(Ordering::Relaxed) {
+                        return Err(EXPORT_CANCELLED_SENTINEL.to_string());
+                    }
+                    Ok(())
+                };
+                copy_reader_to_writer_with_progress(
+                    &mut compressed_reader,
+                    &mut writer,
+                    file.compressed_size,
+                    &mut cancellation_check,
+                )?;
+            }
+
+            writer
+                .write_all(&[ARCHIVE_ENTRY_END])
+                .map_err(|e| format!("Failed to finalize archive stream: {}", e))?;
+            writer
+                .flush()
+                .map_err(|e| format!("Failed to flush archive file: {}", e))?;
+            drop(writer);
+
+            let archive_size_bytes = fs::metadata(&destination)
+                .map_err(|e| format!("Failed to read archive metadata: {}", e))?
+                .len();
+            emit_project_export_progress(
+                &app_handle,
+                &export_id,
+                &project_id,
+                "done",
+                total_bytes,
+                total_bytes,
+            );
+
+            Ok(ProjectArchiveExportResult {
+                archive_path: destination.to_string_lossy().to_string(),
+                project_id: project_id.clone(),
+                project_name: project.name,
+                archive_size_bytes,
+            })
+        })();
+
+        let _ = fs::remove_dir_all(&compression_temp_root);
+
+        if let Err(err) = &export_attempt {
+            let _ = fs::remove_file(&destination);
+            if err == EXPORT_CANCELLED_SENTINEL {
+                return Err("Export canceled by user.".to_string());
+            }
+        }
+
+        export_attempt
+    })
+    .await
+    .map_err(|e| format!("Export task failed to join: {}", e));
+
+    unregister_project_export_cancel_flag(&export_id_for_cleanup);
+    join_result?
+}
+
+/// Requests cancellation of an in-flight project export.
+#[tauri::command]
+pub fn cancel_project_export(export_id: String) -> bool {
+    request_project_export_cancel(&export_id)
+}
+
+/// Imports a compressed `.qcproj` archive into the projects directory.
+#[tauri::command]
+pub async fn import_project_archive(
+    app: AppHandle,
+    archive_path: String,
+    import_id: String,
+) -> Result<ProjectArchiveImportResult, String> {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = PathBuf::from(&archive_path);
+        if !archive.exists() || !archive.is_file() {
+            return Err(format!("Archive not found: {}", archive.display()));
+        }
+
+        let archive_total_bytes = archive
+            .metadata()
+            .map_err(|e| format!("Failed to read archive metadata: {}", e))?
+            .len();
+        emit_project_import_progress(&app_handle, &import_id, "extracting", 0, archive_total_bytes);
+
+        let projects_dir = ensure_projects_dir(&app_handle)?;
+        let extraction_dir = std::env::temp_dir().join(format!("qcortado_import_{}", generate_id()));
+        fs::create_dir_all(&extraction_dir).map_err(|e| {
+            format!(
+                "Failed to create temporary import directory {}: {}",
+                extraction_dir.display(),
+                e
+            )
+        })?;
+
+        let result = (|| -> Result<ProjectArchiveImportResult, String> {
+            let mut last_extract_emitted = 0_u64;
+            let mut last_extract_emit_time = Instant::now();
+            extract_project_archive_to_directory(
+                &archive,
+                &extraction_dir,
+                &mut |processed_bytes, total_bytes| {
+                    let processed = processed_bytes.min(total_bytes);
+                    let should_emit = processed == total_bytes
+                        || processed.saturating_sub(last_extract_emitted) >= IMPORT_PROGRESS_EMIT_BYTES
+                        || last_extract_emit_time.elapsed()
+                            >= Duration::from_millis(IMPORT_PROGRESS_EMIT_INTERVAL_MS);
+                    if should_emit {
+                        last_extract_emitted = processed;
+                        last_extract_emit_time = Instant::now();
+                        emit_project_import_progress(
+                            &app_handle,
+                            &import_id,
+                            "extracting",
+                            processed,
+                            total_bytes,
+                        );
+                    }
+                    Ok(())
+                },
+            )?;
+            emit_project_import_progress(
+                &app_handle,
+                &import_id,
+                "extracting",
+                archive_total_bytes,
+                archive_total_bytes,
+            );
+
+            let project_json_path = extraction_dir.join("project.json");
+            if !project_json_path.exists() {
+                return Err(
+                    "Archive does not contain a valid QCortado project (missing project.json)"
+                        .to_string(),
+                );
+            }
+
+            let project_json = fs::read_to_string(&project_json_path)
+                .map_err(|e| format!("Failed to read imported project.json: {}", e))?;
+            let mut project: Project = serde_json::from_str(&project_json)
+                .map_err(|e| format!("Failed to parse imported project.json: {}", e))?;
+
+            let original_id = project.id.trim().to_string();
+            let mut resolved_id = if original_id.is_empty() {
+                generate_id()
+            } else {
+                original_id.clone()
+            };
+            let mut imported_with_new_id = resolved_id != original_id;
+            while projects_dir.join(&resolved_id).exists() {
+                resolved_id = generate_id();
+                imported_with_new_id = true;
+            }
+
+            if project.id != resolved_id {
+                project.id = resolved_id.clone();
+                let updated = serde_json::to_string_pretty(&project)
+                    .map_err(|e| format!("Failed to serialize imported project: {}", e))?;
+                fs::write(&project_json_path, updated)
+                    .map_err(|e| format!("Failed to update imported project.json: {}", e))?;
+            }
+
+            let destination_dir = projects_dir.join(&resolved_id);
+            if destination_dir.exists() {
+                return Err(format!(
+                    "Target project directory already exists: {}",
+                    destination_dir.display()
+                ));
+            }
+
+            let install_total_bytes = calculate_directory_size(&extraction_dir)?;
+            emit_project_import_progress(&app_handle, &import_id, "installing", 0, install_total_bytes);
+
+            let mut installed_bytes = 0_u64;
+            let mut last_install_emitted = 0_u64;
+            let mut last_install_emit_time = Instant::now();
+            let import_copy_result = copy_dir_recursive_with_progress(
+                extraction_dir.as_path(),
+                destination_dir.as_path(),
+                &mut |copied| {
+                    installed_bytes = installed_bytes.saturating_add(copied);
+                    let processed = installed_bytes.min(install_total_bytes);
+                    let should_emit = processed == install_total_bytes
+                        || processed.saturating_sub(last_install_emitted) >= IMPORT_PROGRESS_EMIT_BYTES
+                        || last_install_emit_time.elapsed()
+                            >= Duration::from_millis(IMPORT_PROGRESS_EMIT_INTERVAL_MS);
+                    if should_emit {
+                        last_install_emitted = processed;
+                        last_install_emit_time = Instant::now();
+                        emit_project_import_progress(
+                            &app_handle,
+                            &import_id,
+                            "installing",
+                            processed,
+                            install_total_bytes,
+                        );
+                    }
+                    Ok(())
+                },
+            );
+            if let Err(err) = import_copy_result {
+                let _ = fs::remove_dir_all(&destination_dir);
+                return Err(format!("Failed to copy imported project files: {}", err));
+            }
+
+            emit_project_import_progress(
+                &app_handle,
+                &import_id,
+                "installing",
+                install_total_bytes,
+                install_total_bytes,
+            );
+
+            fs::create_dir_all(destination_dir.join("structures"))
+                .map_err(|e| format!("Failed to ensure structures directory exists: {}", e))?;
+            fs::create_dir_all(destination_dir.join("calculations"))
+                .map_err(|e| format!("Failed to ensure calculations directory exists: {}", e))?;
+
+            emit_project_import_progress(&app_handle, &import_id, "done", 1, 1);
+
+            Ok(ProjectArchiveImportResult {
+                project_id: resolved_id,
+                project_name: project.name,
+                imported_with_new_id,
+            })
+        })();
+
+        let _ = fs::remove_dir_all(&extraction_dir);
+        result
+    })
+    .await
+    .map_err(|e| format!("Import task failed to join: {}", e))?
 }
 
 /// Deletes a calculation from a project

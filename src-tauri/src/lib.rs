@@ -19,10 +19,10 @@ pub mod qe;
 use process_manager::ProcessManager;
 
 use qe::{
-    add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input,
-    generate_ph_input, generate_q2r_input, parse_ph_output, read_phonon_dispersion_file,
-    read_phonon_dos_file, DosCalculation, MatdynCalculation, PhononPipelineConfig, PhononResult,
-    Q2RCalculation, QPathPoint,
+    add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input,
+    generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_ph_output,
+    read_phonon_dispersion_file, read_phonon_dos_file, DosCalculation, MatdynCalculation,
+    PhononPipelineConfig, PhononResult, Q2RCalculation, QPathPoint,
 };
 use qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw_input, parse_dos_file,
@@ -179,6 +179,35 @@ fn temp_roots_for_cleanup() -> Vec<PathBuf> {
     }
 
     roots
+}
+
+fn can_safely_reset_working_dir(work_path: &Path) -> bool {
+    work_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().starts_with("qcortado"))
+        .unwrap_or(false)
+}
+
+fn prepare_working_directory(work_path: &Path, preserve_existing: bool) -> Result<(), String> {
+    if !preserve_existing && work_path.exists() && can_safely_reset_working_dir(work_path) {
+        std::fs::remove_dir_all(work_path).map_err(|e| {
+            format!(
+                "Failed to reset working directory {}: {}",
+                work_path.display(),
+                e
+            )
+        })?;
+    }
+
+    std::fs::create_dir_all(work_path).map_err(|e| {
+        format!(
+            "Failed to create working directory {}: {}",
+            work_path.display(),
+            e
+        )
+    })?;
+    Ok(())
 }
 
 /// Clears QCortado temporary working directories from system temp roots.
@@ -431,9 +460,7 @@ async fn run_calculation(
     let input = generate_pw_input(&calculation);
     let work_path = PathBuf::from(working_dir);
 
-    // Ensure working directory exists
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     runner
         .run_pw(&input, &work_path)
@@ -472,9 +499,7 @@ async fn run_calculation_streaming(
     let input = generate_pw_input(&calculation);
     let work_path = PathBuf::from(&working_dir);
 
-    // Ensure working directory exists
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     let exe_path = bin_dir.join("pw.x");
     if !exe_path.exists() {
@@ -732,9 +757,7 @@ async fn run_bands_calculation(
 
     let work_path = PathBuf::from(&working_dir);
 
-    // Ensure working directory exists
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     // Copy SCF's .save directory if project/calculation IDs are provided
     if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
@@ -1244,9 +1267,8 @@ async fn run_phonon_calculation(
 
     let work_path = PathBuf::from(&working_dir);
 
-    // Ensure working directory exists
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    // Keep existing scratch only when explicit recover mode is enabled.
+    prepare_working_directory(&work_path, config.phonon.recover)?;
 
     let mut full_output = String::new();
 
@@ -1733,7 +1755,10 @@ async fn start_scf_calculation(
 ) -> Result<String, String> {
     // Reject if a task is already running
     if state.process_manager.has_running_tasks().await {
-        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
     }
 
     let bin_dir = {
@@ -1796,8 +1821,7 @@ async fn run_scf_background(
     let input = generate_pw_input(&calculation);
     let work_path = PathBuf::from(&working_dir);
 
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     let exe_path = bin_dir.join("pw.x");
     if !exe_path.exists() {
@@ -1891,7 +1915,10 @@ async fn start_bands_calculation(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     if state.process_manager.has_running_tasks().await {
-        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
     }
 
     let bin_dir = {
@@ -1952,8 +1979,7 @@ async fn run_bands_background(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let work_path = PathBuf::from(&working_dir);
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     // Helper to emit output to both the task event and the output buffer
     macro_rules! emit_line {
@@ -1995,7 +2021,10 @@ async fn run_bands_background(
             emit_line!("SCF data copied successfully.".to_string());
             let copied_save = work_path.join("qcortado_scf.save");
             if copied_save.exists() {
-                emit_line!(format!("Verified .save in working dir: {}", copied_save.display()));
+                emit_line!(format!(
+                    "Verified .save in working dir: {}",
+                    copied_save.display()
+                ));
             } else {
                 emit_line!("WARNING: .save not found in working dir after copy!".to_string());
             }
@@ -2048,13 +2077,25 @@ async fn run_bands_background(
     for (i, point) in config.k_path.iter().enumerate() {
         emit_line!(format!(
             "  {}: {} ({:.4}, {:.4}, {:.4}) -> {} points to next",
-            i + 1, point.label, point.coords[0], point.coords[1], point.coords[2], point.npoints
+            i + 1,
+            point.label,
+            point.coords[0],
+            point.coords[1],
+            point.coords[2],
+            point.npoints
         ));
     }
 
-    let projections_enabled = config.projections.as_ref().map(|p| p.enabled).unwrap_or(false);
+    let projections_enabled = config
+        .projections
+        .as_ref()
+        .map(|p| p.enabled)
+        .unwrap_or(false);
     let total_steps = if projections_enabled { 3 } else { 2 };
-    emit_line!(format!("Step 1/{}: Running NSCF calculation along k-path...", total_steps));
+    emit_line!(format!(
+        "Step 1/{}: Running NSCF calculation along k-path...",
+        total_steps
+    ));
 
     let exe_path = bin_dir.join("pw.x");
     if !exe_path.exists() {
@@ -2097,7 +2138,10 @@ async fn run_bands_background(
     }
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes()).await.map_err(|e| format!("Failed to write input: {}", e))?;
+        stdin
+            .write_all(input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write input: {}", e))?;
     }
 
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
@@ -2133,12 +2177,17 @@ async fn run_bands_background(
         .map_err(|e| format!("Failed to write output file: {}", e))?;
 
     emit_line!("".to_string());
-    emit_line!(format!("Step 2/{}: Running bands.x post-processing...", total_steps));
+    emit_line!(format!(
+        "Step 2/{}: Running bands.x post-processing...",
+        total_steps
+    ));
 
     // Step 2: bands.x
     let bands_x_path = bin_dir.join("bands.x");
     if !bands_x_path.exists() {
-        return Err("bands.x not found. Make sure your QE installation includes bands.x".to_string());
+        return Err(
+            "bands.x not found. Make sure your QE installation includes bands.x".to_string(),
+        );
     }
 
     let bands_x_config = BandsXConfig {
@@ -2164,10 +2213,16 @@ async fn run_bands_background(
     }
 
     if let Some(mut stdin) = bands_child.stdin.take() {
-        stdin.write_all(bands_x_input.as_bytes()).await.map_err(|e| format!("Failed to write bands.x input: {}", e))?;
+        stdin
+            .write_all(bands_x_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
     }
 
-    let bands_stdout = bands_child.stdout.take().ok_or("Failed to capture bands.x stdout")?;
+    let bands_stdout = bands_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture bands.x stdout")?;
     let mut bands_reader = BufReader::new(bands_stdout).lines();
 
     while let Some(line) = bands_reader.next_line().await.map_err(|e| e.to_string())? {
@@ -2178,7 +2233,10 @@ async fn run_bands_background(
     let bands_status = bands_child.wait().await.map_err(|e| e.to_string())?;
     check_cancel!();
     if !bands_status.success() {
-        return Err(format!("bands.x failed with exit code: {:?}", bands_status.code()));
+        return Err(format!(
+            "bands.x failed with exit code: {:?}",
+            bands_status.code()
+        ));
     }
 
     emit_line!("".to_string());
@@ -2201,7 +2259,10 @@ async fn run_bands_background(
 
     emit_line!(format!(
         "Parsed: {} bands, {} k-points, energy range [{:.2}, {:.2}] eV",
-        band_data.n_bands, band_data.n_kpoints, band_data.energy_range[0], band_data.energy_range[1]
+        band_data.n_bands,
+        band_data.n_kpoints,
+        band_data.energy_range[0],
+        band_data.energy_range[1]
     ));
 
     qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
@@ -2209,11 +2270,16 @@ async fn run_bands_background(
     // Step 3: projwfc.x (optional)
     if projections_enabled {
         emit_line!("".to_string());
-        emit_line!(format!("Step 3/{}: Running projwfc.x orbital projections...", total_steps));
+        emit_line!(format!(
+            "Step 3/{}: Running projwfc.x orbital projections...",
+            total_steps
+        ));
 
         let projwfc_x_path = bin_dir.join("projwfc.x");
         if !projwfc_x_path.exists() {
-            emit_line!("WARNING: projwfc.x not found. Skipping fat-band projection analysis.".to_string());
+            emit_line!(
+                "WARNING: projwfc.x not found. Skipping fat-band projection analysis.".to_string()
+            );
         } else {
             check_cancel!();
             let projection_options = config.projections.as_ref();
@@ -2221,35 +2287,52 @@ async fn run_bands_background(
                 prefix: bands_calc.prefix.clone(),
                 outdir: bands_calc.outdir.clone(),
                 filproj: "bands.projwfc.dat".to_string(),
-                lsym: projection_options.and_then(|opts| opts.lsym).unwrap_or(false),
-                diag_basis: projection_options.and_then(|opts| opts.diag_basis).unwrap_or(false),
-                pawproj: projection_options.and_then(|opts| opts.pawproj).unwrap_or(false),
+                lsym: projection_options
+                    .and_then(|opts| opts.lsym)
+                    .unwrap_or(false),
+                diag_basis: projection_options
+                    .and_then(|opts| opts.diag_basis)
+                    .unwrap_or(false),
+                pawproj: projection_options
+                    .and_then(|opts| opts.pawproj)
+                    .unwrap_or(false),
             };
             let projwfc_input = generate_projwfc_input(&projwfc_config);
             std::fs::write(work_path.join("projwfc.in"), &projwfc_input)
                 .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
 
-            let mut projwfc_child = tokio_command_with_prefix(&projwfc_x_path, execution_prefix.as_deref())
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
+            let mut projwfc_child =
+                tokio_command_with_prefix(&projwfc_x_path, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start projwfc.x: {}", e))?;
 
             if let Some(pid) = projwfc_child.id() {
                 pm.set_child_id(task_id, pid).await;
             }
 
             if let Some(mut stdin) = projwfc_child.stdin.take() {
-                stdin.write_all(projwfc_input.as_bytes()).await.map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
+                stdin
+                    .write_all(projwfc_input.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write projwfc.x input: {}", e))?;
             }
 
-            let projwfc_stdout = projwfc_child.stdout.take().ok_or("Failed to capture projwfc.x stdout")?;
+            let projwfc_stdout = projwfc_child
+                .stdout
+                .take()
+                .ok_or("Failed to capture projwfc.x stdout")?;
             let mut projwfc_reader = BufReader::new(projwfc_stdout).lines();
             let mut projwfc_output = String::new();
 
-            while let Some(line) = projwfc_reader.next_line().await.map_err(|e| e.to_string())? {
+            while let Some(line) = projwfc_reader
+                .next_line()
+                .await
+                .map_err(|e| e.to_string())?
+            {
                 check_cancel!();
                 projwfc_output.push_str(&line);
                 projwfc_output.push('\n');
@@ -2269,16 +2352,24 @@ async fn run_bands_background(
                 let projection_text = {
                     let filproj_path = work_path.join(&projwfc_config.filproj);
                     if filproj_path.exists() {
-                        std::fs::read_to_string(&filproj_path).unwrap_or_else(|_| projwfc_output.clone())
+                        std::fs::read_to_string(&filproj_path)
+                            .unwrap_or_else(|_| projwfc_output.clone())
                     } else {
                         projwfc_output.clone()
                     }
                 };
 
                 if projection_text.trim().is_empty() {
-                    emit_line!("WARNING: projwfc output was empty. Continuing without projections.".to_string());
+                    emit_line!(
+                        "WARNING: projwfc output was empty. Continuing without projections."
+                            .to_string()
+                    );
                 } else {
-                    match parse_projwfc_projection_groups(&projection_text, band_data.n_bands, band_data.n_kpoints) {
+                    match parse_projwfc_projection_groups(
+                        &projection_text,
+                        band_data.n_bands,
+                        band_data.n_kpoints,
+                    ) {
                         Ok(projections) => {
                             let atom_count = projections.atom_groups.len();
                             let orbital_count = projections.orbital_groups.len();
@@ -2301,7 +2392,10 @@ async fn run_bands_background(
     }
 
     emit_line!("=== Band Structure Complete ===".to_string());
-    emit_line!(format!("  {} bands, {} k-points", band_data.n_bands, band_data.n_kpoints));
+    emit_line!(format!(
+        "  {} bands, {} k-points",
+        band_data.n_bands, band_data.n_kpoints
+    ));
     if let Some(ref gap) = band_data.band_gap {
         let gap_type = if gap.is_direct { "direct" } else { "indirect" };
         emit_line!(format!("  Band gap: {:.3} eV ({})", gap.value, gap_type));
@@ -2321,7 +2415,10 @@ async fn start_dos_calculation(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     if state.process_manager.has_running_tasks().await {
-        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
     }
 
     let bin_dir = {
@@ -2382,8 +2479,7 @@ async fn run_dos_background(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let work_path = PathBuf::from(&working_dir);
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    prepare_working_directory(&work_path, false)?;
 
     macro_rules! emit_line {
         ($line:expr) => {{
@@ -2529,7 +2625,10 @@ async fn run_dos_background(
     let status = child.wait().await.map_err(|e| e.to_string())?;
     check_cancel!();
     if !status.success() {
-        return Err(format!("pw.x (NSCF) failed with exit code: {:?}", status.code()));
+        return Err(format!(
+            "pw.x (NSCF) failed with exit code: {:?}",
+            status.code()
+        ));
     }
 
     std::fs::write(work_path.join("nscf.out"), &full_nscf_output)
@@ -2576,7 +2675,10 @@ async fn run_dos_background(
             .map_err(|e| format!("Failed to write dos.x input: {}", e))?;
     }
 
-    let dos_stdout = dos_child.stdout.take().ok_or("Failed to capture dos.x stdout")?;
+    let dos_stdout = dos_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture dos.x stdout")?;
     let mut dos_reader = BufReader::new(dos_stdout).lines();
     let mut dos_output = String::new();
 
@@ -2590,7 +2692,10 @@ async fn run_dos_background(
     let dos_status = dos_child.wait().await.map_err(|e| e.to_string())?;
     check_cancel!();
     if !dos_status.success() {
-        return Err(format!("dos.x failed with exit code: {:?}", dos_status.code()));
+        return Err(format!(
+            "dos.x failed with exit code: {:?}",
+            dos_status.code()
+        ));
     }
 
     std::fs::write(work_path.join("dos.out"), &dos_output)
@@ -2601,10 +2706,7 @@ async fn run_dos_background(
 
     let dos_file = work_path.join(&dos_calc.fildos);
     if !dos_file.exists() {
-        return Err(format!(
-            "DOS file not found: {}",
-            dos_file.display()
-        ));
+        return Err(format!("DOS file not found: {}", dos_file.display()));
     }
 
     let dos_content = std::fs::read_to_string(&dos_file)
@@ -2632,7 +2734,11 @@ async fn run_dos_background(
         dos: dos_values,
         fermi_energy,
         energy_range: [e_min, e_max],
-        max_dos: if max_dos.is_finite() { max_dos.max(0.0) } else { 0.0 },
+        max_dos: if max_dos.is_finite() {
+            max_dos.max(0.0)
+        } else {
+            0.0
+        },
         points,
     };
 
@@ -2656,7 +2762,10 @@ async fn start_phonon_calculation(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     if state.process_manager.has_running_tasks().await {
-        return Err("A calculation is already running. Please wait for it to complete or cancel it.".to_string());
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
     }
 
     let bin_dir = {
@@ -2717,8 +2826,8 @@ async fn run_phonon_background(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let work_path = PathBuf::from(&working_dir);
-    std::fs::create_dir_all(&work_path)
-        .map_err(|e| format!("Failed to create working directory: {}", e))?;
+    // Keep existing scratch only when explicit recover mode is enabled.
+    prepare_working_directory(&work_path, config.phonon.recover)?;
 
     let mut full_output = String::new();
 
@@ -2765,7 +2874,10 @@ async fn run_phonon_background(
     // Step 1: ph.x
     emit_line!("".to_string());
     emit_line!("=== Step 1/4: Running ph.x Phonon Calculation ===".to_string());
-    emit_line!(format!("Q-grid: {}×{}×{}", config.phonon.nq[0], config.phonon.nq[1], config.phonon.nq[2]));
+    emit_line!(format!(
+        "Q-grid: {}×{}×{}",
+        config.phonon.nq[0], config.phonon.nq[1], config.phonon.nq[2]
+    ));
 
     let ph_exe = bin_dir.join("ph.x");
     if !ph_exe.exists() {
@@ -2812,10 +2924,16 @@ async fn run_phonon_background(
     }
 
     if let Some(mut stdin) = ph_child.stdin.take() {
-        stdin.write_all(ph_input.as_bytes()).await.map_err(|e| format!("Failed to write ph.x input: {}", e))?;
+        stdin
+            .write_all(ph_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
     }
 
-    let ph_stdout = ph_child.stdout.take().ok_or("Failed to capture ph.x stdout")?;
+    let ph_stdout = ph_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture ph.x stdout")?;
     let mut ph_reader = BufReader::new(ph_stdout).lines();
 
     while let Some(line) = ph_reader.next_line().await.map_err(|e| e.to_string())? {
@@ -2836,7 +2954,10 @@ async fn run_phonon_background(
                 ph_status.code()
             ));
         } else {
-            return Err(format!("ph.x failed with exit code: {:?}", ph_status.code()));
+            return Err(format!(
+                "ph.x failed with exit code: {:?}",
+                ph_status.code()
+            ));
         }
     }
     if !converged {
@@ -2876,10 +2997,16 @@ async fn run_phonon_background(
     }
 
     if let Some(mut stdin) = q2r_child.stdin.take() {
-        stdin.write_all(q2r_input.as_bytes()).await.map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
+        stdin
+            .write_all(q2r_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
     }
 
-    let q2r_stdout = q2r_child.stdout.take().ok_or("Failed to capture q2r.x stdout")?;
+    let q2r_stdout = q2r_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture q2r.x stdout")?;
     let mut q2r_reader = BufReader::new(q2r_stdout).lines();
 
     while let Some(line) = q2r_reader.next_line().await.map_err(|e| e.to_string())? {
@@ -2890,7 +3017,10 @@ async fn run_phonon_background(
     let q2r_status = q2r_child.wait().await.map_err(|e| e.to_string())?;
     check_cancel!();
     if !q2r_status.success() {
-        return Err(format!("q2r.x failed with exit code: {:?}", q2r_status.code()));
+        return Err(format!(
+            "q2r.x failed with exit code: {:?}",
+            q2r_status.code()
+        ));
     }
     emit_line!("q2r.x completed successfully".to_string());
 
@@ -2910,7 +3040,10 @@ async fn run_phonon_background(
 
         let dos_grid = config.dos_grid.unwrap_or([20, 20, 20]);
         let dos_delta_e = config.dos_delta_e.unwrap_or(1.0);
-        emit_line!(format!("DOS grid: {}×{}×{}", dos_grid[0], dos_grid[1], dos_grid[2]));
+        emit_line!(format!(
+            "DOS grid: {}×{}×{}",
+            dos_grid[0], dos_grid[1], dos_grid[2]
+        ));
         emit_line!(format!("DOS deltaE: {:.4} cm^-1", dos_delta_e));
 
         let matdyn_dos_calc = MatdynCalculation {
@@ -2927,26 +3060,37 @@ async fn run_phonon_background(
         std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
             .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
 
-        let mut matdyn_dos_child = tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
-            .current_dir(&work_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+        let mut matdyn_dos_child =
+            tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
 
         if let Some(pid) = matdyn_dos_child.id() {
             pm.set_child_id(task_id, pid).await;
         }
 
         if let Some(mut stdin) = matdyn_dos_child.stdin.take() {
-            stdin.write_all(matdyn_dos_input.as_bytes()).await.map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
+            stdin
+                .write_all(matdyn_dos_input.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
         }
 
-        let matdyn_dos_stdout = matdyn_dos_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+        let matdyn_dos_stdout = matdyn_dos_child
+            .stdout
+            .take()
+            .ok_or("Failed to capture matdyn.x stdout")?;
         let mut matdyn_dos_reader = BufReader::new(matdyn_dos_stdout).lines();
 
-        while let Some(line) = matdyn_dos_reader.next_line().await.map_err(|e| e.to_string())? {
+        while let Some(line) = matdyn_dos_reader
+            .next_line()
+            .await
+            .map_err(|e| e.to_string())?
+        {
             check_cancel!();
             emit_line!(line);
         }
@@ -2962,7 +3106,9 @@ async fn run_phonon_background(
                     Ok(dos) => {
                         emit_line!(format!(
                             "Phonon DOS: {} points, frequency range [{:.1}, {:.1}] cm^-1",
-                            dos.frequencies.len(), dos.omega_min, dos.omega_max
+                            dos.frequencies.len(),
+                            dos.omega_min,
+                            dos.omega_max
                         ));
                         dos_data = Some(dos);
                     }
@@ -2997,7 +3143,11 @@ async fn run_phonon_background(
                 .map(|(i, p)| QPathPoint {
                     label: p.label.clone(),
                     coords: p.coords,
-                    npoints: if i < q_path.len() - 1 { config.points_per_segment } else { 0 },
+                    npoints: if i < q_path.len() - 1 {
+                        config.points_per_segment
+                    } else {
+                        0
+                    },
                 })
                 .collect();
 
@@ -3015,26 +3165,37 @@ async fn run_phonon_background(
             std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
                 .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
 
-            let mut matdyn_bands_child = tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+            let mut matdyn_bands_child =
+                tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
 
             if let Some(pid) = matdyn_bands_child.id() {
                 pm.set_child_id(task_id, pid).await;
             }
 
             if let Some(mut stdin) = matdyn_bands_child.stdin.take() {
-                stdin.write_all(matdyn_bands_input.as_bytes()).await.map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
+                stdin
+                    .write_all(matdyn_bands_input.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
             }
 
-            let matdyn_bands_stdout = matdyn_bands_child.stdout.take().ok_or("Failed to capture matdyn.x stdout")?;
+            let matdyn_bands_stdout = matdyn_bands_child
+                .stdout
+                .take()
+                .ok_or("Failed to capture matdyn.x stdout")?;
             let mut matdyn_bands_reader = BufReader::new(matdyn_bands_stdout).lines();
 
-            while let Some(line) = matdyn_bands_reader.next_line().await.map_err(|e| e.to_string())? {
+            while let Some(line) = matdyn_bands_reader
+                .next_line()
+                .await
+                .map_err(|e| e.to_string())?
+            {
                 check_cancel!();
                 emit_line!(line);
             }
@@ -3065,7 +3226,10 @@ async fn run_phonon_background(
                             dispersion_data = Some(disp);
                         }
                         Err(e) => {
-                            emit_line!(format!("Warning: Failed to parse phonon dispersion: {}", e));
+                            emit_line!(format!(
+                                "Warning: Failed to parse phonon dispersion: {}",
+                                e
+                            ));
                         }
                     }
                 } else {
@@ -3138,27 +3302,18 @@ async fn get_task_output(
 }
 
 #[tauri::command]
-async fn cancel_task(
-    task_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+async fn cancel_task(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     state.process_manager.cancel(&task_id).await
 }
 
 #[tauri::command]
-async fn dismiss_task(
-    task_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+async fn dismiss_task(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     state.process_manager.remove(&task_id).await;
     Ok(())
 }
 
 #[tauri::command]
-async fn shutdown_and_close(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+async fn shutdown_and_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.process_manager.kill_all().await;
     // Give processes a moment to die
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -3266,6 +3421,9 @@ pub fn run() {
             projects::get_project,
             projects::add_cif_to_project,
             projects::save_calculation,
+            projects::export_project_archive,
+            projects::cancel_project_export,
+            projects::import_project_archive,
             projects::delete_project,
             projects::delete_calculation,
             projects::set_calculation_tag,

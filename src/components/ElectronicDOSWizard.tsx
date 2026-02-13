@@ -34,6 +34,13 @@ interface ElectronicDOSWizardProps {
 }
 
 type WizardStep = "source" | "parameters" | "run" | "results";
+const DOS_WORK_DIR = "/tmp/qcortado_dos";
+
+interface DosTaskPlan {
+  taskLabel: string;
+  taskParams: Record<string, any>;
+  saveParameters: Record<string, any>;
+}
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -124,6 +131,9 @@ export function ElectronicDOSWizard({
 }: ElectronicDOSWizardProps) {
   const taskContext = useTaskContext();
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const hasExternalRunningTask = taskContext.activeTasks.some(
+    (task) => task.status === "running" && task.taskId !== activeTaskId,
+  );
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
 
@@ -154,7 +164,6 @@ export function ElectronicDOSWizard({
   const [scfFermiEnergy, setScfFermiEnergy] = useState<number | null>(null);
   const [showOutput, setShowOutput] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
 
   const [mpiEnabled, setMpiEnabled] = useState(false);
   const [mpiProcs, setMpiProcs] = useState(1);
@@ -235,12 +244,157 @@ export function ElectronicDOSWizard({
     setProgress(task.progress);
   }, [activeTaskId, taskContext, taskContext.getTask(activeTaskId ?? "")?.output.length]);
 
-  async function runCalculation() {
+  function buildDosTaskPlan(): DosTaskPlan {
     if (!selectedScf) {
-      setError("No source SCF calculation selected");
-      return;
+      throw new Error("No source SCF calculation selected");
     }
 
+    const parsedDeltaE = parseOptionalPositiveNumber(deltaEInput, "DOS energy step");
+    const parsedDegauss = parseOptionalPositiveNumber(degaussInput, "DOS degauss");
+    const parsedEmin = parseOptionalNumber(eminInput, "minimum energy");
+    const parsedEmax = parseOptionalNumber(emaxInput, "maximum energy");
+
+    if (parsedEmin != null && parsedEmax != null && parsedEmin >= parsedEmax) {
+      throw new Error("Energy window is invalid. Emin must be smaller than Emax.");
+    }
+
+    const scfParams = selectedScf.parameters || {};
+    const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
+    for (const element of elements) {
+      if (!selectedPseudos[element]) {
+        throw new Error(`No pseudopotential selected for element ${element}`);
+      }
+    }
+
+    const occupationRaw = String(scfParams.occupations || "smearing").toLowerCase();
+    const occupations = occupationRaw === "fixed"
+      ? "fixed"
+      : occupationRaw === "tetrahedra"
+        ? "tetrahedra"
+        : occupationRaw === "from_input"
+          ? "from_input"
+          : "smearing";
+    const smearingRaw = String(scfParams.smearing || "gaussian").toLowerCase();
+    const smearing = smearingRaw === "methfessel-paxton"
+      || smearingRaw === "marzari-vanderbilt"
+      || smearingRaw === "fermi-dirac"
+      ? smearingRaw
+      : "gaussian";
+    const inheritedDegaussValue = Number(scfParams.degauss);
+    const inheritedDegauss = Number.isFinite(inheritedDegaussValue) ? inheritedDegaussValue : null;
+    const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+    const prefix = scfParams.prefix || "qcortado_scf";
+
+    const gammaRadians = (crystalData.cell_angle_gamma.value * Math.PI) / 180;
+    const betaRadians = (crystalData.cell_angle_beta.value * Math.PI) / 180;
+    const alphaRadians = (crystalData.cell_angle_alpha.value * Math.PI) / 180;
+    const c = crystalData.cell_length_c.value;
+    const cVector: [number, number, number] = [
+      c * Math.cos(betaRadians),
+      (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians))) / Math.sin(gammaRadians),
+      Math.sqrt(
+        Math.max(
+          0,
+          c * c
+            - (c * Math.cos(betaRadians)) ** 2
+            - (
+              (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians)))
+              / Math.sin(gammaRadians)
+            ) ** 2,
+        ),
+      ),
+    ];
+
+    const baseCalculation = {
+      calculation: "scf",
+      prefix,
+      outdir: "./tmp",
+      pseudo_dir: pseudoDir,
+      system: {
+        ibrav: "free",
+        celldm: null,
+        cell_parameters: [
+          [crystalData.cell_length_a.value, 0, 0],
+          [
+            crystalData.cell_length_b.value * Math.cos(gammaRadians),
+            crystalData.cell_length_b.value * Math.sin(gammaRadians),
+            0,
+          ],
+          cVector,
+        ],
+        cell_units: "angstrom",
+        species: elements.map((element) => ({
+          symbol: element,
+          mass: ELEMENT_MASSES[element] || 1.0,
+          pseudopotential: selectedPseudos[element],
+        })),
+        atoms: crystalData.atom_sites.map((site) => ({
+          symbol: getBaseElement(site.type_symbol),
+          position: [site.fract_x, site.fract_y, site.fract_z],
+          if_pos: [true, true, true],
+        })),
+        position_units: "crystal",
+        ecutwfc: Number(scfParams.ecutwfc) || 40,
+        ecutrho: Number(scfParams.ecutrho) || 320,
+        nspin: Number(scfParams.nspin) || 1,
+        occupations,
+        smearing,
+        degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
+      },
+      kpoints: { type: "gamma" },
+      conv_thr: Number(scfParams.conv_thr) || 1e-8,
+      mixing_beta: Number(scfParams.mixing_beta) || 0.7,
+      tprnfor: false,
+      tstress: false,
+      forc_conv_thr: null,
+      etot_conv_thr: null,
+      verbosity: "high",
+    };
+
+    const taskLabel = `DOS - ${crystalData?.formula_sum || ""}`;
+    const taskParams = {
+      config: {
+        base_calculation: baseCalculation,
+        k_grid: dosKGrid,
+        degauss: parsedDegauss,
+        emin: parsedEmin,
+        emax: parsedEmax,
+        delta_e: parsedDeltaE,
+        project_id: projectId,
+        scf_calc_id: selectedScf.id,
+      },
+      workingDir: DOS_WORK_DIR,
+      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+    };
+
+    const saveParameters = {
+      source_scf_id: selectedScf.id,
+      dos_k_grid: dosKGrid,
+      dos_delta_e: parsedDeltaE,
+      dos_degauss: parsedDegauss,
+      dos_emin: parsedEmin,
+      dos_emax: parsedEmax,
+      n_points: null,
+      // Inherit SCF feature parameters for dashboard tags
+      nspin: scfParams.nspin,
+      lspinorb: scfParams.lspinorb,
+      lda_plus_u: scfParams.lda_plus_u,
+      vdw_corr: scfParams.vdw_corr,
+      scf_fermi_energy: selectedScf.result?.fermi_energy ?? scfFermiEnergy,
+    };
+
+    return {
+      taskLabel,
+      taskParams,
+      saveParameters,
+    };
+  }
+
+  async function runCalculation() {
+    if (hasExternalRunningTask) {
+      setError("Another task is currently running. Queue this task or wait for completion.");
+      return;
+    }
     setIsRunning(true);
     followOutputRef.current = true;
     setOutput("");
@@ -253,141 +407,17 @@ export function ElectronicDOSWizard({
     setStep("run");
 
     try {
-      const parsedDeltaE = parseOptionalPositiveNumber(deltaEInput, "DOS energy step");
-      const parsedDegauss = parseOptionalPositiveNumber(degaussInput, "DOS degauss");
-      const parsedEmin = parseOptionalNumber(eminInput, "minimum energy");
-      const parsedEmax = parseOptionalNumber(emaxInput, "maximum energy");
-
-      if (parsedEmin != null && parsedEmax != null && parsedEmin >= parsedEmax) {
-        throw new Error("Energy window is invalid. Emin must be smaller than Emax.");
-      }
-
-      const scfParams = selectedScf.parameters || {};
-      const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
-      for (const element of elements) {
-        if (!selectedPseudos[element]) {
-          throw new Error(`No pseudopotential selected for element ${element}`);
-        }
-      }
-
-      const occupationRaw = String(scfParams.occupations || "smearing").toLowerCase();
-      const occupations = occupationRaw === "fixed"
-        ? "fixed"
-        : occupationRaw === "tetrahedra"
-          ? "tetrahedra"
-          : occupationRaw === "from_input"
-            ? "from_input"
-            : "smearing";
-      const smearingRaw = String(scfParams.smearing || "gaussian").toLowerCase();
-      const smearing = smearingRaw === "methfessel-paxton"
-        || smearingRaw === "marzari-vanderbilt"
-        || smearingRaw === "fermi-dirac"
-        ? smearingRaw
-        : "gaussian";
-      const inheritedDegaussValue = Number(scfParams.degauss);
-      const inheritedDegauss = Number.isFinite(inheritedDegaussValue) ? inheritedDegaussValue : null;
-      const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-      const prefix = scfParams.prefix || "qcortado_scf";
-
-      const gammaRadians = (crystalData.cell_angle_gamma.value * Math.PI) / 180;
-      const betaRadians = (crystalData.cell_angle_beta.value * Math.PI) / 180;
-      const alphaRadians = (crystalData.cell_angle_alpha.value * Math.PI) / 180;
-      const c = crystalData.cell_length_c.value;
-      const cVector: [number, number, number] = [
-        c * Math.cos(betaRadians),
-        (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians))) / Math.sin(gammaRadians),
-        Math.sqrt(
-          Math.max(
-            0,
-            c * c
-              - (c * Math.cos(betaRadians)) ** 2
-              - (
-                (c * (Math.cos(alphaRadians) - Math.cos(betaRadians) * Math.cos(gammaRadians)))
-                / Math.sin(gammaRadians)
-              ) ** 2,
-          ),
-        ),
-      ];
-
-      const baseCalculation = {
-        calculation: "scf",
-        prefix,
-        outdir: "./tmp",
-        pseudo_dir: pseudoDir,
-        system: {
-          ibrav: "free",
-          celldm: null,
-          cell_parameters: [
-            [crystalData.cell_length_a.value, 0, 0],
-            [
-              crystalData.cell_length_b.value * Math.cos(gammaRadians),
-              crystalData.cell_length_b.value * Math.sin(gammaRadians),
-              0,
-            ],
-            cVector,
-          ],
-          cell_units: "angstrom",
-          species: elements.map((element) => ({
-            symbol: element,
-            mass: ELEMENT_MASSES[element] || 1.0,
-            pseudopotential: selectedPseudos[element],
-          })),
-          atoms: crystalData.atom_sites.map((site) => ({
-            symbol: getBaseElement(site.type_symbol),
-            position: [site.fract_x, site.fract_y, site.fract_z],
-            if_pos: [true, true, true],
-          })),
-          position_units: "crystal",
-          ecutwfc: Number(scfParams.ecutwfc) || 40,
-          ecutrho: Number(scfParams.ecutrho) || 320,
-          nspin: Number(scfParams.nspin) || 1,
-          occupations,
-          smearing,
-          degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
-        },
-        kpoints: { type: "gamma" },
-        conv_thr: Number(scfParams.conv_thr) || 1e-8,
-        mixing_beta: Number(scfParams.mixing_beta) || 0.7,
-        tprnfor: false,
-        tstress: false,
-        forc_conv_thr: null,
-        etot_conv_thr: null,
-        verbosity: "high",
-      };
-
-      const taskLabel = `DOS - ${crystalData?.formula_sum || ""}`;
-      const taskId = await taskContext.startTask("dos", {
-        config: {
-          base_calculation: baseCalculation,
-          k_grid: dosKGrid,
-          degauss: parsedDegauss,
-          emin: parsedEmin,
-          emax: parsedEmax,
-          delta_e: parsedDeltaE,
-          project_id: projectId,
-          scf_calc_id: selectedScf.id,
-        },
-        workingDir: "/tmp/qcortado_dos",
-        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
-      }, taskLabel);
+      const plan = buildDosTaskPlan();
+      const taskId = await taskContext.startTask("dos", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
 
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          const task = taskContext.getTask(taskId);
-          if (task && task.status !== "running") {
-            clearInterval(interval);
-            resolve();
-          }
-        }, 500);
-      });
-
-      const finalTask = taskContext.getTask(taskId);
-      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+      const finalTask = await taskContext.waitForTaskCompletion(taskId);
+      if (finalTask.status !== "completed" || !finalTask.result) {
         throw new Error(finalTask?.error || "Calculation failed");
       }
 
       const result = finalTask.result as ElectronicDOSData;
+      const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
       setDosData(result);
       setStep("results");
@@ -399,48 +429,36 @@ export function ElectronicDOSWizard({
       }));
 
       try {
-        setIsSaving(true);
         await invoke("save_calculation", {
           projectId,
           cifId,
           calcData: {
             calc_type: "dos",
             parameters: {
-              source_scf_id: selectedScf.id,
-              dos_k_grid: dosKGrid,
-              dos_delta_e: parsedDeltaE,
-              dos_degauss: parsedDegauss,
-              dos_emin: parsedEmin,
-              dos_emax: parsedEmax,
+              ...plan.saveParameters,
               n_points: result.points,
-              // Inherit SCF feature parameters for dashboard tags
-              nspin: scfParams.nspin,
-              lspinorb: scfParams.lspinorb,
-              lda_plus_u: scfParams.lda_plus_u,
-              vdw_corr: scfParams.vdw_corr,
             },
             result: {
               converged: true,
               total_energy: null,
-              fermi_energy: result.fermi_energy ?? scfFermiEnergy,
+              fermi_energy: result.fermi_energy ?? selectedScf?.result?.fermi_energy ?? scfFermiEnergy,
               n_scf_steps: null,
               wall_time_seconds: null,
-              raw_output: output,
+              raw_output: outputContent,
               dos_data: result,
             },
             started_at: startTime,
             completed_at: endTime,
             input_content: "",
-            output_content: output,
+            output_content: outputContent,
             tags: [],
           },
-          workingDir: "/tmp/qcortado_dos",
+          workingDir: DOS_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
         console.error("Failed to save DOS calculation:", saveError);
-      } finally {
-        setIsSaving(false);
+        setError(`Failed to auto-save DOS calculation: ${saveError}`);
       }
     } catch (e) {
       setError(String(e));
@@ -453,6 +471,29 @@ export function ElectronicDOSWizard({
       }));
     } finally {
       setIsRunning(false);
+    }
+  }
+
+  function queueCalculation() {
+    try {
+      const plan = buildDosTaskPlan();
+      setError(null);
+      taskContext.enqueueTask(
+        "dos",
+        plan.taskParams,
+        plan.taskLabel,
+        {
+          projectId,
+          cifId,
+          workingDir: DOS_WORK_DIR,
+          calcType: "dos",
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        },
+      );
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -702,7 +743,10 @@ export function ElectronicDOSWizard({
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button className="primary-button" onClick={() => void runCalculation()}>
+          <button className="secondary-button" onClick={() => void queueCalculation()}>
+            Queue Task
+          </button>
+          <button className="primary-button" onClick={() => void runCalculation()} disabled={hasExternalRunningTask}>
             Run Calculation
           </button>
         </div>
@@ -792,10 +836,11 @@ export function ElectronicDOSWizard({
           )}
         </div>
 
-        <div className="save-status">
-          {isSaving && <span className="saving">Saving to project...</span>}
-          {isSaved && <span className="saved">Saved to project</span>}
-        </div>
+        {isSaved && (
+          <div className="save-status save-status-inline">
+            <span className="saved">Saved to project</span>
+          </div>
+        )}
 
         <div className="step-actions">
           <button className="secondary-button" onClick={onBack}>

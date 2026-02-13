@@ -126,6 +126,15 @@ interface DisplayCellMetrics {
   gamma: number;
 }
 
+interface ScfTaskPlan {
+  calculation: any;
+  inputText: string;
+  taskLabel: string;
+  taskParams: Record<string, any>;
+  sourceStructure: SavedStructureData;
+  sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string };
+}
+
 export function SCFWizard({
   onBack,
   qePath,
@@ -138,6 +147,9 @@ export function SCFWizard({
   const taskContext = useTaskContext();
   // Track background task for this wizard
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const hasExternalRunningTask = taskContext.activeTasks.some(
+    (task) => task.status === "running" && task.taskId !== activeTaskId,
+  );
   // If we have initial CIF data, skip to configure step
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : (initialCif ? "configure" : "import"));
   const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
@@ -627,8 +639,176 @@ export function SCFWizard({
     return elements.every((el) => selectedPseudos[el]);
   }
 
+  async function buildScfTaskPlan(): Promise<ScfTaskPlan> {
+    if (!crystalData || !canRun()) {
+      throw new Error("Missing structure or pseudopotential selections.");
+    }
+
+    const elements = getUniqueElements();
+    const cifStructure = buildCifConventionalStructure(crystalData);
+    const sourceStructure: SavedStructureData = selectedOptimizedStructure
+      ? {
+          ...selectedOptimizedStructure.structure,
+          cell_parameters: selectedOptimizedStructure.structure.cell_parameters || cifStructure.cell_parameters,
+          cell_units: selectedOptimizedStructure.structure.cell_units || cifStructure.cell_units,
+        }
+      : cifStructure;
+    const sourceDescriptor = selectedOptimizedStructure
+      ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
+      : { type: "cif" as const };
+
+    // Check if this is an FCC structure that should use primitive cell
+    // Using primitive cell with ibrav gives correct symmetry and faster calculations
+    const primitiveCell: PrimitiveCell | null = selectedOptimizedStructure ? null : getPrimitiveCell(crystalData);
+    const usePrimitiveCell = !selectedOptimizedStructure && primitiveCell !== null;
+
+    if (usePrimitiveCell && primitiveCell) {
+      console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
+    }
+
+    // Build species list (same for both primitive and conventional)
+    const speciesList = elements.map((el) => ({
+      symbol: el,
+      mass: ELEMENT_MASSES[el] || 1.0,
+      pseudopotential: selectedPseudos[el],
+      starting_magnetization: config.starting_magnetization[el] || 0,
+      hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
+      hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
+    }));
+
+    // Build system configuration based on cell type
+    const systemConfig: any = {
+      // Common properties
+      species: speciesList,
+      position_units: sourceStructure.position_units || "crystal",
+      ecutwfc: config.ecutwfc,
+      ecutrho: config.ecutrho,
+      // Electronic structure
+      occupations: config.occupations,
+      smearing: config.occupations === "smearing" ? config.smearing : undefined,
+      degauss: config.occupations === "smearing" ? config.degauss : undefined,
+      nbnd: config.nbnd,
+      tot_charge: config.tot_charge !== 0 ? config.tot_charge : undefined,
+      // Magnetism
+      nspin: config.nspin,
+      noncolin: config.noncolin || undefined,
+      lspinorb: config.lspinorb || undefined,
+      tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
+      constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
+      // DFT+U
+      lda_plus_u: config.lda_plus_u || undefined,
+      lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
+      // Van der Waals
+      vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
+      // Isolated systems
+      assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
+      // XC functional override
+      input_dft: config.input_dft || undefined,
+    };
+
+    // Add cell-specific properties
+    if (selectedOptimizedStructure) {
+      systemConfig.ibrav = "free";
+      systemConfig.celldm = null;
+      systemConfig.cell_parameters = sourceStructure.cell_parameters;
+      systemConfig.cell_units = sourceStructure.cell_units || "angstrom";
+      systemConfig.atoms = sourceStructure.atoms.map((atom) => ({
+        symbol: getBaseElement(atom.symbol),
+        position: atom.position,
+        if_pos: [true, true, true],
+      }));
+    } else if (usePrimitiveCell && primitiveCell) {
+      // Primitive cell with ibrav (e.g., ibrav=2 for FCC)
+      systemConfig.ibrav = primitiveCell.ibrav;
+      // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
+      // For cubic, only celldm(1) = a is needed
+      systemConfig.celldm = [primitiveCell.celldm1, 0, 0, 0, 0, 0];
+      systemConfig.cell_parameters = null;
+      systemConfig.cell_units = null;
+      systemConfig.atoms = primitiveCell.atoms.map((atom) => ({
+        symbol: atom.symbol,
+        position: atom.position,
+        if_pos: [true, true, true],
+      }));
+    } else {
+      // Conventional cell with ibrav=0 (fallback for non-FCC structures)
+      systemConfig.ibrav = "free";
+      systemConfig.celldm = null;
+      systemConfig.cell_parameters = [
+        [crystalData.cell_length_a.value, 0, 0],
+        [
+          crystalData.cell_length_b.value *
+            Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+          crystalData.cell_length_b.value *
+            Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+          0,
+        ],
+        calculateCVector(crystalData),
+      ];
+      systemConfig.cell_units = "angstrom";
+      systemConfig.atoms = crystalData.atom_sites.map((site) => ({
+        symbol: getBaseElement(site.type_symbol),
+        position: [site.fract_x, site.fract_y, site.fract_z],
+        if_pos: [true, true, true],
+      }));
+    }
+
+    // Build the calculation configuration with all options
+    const calculation: any = {
+      calculation: config.calculation,
+      prefix: "qcortado_scf",
+      outdir: "./tmp",
+      pseudo_dir: qePath.replace("/bin", "/pseudo"),
+      verbosity: config.verbosity,
+      tprnfor: config.tprnfor,
+      tstress: config.tstress,
+      disk_io: config.disk_io,
+      system: systemConfig,
+      kpoints: {
+        type: "automatic",
+        grid: config.kgrid,
+        offset: config.kgrid_offset,
+      },
+      // SCF convergence settings
+      conv_thr: config.conv_thr,
+      electron_maxstep: config.electron_maxstep,
+      mixing_mode: config.mixing_mode,
+      mixing_beta: config.mixing_beta,
+      mixing_ndim: config.mixing_ndim,
+      diagonalization: config.diagonalization,
+      startingpot: config.startingpot,
+      startingwfc: config.startingwfc,
+      // Relaxation settings (only used for relax/vcrelax)
+      forc_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.forc_conv_thr : null,
+      etot_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.etot_conv_thr : null,
+      // vcrelax specific
+      press: config.calculation === "vcrelax" ? config.press : null,
+    };
+
+    // Generate and display the input file
+    const inputText = await invoke<string>("generate_input", { calculation });
+    const taskLabel = crystalData?.formula_sum || cifFilename || "SCF";
+
+    return {
+      calculation,
+      inputText,
+      taskLabel,
+      taskParams: {
+        calculation,
+        workingDir: WORK_DIR,
+        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      },
+      sourceStructure,
+      sourceDescriptor,
+    };
+  }
+
   async function handleRun() {
     if (!crystalData || !canRun()) return;
+    if (hasExternalRunningTask) {
+      setError("Another task is currently running. Queue this task or wait for completion.");
+      return;
+    }
 
     setIsRunning(true);
     followOutputRef.current = true;
@@ -645,180 +825,19 @@ export function SCFWizard({
     // Run the calculation as a background task
 
     try {
-      const elements = getUniqueElements();
-      const cifStructure = buildCifConventionalStructure(crystalData);
-      const sourceStructure: SavedStructureData = selectedOptimizedStructure
-        ? {
-            ...selectedOptimizedStructure.structure,
-            cell_parameters: selectedOptimizedStructure.structure.cell_parameters || cifStructure.cell_parameters,
-            cell_units: selectedOptimizedStructure.structure.cell_units || cifStructure.cell_units,
-          }
-        : cifStructure;
-      const sourceDescriptor = selectedOptimizedStructure
-        ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
-        : { type: "cif" as const };
+      const plan = await buildScfTaskPlan();
+      const { inputText, taskLabel, sourceStructure, sourceDescriptor } = plan;
       setRunSourceStructure(sourceStructure);
       setRunSourceDescriptor(sourceDescriptor);
-
-      // Check if this is an FCC structure that should use primitive cell
-      // Using primitive cell with ibrav gives correct symmetry and faster calculations
-      const primitiveCell: PrimitiveCell | null = selectedOptimizedStructure ? null : getPrimitiveCell(crystalData);
-      const usePrimitiveCell = !selectedOptimizedStructure && primitiveCell !== null;
-
-      if (usePrimitiveCell && primitiveCell) {
-        console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
-      }
-
-      // Build species list (same for both primitive and conventional)
-      const speciesList = elements.map((el) => ({
-        symbol: el,
-        mass: ELEMENT_MASSES[el] || 1.0,
-        pseudopotential: selectedPseudos[el],
-        starting_magnetization: config.starting_magnetization[el] || 0,
-        hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
-        hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
-      }));
-
-      // Build system configuration based on cell type
-      const systemConfig: any = {
-        // Common properties
-        species: speciesList,
-        position_units: sourceStructure.position_units || "crystal",
-        ecutwfc: config.ecutwfc,
-        ecutrho: config.ecutrho,
-        // Electronic structure
-        occupations: config.occupations,
-        smearing: config.occupations === "smearing" ? config.smearing : undefined,
-        degauss: config.occupations === "smearing" ? config.degauss : undefined,
-        nbnd: config.nbnd,
-        tot_charge: config.tot_charge !== 0 ? config.tot_charge : undefined,
-        // Magnetism
-        nspin: config.nspin,
-        noncolin: config.noncolin || undefined,
-        lspinorb: config.lspinorb || undefined,
-        tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
-        constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
-        // DFT+U
-        lda_plus_u: config.lda_plus_u || undefined,
-        lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
-        // Van der Waals
-        vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
-        // Isolated systems
-        assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
-        // XC functional override
-        input_dft: config.input_dft || undefined,
-      };
-
-      // Add cell-specific properties
-      if (selectedOptimizedStructure) {
-        systemConfig.ibrav = "free";
-        systemConfig.celldm = null;
-        systemConfig.cell_parameters = sourceStructure.cell_parameters;
-        systemConfig.cell_units = sourceStructure.cell_units || "angstrom";
-        systemConfig.atoms = sourceStructure.atoms.map((atom) => ({
-          symbol: getBaseElement(atom.symbol),
-          position: atom.position,
-          if_pos: [true, true, true],
-        }));
-      } else if (usePrimitiveCell && primitiveCell) {
-        // Primitive cell with ibrav (e.g., ibrav=2 for FCC)
-        systemConfig.ibrav = primitiveCell.ibrav;
-        // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
-        // For cubic, only celldm(1) = a is needed
-        systemConfig.celldm = [primitiveCell.celldm1, 0, 0, 0, 0, 0];
-        systemConfig.cell_parameters = null;
-        systemConfig.cell_units = null;
-        systemConfig.atoms = primitiveCell.atoms.map((atom) => ({
-          symbol: atom.symbol,
-          position: atom.position,
-          if_pos: [true, true, true],
-        }));
-      } else {
-        // Conventional cell with ibrav=0 (fallback for non-FCC structures)
-        systemConfig.ibrav = "free";
-        systemConfig.celldm = null;
-        systemConfig.cell_parameters = [
-          [crystalData.cell_length_a.value, 0, 0],
-          [
-            crystalData.cell_length_b.value *
-              Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-            crystalData.cell_length_b.value *
-              Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-            0,
-          ],
-          calculateCVector(crystalData),
-        ];
-        systemConfig.cell_units = "angstrom";
-        systemConfig.atoms = crystalData.atom_sites.map((site) => ({
-          symbol: getBaseElement(site.type_symbol),
-          position: [site.fract_x, site.fract_y, site.fract_z],
-          if_pos: [true, true, true],
-        }));
-      }
-
-      // Build the calculation configuration with all options
-      const calculation: any = {
-        calculation: config.calculation,
-        prefix: "qcortado_scf",
-        outdir: "./tmp",
-        pseudo_dir: qePath.replace("/bin", "/pseudo"),
-        verbosity: config.verbosity,
-        tprnfor: config.tprnfor,
-        tstress: config.tstress,
-        disk_io: config.disk_io,
-        system: systemConfig,
-        kpoints: {
-          type: "automatic",
-          grid: config.kgrid,
-          offset: config.kgrid_offset,
-        },
-        // SCF convergence settings
-        conv_thr: config.conv_thr,
-        electron_maxstep: config.electron_maxstep,
-        mixing_mode: config.mixing_mode,
-        mixing_beta: config.mixing_beta,
-        mixing_ndim: config.mixing_ndim,
-        diagonalization: config.diagonalization,
-        startingpot: config.startingpot,
-        startingwfc: config.startingwfc,
-        // Relaxation settings (only used for relax/vcrelax)
-        forc_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.forc_conv_thr : null,
-        etot_conv_thr: (config.calculation === "relax" || config.calculation === "vcrelax") ? config.etot_conv_thr : null,
-        // vcrelax specific
-        press: config.calculation === "vcrelax" ? config.press : null,
-      };
-
-      // Generate and display the input file
-      const inputText = await invoke<string>("generate_input", { calculation });
       setGeneratedInput(inputText);
       setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running pw.x ===\n`);
 
-      // Build a label for the process indicator
-      const taskLabel = crystalData?.formula_sum || cifFilename || "SCF";
-
       // Start as a background task
-      const taskId = await taskContext.startTask("scf", {
-        calculation,
-        workingDir: WORK_DIR,
-        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
-      }, `SCF - ${taskLabel}`);
+      const taskId = await taskContext.startTask("scf", plan.taskParams, `SCF - ${taskLabel}`);
       setActiveTaskId(taskId);
 
-      // Wait for task completion by polling task state
-      // The sync effects above will update output/progress in real-time
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          const task = taskContext.getTask(taskId);
-          if (task && task.status !== "running") {
-            clearInterval(interval);
-            resolve();
-          }
-        }, 500);
-      });
-
-      // Get final task state
-      const finalTask = taskContext.getTask(taskId);
-      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+      const finalTask = await taskContext.waitForTaskCompletion(taskId);
+      if (finalTask.status !== "completed" || !finalTask.result) {
         throw new Error(finalTask?.error || "Calculation failed");
       }
 
@@ -858,7 +877,8 @@ export function SCFWizard({
           });
           setResultSaved(true);
         } catch (saveError) {
-          console.error("Failed to auto-save SCF calculation:", saveError);
+          console.error("Failed to auto-save calculation:", saveError);
+          setError(`Failed to auto-save calculation: ${saveError}`);
         } finally {
           setIsSaving(false);
         }
@@ -874,6 +894,57 @@ export function SCFWizard({
       }));
     } finally {
       setIsRunning(false);
+    }
+  }
+
+  async function handleQueue() {
+    if (!crystalData || !canRun()) return;
+
+    if (!projectContext) {
+      setError("Queueing is available when running from a project.");
+      return;
+    }
+
+    try {
+      const plan = await buildScfTaskPlan();
+      const nowIso = new Date().toISOString();
+      const draftCalcData = buildCalculationData(
+        {
+          converged: false,
+          total_energy: null,
+          fermi_energy: null,
+          n_scf_steps: null,
+          wall_time_seconds: null,
+          raw_output: "",
+        },
+        nowIso,
+        nowIso,
+        plan.inputText,
+        plan.sourceStructure,
+        plan.sourceDescriptor,
+      );
+      const queueCalcType = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
+      const queueLabel = queueCalcType === "optimization"
+        ? `${config.calculation === "vcrelax" ? "VC-Relax" : "Relax"} - ${plan.taskLabel}`
+        : `SCF - ${plan.taskLabel}`;
+
+      taskContext.enqueueTask(
+        "scf",
+        plan.taskParams,
+        queueLabel,
+        {
+          projectId: projectContext.projectId,
+          cifId: projectContext.cifId,
+          workingDir: WORK_DIR,
+          calcType: queueCalcType,
+          parameters: draftCalcData.parameters,
+          tags: draftCalcData.tags,
+          inputContent: plan.inputText,
+        },
+      );
+      setError(null);
+    } catch (e) {
+      setError(`Failed to queue calculation: ${e}`);
     }
   }
 
@@ -1248,7 +1319,7 @@ export function SCFWizard({
     : null;
 
   return (
-    <div className="wizard-container">
+    <div className={`wizard-container wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-btn" onClick={() => handleExitAttempt(onBack)}>
           ← Back
@@ -2111,15 +2182,26 @@ export function SCFWizard({
                   )}
                 </section>
 
-                <button
-                  className="run-btn"
-                  onClick={handleRun}
-                  disabled={!canRun()}
-                >
-                  {mpiEnabled && mpiProcs > 1
-                    ? `Run SCF Calculation (${mpiProcs} cores)`
-                    : "Run SCF Calculation"}
-                </button>
+                <div className="run-btn-group">
+                  {projectContext && (
+                    <button
+                      className="secondary-button"
+                      onClick={() => void handleQueue()}
+                      disabled={!canRun()}
+                    >
+                      Queue Task
+                    </button>
+                  )}
+                  <button
+                    className="run-btn"
+                    onClick={handleRun}
+                    disabled={!canRun() || hasExternalRunningTask}
+                  >
+                    {mpiEnabled && mpiProcs > 1
+                      ? `Run SCF Calculation (${mpiProcs} cores)`
+                      : "Run SCF Calculation"}
+                  </button>
+                </div>
               </div>
 
               <div className="config-right">
@@ -2175,6 +2257,11 @@ export function SCFWizard({
                       </div>
                     )}
                   </div>
+                  {resultSaved && (
+                    <div className="save-status save-status-inline">
+                      <span className="saved">Saved to project</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2185,32 +2272,27 @@ export function SCFWizard({
               </button>
               {result && (
                 <>
-                  <button
-                    onClick={() => setShowSaveDialog(true)}
-                    className="save-project-btn"
-                    disabled={isSaving}
-                  >
-                    {resultSaved ? "Saved" : "Save to Project"}
-                  </button>
+                  {!projectContext && (
+                    <button
+                      onClick={() => setShowSaveDialog(true)}
+                      className="save-project-btn"
+                      disabled={isSaving}
+                    >
+                      {resultSaved ? "Saved" : "Save to Project"}
+                    </button>
+                  )}
                   <button onClick={() => handleExitAttempt(() => setStep("import"))} className="new-calc-btn">
                     New Calculation
                   </button>
                 </>
               )}
             </div>
-
-            {result && (
-              <div className="save-status">
-                {isSaving && <span className="saving">Saving to project...</span>}
-                {resultSaved && <span className="saved">Saved to project</span>}
-              </div>
-            )}
           </div>
         )}
       </div>
 
       {/* Save to Project Dialog */}
-      {showSaveDialog && crystalData && calculationData && (
+      {!projectContext && showSaveDialog && crystalData && calculationData && (
         <SaveToProjectDialog
           isOpen={showSaveDialog}
           onClose={() => setShowSaveDialog(false)}
@@ -2243,11 +2325,16 @@ export function SCFWizard({
 
             <div className="dialog-body">
               <p className="exit-warning">
-                Your calculation results have not been saved to a project.
-                If you leave now, the results will be lost.
+                {projectContext
+                  ? "Your calculation results have not finished auto-saving to this project yet."
+                  : "Your calculation results have not been saved to a project."}
+                {" "}
+                If you leave now, the results may be lost.
               </p>
               <p className="exit-hint">
-                Click "Save to Project" to keep your results, or "Leave Anyway" to discard them.
+                {projectContext
+                  ? "Wait for auto-save to complete, or choose \"Leave Anyway\" to discard this run."
+                  : "Click \"Save to Project\" to keep your results, or \"Leave Anyway\" to discard them."}
               </p>
             </div>
 

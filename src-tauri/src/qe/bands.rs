@@ -389,8 +389,8 @@ fn commit_projection_buffer(
         if let Some(group_indices) = state_to_groups.get(&state_id).copied() {
             atom_groups[group_indices.atom_group_idx].weights[band_idx][k_idx] += weight;
             orbital_groups[group_indices.orbital_group_idx].weights[band_idx][k_idx] += weight;
-            element_orbital_groups[group_indices.element_orbital_group_idx].weights[band_idx][k_idx] +=
-                weight;
+            element_orbital_groups[group_indices.element_orbital_group_idx].weights[band_idx]
+                [k_idx] += weight;
             committed = true;
         }
     }
@@ -410,10 +410,9 @@ pub fn parse_projwfc_projection_groups(
         return Err("Projection output is empty".to_string());
     }
 
-    let state_re = Regex::new(
-        r"^\s*state\s*#\s*(\d+)\s*:\s*atom\s*\d+\s*\(\s*([A-Za-z0-9_+\-]+)\s*\)(.*)$",
-    )
-    .map_err(|e| format!("Failed to build state regex: {}", e))?;
+    let state_re =
+        Regex::new(r"^\s*state\s*#\s*(\d+)\s*:\s*atom\s*\d+\s*\(\s*([A-Za-z0-9_+\-]+)\s*\)(.*)$")
+            .map_err(|e| format!("Failed to build state regex: {}", e))?;
     let l_re = Regex::new(r"(?i)\bl\s*=\s*(\d+)")
         .map_err(|e| format!("Failed to build angular-momentum regex: {}", e))?;
     let k_re = Regex::new(r"^\s*k\s*=\s*[-\d.Ee+]+\s+[-\d.Ee+]+\s+[-\d.Ee+]+")

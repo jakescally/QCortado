@@ -110,6 +110,14 @@ interface BandStructureWizardProps {
 }
 
 type WizardStep = "source" | "kpath" | "parameters" | "run" | "results";
+const BANDS_WORK_DIR = "/tmp/qcortado_bands";
+
+interface BandTaskPlan {
+  taskLabel: string;
+  taskParams: Record<string, any>;
+  saveParameters: Record<string, any>;
+  saveTags: string[];
+}
 
 export function BandStructureWizard({
   onBack,
@@ -123,6 +131,9 @@ export function BandStructureWizard({
 }: BandStructureWizardProps) {
   const taskContext = useTaskContext();
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const hasExternalRunningTask = taskContext.activeTasks.some(
+    (task) => task.status === "running" && task.taskId !== activeTaskId,
+  );
   // Wizard state
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -173,7 +184,6 @@ export function BandStructureWizard({
   const [showOutput, setShowOutput] = useState(false);
   // Track if calculation was saved
   const [isSaved, setIsSaved] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   // Track calculation timing
   const [calcStartTime, setCalcStartTime] = useState<string>("");
 
@@ -323,13 +333,203 @@ export function BandStructureWizard({
     setKPath(newPath);
   }, []);
 
-  // Run the calculation
-  const runCalculation = async () => {
+  const buildBandTaskPlan = (): BandTaskPlan => {
     if (!selectedScf?.result) {
-      setError("No source SCF calculation selected");
-      return;
+      throw new Error("No source SCF calculation selected");
     }
 
+    if (kPath.length < 2) {
+      throw new Error("Please select at least 2 points for the k-path");
+    }
+
+    // Get the SCF parameters for cutoffs, etc.
+    const scfParams = selectedScf.parameters || {};
+
+    // Get unique elements from crystal data
+    const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
+
+    // Check we have pseudopotentials for all elements
+    for (const el of elements) {
+      if (!selectedPseudos[el]) {
+        throw new Error(`No pseudopotential selected for element ${el}`);
+      }
+    }
+
+    // Build the full calculation config from crystalData
+    // Use the same prefix as the source SCF so we can read its .save directory
+    // SCFWizard uses "qcortado_scf" as the prefix
+    const scfPrefix = scfParams.prefix || "qcortado_scf";
+    const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+
+    // Check if this is an FCC structure (diamond, zincblende) that should use primitive cell
+    // Using primitive cell with ibrav=2 gives correct band structure matching literature
+    const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+    const usePrimitiveCell = primitiveCell !== null;
+
+    let baseCalculation;
+    let transformedKPath;
+
+    if (usePrimitiveCell && primitiveCell) {
+      // Use primitive cell with ibrav (e.g., ibrav=2 for FCC)
+      // This is the standard approach for band structure calculations
+      console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
+
+      baseCalculation = {
+        calculation: "scf",
+        prefix: scfPrefix,
+        outdir: "./tmp",
+        pseudo_dir: pseudoDir,
+        system: {
+          ibrav: primitiveCell.ibrav,
+          // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
+          // For cubic, only celldm(1) = a is needed
+          celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
+          cell_parameters: null, // Not needed when using ibrav
+          cell_units: null,
+          species: elements.map((el) => ({
+            symbol: el,
+            mass: ELEMENT_MASSES[el] || 1.0,
+            pseudopotential: selectedPseudos[el],
+          })),
+          atoms: primitiveCell.atoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: atom.position,
+            if_pos: [true, true, true],
+          })),
+          position_units: "crystal",
+          ecutwfc: scfParams.ecutwfc || 40,
+          ecutrho: scfParams.ecutrho || 320,
+          nspin: 1,
+          occupations: "smearing",
+          smearing: "gaussian",
+          degauss: 0.01,
+        },
+        kpoints: { type: "gamma" }, // Will be replaced by backend
+        conv_thr: scfParams.conv_thr || 1e-6,
+        mixing_beta: scfParams.mixing_beta || 0.7,
+        tprnfor: false,
+        tstress: false,
+        forc_conv_thr: null,
+        etot_conv_thr: null,
+        verbosity: "high",
+      };
+
+      // For primitive cell, k-points are already in the correct basis
+      // No transformation needed - use them directly
+      transformedKPath = kPath;
+    } else {
+      // Fall back to conventional cell with ibrav=0 for non-FCC structures
+      baseCalculation = {
+        calculation: "scf",
+        prefix: scfPrefix,
+        outdir: "./tmp",
+        pseudo_dir: pseudoDir,
+        system: {
+          ibrav: "free",
+          celldm: null,
+          cell_parameters: [
+            [crystalData.cell_length_a.value, 0, 0],
+            [
+              crystalData.cell_length_b.value *
+                Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+              crystalData.cell_length_b.value *
+                Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
+              0,
+            ],
+            calculateCVector(crystalData),
+          ],
+          cell_units: "angstrom",
+          species: elements.map((el) => ({
+            symbol: el,
+            mass: ELEMENT_MASSES[el] || 1.0,
+            pseudopotential: selectedPseudos[el],
+          })),
+          atoms: crystalData.atom_sites.map((site) => ({
+            symbol: getBaseElement(site.type_symbol),
+            position: [site.fract_x, site.fract_y, site.fract_z],
+            if_pos: [true, true, true],
+          })),
+          position_units: "crystal",
+          ecutwfc: scfParams.ecutwfc || 40,
+          ecutrho: scfParams.ecutrho || 320,
+          nspin: 1,
+          occupations: "smearing",
+          smearing: "gaussian",
+          degauss: 0.01,
+        },
+        kpoints: { type: "gamma" }, // Will be replaced by backend
+        conv_thr: scfParams.conv_thr || 1e-6,
+        mixing_beta: scfParams.mixing_beta || 0.7,
+        tprnfor: false,
+        tstress: false,
+        forc_conv_thr: null,
+        etot_conv_thr: null,
+        verbosity: "high",
+      };
+
+      // Transform k-points from primitive to conventional reciprocal lattice
+      // This is necessary because the standard k-point coordinates (e.g., from
+      // Setyawan & Curtarolo) are in the primitive reciprocal basis, but QE's
+      // crystal_b format with ibrav=0 uses the conventional reciprocal basis.
+      transformedKPath = kPath.map((point) => ({
+        ...point,
+        coords: kPointPrimitiveToConventional(point.coords, centeringType),
+      }));
+    }
+
+    const taskLabel = `Bands - ${crystalData?.formula_sum || ""}`;
+    const taskParams = {
+      config: {
+        base_calculation: baseCalculation,
+        k_path: transformedKPath,
+        nbnd: nbnd === "auto" ? null : nbnd,
+        project_id: projectId,
+        scf_calc_id: selectedScf.id,
+        projections: {
+          enabled: enableProjections,
+          lsym: projectionLsym,
+          diag_basis: projectionDiagBasis,
+          pawproj: projectionPawproj,
+        },
+      },
+      workingDir: BANDS_WORK_DIR,
+      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+    };
+
+    const pathString = kPath.map((point) => point.label).join(" → ");
+    const saveParameters = {
+      source_scf_id: selectedScf.id,
+      k_path: pathString,
+      points_per_segment: pointsPerSegment,
+      total_k_points: null,
+      n_bands: nbnd === "auto" ? null : nbnd,
+      // Inherit SCF parameters for tags
+      ecutwfc: scfParams.ecutwfc,
+      nspin: scfParams.nspin,
+      lspinorb: scfParams.lspinorb,
+      lda_plus_u: scfParams.lda_plus_u,
+      vdw_corr: scfParams.vdw_corr,
+      fat_bands_requested: enableProjections,
+      projection_lsym: projectionLsym,
+      projection_diag_basis: projectionDiagBasis,
+      projection_pawproj: projectionPawproj,
+      scf_fermi_energy: selectedScf.result?.fermi_energy ?? scfFermiEnergy,
+    };
+
+    return {
+      taskLabel,
+      taskParams,
+      saveParameters,
+      saveTags: enableProjections ? ["Proj"] : [],
+    };
+  };
+
+  // Run the calculation
+  const runCalculation = async () => {
+    if (hasExternalRunningTask) {
+      setError("Another task is currently running. Queue this task or wait for completion.");
+      return;
+    }
     setIsRunning(true);
     followOutputRef.current = true;
     setOutput("");
@@ -337,188 +537,23 @@ export function BandStructureWizard({
     setBandData(null);
     setIsSaved(false);
     setProgress(defaultProgressState("Band structure"));
-    setCalcStartTime(new Date().toISOString());
+    const startTime = new Date().toISOString();
+    setCalcStartTime(startTime);
     setStep("run");
 
     try {
-      // Validate k-path
-      if (kPath.length < 2) {
-        throw new Error("Please select at least 2 points for the k-path");
-      }
+      const plan = buildBandTaskPlan();
 
-      // Get the SCF parameters for cutoffs, etc.
-      const scfParams = selectedScf.parameters || {};
-
-      // Get unique elements from crystal data
-      const elements = [...new Set(crystalData.atom_sites.map(s => getBaseElement(s.type_symbol)))];
-
-      // Check we have pseudopotentials for all elements
-      for (const el of elements) {
-        if (!selectedPseudos[el]) {
-          throw new Error(`No pseudopotential selected for element ${el}`);
-        }
-      }
-
-      // Build the full calculation config from crystalData
-      // Use the same prefix as the source SCF so we can read its .save directory
-      // SCFWizard uses "qcortado_scf" as the prefix
-      const scfPrefix = scfParams.prefix || "qcortado_scf";
-      const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-
-      // Check if this is an FCC structure (diamond, zincblende) that should use primitive cell
-      // Using primitive cell with ibrav=2 gives correct band structure matching literature
-      const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
-      const usePrimitiveCell = primitiveCell !== null;
-
-      let baseCalculation;
-      let transformedKPath;
-
-      if (usePrimitiveCell && primitiveCell) {
-        // Use primitive cell with ibrav (e.g., ibrav=2 for FCC)
-        // This is the standard approach for band structure calculations
-        console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
-
-        baseCalculation = {
-          calculation: "scf",
-          prefix: scfPrefix,
-          outdir: "./tmp",
-          pseudo_dir: pseudoDir,
-          system: {
-            ibrav: primitiveCell.ibrav,
-            // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
-            // For cubic, only celldm(1) = a is needed
-            celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
-            cell_parameters: null, // Not needed when using ibrav
-            cell_units: null,
-            species: elements.map((el) => ({
-              symbol: el,
-              mass: ELEMENT_MASSES[el] || 1.0,
-              pseudopotential: selectedPseudos[el],
-            })),
-            atoms: primitiveCell.atoms.map((atom) => ({
-              symbol: atom.symbol,
-              position: atom.position,
-              if_pos: [true, true, true],
-            })),
-            position_units: "crystal",
-            ecutwfc: scfParams.ecutwfc || 40,
-            ecutrho: scfParams.ecutrho || 320,
-            nspin: 1,
-            occupations: "smearing",
-            smearing: "gaussian",
-            degauss: 0.01,
-          },
-          kpoints: { type: "gamma" }, // Will be replaced by backend
-          conv_thr: scfParams.conv_thr || 1e-6,
-          mixing_beta: scfParams.mixing_beta || 0.7,
-          tprnfor: false,
-          tstress: false,
-          forc_conv_thr: null,
-          etot_conv_thr: null,
-          verbosity: "high",
-        };
-
-        // For primitive cell, k-points are already in the correct basis
-        // No transformation needed - use them directly
-        transformedKPath = kPath;
-      } else {
-        // Fall back to conventional cell with ibrav=0 for non-FCC structures
-        baseCalculation = {
-          calculation: "scf",
-          prefix: scfPrefix,
-          outdir: "./tmp",
-          pseudo_dir: pseudoDir,
-          system: {
-            ibrav: "free",
-            celldm: null,
-            cell_parameters: [
-              [crystalData.cell_length_a.value, 0, 0],
-              [
-                crystalData.cell_length_b.value *
-                  Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-                crystalData.cell_length_b.value *
-                  Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-                0,
-              ],
-              calculateCVector(crystalData),
-            ],
-            cell_units: "angstrom",
-            species: elements.map((el) => ({
-              symbol: el,
-              mass: ELEMENT_MASSES[el] || 1.0,
-              pseudopotential: selectedPseudos[el],
-            })),
-            atoms: crystalData.atom_sites.map((site) => ({
-              symbol: getBaseElement(site.type_symbol),
-              position: [site.fract_x, site.fract_y, site.fract_z],
-              if_pos: [true, true, true],
-            })),
-            position_units: "crystal",
-            ecutwfc: scfParams.ecutwfc || 40,
-            ecutrho: scfParams.ecutrho || 320,
-            nspin: 1,
-            occupations: "smearing",
-            smearing: "gaussian",
-            degauss: 0.01,
-          },
-          kpoints: { type: "gamma" }, // Will be replaced by backend
-          conv_thr: scfParams.conv_thr || 1e-6,
-          mixing_beta: scfParams.mixing_beta || 0.7,
-          tprnfor: false,
-          tstress: false,
-          forc_conv_thr: null,
-          etot_conv_thr: null,
-          verbosity: "high",
-        };
-
-        // Transform k-points from primitive to conventional reciprocal lattice
-        // This is necessary because the standard k-point coordinates (e.g., from
-        // Setyawan & Curtarolo) are in the primitive reciprocal basis, but QE's
-        // crystal_b format with ibrav=0 uses the conventional reciprocal basis.
-        transformedKPath = kPath.map(point => ({
-          ...point,
-          coords: kPointPrimitiveToConventional(point.coords, centeringType),
-        }));
-      }
-
-      // Start as a background task
-      const taskLabel = `Bands - ${crystalData?.formula_sum || ""}`;
-      const taskId = await taskContext.startTask("bands", {
-        config: {
-          base_calculation: baseCalculation,
-          k_path: transformedKPath,
-          nbnd: nbnd === "auto" ? null : nbnd,
-          project_id: projectId,
-          scf_calc_id: selectedScf.id,
-          projections: {
-            enabled: enableProjections,
-            lsym: projectionLsym,
-            diag_basis: projectionDiagBasis,
-            pawproj: projectionPawproj,
-          },
-        },
-        workingDir: "/tmp/qcortado_bands",
-        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
-      }, taskLabel);
+      const taskId = await taskContext.startTask("bands", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
 
-      // Wait for task completion
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          const task = taskContext.getTask(taskId);
-          if (task && task.status !== "running") {
-            clearInterval(interval);
-            resolve();
-          }
-        }, 500);
-      });
-
-      const finalTask = taskContext.getTask(taskId);
-      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+      const finalTask = await taskContext.waitForTaskCompletion(taskId);
+      if (finalTask.status !== "completed" || !finalTask.result) {
         throw new Error(finalTask?.error || "Calculation failed");
       }
 
       const result = finalTask.result as BandData;
+      const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
       setBandData(result);
       setStep("results");
@@ -531,58 +566,38 @@ export function BandStructureWizard({
 
       // Auto-save the band calculation to the project
       try {
-        setIsSaving(true);
-        const pathString = kPath.map((p) => p.label).join(" → ");
-        const scfParams = selectedScf?.parameters || {};
-
         await invoke("save_calculation", {
           projectId,
           cifId: _cifId,
           calcData: {
             calc_type: "bands",
             parameters: {
-              source_scf_id: selectedScf?.id,
-              k_path: pathString,
-              points_per_segment: pointsPerSegment,
+              ...plan.saveParameters,
               total_k_points: result.n_kpoints,
               n_bands: result.n_bands,
-              // Inherit SCF parameters for tags
-              ecutwfc: scfParams.ecutwfc,
-              nspin: scfParams.nspin,
-              lspinorb: scfParams.lspinorb,
-              lda_plus_u: scfParams.lda_plus_u,
-              vdw_corr: scfParams.vdw_corr,
-              fat_bands_requested: enableProjections,
-              projection_lsym: projectionLsym,
-              projection_diag_basis: projectionDiagBasis,
-              projection_pawproj: projectionPawproj,
             },
             result: {
               converged: true,
               total_energy: null,
-              fermi_energy: scfFermiEnergy,
+              fermi_energy: selectedScf?.result?.fermi_energy ?? scfFermiEnergy,
               n_scf_steps: null,
               wall_time_seconds: null,
-              raw_output: output,
+              raw_output: outputContent,
               // Store band data for later viewing
               band_data: result,
             },
-            started_at: calcStartTime,
+            started_at: startTime,
             completed_at: endTime,
             input_content: "", // TODO: store bands input
-            output_content: output,
-            tags: [
-              ...(enableProjections ? ["Proj"] : []),
-            ],
+            output_content: outputContent,
+            tags: plan.saveTags,
           },
-          workingDir: "/tmp/qcortado_bands",
+          workingDir: BANDS_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
         console.error("Failed to save band calculation:", saveError);
-        // Don't fail the whole operation if save fails
-      } finally {
-        setIsSaving(false);
+        setError(`Failed to auto-save band calculation: ${saveError}`);
       }
     } catch (e) {
       setError(String(e));
@@ -595,6 +610,29 @@ export function BandStructureWizard({
       }));
     } finally {
       setIsRunning(false);
+    }
+  };
+
+  const queueCalculation = () => {
+    try {
+      const plan = buildBandTaskPlan();
+      setError(null);
+      taskContext.enqueueTask(
+        "bands",
+        plan.taskParams,
+        plan.taskLabel,
+        {
+          projectId,
+          cifId: _cifId,
+          workingDir: BANDS_WORK_DIR,
+          calcType: "bands",
+          parameters: plan.saveParameters,
+          tags: plan.saveTags,
+          inputContent: "",
+        },
+      );
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -924,7 +962,10 @@ export function BandStructureWizard({
           <button className="secondary-button" onClick={() => setStep("kpath")}>
             Back
           </button>
-          <button className="primary-button" onClick={runCalculation}>
+          <button className="secondary-button" onClick={queueCalculation}>
+            Queue Task
+          </button>
+          <button className="primary-button" onClick={runCalculation} disabled={hasExternalRunningTask}>
             Run Calculation
           </button>
         </div>
@@ -1032,11 +1073,11 @@ export function BandStructureWizard({
           )}
         </div>
 
-        {/* Save status */}
-        <div className="save-status">
-          {isSaving && <span className="saving">Saving to project...</span>}
-          {isSaved && <span className="saved">Saved to project</span>}
-        </div>
+        {isSaved && (
+          <div className="save-status save-status-inline">
+            <span className="saved">Saved to project</span>
+          </div>
+        )}
 
         <div className="step-actions">
           <button className="secondary-button" onClick={onBack}>

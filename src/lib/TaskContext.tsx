@@ -1,10 +1,11 @@
-import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type TaskType = "scf" | "bands" | "dos" | "phonon";
+export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
   taskId: string;
@@ -36,6 +37,35 @@ interface TaskInfo {
   error: string | null;
 }
 
+interface QueueSaveSpec {
+  projectId: string;
+  cifId: string;
+  workingDir?: string | null;
+  calcType: "scf" | "bands" | "dos" | "phonon" | "optimization";
+  parameters: Record<string, any>;
+  tags?: string[];
+  inputContent?: string;
+}
+
+export interface QueueItem {
+  id: string;
+  taskType: TaskType;
+  label: string;
+  params: Record<string, any>;
+  status: QueueItemStatus;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  taskId: string | null;
+  error: string | null;
+  saveSpec: QueueSaveSpec | null;
+}
+
+export interface QueueSummary {
+  total: number;
+  activeIndex: number | null;
+}
+
 interface TaskContextValue {
   tasks: Map<string, TaskState>;
   activeTasks: TaskState[];
@@ -44,13 +74,141 @@ interface TaskContextValue {
     params: Record<string, any>,
     label: string,
   ) => Promise<string>;
+  enqueueTask: (
+    type: TaskType,
+    params: Record<string, any>,
+    label: string,
+    saveSpec?: QueueSaveSpec | null,
+  ) => string;
+  queueItems: QueueItem[];
+  queueSummary: QueueSummary;
+  cancelQueueItem: (queueItemId: string) => Promise<void>;
+  removeQueueItem: (queueItemId: string) => void;
+  moveQueueItem: (queueItemId: string, direction: "up" | "down") => void;
+  clearFinishedQueueItems: () => void;
   cancelTask: (taskId: string) => Promise<void>;
   dismissTask: (taskId: string) => Promise<void>;
   getTask: (taskId: string) => TaskState | undefined;
+  waitForTaskCompletion: (taskId: string) => Promise<TaskState>;
   reconnectToTask: (taskId: string) => Promise<void>;
 }
 
 const TaskContext = createContext<TaskContextValue | null>(null);
+
+const COMMAND_MAP: Record<TaskType, string> = {
+  scf: "start_scf_calculation",
+  bands: "start_bands_calculation",
+  dos: "start_dos_calculation",
+  phonon: "start_phonon_calculation",
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function generateQueueItemId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `queue_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+function isBusyError(error: unknown): boolean {
+  const text = String(error).toLowerCase();
+  return text.includes("already running");
+}
+
+function normalizeTaskType(taskType: string): TaskType {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "phonon") {
+    return taskType;
+  }
+  return "scf";
+}
+
+function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: string, parameters: Record<string, any>) {
+  if (taskType === "scf") {
+    if (taskResult && typeof taskResult === "object") {
+      return taskResult;
+    }
+    return {
+      converged: false,
+      raw_output: outputText,
+    };
+  }
+
+  if (taskType === "bands") {
+    const fallbackEf = Number(parameters?.scf_fermi_energy);
+    const fermiEnergy = Number.isFinite(fallbackEf) ? fallbackEf : null;
+    return {
+      converged: true,
+      total_energy: null,
+      fermi_energy: fermiEnergy,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+      band_data: taskResult,
+    };
+  }
+
+  if (taskType === "dos") {
+    const resultEf = Number(taskResult?.fermi_energy);
+    const fallbackEf = Number(parameters?.scf_fermi_energy);
+    const fermiEnergy = Number.isFinite(resultEf)
+      ? resultEf
+      : Number.isFinite(fallbackEf)
+        ? fallbackEf
+        : null;
+    return {
+      converged: true,
+      total_energy: null,
+      fermi_energy: fermiEnergy,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+      dos_data: taskResult,
+    };
+  }
+
+  const converged = taskResult?.converged ?? true;
+  return {
+    converged,
+    total_energy: null,
+    fermi_energy: null,
+    n_scf_steps: null,
+    wall_time_seconds: null,
+    raw_output: taskResult?.raw_output ?? outputText,
+    phonon_data: {
+      dos_data: taskResult?.dos_data ?? null,
+      dispersion_data: taskResult?.dispersion_data ?? null,
+    },
+  };
+}
+
+function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<string, any>, taskResult: any): Record<string, any> {
+  const next = { ...baseParameters };
+
+  if (taskType === "bands") {
+    if (next.total_k_points == null && Number.isFinite(Number(taskResult?.n_kpoints))) {
+      next.total_k_points = Number(taskResult.n_kpoints);
+    }
+    if (next.n_bands == null && Number.isFinite(Number(taskResult?.n_bands))) {
+      next.n_bands = Number(taskResult.n_bands);
+    }
+  } else if (taskType === "dos") {
+    if (next.n_points == null && Number.isFinite(Number(taskResult?.points))) {
+      next.n_points = Number(taskResult.points);
+    }
+  } else if (taskType === "phonon") {
+    if (next.n_qpoints == null && Number.isFinite(Number(taskResult?.n_qpoints))) {
+      next.n_qpoints = Number(taskResult.n_qpoints);
+    }
+    if (next.n_modes == null && Number.isFinite(Number(taskResult?.n_modes))) {
+      next.n_modes = Number(taskResult.n_modes);
+    }
+  }
+
+  return next;
+}
 
 export function useTaskContext(): TaskContextValue {
   const ctx = useContext(TaskContext);
@@ -62,58 +220,33 @@ export function useTaskContext(): TaskContextValue {
 
 export function TaskProvider({ children }: { children: React.ReactNode }) {
   const [tasks, setTasks] = useState<Map<string, TaskState>>(new Map());
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const unlistenRefs = useRef<Map<string, UnlistenFn[]>>(new Map());
+  const queueProcessingRef = useRef(false);
+  const tasksRef = useRef(tasks);
+  const queueRef = useRef(queueItems);
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
+
+  useEffect(() => {
+    queueRef.current = queueItems;
+  }, [queueItems]);
 
   // Sync with backend on mount (handles app reload)
   useEffect(() => {
-    syncWithBackend();
+    void syncWithBackend();
     return () => {
-      // Cleanup all listeners
       for (const fns of unlistenRefs.current.values()) {
         for (const fn of fns) fn();
       }
     };
   }, []);
 
-  async function syncWithBackend() {
-    try {
-      const summaries = await invoke<TaskSummary[]>("list_running_tasks");
-      for (const summary of summaries) {
-        if (summary.status === "running") {
-          await reconnectToTask(summary.task_id);
-        } else {
-          // Load completed/failed task info
-          const info = await invoke<TaskInfo>("get_task_info", { taskId: summary.task_id });
-          setTasks((prev) => {
-            const next = new Map(prev);
-            next.set(summary.task_id, {
-              taskId: summary.task_id,
-              taskType: summary.task_type as TaskType,
-              label: summary.label,
-              startedAt: summary.started_at,
-              status: info.status,
-              progress: {
-                status: info.status === "completed" ? "complete" : "error",
-                percent: info.status === "completed" ? 100 : null,
-                phase: info.status === "completed" ? "Complete" : "Failed",
-              },
-              output: [],
-              result: info.result,
-              error: info.error,
-            });
-            return next;
-          });
-        }
-      }
-    } catch (e) {
-      console.error("Failed to sync tasks with backend:", e);
-    }
-  }
-
-  function subscribeToTask(taskId: string, taskType: TaskType) {
+  const subscribeToTask = useCallback((taskId: string, taskType: TaskType) => {
     const fns: UnlistenFn[] = [];
 
-    // Listen for output lines
     listen<string>(`task-output:${taskId}`, (event) => {
       setTasks((prev) => {
         const task = prev.get(taskId);
@@ -129,7 +262,6 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       });
     }).then((fn) => fns.push(fn));
 
-    // Listen for completion
     listen<string>(`task-complete:${taskId}`, async () => {
       try {
         const info = await invoke<TaskInfo>("get_task_info", { taskId });
@@ -154,7 +286,6 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       }
     }).then((fn) => fns.push(fn));
 
-    // Listen for failure/status changes
     listen<string>(`task-status:${taskId}`, (event) => {
       const payload = event.payload;
       if (payload.startsWith("failed:")) {
@@ -179,42 +310,26 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     }).then((fn) => fns.push(fn));
 
     unlistenRefs.current.set(taskId, fns);
-  }
+  }, []);
 
-  const startTask = useCallback(
+  const startTaskInternal = useCallback(
     async (
       type: TaskType,
       params: Record<string, any>,
       label: string,
     ): Promise<string> => {
-      const commandMap: Record<TaskType, string> = {
-        scf: "start_scf_calculation",
-        bands: "start_bands_calculation",
-        dos: "start_dos_calculation",
-        phonon: "start_phonon_calculation",
-      };
-
-      const taskId = await invoke<string>(commandMap[type], {
+      const taskId = await invoke<string>(COMMAND_MAP[type], {
         ...params,
         label,
       });
 
-      // Create initial task state
       const initialState: TaskState = {
         taskId,
         taskType: type,
         label,
         startedAt: new Date().toISOString(),
         status: "running",
-        progress: defaultProgressState(
-          type === "scf"
-            ? "Starting..."
-            : type === "bands"
-              ? "Starting..."
-              : type === "dos"
-                ? "Starting..."
-              : "Starting...",
-        ),
+        progress: defaultProgressState("Starting..."),
         output: [],
         result: null,
         error: null,
@@ -228,6 +343,42 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
 
       subscribeToTask(taskId, type);
       return taskId;
+    },
+    [subscribeToTask],
+  );
+
+  const startTask = useCallback(
+    async (
+      type: TaskType,
+      params: Record<string, any>,
+      label: string,
+    ): Promise<string> => startTaskInternal(type, params, label),
+    [startTaskInternal],
+  );
+
+  const enqueueTask = useCallback(
+    (
+      type: TaskType,
+      params: Record<string, any>,
+      label: string,
+      saveSpec?: QueueSaveSpec | null,
+    ): string => {
+      const queueItemId = generateQueueItemId();
+      const nextItem: QueueItem = {
+        id: queueItemId,
+        taskType: type,
+        label,
+        params,
+        status: "queued",
+        createdAt: new Date().toISOString(),
+        startedAt: null,
+        finishedAt: null,
+        taskId: null,
+        error: null,
+        saveSpec: saveSpec ?? null,
+      };
+      setQueueItems((prev) => [...prev, nextItem]);
+      return queueItemId;
     },
     [],
   );
@@ -250,13 +401,37 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       });
       return next;
     });
-    // Clean up listeners
+
     const fns = unlistenRefs.current.get(taskId);
     if (fns) {
       for (const fn of fns) fn();
       unlistenRefs.current.delete(taskId);
     }
   }, []);
+
+  const cancelQueueItem = useCallback(async (queueItemId: string) => {
+    const item = queueRef.current.find((entry) => entry.id === queueItemId);
+    if (!item) return;
+
+    if ((item.status === "running" || item.status === "saving") && item.taskId) {
+      try {
+        await cancelTask(item.taskId);
+      } catch (e) {
+        console.error("Failed to cancel running queued task:", e);
+      }
+    }
+
+    setQueueItems((prev) => prev.map((entry) => (
+      entry.id === queueItemId
+        ? {
+          ...entry,
+          status: "cancelled",
+          error: entry.error ?? "Cancelled by user",
+          finishedAt: new Date().toISOString(),
+        }
+        : entry
+    )));
+  }, [cancelTask]);
 
   const dismissTask = useCallback(async (taskId: string) => {
     await invoke("dismiss_task", { taskId });
@@ -282,14 +457,12 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       const info = await invoke<TaskInfo>("get_task_info", { taskId });
       const output = await invoke<string[]>("get_task_output", { taskId });
 
-      // Replay progress from buffered output
-      const taskType = info.task_type as TaskType;
+      const taskType = normalizeTaskType(info.task_type);
       let progress = defaultProgressState("Starting...");
       for (const line of output) {
         progress = progressReducer(taskType, line, progress);
       }
 
-      // If task already completed/failed, set final state
       if (info.status !== "running") {
         progress = {
           status: info.status === "completed" ? "complete" : "error",
@@ -314,26 +487,342 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         return next;
       });
 
-      // Only subscribe to events if the task is still running
       if (info.status === "running") {
         subscribeToTask(taskId, taskType);
       }
     } catch (e) {
       console.error("Failed to reconnect to task:", e);
     }
+  }, [subscribeToTask]);
+
+  async function syncWithBackend() {
+    try {
+      const summaries = await invoke<TaskSummary[]>("list_running_tasks");
+      for (const summary of summaries) {
+        if (summary.status === "running") {
+          await reconnectToTask(summary.task_id);
+        } else {
+          const info = await invoke<TaskInfo>("get_task_info", { taskId: summary.task_id });
+          setTasks((prev) => {
+            const next = new Map(prev);
+            next.set(summary.task_id, {
+              taskId: summary.task_id,
+              taskType: normalizeTaskType(summary.task_type),
+              label: summary.label,
+              startedAt: summary.started_at,
+              status: info.status,
+              progress: {
+                status: info.status === "completed" ? "complete" : "error",
+                percent: info.status === "completed" ? 100 : null,
+                phase: info.status === "completed" ? "Complete" : "Failed",
+              },
+              output: [],
+              result: info.result,
+              error: info.error,
+            });
+            return next;
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Failed to sync tasks with backend:", e);
+    }
+  }
+
+  const removeQueueItem = useCallback((queueItemId: string) => {
+    setQueueItems((prev) => prev.filter((item) => item.id !== queueItemId));
   }, []);
 
-  const activeTasks = Array.from(tasks.values()).filter(
-    (t) => t.status === "running" || t.status === "completed" || t.status === "failed" || t.status === "cancelled",
+  const moveQueueItem = useCallback((queueItemId: string, direction: "up" | "down") => {
+    setQueueItems((prev) => {
+      const index = prev.findIndex((item) => item.id === queueItemId);
+      if (index < 0) return prev;
+      const item = prev[index];
+      if (item.status !== "queued") return prev;
+
+      const queuedIndices = prev
+        .map((entry, idx) => ({ entry, idx }))
+        .filter(({ entry }) => entry.status === "queued")
+        .map(({ idx }) => idx);
+      const queuedPosition = queuedIndices.indexOf(index);
+      if (queuedPosition < 0) return prev;
+
+      const neighborPosition = direction === "up" ? queuedPosition - 1 : queuedPosition + 1;
+      if (neighborPosition < 0 || neighborPosition >= queuedIndices.length) return prev;
+
+      const neighborIndex = queuedIndices[neighborPosition];
+      const next = [...prev];
+      [next[index], next[neighborIndex]] = [next[neighborIndex], next[index]];
+      return next;
+    });
+  }, []);
+
+  const clearFinishedQueueItems = useCallback(() => {
+    setQueueItems((prev) => prev.filter((item) => item.status === "queued" || item.status === "running" || item.status === "saving"));
+  }, []);
+
+  const waitForTaskCompletion = useCallback(async (taskId: string): Promise<TaskState> => {
+    while (true) {
+      const local = tasksRef.current.get(taskId);
+      if (local && local.status !== "running") {
+        return local;
+      }
+
+      try {
+        const info = await invoke<TaskInfo>("get_task_info", { taskId });
+        if (info.status !== "running") {
+          const output = await invoke<string[]>("get_task_output", { taskId });
+          const taskType = normalizeTaskType(info.task_type);
+          let progress = defaultProgressState("Starting...");
+          for (const line of output) {
+            progress = progressReducer(taskType, line, progress);
+          }
+          if (info.status === "completed") {
+            progress = {
+              status: "complete",
+              percent: 100,
+              phase: "Complete",
+            };
+          } else {
+            progress = {
+              status: "error",
+              percent: progress.percent,
+              phase: info.status === "cancelled" ? "Cancelled" : "Failed",
+            };
+          }
+
+          const reconstructed: TaskState = {
+            taskId,
+            taskType,
+            label: info.label,
+            startedAt: info.started_at,
+            status: info.status,
+            progress,
+            output,
+            result: info.result,
+            error: info.error,
+          };
+
+          setTasks((prev) => {
+            const next = new Map(prev);
+            next.set(taskId, reconstructed);
+            return next;
+          });
+
+          return reconstructed;
+        }
+      } catch (e) {
+        console.error("Failed to poll task status:", e);
+      }
+
+      await sleep(500);
+    }
+  }, []);
+
+  const saveQueuedTaskResult = useCallback(async (item: QueueItem, task: TaskState) => {
+    const spec = item.saveSpec;
+    if (!spec) return;
+
+    const outputLines = task.output.length > 0
+      ? task.output
+      : await invoke<string[]>("get_task_output", { taskId: task.taskId });
+    const outputText = outputLines.join("\n");
+    const nowIso = new Date().toISOString();
+    const taskResult = task.result;
+    const parameters = augmentQueuedParameters(item.taskType, spec.parameters || {}, taskResult);
+    const resultPayload = buildQueuedResult(item.taskType, taskResult, outputText, parameters);
+
+    await invoke("save_calculation", {
+      projectId: spec.projectId,
+      cifId: spec.cifId,
+      calcData: {
+        calc_type: spec.calcType,
+        parameters,
+        result: resultPayload,
+        started_at: item.startedAt || task.startedAt || nowIso,
+        completed_at: nowIso,
+        input_content: spec.inputContent ?? "",
+        output_content: outputText,
+        tags: spec.tags ?? [],
+      },
+      workingDir: spec.workingDir ?? item.params.workingDir ?? null,
+    });
+  }, []);
+
+  const processQueue = useCallback(async () => {
+    if (queueProcessingRef.current) {
+      return;
+    }
+
+    const nextQueued = queueRef.current.find((item) => item.status === "queued");
+    if (!nextQueued) {
+      return;
+    }
+
+    const hasRunningTask = Array.from(tasksRef.current.values()).some((task) => task.status === "running");
+    if (hasRunningTask) {
+      return;
+    }
+
+    queueProcessingRef.current = true;
+
+    try {
+      setQueueItems((prev) => prev.map((item) => (
+        item.id === nextQueued.id
+          ? {
+            ...item,
+            status: "running",
+            startedAt: new Date().toISOString(),
+            error: null,
+          }
+          : item
+      )));
+
+      let taskId: string;
+      try {
+        taskId = await startTaskInternal(nextQueued.taskType, nextQueued.params, nextQueued.label);
+      } catch (e) {
+        if (isBusyError(e)) {
+          setQueueItems((prev) => prev.map((item) => (
+            item.id === nextQueued.id
+              ? { ...item, status: "queued", error: null }
+              : item
+          )));
+          return;
+        }
+
+        setQueueItems((prev) => prev.map((item) => (
+          item.id === nextQueued.id
+            ? {
+              ...item,
+              status: "failed",
+              finishedAt: new Date().toISOString(),
+              error: String(e),
+            }
+            : item
+        )));
+        return;
+      }
+
+      setQueueItems((prev) => prev.map((item) => (
+        item.id === nextQueued.id
+          ? { ...item, taskId }
+          : item
+      )));
+
+      const finalTask = await waitForTaskCompletion(taskId);
+      if (finalTask.status === "completed") {
+        const queueItem = queueRef.current.find((item) => item.id === nextQueued.id);
+        if (queueItem?.saveSpec) {
+          setQueueItems((prev) => prev.map((item) => (
+            item.id === nextQueued.id
+              ? { ...item, status: "saving" }
+              : item
+          )));
+
+          try {
+            await saveQueuedTaskResult(queueItem, finalTask);
+          } catch (saveError) {
+            setQueueItems((prev) => prev.map((item) => (
+              item.id === nextQueued.id
+                ? {
+                  ...item,
+                  status: "failed",
+                  finishedAt: new Date().toISOString(),
+                  error: `Failed to save result: ${saveError}`,
+                }
+                : item
+            )));
+            return;
+          }
+        }
+
+        setQueueItems((prev) => prev.map((item) => (
+          item.id === nextQueued.id
+            ? {
+              ...item,
+              status: "completed",
+              finishedAt: new Date().toISOString(),
+              error: null,
+            }
+            : item
+        )));
+      } else if (finalTask.status === "cancelled") {
+        setQueueItems((prev) => prev.map((item) => (
+          item.id === nextQueued.id
+            ? {
+              ...item,
+              status: "cancelled",
+              finishedAt: new Date().toISOString(),
+              error: finalTask.error ?? "Cancelled",
+            }
+            : item
+        )));
+      } else {
+        setQueueItems((prev) => prev.map((item) => (
+          item.id === nextQueued.id
+            ? {
+              ...item,
+              status: "failed",
+              finishedAt: new Date().toISOString(),
+              error: finalTask.error ?? "Task failed",
+            }
+            : item
+        )));
+      }
+    } finally {
+      queueProcessingRef.current = false;
+      if (queueRef.current.some((item) => item.status === "queued")) {
+        window.setTimeout(() => {
+          void processQueue();
+        }, 0);
+      }
+    }
+  }, [saveQueuedTaskResult, startTaskInternal, waitForTaskCompletion]);
+
+  const hasQueuedItems = queueItems.some((item) => item.status === "queued");
+  const hasRunningTask = useMemo(
+    () => Array.from(tasks.values()).some((task) => task.status === "running"),
+    [tasks],
   );
+
+  useEffect(() => {
+    if (hasQueuedItems && !hasRunningTask) {
+      void processQueue();
+    }
+  }, [hasQueuedItems, hasRunningTask, processQueue]);
+
+  const activeTasks = Array.from(tasks.values()).filter(
+    (task) => task.status === "running" || task.status === "completed" || task.status === "failed" || task.status === "cancelled",
+  );
+
+  const queueSummary = useMemo<QueueSummary>(() => {
+    const pending = queueItems.filter((item) => item.status === "queued" || item.status === "running" || item.status === "saving");
+    if (pending.length === 0) {
+      return { total: 0, activeIndex: null };
+    }
+    const runningIndex = pending.findIndex((item) => item.status === "running" || item.status === "saving");
+    return {
+      total: pending.length,
+      activeIndex: runningIndex >= 0 ? runningIndex + 1 : 1,
+    };
+  }, [queueItems]);
 
   const value: TaskContextValue = {
     tasks,
     activeTasks,
     startTask,
+    enqueueTask,
+    queueItems,
+    queueSummary,
+    cancelQueueItem,
+    removeQueueItem,
+    moveQueueItem,
+    clearFinishedQueueItems,
     cancelTask,
     dismissTask,
     getTask,
+    waitForTaskCompletion,
     reconnectToTask,
   };
 

@@ -166,6 +166,17 @@ interface PhononWizardProps {
 }
 
 type WizardStep = "source" | "qgrid" | "options" | "run" | "results";
+const PHONON_WORK_DIR = "/tmp/qcortado_phonon";
+
+interface PhononTaskPlan {
+  taskLabel: string;
+  taskParams: Record<string, any>;
+  saveParameters: Record<string, any>;
+  progressMeta: {
+    hasDos: boolean;
+    hasDispersion: boolean;
+  };
+}
 
 export function PhononWizard({
   onBack,
@@ -179,6 +190,9 @@ export function PhononWizard({
 }: PhononWizardProps) {
   const taskContext = useTaskContext();
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const hasExternalRunningTask = taskContext.activeTasks.some(
+    (task) => task.status === "running" && task.taskId !== activeTaskId,
+  );
   // Wizard state
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -263,7 +277,6 @@ export function PhononWizard({
   const [phononResult, setPhononResult] = useState<PhononResult | null>(null);
   const [showOutput, setShowOutput] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [calcStartTime, setCalcStartTime] = useState<string>("");
 
   // MPI settings
@@ -343,86 +356,181 @@ export function PhononWizard({
     setQPath(newPath);
   }, []);
 
-  // Run the phonon calculation
-  const runCalculation = async () => {
+  function buildPhononTaskPlan(): PhononTaskPlan {
     if (!selectedScf?.result) {
-      setError("No source SCF calculation selected");
-      return;
+      throw new Error("No source SCF calculation selected");
     }
 
     const shouldCalculateDispersion = calculateDispersion && qPath.length >= 2;
     if (calculateDispersion && !shouldCalculateDispersion) {
-      setError("Select at least 2 Q-path points for dispersion, or disable dispersion.");
-      return;
+      throw new Error("Select at least 2 Q-path points for dispersion, or disable dispersion.");
     }
 
     const parsedDosDeltaE = parseOptionalPositiveNumber(dosDeltaEInput);
     if (calculateDos && parsedDosDeltaE === null) {
-      setError("Invalid DOS frequency step. Use a positive number (e.g. 1.0).");
-      return;
+      throw new Error("Invalid DOS frequency step. Use a positive number (e.g. 1.0).");
     }
 
     const nmixPh = parseOptionalPositiveInt(nmixPhInput);
     if (nmixPhInput.trim() && nmixPh === null) {
-      setError("Response mixing history must be a positive integer (`nmix_ph`).");
-      return;
+      throw new Error("Response mixing history must be a positive integer (`nmix_ph`).");
     }
     const niterPh = parseOptionalPositiveInt(niterPhInput);
     if (niterPhInput.trim() && niterPh === null) {
-      setError("Max DFPT iterations must be a positive integer (`niter_ph`).");
-      return;
+      throw new Error("Max DFPT iterations must be a positive integer (`niter_ph`).");
     }
     const alphaMix = parseOptionalPositiveNumber(alphaMixInput);
     if (alphaMixInput.trim() && alphaMix === null) {
-      setError("Initial response mixing factor must be a positive number (`alpha_mix(1)`).");
-      return;
+      throw new Error("Initial response mixing factor must be a positive number (`alpha_mix(1)`).");
     }
 
     const startQ = parseOptionalPositiveInt(startQInput);
     if (startQInput.trim() && startQ === null) {
-      setError("Q-range start index must be a positive integer (`start_q`).");
-      return;
+      throw new Error("Q-range start index must be a positive integer (`start_q`).");
     }
     const lastQ = parseOptionalPositiveInt(lastQInput);
     if (lastQInput.trim() && lastQ === null) {
-      setError("Q-range end index must be a positive integer (`last_q`).");
-      return;
+      throw new Error("Q-range end index must be a positive integer (`last_q`).");
     }
     if (startQ !== null && lastQ !== null && startQ > lastQ) {
-      setError("Q-range start index (`start_q`) cannot be greater than end index (`last_q`).");
-      return;
+      throw new Error("Q-range start index (`start_q`) cannot be greater than end index (`last_q`).");
     }
 
     const startIrr = parseOptionalPositiveInt(startIrrInput);
     if (startIrrInput.trim() && startIrr === null) {
-      setError("Irreducible-representation start index must be a positive integer (`start_irr`).");
-      return;
+      throw new Error("Irreducible-representation start index must be a positive integer (`start_irr`).");
     }
     const lastIrr = parseOptionalPositiveInt(lastIrrInput);
     if (lastIrrInput.trim() && lastIrr === null) {
-      setError("Irreducible-representation end index must be a positive integer (`last_irr`).");
-      return;
+      throw new Error("Irreducible-representation end index must be a positive integer (`last_irr`).");
     }
     if (startIrr !== null && lastIrr !== null && startIrr > lastIrr) {
-      setError("Irreducible-representation start index (`start_irr`) cannot be greater than end index (`last_irr`).");
-      return;
+      throw new Error("Irreducible-representation start index (`start_irr`) cannot be greater than end index (`last_irr`).");
     }
 
     const electronPhonon = electronPhononMode === "none" ? null : electronPhononMode;
     const elPhSigma = electronPhonon ? parseOptionalPositiveNumber(elPhSigmaInput) : null;
     const elPhNsigma = electronPhonon ? parseOptionalPositiveInt(elPhNsigmaInput) : null;
     if (electronPhonon && elPhSigma === null) {
-      setError("E-ph smearing width must be a positive number when electron-phonon mode is enabled (`el_ph_sigma`).");
-      return;
+      throw new Error("E-ph smearing width must be a positive number when electron-phonon mode is enabled (`el_ph_sigma`).");
     }
     if (electronPhonon && elPhNsigma === null) {
-      setError("Number of smearing samples must be a positive integer when electron-phonon mode is enabled (`el_ph_nsigma`).");
-      return;
+      throw new Error("Number of smearing samples must be a positive integer when electron-phonon mode is enabled (`el_ph_nsigma`).");
     }
 
     const fildvscfPath = fildvscfEnabled ? (fildvscf.trim() || "dvscf") : null;
     const verbosityValue = verbosity === "default" ? null : verbosity;
     const shouldPreserveFullArtifacts = epwPreparationEnabled && preserveFullArtifacts;
+    const phononConfig = {
+      phonon: {
+        prefix: "qcortado_scf",
+        outdir: "./tmp",
+        fildyn: "dynmat",
+        nq: qGrid,
+        tr2_ph: tr2Ph,
+        ldisp: true,
+        recover,
+        trans,
+        epsil,
+        fpol,
+        lraman,
+        fildvscf: fildvscfPath,
+        electron_phonon: electronPhonon,
+        el_ph_sigma: elPhSigma,
+        el_ph_nsigma: elPhNsigma,
+        nmix_ph: nmixPh,
+        niter_ph: niterPh,
+        alpha_mix: alphaMix,
+        start_q: startQ,
+        last_q: lastQ,
+        start_irr: startIrr,
+        last_irr: lastIrr,
+        verbosity: verbosityValue,
+        asr,
+      },
+      calculate_dos: calculateDos,
+      dos_grid: calculateDos ? dosGrid : null,
+      dos_delta_e: calculateDos ? parsedDosDeltaE : null,
+      calculate_dispersion: shouldCalculateDispersion,
+      q_path: shouldCalculateDispersion ? qPath.map((point) => ({
+        label: point.label,
+        coords: point.coords,
+        npoints: point.npoints,
+      })) : null,
+      points_per_segment: pointsPerSegment,
+      project_id: projectId,
+      scf_calc_id: selectedScf.id,
+    };
+
+    const taskLabel = `Phonon - ${crystalData?.formula_sum || ""}`;
+    const taskParams = {
+      config: phononConfig,
+      workingDir: PHONON_WORK_DIR,
+      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+    };
+    const pathString = shouldCalculateDispersion ? qPath.map((point) => point.label).join(" -> ") : "";
+    const saveParameters = {
+      source_scf_id: selectedScf.id,
+      q_grid: qGrid,
+      tr2_ph: tr2Ph,
+      asr,
+      recover,
+      trans,
+      epsil,
+      fpol,
+      lraman,
+      nmix_ph: nmixPh,
+      niter_ph: niterPh,
+      alpha_mix: alphaMix,
+      start_q: startQ,
+      last_q: lastQ,
+      start_irr: startIrr,
+      last_irr: lastIrr,
+      verbosity: verbosityValue,
+      electron_phonon: electronPhonon,
+      el_ph_sigma: elPhSigma,
+      el_ph_nsigma: elPhNsigma,
+      fildvscf: fildvscfPath,
+      calculate_dos: calculateDos,
+      dos_grid: calculateDos ? dosGrid : null,
+      dos_delta_e: calculateDos ? parsedDosDeltaE : null,
+      calculate_dispersion: shouldCalculateDispersion,
+      q_path: pathString,
+      points_per_segment: pointsPerSegment,
+      epw_preparation: {
+        enabled: epwPreparationEnabled,
+        preserve_full_artifacts: shouldPreserveFullArtifacts,
+        fildvscf: fildvscfPath,
+        electron_phonon: electronPhonon,
+      },
+      n_qpoints: null,
+      n_modes: null,
+    };
+
+    return {
+      taskLabel,
+      taskParams,
+      saveParameters,
+      progressMeta: {
+        hasDos: calculateDos,
+        hasDispersion: shouldCalculateDispersion,
+      },
+    };
+  }
+
+  // Run the phonon calculation
+  const runCalculation = async () => {
+    if (hasExternalRunningTask) {
+      setError("Another task is currently running. Queue this task or wait for completion.");
+      return;
+    }
+    let plan: PhononTaskPlan;
+    try {
+      plan = buildPhononTaskPlan();
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
 
     setIsRunning(true);
     followOutputRef.current = true;
@@ -432,82 +540,25 @@ export function PhononWizard({
     setIsSaved(false);
     setProgress(defaultProgressState("Phonon calculation", {
       phonon: {
-        hasDos: calculateDos,
-        hasDispersion: shouldCalculateDispersion,
+        hasDos: plan.progressMeta.hasDos,
+        hasDispersion: plan.progressMeta.hasDispersion,
       },
     }));
-    setCalcStartTime(new Date().toISOString());
+    const startTime = new Date().toISOString();
+    setCalcStartTime(startTime);
     setStep("run");
 
     try {
-      // Build the phonon configuration
-      const phononConfig = {
-        phonon: {
-          prefix: "qcortado_scf",
-          outdir: "./tmp",
-          fildyn: "dynmat",
-          nq: qGrid,
-          tr2_ph: tr2Ph,
-          ldisp: true,
-          recover,
-          trans,
-          epsil,
-          fpol,
-          lraman,
-          fildvscf: fildvscfPath,
-          electron_phonon: electronPhonon,
-          el_ph_sigma: elPhSigma,
-          el_ph_nsigma: elPhNsigma,
-          nmix_ph: nmixPh,
-          niter_ph: niterPh,
-          alpha_mix: alphaMix,
-          start_q: startQ,
-          last_q: lastQ,
-          start_irr: startIrr,
-          last_irr: lastIrr,
-          verbosity: verbosityValue,
-          asr,
-        },
-        calculate_dos: calculateDos,
-        dos_grid: calculateDos ? dosGrid : null,
-        dos_delta_e: calculateDos ? parsedDosDeltaE : null,
-        calculate_dispersion: shouldCalculateDispersion,
-        q_path: shouldCalculateDispersion ? qPath.map(p => ({
-          label: p.label,
-          coords: p.coords,
-          npoints: p.npoints,
-        })) : null,
-        points_per_segment: pointsPerSegment,
-        project_id: projectId,
-        scf_calc_id: selectedScf.id,
-      };
-
-      // Start as a background task
-      const taskLabel = `Phonon - ${crystalData?.formula_sum || ""}`;
-      const taskId = await taskContext.startTask("phonon", {
-        config: phononConfig,
-        workingDir: "/tmp/qcortado_phonon",
-        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
-      }, taskLabel);
+      const taskId = await taskContext.startTask("phonon", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
 
-      // Wait for task completion
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(() => {
-          const task = taskContext.getTask(taskId);
-          if (task && task.status !== "running") {
-            clearInterval(interval);
-            resolve();
-          }
-        }, 500);
-      });
-
-      const finalTask = taskContext.getTask(taskId);
-      if (!finalTask || finalTask.status !== "completed" || !finalTask.result) {
+      const finalTask = await taskContext.waitForTaskCompletion(taskId);
+      if (finalTask.status !== "completed" || !finalTask.result) {
         throw new Error(finalTask?.error || "Calculation failed");
       }
 
       const result = finalTask.result as PhononResult;
+      const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
       setPhononResult(result);
       setStep("results");
@@ -520,48 +571,13 @@ export function PhononWizard({
 
       // Auto-save the phonon calculation to the project
       try {
-        setIsSaving(true);
-        const pathString = shouldCalculateDispersion ? qPath.map((p) => p.label).join(" -> ") : "";
-
         await invoke("save_calculation", {
           projectId,
           cifId: _cifId,
           calcData: {
             calc_type: "phonon",
             parameters: {
-              source_scf_id: selectedScf.id,
-              q_grid: qGrid,
-              tr2_ph: tr2Ph,
-              asr,
-              recover,
-              trans,
-              epsil,
-              fpol,
-              lraman,
-              nmix_ph: nmixPh,
-              niter_ph: niterPh,
-              alpha_mix: alphaMix,
-              start_q: startQ,
-              last_q: lastQ,
-              start_irr: startIrr,
-              last_irr: lastIrr,
-              verbosity: verbosityValue,
-              electron_phonon: electronPhonon,
-              el_ph_sigma: elPhSigma,
-              el_ph_nsigma: elPhNsigma,
-              fildvscf: fildvscfPath,
-              calculate_dos: calculateDos,
-              dos_grid: calculateDos ? dosGrid : null,
-              dos_delta_e: calculateDos ? parsedDosDeltaE : null,
-              calculate_dispersion: shouldCalculateDispersion,
-              q_path: pathString,
-              points_per_segment: pointsPerSegment,
-              epw_preparation: {
-                enabled: epwPreparationEnabled,
-                preserve_full_artifacts: shouldPreserveFullArtifacts,
-                fildvscf: fildvscfPath,
-                electron_phonon: electronPhonon,
-              },
+              ...plan.saveParameters,
               n_qpoints: result.n_qpoints,
               n_modes: result.n_modes,
             },
@@ -577,18 +593,17 @@ export function PhononWizard({
                 dispersion_data: result.dispersion_data,
               },
             },
-            started_at: calcStartTime,
+            started_at: startTime,
             completed_at: endTime,
             input_content: "",
-            output_content: output,
+            output_content: outputContent,
           },
-          workingDir: "/tmp/qcortado_phonon",
+          workingDir: PHONON_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
         console.error("Failed to save phonon calculation:", saveError);
-      } finally {
-        setIsSaving(false);
+        setError(`Failed to auto-save phonon calculation: ${saveError}`);
       }
     } catch (e) {
       setError(String(e));
@@ -601,6 +616,28 @@ export function PhononWizard({
       }));
     } finally {
       setIsRunning(false);
+    }
+  };
+
+  const queueCalculation = () => {
+    try {
+      const plan = buildPhononTaskPlan();
+      setError(null);
+      taskContext.enqueueTask(
+        "phonon",
+        plan.taskParams,
+        plan.taskLabel,
+        {
+          projectId,
+          cifId: _cifId,
+          workingDir: PHONON_WORK_DIR,
+          calcType: "phonon",
+          parameters: plan.saveParameters,
+          inputContent: "",
+        },
+      );
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -1423,8 +1460,15 @@ export function PhononWizard({
             Back
           </button>
           <button
-            className="primary-button"
+            className="secondary-button"
             disabled={!canRun}
+            onClick={queueCalculation}
+          >
+            Queue Task
+          </button>
+          <button
+            className="primary-button"
+            disabled={!canRun || hasExternalRunningTask}
             onClick={runCalculation}
           >
             Run Calculation
@@ -1539,11 +1583,11 @@ export function PhononWizard({
           )}
         </div>
 
-        {/* Save status */}
-        <div className="save-status">
-          {isSaving && <span className="saving">Saving to project...</span>}
-          {isSaved && <span className="saved">Saved to project</span>}
-        </div>
+        {isSaved && (
+          <div className="save-status save-status-inline">
+            <span className="saved">Saved to project</span>
+          </div>
+        )}
 
         <div className="step-actions">
           <button className="secondary-button" onClick={onBack}>

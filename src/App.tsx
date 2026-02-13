@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -14,6 +14,7 @@ import { ProjectBrowser } from "./components/ProjectBrowser";
 import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ProcessIndicator } from "./components/ProcessIndicator";
+import { TaskQueuePage } from "./components/TaskQueuePage";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
@@ -29,7 +30,37 @@ interface ProjectSummary {
   last_activity: string;
 }
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard";
+interface TempCleanupResult {
+  removed_paths: string[];
+  failed_paths: string[];
+  bytes_freed: number;
+}
+
+interface RecoveryCalculation {
+  id: string;
+  calc_type: string;
+  started_at: string;
+  completed_at: string | null;
+  result: {
+    converged: boolean;
+  } | null;
+}
+
+interface RecoveryCifVariant {
+  id: string;
+  calculations: RecoveryCalculation[];
+}
+
+interface SettingsProjectSnapshot {
+  id: string;
+  name: string;
+  last_opened_cif_id: string | null;
+  cif_variants: RecoveryCifVariant[];
+}
+
+const DELETE_CONFIRM_TEXT = "delete my project for good";
+
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue";
 
 interface SCFContext {
   cifId: string;
@@ -185,6 +216,23 @@ function AppInner() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [showQueueMenu, setShowQueueMenu] = useState(false);
+  const [lastNonQueueView, setLastNonQueueView] = useState<AppView>("home");
+  const queueMenuRef = useRef<HTMLDivElement | null>(null);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null);
+  const [executionPrefixInput, setExecutionPrefixInput] = useState("");
+  const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
+  const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
+  const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
+  const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
+  const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
+  const [recoveryStatus, setRecoveryStatus] = useState<string | null>(null);
+  const [showDeleteProjectDialog, setShowDeleteProjectDialog] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [deleteProjectSnapshot, setDeleteProjectSnapshot] = useState<SettingsProjectSnapshot | null>(null);
+  const [projectDashboardRefreshToken, setProjectDashboardRefreshToken] = useState(0);
 
   // Active task ID for reconnection when navigating to wizard from indicator
   const [reconnectTaskId, setReconnectTaskId] = useState<string | null>(null);
@@ -216,6 +264,7 @@ function AppInner() {
   useEffect(() => {
     checkQEPath();
     loadProjectCount();
+    void loadExecutionPrefix();
   }, []);
 
   // Listen for close confirmation events from backend
@@ -224,6 +273,19 @@ function AppInner() {
       setShowCloseConfirm(true);
     });
     return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (queueMenuRef.current && !queueMenuRef.current.contains(event.target as Node)) {
+        setShowQueueMenu(false);
+      }
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
+        setShowSettingsMenu(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   async function loadProjectCount() {
@@ -278,6 +340,180 @@ function AppInner() {
     }
   }
 
+  async function loadExecutionPrefix() {
+    try {
+      const prefix = await invoke<string | null>("get_execution_prefix");
+      setExecutionPrefixInput(prefix ?? "");
+    } catch (e) {
+      console.error("Failed to load execution prefix:", e);
+    }
+  }
+
+  async function saveExecutionPrefix() {
+    const normalized = executionPrefixInput.trim();
+    setIsSavingExecutionPrefix(true);
+    setPrefixStatus(null);
+    try {
+      await invoke("set_execution_prefix", {
+        prefix: normalized.length > 0 ? normalized : null,
+      });
+      setExecutionPrefixInput(normalized);
+      setPrefixStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save execution prefix:", e);
+      setPrefixStatus("Failed to save");
+    } finally {
+      setIsSavingExecutionPrefix(false);
+    }
+  }
+
+  function formatBytes(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unitIdx = 0;
+    while (value >= 1024 && unitIdx < units.length - 1) {
+      value /= 1024;
+      unitIdx += 1;
+    }
+    const precision = value >= 10 || unitIdx === 0 ? 0 : 1;
+    return `${value.toFixed(precision)} ${units[unitIdx]}`;
+  }
+
+  async function clearTempStorage() {
+    setIsClearingTempStorage(true);
+    setTempStorageStatus(null);
+    try {
+      const result = await invoke<TempCleanupResult>("clear_temp_storage");
+      if (result.failed_paths.length > 0) {
+        setTempStorageStatus(
+          `Removed ${result.removed_paths.length} item(s), but ${result.failed_paths.length} item(s) could not be removed.`,
+        );
+      } else if (result.removed_paths.length > 0) {
+        setTempStorageStatus(
+          `Cleared ${formatBytes(result.bytes_freed)} from ${result.removed_paths.length} item(s).`,
+        );
+      } else {
+        setTempStorageStatus("No QCortado temporary data found.");
+      }
+    } catch (e) {
+      console.error("Failed to clear temp storage:", e);
+      setTempStorageStatus(`Failed to clear temporary storage: ${e}`);
+    } finally {
+      setIsClearingTempStorage(false);
+    }
+  }
+
+  async function recoverPhononFromSettings() {
+    if (!selectedProjectId) {
+      setRecoveryStatus("Open a project to recover phonon data.");
+      return;
+    }
+
+    setIsRecoveringPhonon(true);
+    setRecoveryStatus(null);
+    try {
+      const project = await invoke<SettingsProjectSnapshot>("get_project", { projectId: selectedProjectId });
+      const selectedVariant = (project.last_opened_cif_id && project.cif_variants.some((variant) => variant.id === project.last_opened_cif_id))
+        ? project.cif_variants.find((variant) => variant.id === project.last_opened_cif_id) ?? null
+        : project.cif_variants[0] ?? null;
+      if (!selectedVariant) {
+        setRecoveryStatus("No structure found in this project.");
+        return;
+      }
+
+      const fallbackScf = selectedVariant.calculations
+        .filter((calc) => calc.calc_type === "scf" && calc.result?.converged)
+        .sort((a, b) => {
+          const aTime = a.completed_at ?? a.started_at;
+          const bTime = b.completed_at ?? b.started_at;
+          return bTime.localeCompare(aTime);
+        })[0];
+
+      const defaultTmpDir = "/tmp/qcortado_phonon";
+      try {
+        await invoke("recover_phonon_calculation", {
+          projectId: selectedProjectId,
+          cifId: selectedVariant.id,
+          workingDir: defaultTmpDir,
+          sourceScfId: fallbackScf?.id ?? null,
+        });
+        setRecoveryStatus(`Recovered phonon calculation from ${defaultTmpDir}.`);
+        setProjectDashboardRefreshToken((prev) => prev + 1);
+        return;
+      } catch {
+        // Fall back to directory picker below.
+      }
+
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        defaultPath: defaultTmpDir,
+        title: "Select phonon scratch directory",
+      });
+
+      if (!selected || Array.isArray(selected)) {
+        setRecoveryStatus("Phonon recovery canceled.");
+        return;
+      }
+
+      await invoke("recover_phonon_calculation", {
+        projectId: selectedProjectId,
+        cifId: selectedVariant.id,
+        workingDir: selected,
+        sourceScfId: fallbackScf?.id ?? null,
+      });
+      setRecoveryStatus(`Recovered phonon calculation from ${selected}.`);
+      setProjectDashboardRefreshToken((prev) => prev + 1);
+    } catch (e) {
+      console.error("Failed to recover phonon calculation:", e);
+      setRecoveryStatus(`Phonon recovery failed: ${e}`);
+    } finally {
+      setIsRecoveringPhonon(false);
+    }
+  }
+
+  async function openDeleteProjectDialog() {
+    if (!selectedProjectId) return;
+    try {
+      const project = await invoke<SettingsProjectSnapshot>("get_project", { projectId: selectedProjectId });
+      setDeleteProjectSnapshot(project);
+      setDeleteConfirmText("");
+      setShowDeleteProjectDialog(true);
+      setShowSettingsMenu(false);
+    } catch (e) {
+      console.error("Failed to load project for deletion:", e);
+      setPrefixStatus("Failed to open delete dialog");
+    }
+  }
+
+  async function handleConfirmDeleteProject() {
+    if (!selectedProjectId || deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
+    setIsDeletingProject(true);
+    try {
+      await invoke("delete_project", { projectId: selectedProjectId });
+      setShowDeleteProjectDialog(false);
+      setDeleteProjectSnapshot(null);
+      setDeleteConfirmText("");
+      setScfContext(null);
+      setBandsContext(null);
+      setDosContext(null);
+      setPhononsContext(null);
+      setViewBandsData(null);
+      setViewDosData(null);
+      setViewPhononData(null);
+      setReconnectTaskId(null);
+      setSelectedProjectId(null);
+      setCurrentView("project-browser");
+      await loadProjectCount();
+    } catch (e) {
+      console.error("Failed to delete project:", e);
+      setPrefixStatus("Failed to delete project");
+    } finally {
+      setIsDeletingProject(false);
+    }
+  }
+
   function handleNavigateToTask(taskId: string, taskType: string) {
     setReconnectTaskId(taskId);
     const viewMap: Record<string, AppView> = {
@@ -290,6 +526,20 @@ function AppInner() {
     if (view) {
       setCurrentView(view);
     }
+  }
+
+  function navigateToQueue() {
+    setShowQueueMenu(false);
+    if (currentView !== "task-queue") {
+      setLastNonQueueView(currentView);
+      setCurrentView("task-queue");
+    }
+  }
+
+  function returnFromQueue() {
+    const fallback: AppView = selectedProjectId ? "project-dashboard" : "home";
+    const destination = lastNonQueueView === "task-queue" ? fallback : lastNonQueueView;
+    setCurrentView(destination);
   }
 
   async function handleConfirmClose() {
@@ -317,6 +567,228 @@ function AppInner() {
 
   // The process indicator is always rendered
   const processIndicator = <ProcessIndicator onNavigateToTask={handleNavigateToTask} />;
+  const queueLauncher = (
+    <div className="floating-queue" ref={queueMenuRef}>
+      <button
+        className="floating-queue-btn"
+        onClick={() => {
+          setShowSettingsMenu(false);
+          setShowQueueMenu((prev) => !prev);
+        }}
+        title="Task queue menu"
+      >
+        ☰
+      </button>
+      {showQueueMenu && (
+        <div className="floating-queue-menu">
+          <button onClick={navigateToQueue}>View Queue</button>
+        </div>
+      )}
+    </div>
+  );
+
+  const settingsLauncher = (
+    <div className="floating-settings" ref={settingsMenuRef}>
+      <button
+        className="floating-settings-btn"
+        onClick={() => {
+          setShowQueueMenu(false);
+          setShowSettingsMenu((prev) => !prev);
+        }}
+        title="Settings"
+      >
+        <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
+          <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+        </svg>
+      </button>
+
+      {showSettingsMenu && (
+        <div className="floating-settings-menu">
+          <div className="settings-menu-section">
+            <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
+              Command Prefix
+            </label>
+            <input
+              id="global-execution-prefix-input"
+              className="settings-menu-input"
+              value={executionPrefixInput}
+              onChange={(e) => {
+                setExecutionPrefixInput(e.target.value);
+                setPrefixStatus(null);
+              }}
+              placeholder="e.g. mpirun"
+            />
+            <p className="settings-menu-hint">
+              Prepended before every QE executable launch.
+            </p>
+            <button
+              className="settings-menu-item"
+              onClick={() => void saveExecutionPrefix()}
+              disabled={isSavingExecutionPrefix}
+            >
+              {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
+            </button>
+            {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
+          </div>
+
+          <div className="settings-menu-divider" />
+          <div className="settings-menu-section">
+            <label className="settings-menu-label">Temporary Storage</label>
+            <p className="settings-menu-hint">
+              Remove `/tmp` and system temp QCortado working folders.
+            </p>
+            <button
+              className="settings-menu-item warning"
+              onClick={() => void clearTempStorage()}
+              disabled={isClearingTempStorage}
+            >
+              {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
+            </button>
+            {tempStorageStatus && <div className="settings-menu-status">{tempStorageStatus}</div>}
+          </div>
+
+          <div className="settings-menu-divider" />
+          <div className="settings-menu-section">
+            <label className="settings-menu-label">Recovery</label>
+            <p className="settings-menu-hint">
+              Import a completed phonon scratch run into the active project history.
+            </p>
+            <button
+              className="settings-menu-item"
+              onClick={() => void recoverPhononFromSettings()}
+              disabled={isRecoveringPhonon || !selectedProjectId}
+            >
+              {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
+            </button>
+            {recoveryStatus && <div className="settings-menu-status">{recoveryStatus}</div>}
+          </div>
+
+          <div className="settings-menu-divider" />
+          <div className="settings-menu-section">
+            <label className="settings-menu-label">Theme</label>
+            <div className="theme-toggle-group" role="group" aria-label="Theme">
+              <button
+                type="button"
+                className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
+                onClick={() => setTheme("system")}
+              >
+                System
+              </button>
+              <button
+                type="button"
+                className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+                onClick={() => setTheme("light")}
+              >
+                Light
+              </button>
+              <button
+                type="button"
+                className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+                onClick={() => setTheme("dark")}
+              >
+                Dark
+              </button>
+            </div>
+          </div>
+
+          {selectedProjectId && (
+            <>
+              <div className="settings-menu-divider" />
+              <button className="settings-menu-item danger" onClick={() => void openDeleteProjectDialog()}>
+                Delete Project
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const deleteProjectModal = showDeleteProjectDialog && deleteProjectSnapshot ? (
+    <div className="dialog-overlay" onClick={() => !isDeletingProject && setShowDeleteProjectDialog(false)}>
+      <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h2>Delete Project</h2>
+          <button
+            className="dialog-close"
+            onClick={() => setShowDeleteProjectDialog(false)}
+            disabled={isDeletingProject}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="dialog-body">
+          <div className="delete-warning">
+            <p>
+              You are about to permanently delete <strong>{deleteProjectSnapshot.name}</strong> and all of its data:
+            </p>
+            <ul>
+              <li>{deleteProjectSnapshot.cif_variants.length} structure{deleteProjectSnapshot.cif_variants.length !== 1 ? "s" : ""}</li>
+              <li>
+                {deleteProjectSnapshot.cif_variants.reduce((sum, variant) => sum + variant.calculations.length, 0)} calculation
+                {deleteProjectSnapshot.cif_variants.reduce((sum, variant) => sum + variant.calculations.length, 0) !== 1 ? "s" : ""}
+              </li>
+              <li>All input/output files</li>
+            </ul>
+            <p className="delete-warning-emphasis">
+              This action cannot be undone.
+            </p>
+          </div>
+
+          <div className="form-group">
+            <label>
+              Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
+            </label>
+            <input
+              type="text"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder={DELETE_CONFIRM_TEXT}
+              disabled={isDeletingProject}
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div className="dialog-footer">
+          <button
+            className="dialog-btn cancel"
+            onClick={() => setShowDeleteProjectDialog(false)}
+            disabled={isDeletingProject}
+          >
+            Cancel
+          </button>
+          <button
+            className="dialog-btn delete"
+            onClick={() => void handleConfirmDeleteProject()}
+            disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeletingProject}
+          >
+            {isDeletingProject ? "Deleting..." : "Delete Project"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const appChrome = (
+    <>
+      {queueLauncher}
+      {settingsLauncher}
+      {processIndicator}
+      {closeConfirmModal}
+      {deleteProjectModal}
+    </>
+  );
+
+  if (currentView === "task-queue") {
+    return (
+      <>
+        <TaskQueuePage onBack={returnFromQueue} />
+        {appChrome}
+      </>
+    );
+  }
 
   if (currentView === "bands-wizard" && qePath && (bandsContext || reconnectTaskId)) {
     return (
@@ -339,8 +811,7 @@ function AppInner() {
           scfCalculations={bandsContext?.scfCalculations ?? []}
           reconnectTaskId={reconnectTaskId ?? undefined}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -369,8 +840,7 @@ function AppInner() {
             />
           </div>
         </div>
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -396,8 +866,7 @@ function AppInner() {
           scfCalculations={dosContext?.scfCalculations ?? []}
           reconnectTaskId={reconnectTaskId ?? undefined}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -429,8 +898,7 @@ function AppInner() {
             />
           </div>
         </div>
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -459,8 +927,7 @@ function AppInner() {
           scfCalculations={phononsContext?.scfCalculations ?? []}
           reconnectTaskId={reconnectTaskId ?? undefined}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -590,8 +1057,7 @@ function AppInner() {
             )}
           </div>
         </div>
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -616,8 +1082,7 @@ function AppInner() {
           optimizedStructures={scfContext?.optimizedStructures}
           reconnectTaskId={reconnectTaskId ?? undefined}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -630,13 +1095,15 @@ function AppInner() {
             setCurrentView("home");
             loadProjectCount();
           }}
+          onProjectsChanged={() => {
+            void loadProjectCount();
+          }}
           onSelectProject={(projectId) => {
             setSelectedProjectId(projectId);
             setCurrentView("project-dashboard");
           }}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -646,6 +1113,8 @@ function AppInner() {
       <>
         <ProjectDashboard
           projectId={selectedProjectId}
+          showFloatingSettings={false}
+          refreshToken={projectDashboardRefreshToken}
           onBack={() => {
             setCurrentView("project-browser");
             setSelectedProjectId(null);
@@ -711,8 +1180,7 @@ function AppInner() {
             setCurrentView("phonon-viewer");
           }}
         />
-        {processIndicator}
-        {closeConfirmModal}
+        {appChrome}
       </>
     );
   }
@@ -845,8 +1313,7 @@ function AppInner() {
           }}
         />
       </main>
-      {processIndicator}
-      {closeConfirmModal}
+        {appChrome}
     </>
   );
 }

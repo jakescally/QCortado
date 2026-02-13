@@ -25,7 +25,7 @@ thiserror = "1"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
