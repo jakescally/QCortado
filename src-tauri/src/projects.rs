@@ -74,6 +74,8 @@ pub struct ProjectSummary {
     pub created_at: String,
     pub formula: Option<String>,
     pub calculation_count: usize,
+    #[serde(default)]
+    pub calculation_types: Vec<String>,
     pub last_activity: String,
 }
 
@@ -153,6 +155,14 @@ const IMPORT_PROGRESS_EMIT_BYTES: u64 = 8 * 1024 * 1024;
 const EXPORT_COPY_BUFFER_SIZE: usize = 256 * 1024;
 const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
+const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 6] = [
+    "scf",
+    "bands",
+    "dos",
+    "phonon",
+    "optimization",
+    "fermi_surface",
+];
 
 static EXPORT_CANCEL_FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
 
@@ -1000,6 +1010,22 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
+    let normalized = calc_type.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "scf" => Some("scf"),
+        "bands" | "band" => Some("bands"),
+        "dos" => Some("dos"),
+        "phonon" => Some("phonon"),
+        "optimization" | "geometry_optimization" | "geometry optimization" | "relax"
+        | "vcrelax" => Some("optimization"),
+        "fermi_surface" | "fermisurface" | "fermi-surface" | "fermi surface" => {
+            Some("fermi_surface")
+        }
+        _ => None,
+    }
+}
+
 // ============================================================================
 // Tauri Commands
 // ============================================================================
@@ -1032,22 +1058,56 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
         // Calculate summary info
-        let calculation_count: usize = project
+        let mut calculation_count = 0usize;
+        let mut last_activity = project.created_at.clone();
+        let mut has_scf = false;
+        let mut has_bands = false;
+        let mut has_dos = false;
+        let mut has_phonon = false;
+        let mut has_optimization = false;
+        let mut has_fermi_surface = false;
+
+        for calc in project
             .cif_variants
             .iter()
-            .map(|v| v.calculations.len())
-            .sum();
+            .flat_map(|variant| variant.calculations.iter())
+        {
+            calculation_count += 1;
+
+            if let Some(completed_at) = calc.completed_at.as_ref() {
+                if completed_at > &last_activity {
+                    last_activity = completed_at.clone();
+                }
+            }
+
+            match normalize_summary_calc_type(&calc.calc_type) {
+                Some("scf") => has_scf = true,
+                Some("bands") => has_bands = true,
+                Some("dos") => has_dos = true,
+                Some("phonon") => has_phonon = true,
+                Some("optimization") => has_optimization = true,
+                Some("fermi_surface") => has_fermi_surface = true,
+                _ => {}
+            }
+        }
+
+        let mut calculation_types = Vec::new();
+        for calc_type in PROJECT_SUMMARY_CALC_TYPE_ORDER {
+            let include = match calc_type {
+                "scf" => has_scf,
+                "bands" => has_bands,
+                "dos" => has_dos,
+                "phonon" => has_phonon,
+                "optimization" => has_optimization,
+                "fermi_surface" => has_fermi_surface,
+                _ => false,
+            };
+            if include {
+                calculation_types.push(calc_type.to_string());
+            }
+        }
 
         let formula = project.cif_variants.first().map(|v| v.formula.clone());
-
-        let last_activity = project
-            .cif_variants
-            .iter()
-            .flat_map(|v| v.calculations.iter())
-            .filter_map(|c| c.completed_at.as_ref())
-            .max()
-            .cloned()
-            .unwrap_or_else(|| project.created_at.clone());
 
         summaries.push(ProjectSummary {
             id: project.id,
@@ -1056,6 +1116,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             created_at: project.created_at,
             formula,
             calculation_count,
+            calculation_types,
             last_activity,
         });
     }

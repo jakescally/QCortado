@@ -1567,6 +1567,132 @@ html[data-theme="dark"] {
   gap: 1rem;
 }
 
+.project-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.project-filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #4a5568;
+  padding: 0.26rem 0.62rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.project-filter-tab:hover {
+  background: #f7fafc;
+  border-color: #a0aec0;
+}
+
+.project-filter-tab.active {
+  font-weight: 600;
+}
+
+.project-filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  font-size: 0.69rem;
+  font-weight: 700;
+  background: #edf2f7;
+  color: #4a5568;
+}
+
+.project-filter-tab-all.active {
+  background: #ebf8ff;
+  border-color: #90cdf4;
+  color: #2b6cb0;
+}
+
+.project-filter-tab-all.active .project-filter-count {
+  background: #bee3f8;
+  color: #2b6cb0;
+}
+
+.project-filter-tab-scf.active {
+  background: #ebf8ff;
+  border-color: #90cdf4;
+  color: #2b6cb0;
+}
+
+.project-filter-tab-scf.active .project-filter-count {
+  background: #bee3f8;
+  color: #2b6cb0;
+}
+
+.project-filter-tab-bands.active {
+  background: #ebf4ff;
+  border-color: #a3bffa;
+  color: #1e429f;
+}
+
+.project-filter-tab-bands.active .project-filter-count {
+  background: #c3dafe;
+  color: #1e429f;
+}
+
+.project-filter-tab-dos.active {
+  background: #e6fffa;
+  border-color: #81e6d9;
+  color: #234e52;
+}
+
+.project-filter-tab-dos.active .project-filter-count {
+  background: #b2f5ea;
+  color: #234e52;
+}
+
+.project-filter-tab-phonon.active {
+  background: #fff7ed;
+  border-color: #fbd38d;
+  color: #9c4221;
+}
+
+.project-filter-tab-phonon.active .project-filter-count {
+  background: #feebc8;
+  color: #9c4221;
+}
+
+.project-filter-tab-optimization.active {
+  background: #f0fff4;
+  border-color: #9ae6b4;
+  color: #276749;
+}
+
+.project-filter-tab-optimization.active .project-filter-count {
+  background: #c6f6d5;
+  color: #276749;
+}
+
+.project-filter-tab-fermi-surface.active {
+  background: #fff5f7;
+  border-color: #fbb6ce;
+  color: #97266d;
+}
+
+.project-filter-tab-fermi-surface.active .project-filter-count {
+  background: #fed7e2;
+  color: #97266d;
+}
+
+.project-filter-empty-state {
+  padding: 2rem 1rem;
+}
+
 .project-card {
   background: white;
   border: 1px solid #e2e8f0;
@@ -1649,6 +1775,61 @@ html[data-theme="dark"] {
 .project-stats {
   font-size: 0.85rem;
   color: #718096;
+}
+
+.project-calculation-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.project-calc-tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 0.18rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.project-calc-tag-scf {
+  background: #ebf8ff;
+  color: #2b6cb0;
+  border-color: #90cdf4;
+}
+
+.project-calc-tag-bands {
+  background: #ebf4ff;
+  color: #1e429f;
+  border-color: #a3bffa;
+}
+
+.project-calc-tag-dos {
+  background: #e6fffa;
+  color: #234e52;
+  border-color: #81e6d9;
+}
+
+.project-calc-tag-phonon {
+  background: #fff7ed;
+  color: #9c4221;
+  border-color: #fbd38d;
+}
+
+.project-calc-tag-optimization {
+  background: #f0fff4;
+  color: #276749;
+  border-color: #9ae6b4;
+}
+
+.project-calc-tag-fermi-surface {
+  background: #fff5f7;
+  color: #97266d;
+  border-color: #fbb6ce;
 }
 
 .project-footer {
@@ -1819,9 +2000,138 @@ html[data-theme="dark"] {
     color: #f7fafc;
   }
 
+  .project-filter-tab {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .project-filter-tab:hover {
+    background: #374151;
+    border-color: #718096;
+  }
+
+  .project-filter-count {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .project-filter-tab-all.active {
+    background: #1e3a5f;
+    border-color: #2b6cb0;
+    color: #90cdf4;
+  }
+
+  .project-filter-tab-all.active .project-filter-count {
+    background: #2b6cb0;
+    color: #ebf8ff;
+  }
+
+  .project-filter-tab-scf.active {
+    background: #1e3a5f;
+    border-color: #2b6cb0;
+    color: #90cdf4;
+  }
+
+  .project-filter-tab-scf.active .project-filter-count {
+    background: #2b6cb0;
+    color: #ebf8ff;
+  }
+
+  .project-filter-tab-bands.active {
+    background: #16324a;
+    border-color: #0ea5e9;
+    color: #7dd3fc;
+  }
+
+  .project-filter-tab-bands.active .project-filter-count {
+    background: #0ea5e9;
+    color: #e0f2fe;
+  }
+
+  .project-filter-tab-dos.active {
+    background: #153e3e;
+    border-color: #2c7a7b;
+    color: #81e6d9;
+  }
+
+  .project-filter-tab-dos.active .project-filter-count {
+    background: #2c7a7b;
+    color: #e6fffa;
+  }
+
+  .project-filter-tab-phonon.active {
+    background: #4a2a14;
+    border-color: #c05621;
+    color: #fbd38d;
+  }
+
+  .project-filter-tab-phonon.active .project-filter-count {
+    background: #c05621;
+    color: #fffaf0;
+  }
+
+  .project-filter-tab-optimization.active {
+    background: #1f3f2a;
+    border-color: #2f855a;
+    color: #9ae6b4;
+  }
+
+  .project-filter-tab-optimization.active .project-filter-count {
+    background: #2f855a;
+    color: #f0fff4;
+  }
+
+  .project-filter-tab-fermi-surface.active {
+    background: #4a1f33;
+    border-color: #b83280;
+    color: #fbb6ce;
+  }
+
+  .project-filter-tab-fermi-surface.active .project-filter-count {
+    background: #b83280;
+    color: #fff5f7;
+  }
+
   .project-formula {
     background: #2c7a7b;
     color: #b2f5ea;
+  }
+
+  .project-calc-tag-scf {
+    background: #1e3a5f;
+    color: #90cdf4;
+    border-color: #2b6cb0;
+  }
+
+  .project-calc-tag-bands {
+    background: #16324a;
+    color: #7dd3fc;
+    border-color: #0ea5e9;
+  }
+
+  .project-calc-tag-dos {
+    background: #153e3e;
+    color: #81e6d9;
+    border-color: #2c7a7b;
+  }
+
+  .project-calc-tag-phonon {
+    background: #4a2a14;
+    color: #fbd38d;
+    border-color: #c05621;
+  }
+
+  .project-calc-tag-optimization {
+    background: #1f3f2a;
+    color: #9ae6b4;
+    border-color: #2f855a;
+  }
+
+  .project-calc-tag-fermi-surface {
+    background: #4a1f33;
+    color: #fbb6ce;
+    border-color: #b83280;
   }
 
   .project-footer {

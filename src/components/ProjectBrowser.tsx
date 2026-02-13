@@ -1,6 +1,6 @@
 // Project Browser - Grid view of all projects
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -13,7 +13,80 @@ interface ProjectSummary {
   created_at: string;
   formula: string | null;
   calculation_count: number;
+  calculation_types?: string[];
   last_activity: string;
+}
+
+type ProjectCalculationType =
+  | "scf"
+  | "bands"
+  | "dos"
+  | "phonon"
+  | "optimization"
+  | "fermi_surface";
+
+const PROJECT_CALCULATION_TYPE_ORDER: ProjectCalculationType[] = [
+  "scf",
+  "bands",
+  "dos",
+  "phonon",
+  "optimization",
+  "fermi_surface",
+];
+
+const PROJECT_CALCULATION_TYPE_LABELS: Record<ProjectCalculationType, string> = {
+  scf: "SCF",
+  bands: "Band",
+  dos: "DOS",
+  phonon: "Phonon",
+  optimization: "Geometry Optimization",
+  fermi_surface: "Fermi Surface",
+};
+
+type ProjectFilter = "all" | ProjectCalculationType;
+
+interface ProjectWithCalculationTypes {
+  project: ProjectSummary;
+  calculationTypes: ProjectCalculationType[];
+}
+
+const PROJECT_FILTER_ORDER: ProjectFilter[] = ["all", ...PROJECT_CALCULATION_TYPE_ORDER];
+
+function normalizeProjectCalculationType(calcType: string): ProjectCalculationType | null {
+  const normalized = calcType.trim().toLowerCase();
+  if (normalized === "scf") return "scf";
+  if (normalized === "band" || normalized === "bands") return "bands";
+  if (normalized === "dos") return "dos";
+  if (normalized === "phonon") return "phonon";
+  if (
+    normalized === "optimization"
+    || normalized === "geometry_optimization"
+    || normalized === "geometry optimization"
+    || normalized === "relax"
+    || normalized === "vcrelax"
+  ) {
+    return "optimization";
+  }
+  if (
+    normalized === "fermi_surface"
+    || normalized === "fermisurface"
+    || normalized === "fermi-surface"
+    || normalized === "fermi surface"
+  ) {
+    return "fermi_surface";
+  }
+  return null;
+}
+
+function getProjectCalculationTypes(project: ProjectSummary): ProjectCalculationType[] {
+  const presentTypes = new Set<ProjectCalculationType>();
+  for (const rawType of project.calculation_types ?? []) {
+    const normalizedType = normalizeProjectCalculationType(rawType);
+    if (normalizedType) {
+      presentTypes.add(normalizedType);
+    }
+  }
+  return PROJECT_CALCULATION_TYPE_ORDER.filter((calcType) => presentTypes.has(calcType));
 }
 
 interface ProjectBrowserProps {
@@ -67,10 +140,54 @@ export function ProjectBrowser({
   const [isExporting, setIsExporting] = useState(false);
   const [isCancelingExport, setIsCancelingExport] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [activeProjectFilters, setActiveProjectFilters] = useState<ProjectCalculationType[]>([]);
   const [exportProgress, setExportProgress] = useState<ProjectArchiveExportProgress | null>(null);
   const [importProgress, setImportProgress] = useState<ProjectArchiveImportProgress | null>(null);
   const activeExportIdRef = useRef<string | null>(null);
   const activeImportIdRef = useRef<string | null>(null);
+
+  const projectsWithCalculationTypes = useMemo<ProjectWithCalculationTypes[]>(
+    () => projects.map((project) => ({
+      project,
+      calculationTypes: getProjectCalculationTypes(project),
+    })),
+    [projects],
+  );
+
+  const calculationTypeProjectCounts = useMemo<Record<ProjectCalculationType, number>>(() => {
+    const counts: Record<ProjectCalculationType, number> = {
+      scf: 0,
+      bands: 0,
+      dos: 0,
+      phonon: 0,
+      optimization: 0,
+      fermi_surface: 0,
+    };
+    for (const { calculationTypes } of projectsWithCalculationTypes) {
+      for (const calcType of calculationTypes) {
+        counts[calcType] += 1;
+      }
+    }
+    return counts;
+  }, [projectsWithCalculationTypes]);
+
+  const filteredProjects = useMemo<ProjectWithCalculationTypes[]>(() => {
+    if (activeProjectFilters.length === 0) {
+      return projectsWithCalculationTypes;
+    }
+    return projectsWithCalculationTypes.filter(({ calculationTypes }) => (
+      activeProjectFilters.some((filterType) => calculationTypes.includes(filterType))
+    ));
+  }, [projectsWithCalculationTypes, activeProjectFilters]);
+
+  function toggleProjectFilter(filterType: ProjectCalculationType) {
+    setActiveProjectFilters((currentFilters) => {
+      if (currentFilters.includes(filterType)) {
+        return currentFilters.filter((current) => current !== filterType);
+      }
+      return [...currentFilters, filterType];
+    });
+  }
 
   useEffect(() => {
     loadProjects();
@@ -401,42 +518,105 @@ export function ProjectBrowser({
             </button>
           </div>
         ) : (
-          <div className="project-grid">
-            {projects.map((project) => (
-              <div
-                key={project.id}
-                className="project-card"
-                onClick={() => onSelectProject?.(project.id)}
-              >
-                <div className="project-card-header">
-                  <h3 className="project-name">{project.name}</h3>
-                </div>
+          <>
+            <div className="project-filter-bar">
+              {PROJECT_FILTER_ORDER.map((filterType) => {
+                const filterLabel = filterType === "all"
+                  ? "All"
+                  : PROJECT_CALCULATION_TYPE_LABELS[filterType];
+                const filterCount = filterType === "all"
+                  ? projects.length
+                  : calculationTypeProjectCounts[filterType];
+                const variantClass = filterType === "all"
+                  ? "project-filter-tab-all"
+                  : `project-filter-tab-${filterType.replace(/_/g, "-")}`;
+                const isActive = filterType === "all"
+                  ? activeProjectFilters.length === 0
+                  : activeProjectFilters.includes(filterType);
+                return (
+                  <button
+                    key={filterType}
+                    className={`project-filter-tab ${variantClass} ${isActive ? "active" : ""}`}
+                    onClick={() => {
+                      if (filterType === "all") {
+                        setActiveProjectFilters([]);
+                        return;
+                      }
+                      toggleProjectFilter(filterType);
+                    }}
+                    type="button"
+                  >
+                    <span>{filterLabel}</span>
+                    <span className="project-filter-count">{filterCount}</span>
+                  </button>
+                );
+              })}
+            </div>
 
-                {project.description && (
-                  <p className="project-description">{project.description}</p>
-                )}
-
-                <div className="project-meta">
-                  {project.formula && (
-                    <span className="project-formula">{project.formula}</span>
-                  )}
-                  <span className="project-stats">
-                    {project.calculation_count} calculation
-                    {project.calculation_count !== 1 ? "s" : ""}
-                  </span>
-                </div>
-
-                <div className="project-footer">
-                  <span className="project-date" title={formatDate(project.created_at)}>
-                    Created {formatDate(project.created_at)}
-                  </span>
-                  <span className="project-activity" title={formatDate(project.last_activity)}>
-                    Active {formatRelativeTime(project.last_activity)}
-                  </span>
-                </div>
+            {filteredProjects.length === 0 ? (
+              <div className="empty-state project-filter-empty-state">
+                <h3>No Matching Projects</h3>
+                <p>No projects include the selected tags.</p>
+                <button
+                  className="secondary-project-btn"
+                  type="button"
+                  onClick={() => setActiveProjectFilters([])}
+                >
+                  Clear Filters
+                </button>
               </div>
-            ))}
-          </div>
+            ) : (
+              <div className="project-grid">
+                {filteredProjects.map(({ project, calculationTypes }) => (
+                  <div
+                    key={project.id}
+                    className="project-card"
+                    onClick={() => onSelectProject?.(project.id)}
+                  >
+                    <div className="project-card-header">
+                      <h3 className="project-name">{project.name}</h3>
+                    </div>
+
+                    {project.description && (
+                      <p className="project-description">{project.description}</p>
+                    )}
+
+                    <div className="project-meta">
+                      {project.formula && (
+                        <span className="project-formula">{project.formula}</span>
+                      )}
+                      <span className="project-stats">
+                        {project.calculation_count} calculation
+                        {project.calculation_count !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+
+                    {calculationTypes.length > 0 && (
+                      <div className="project-calculation-tags">
+                        {calculationTypes.map((calcType) => (
+                          <span
+                            key={calcType}
+                            className={`project-calc-tag project-calc-tag-${calcType.replace(/_/g, "-")}`}
+                          >
+                            {PROJECT_CALCULATION_TYPE_LABELS[calcType]}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="project-footer">
+                      <span className="project-date" title={formatDate(project.created_at)}>
+                        Created {formatDate(project.created_at)}
+                      </span>
+                      <span className="project-activity" title={formatDate(project.last_activity)}>
+                        Active {formatRelativeTime(project.last_activity)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
 
