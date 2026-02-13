@@ -204,7 +204,6 @@ function getPhononFocusRanges(phononBandData: BandData): {
 function AppInner() {
   const { theme, setTheme } = useTheme();
   const windowSize = useWindowSize();
-  const plotWidth = Math.max(600, windowSize.width - 80);
   const plotHeight = Math.max(400, windowSize.height - 160);
 
   const [qePath, setQePath] = useState<string | null>(null);
@@ -893,8 +892,6 @@ function AppInner() {
                 ...viewDosData.dosData,
                 fermi_energy: viewDosData.dosData.fermi_energy ?? viewDosData.fermiEnergy,
               }}
-              width={plotWidth}
-              height={plotHeight}
             />
           </div>
         </div>
@@ -1031,8 +1028,6 @@ function AppInner() {
               <BandPlot
                 key={plotKey}
                 data={displayPhononBandData}
-                width={plotWidth}
-                height={plotHeight}
                 energyRange={activePhononRange}
                 showFermiLevel={false}
                 yAxisLabel={`Frequency (${phononUnitLabel})`}

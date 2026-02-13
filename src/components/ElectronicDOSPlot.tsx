@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 export interface ElectronicDOSData {
   energies: number[];
@@ -20,9 +20,39 @@ export function ElectronicDOSPlot({
   width = 900,
   height = 500,
 }: ElectronicDOSPlotProps) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const nextWidth = Math.floor(entry.contentRect.width);
+      const nextHeight = Math.floor(entry.contentRect.height);
+      setContainerSize((prev) => {
+        if (prev && prev.width === nextWidth && prev.height === nextHeight) {
+          return prev;
+        }
+        return {
+          width: nextWidth,
+          height: nextHeight,
+        };
+      });
+    });
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const resolvedWidth = containerSize ? Math.max(1, containerSize.width) : Math.max(320, width);
+  const resolvedHeight = containerSize ? Math.max(1, containerSize.height) : Math.max(260, height);
+
   const margins = { top: 28, right: 26, bottom: 56, left: 64 };
-  const innerWidth = Math.max(1, width - margins.left - margins.right);
-  const innerHeight = Math.max(1, height - margins.top - margins.bottom);
+  const innerWidth = Math.max(1, resolvedWidth - margins.left - margins.right);
+  const innerHeight = Math.max(1, resolvedHeight - margins.top - margins.bottom);
 
   const [energyMin, energyMax] = useMemo<[number, number]>(() => {
     const min = Number.isFinite(data.energy_range?.[0]) ? data.energy_range[0] : Math.min(...data.energies);
@@ -80,77 +110,79 @@ export function ElectronicDOSPlot({
 
   return (
     <div className="electronic-dos-plot">
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-        <g transform={`translate(${margins.left},${margins.top})`}>
-          <rect x={0} y={0} width={innerWidth} height={innerHeight} fill="#ffffff" />
+      <div className="electronic-dos-plot-canvas" ref={canvasRef}>
+        <svg width={resolvedWidth} height={resolvedHeight} viewBox={`0 0 ${resolvedWidth} ${resolvedHeight}`}>
+          <g transform={`translate(${margins.left},${margins.top})`}>
+            <rect x={0} y={0} width={innerWidth} height={innerHeight} fill="#ffffff" />
 
-          {xTicks.map((tick) => (
-            <g key={`x-${tick.toFixed(4)}`} transform={`translate(${toX(tick)},0)`}>
-              <line y1={0} y2={innerHeight} stroke="#e2e8f0" strokeWidth={1} />
-              <text y={innerHeight + 22} textAnchor="middle" fontSize={12} fill="#4a5568">
-                {tick.toFixed(1)}
-              </text>
-            </g>
-          ))}
+            {xTicks.map((tick) => (
+              <g key={`x-${tick.toFixed(4)}`} transform={`translate(${toX(tick)},0)`}>
+                <line y1={0} y2={innerHeight} stroke="#e2e8f0" strokeWidth={1} />
+                <text y={innerHeight + 22} textAnchor="middle" fontSize={12} fill="#4a5568">
+                  {tick.toFixed(1)}
+                </text>
+              </g>
+            ))}
 
-          {yTicks.map((tick) => (
-            <g key={`y-${tick.toFixed(4)}`} transform={`translate(0,${toY(tick)})`}>
-              <line x1={0} x2={innerWidth} stroke="#edf2f7" strokeWidth={1} />
-              <text x={-10} y={4} textAnchor="end" fontSize={12} fill="#4a5568">
-                {tick.toFixed(1)}
-              </text>
-            </g>
-          ))}
+            {yTicks.map((tick) => (
+              <g key={`y-${tick.toFixed(4)}`} transform={`translate(0,${toY(tick)})`}>
+                <line x1={0} x2={innerWidth} stroke="#edf2f7" strokeWidth={1} />
+                <text x={-10} y={4} textAnchor="end" fontSize={12} fill="#4a5568">
+                  {tick.toFixed(1)}
+                </text>
+              </g>
+            ))}
 
-          <line x1={0} y1={innerHeight} x2={innerWidth} y2={innerHeight} stroke="#2d3748" strokeWidth={1.4} />
-          <line x1={0} y1={0} x2={0} y2={innerHeight} stroke="#2d3748" strokeWidth={1.4} />
+            <line x1={0} y1={innerHeight} x2={innerWidth} y2={innerHeight} stroke="#2d3748" strokeWidth={1.4} />
+            <line x1={0} y1={0} x2={0} y2={innerHeight} stroke="#2d3748" strokeWidth={1.4} />
 
-          {pathD && (
-            <path d={pathD} fill="none" stroke="#1f77b4" strokeWidth={1.8} />
-          )}
+            {pathD && (
+              <path d={pathD} fill="none" stroke="#1f77b4" strokeWidth={1.8} />
+            )}
 
-          {fermiX !== null && (
-            <>
-              <line
-                x1={fermiX}
-                y1={0}
-                x2={fermiX}
-                y2={innerHeight}
-                stroke="#d53f8c"
-                strokeWidth={1.25}
-                strokeDasharray="4 3"
-              />
-              <text
-                x={Math.min(innerWidth - 6, fermiX + 4)}
-                y={14}
-                textAnchor="start"
-                fontSize={11}
-                fill="#97266d"
-              >
-                EF
-              </text>
-            </>
-          )}
+            {fermiX !== null && (
+              <>
+                <line
+                  x1={fermiX}
+                  y1={0}
+                  x2={fermiX}
+                  y2={innerHeight}
+                  stroke="#d53f8c"
+                  strokeWidth={1.25}
+                  strokeDasharray="4 3"
+                />
+                <text
+                  x={Math.min(innerWidth - 6, fermiX + 4)}
+                  y={14}
+                  textAnchor="start"
+                  fontSize={11}
+                  fill="#97266d"
+                >
+                  EF
+                </text>
+              </>
+            )}
 
-          <text
-            x={innerWidth / 2}
-            y={innerHeight + 44}
-            textAnchor="middle"
-            fontSize={13}
-            fill="#2d3748"
-          >
-            Energy (eV)
-          </text>
-          <text
-            transform={`translate(${-46},${innerHeight / 2}) rotate(-90)`}
-            textAnchor="middle"
-            fontSize={13}
-            fill="#2d3748"
-          >
-            DOS (states/eV)
-          </text>
-        </g>
-      </svg>
+            <text
+              x={innerWidth / 2}
+              y={innerHeight + 44}
+              textAnchor="middle"
+              fontSize={13}
+              fill="#2d3748"
+            >
+              Energy (eV)
+            </text>
+            <text
+              transform={`translate(${-46},${innerHeight / 2}) rotate(-90)`}
+              textAnchor="middle"
+              fontSize={13}
+              fill="#2d3748"
+            >
+              DOS (states/eV)
+            </text>
+          </g>
+        </svg>
+      </div>
     </div>
   );
 }

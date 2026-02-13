@@ -310,7 +310,7 @@ export function BandPlot({
   [isDark]);
 
   const svgRef = useRef<SVGSVGElement>(null);
-  const mainRef = useRef<HTMLDivElement>(null);
+  const plotCanvasRef = useRef<HTMLDivElement>(null);
   const clipPathId = useId();
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | null>(null);
   const [isHoveringPlot, setIsHoveringPlot] = useState(false);
@@ -319,15 +319,22 @@ export function BandPlot({
   const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
 
   useLayoutEffect(() => {
-    const el = mainRef.current;
+    const el = plotCanvasRef.current;
     if (!el) return;
 
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (entry) {
-        setContainerSize({
-          width: Math.floor(entry.contentRect.width),
-          height: Math.floor(entry.contentRect.height),
+        const nextWidth = Math.floor(entry.contentRect.width);
+        const nextHeight = Math.floor(entry.contentRect.height);
+        setContainerSize((prev) => {
+          if (prev && prev.width === nextWidth && prev.height === nextHeight) {
+            return prev;
+          }
+          return {
+            width: nextWidth,
+            height: nextHeight,
+          };
         });
       }
     });
@@ -368,12 +375,11 @@ export function BandPlot({
   const [exportNote, setExportNote] = useState("");
 
   // Margins & dimensions — prefer ResizeObserver, fall back to props
-  const infoBarHeight = 30;
   const margin = { top: 30, right: 30, bottom: 50, left: 70 };
   const fallbackWidth = Math.max(240, width);
   const fallbackHeight = Math.max(220, height);
   const resolvedWidth = containerSize ? Math.max(1, containerSize.width) : fallbackWidth;
-  const resolvedHeight = containerSize ? Math.max(1, containerSize.height - infoBarHeight) : fallbackHeight;
+  const resolvedHeight = containerSize ? Math.max(1, containerSize.height) : fallbackHeight;
   const plotWidth = Math.max(1, resolvedWidth - margin.left - margin.right);
   const plotHeight = Math.max(1, resolvedHeight - margin.top - margin.bottom);
 
@@ -877,210 +883,212 @@ export function BandPlot({
 
   return (
     <div className="band-plot-layout">
-      <div className="band-plot-main" ref={mainRef}>
-        <svg
-          ref={svgRef}
-          width={resolvedWidth}
-          height={resolvedHeight}
-          onMouseEnter={() => setIsHoveringPlot(true)}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => {
-            setIsHoveringPlot(false);
-            setHoveredPoint(null);
-          }}
-          onWheel={handleWheel}
-          style={{ cursor: "crosshair", display: "block" }}
-        >
-          <defs>
-            <clipPath id={clipPathId}>
-              <rect x={0} y={0} width={plotWidth} height={plotHeight} />
-            </clipPath>
-          </defs>
+      <div className="band-plot-main">
+        <div className="band-plot-canvas" ref={plotCanvasRef}>
+          <svg
+            ref={svgRef}
+            width={resolvedWidth}
+            height={resolvedHeight}
+            onMouseEnter={() => setIsHoveringPlot(true)}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => {
+              setIsHoveringPlot(false);
+              setHoveredPoint(null);
+            }}
+            onWheel={handleWheel}
+            style={{ cursor: "crosshair", display: "block" }}
+          >
+            <defs>
+              <clipPath id={clipPathId}>
+                <rect x={0} y={0} width={plotWidth} height={plotHeight} />
+              </clipPath>
+            </defs>
 
-          {/* Background */}
-          <rect width={resolvedWidth} height={resolvedHeight} fill={svgBgFill} />
+            {/* Background */}
+            <rect width={resolvedWidth} height={resolvedHeight} fill={svgBgFill} />
 
-          {/* Plot area */}
-          <g transform={`translate(${margin.left}, ${margin.top})`}>
-            {/* Grid lines */}
-            <g className="grid-lines" opacity={0.3}>
-              {yTicks.map((tick) => (
-                <line
-                  key={tick}
-                  x1={0}
-                  x2={plotWidth}
-                  y1={scales.yScale(tick)}
-                  y2={scales.yScale(tick)}
-                  stroke={colors.grid}
-                  strokeDasharray="2,2"
-                />
-              ))}
-            </g>
-
-            {/* High-symmetry point vertical lines */}
-            {data.high_symmetry_points.map((point, i) => (
-              <g key={i}>
-                <line
-                  x1={scales.xScale(point.k_distance)}
-                  x2={scales.xScale(point.k_distance)}
-                  y1={0}
-                  y2={plotHeight}
-                  stroke={colors.axis}
-                  strokeWidth={0.5}
-                />
-                <text
-                  x={scales.xScale(point.k_distance)}
-                  y={plotHeight + 20}
-                  textAnchor="middle"
-                  fill={colors.text}
-                  fontSize={14}
-                  fontFamily="serif"
-                  fontStyle="italic"
-                >
-                  {formatLabel(point.label)}
-                </text>
-              </g>
-            ))}
-
-            {/* Fermi level at E - E_F = 0 */}
-            {showFermiLevel && (
-              <g>
-                <line
-                  x1={0}
-                  x2={plotWidth}
-                  y1={scales.yScale(0)}
-                  y2={scales.yScale(0)}
-                  stroke="#d32f2f"
-                  strokeWidth={1}
-                  strokeDasharray="4,4"
-                />
-                <text
-                  x={plotWidth + 5}
-                  y={scales.yScale(0) + 4}
-                  fill="#d32f2f"
-                  fontSize={11}
-                >
-                  E_F
-                </text>
-              </g>
-            )}
-
-            {/* Band lines + fat points */}
-            <g clipPath={`url(#${clipPathId})`}>
-              {drawBandLines &&
-                shiftedEnergies.map((band, bandIdx) => (
-                  <path
-                    key={bandIdx}
-                    d={bandToPath(band, data.k_points)}
-                    fill="none"
-                    stroke={bandColors[bandIdx]}
-                    strokeWidth={lineWidth}
-                    opacity={lineOpacity}
-                  />
-                ))}
-
-              {fatBandsActive &&
-                fatPoints.map((point) => (
-                  <circle
-                    key={point.key}
-                    cx={point.cx}
-                    cy={point.cy}
-                    r={point.r}
-                    fill={point.fill}
-                    opacity={point.opacity}
-                  />
-                ))}
-            </g>
-
-            {/* Hover point */}
-            {hoveredPoint && (
-              <g>
-                <circle
-                  cx={hoveredPoint.x}
-                  cy={hoveredPoint.y}
-                  r={5}
-                  fill="#ff9800"
-                  stroke="#fff"
-                  strokeWidth={2}
-                />
-              </g>
-            )}
-
-            {/* Y-axis */}
-            <g>
-              <line x1={0} y1={0} x2={0} y2={plotHeight} stroke={colors.axis} />
-              {yTicks.map((tick) => (
-                <g key={tick}>
+            {/* Plot area */}
+            <g transform={`translate(${margin.left}, ${margin.top})`}>
+              {/* Grid lines */}
+              <g className="grid-lines" opacity={0.3}>
+                {yTicks.map((tick) => (
                   <line
-                    x1={-5}
-                    x2={0}
+                    key={tick}
+                    x1={0}
+                    x2={plotWidth}
                     y1={scales.yScale(tick)}
                     y2={scales.yScale(tick)}
+                    stroke={colors.grid}
+                    strokeDasharray="2,2"
+                  />
+                ))}
+              </g>
+
+              {/* High-symmetry point vertical lines */}
+              {data.high_symmetry_points.map((point, i) => (
+                <g key={i}>
+                  <line
+                    x1={scales.xScale(point.k_distance)}
+                    x2={scales.xScale(point.k_distance)}
+                    y1={0}
+                    y2={plotHeight}
                     stroke={colors.axis}
+                    strokeWidth={0.5}
                   />
                   <text
-                    x={-10}
-                    y={scales.yScale(tick) + 4}
-                    textAnchor="end"
+                    x={scales.xScale(point.k_distance)}
+                    y={plotHeight + 20}
+                    textAnchor="middle"
                     fill={colors.text}
-                    fontSize={11}
+                    fontSize={14}
+                    fontFamily="serif"
+                    fontStyle="italic"
                   >
-                    {tick.toFixed(1)}
+                    {formatLabel(point.label)}
                   </text>
                 </g>
               ))}
-              <text
-                transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
-                textAnchor="middle"
-                fill={colors.text}
-                fontSize={14}
-              >
-                {yAxisLabel}
-              </text>
-            </g>
 
-            {/* X-axis line */}
-            <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
-          </g>
-
-          {/* Tooltip */}
-          {hoveredPoint && (
-            <g
-              transform={`translate(${margin.left + hoveredPoint.x + 10}, ${
-                margin.top + hoveredPoint.y - 10
-              })`}
-            >
-              <rect
-                x={0}
-                y={-42}
-                width={190}
-                height={
-                  hoveredPoint.projectionWeight !== undefined &&
-                  hoveredPoint.projectionWeightNormalized !== undefined
-                    ? 66
-                    : 48
-                }
-                fill={colors.tooltip}
-                stroke={colors.tooltipBorder}
-                rx={4}
-                filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
-              />
-              <text x={8} y={-24} fill={colors.tooltipText} fontSize={11}>
-                {pointLabel} {hoveredPoint.band}
-              </text>
-              <text x={8} y={-8} fill="#1565c0" fontSize={11}>
-                {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
-              </text>
-              {hoveredPoint.projectionWeight !== undefined &&
-                hoveredPoint.projectionWeightNormalized !== undefined && (
-                  <text x={8} y={10} fill="#6d4c41" fontSize={11}>
-                    Weight = {hoveredPoint.projectionWeight.toExponential(2)} (
-                    {(hoveredPoint.projectionWeightNormalized * 100).toFixed(1)}%)
+              {/* Fermi level at E - E_F = 0 */}
+              {showFermiLevel && (
+                <g>
+                  <line
+                    x1={0}
+                    x2={plotWidth}
+                    y1={scales.yScale(0)}
+                    y2={scales.yScale(0)}
+                    stroke="#d32f2f"
+                    strokeWidth={1}
+                    strokeDasharray="4,4"
+                  />
+                  <text
+                    x={plotWidth + 5}
+                    y={scales.yScale(0) + 4}
+                    fill="#d32f2f"
+                    fontSize={11}
+                  >
+                    E_F
                   </text>
-                )}
+                </g>
+              )}
+
+              {/* Band lines + fat points */}
+              <g clipPath={`url(#${clipPathId})`}>
+                {drawBandLines &&
+                  shiftedEnergies.map((band, bandIdx) => (
+                    <path
+                      key={bandIdx}
+                      d={bandToPath(band, data.k_points)}
+                      fill="none"
+                      stroke={bandColors[bandIdx]}
+                      strokeWidth={lineWidth}
+                      opacity={lineOpacity}
+                    />
+                  ))}
+
+                {fatBandsActive &&
+                  fatPoints.map((point) => (
+                    <circle
+                      key={point.key}
+                      cx={point.cx}
+                      cy={point.cy}
+                      r={point.r}
+                      fill={point.fill}
+                      opacity={point.opacity}
+                    />
+                  ))}
+              </g>
+
+              {/* Hover point */}
+              {hoveredPoint && (
+                <g>
+                  <circle
+                    cx={hoveredPoint.x}
+                    cy={hoveredPoint.y}
+                    r={5}
+                    fill="#ff9800"
+                    stroke="#fff"
+                    strokeWidth={2}
+                  />
+                </g>
+              )}
+
+              {/* Y-axis */}
+              <g>
+                <line x1={0} y1={0} x2={0} y2={plotHeight} stroke={colors.axis} />
+                {yTicks.map((tick) => (
+                  <g key={tick}>
+                    <line
+                      x1={-5}
+                      x2={0}
+                      y1={scales.yScale(tick)}
+                      y2={scales.yScale(tick)}
+                      stroke={colors.axis}
+                    />
+                    <text
+                      x={-10}
+                      y={scales.yScale(tick) + 4}
+                      textAnchor="end"
+                      fill={colors.text}
+                      fontSize={11}
+                    >
+                      {tick.toFixed(1)}
+                    </text>
+                  </g>
+                ))}
+                <text
+                  transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
+                  textAnchor="middle"
+                  fill={colors.text}
+                  fontSize={14}
+                >
+                  {yAxisLabel}
+                </text>
+              </g>
+
+              {/* X-axis line */}
+              <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
             </g>
-          )}
-        </svg>
+
+            {/* Tooltip */}
+            {hoveredPoint && (
+              <g
+                transform={`translate(${margin.left + hoveredPoint.x + 10}, ${
+                  margin.top + hoveredPoint.y - 10
+                })`}
+              >
+                <rect
+                  x={0}
+                  y={-42}
+                  width={190}
+                  height={
+                    hoveredPoint.projectionWeight !== undefined &&
+                    hoveredPoint.projectionWeightNormalized !== undefined
+                      ? 66
+                      : 48
+                  }
+                  fill={colors.tooltip}
+                  stroke={colors.tooltipBorder}
+                  rx={4}
+                  filter="drop-shadow(0 2px 4px rgba(0,0,0,0.1))"
+                />
+                <text x={8} y={-24} fill={colors.tooltipText} fontSize={11}>
+                  {pointLabel} {hoveredPoint.band}
+                </text>
+                <text x={8} y={-8} fill="#1565c0" fontSize={11}>
+                  {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
+                </text>
+                {hoveredPoint.projectionWeight !== undefined &&
+                  hoveredPoint.projectionWeightNormalized !== undefined && (
+                    <text x={8} y={10} fill="#6d4c41" fontSize={11}>
+                      Weight = {hoveredPoint.projectionWeight.toExponential(2)} (
+                      {(hoveredPoint.projectionWeightNormalized * 100).toFixed(1)}%)
+                    </text>
+                  )}
+              </g>
+            )}
+          </svg>
+        </div>
 
         {/* Info panel */}
         <div className="band-plot-info">
