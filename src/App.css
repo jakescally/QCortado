@@ -1567,6 +1567,154 @@ html[data-theme="dark"] {
   gap: 1rem;
 }
 
+.folder-section {
+  margin-bottom: 1.25rem;
+}
+
+.folder-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+  color: #4a5568;
+}
+
+.folder-section-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #2d3748;
+}
+
+.folder-section-header span {
+  font-size: 0.8rem;
+  color: #718096;
+}
+
+.folder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.85rem;
+}
+
+.folder-card {
+  border: 1px solid #dbe7f5;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.folder-card:hover {
+  border-color: #90cdf4;
+  box-shadow: 0 4px 12px rgba(66, 153, 225, 0.14);
+}
+
+.folder-card.active {
+  border-color: #4299e1;
+  box-shadow: 0 0 0 1px rgba(66, 153, 225, 0.34);
+}
+
+.folder-card:focus-visible {
+  outline: 2px solid #63b3ed;
+  outline-offset: 2px;
+}
+
+.folder-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.folder-card-header h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #2c5282;
+}
+
+.folder-rename-btn {
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #2b6cb0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+
+.folder-rename-btn:hover {
+  background: #ebf8ff;
+}
+
+.folder-empty-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #718096;
+}
+
+.folder-project-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.folder-project-title {
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #2b6cb0;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.22rem 0.58rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-browse-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.95rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.folder-back-btn {
+  white-space: nowrap;
+}
+
+.folder-browse-meta h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #2d3748;
+}
+
+.folder-browse-meta span {
+  font-size: 0.78rem;
+  color: #718096;
+}
+
+.folder-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.folder-tag-empty {
+  font-size: 0.75rem;
+  color: #718096;
+}
+
 .project-filter-bar {
   display: flex;
   flex-wrap: wrap;
@@ -1722,6 +1870,74 @@ html[data-theme="dark"] {
   font-weight: 600;
 }
 
+.project-card-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  margin-left: auto;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #a0aec0;
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.project-card-menu-btn:hover {
+  background: #edf2f7;
+  color: #4a5568;
+}
+
+.project-card-menu-wrapper {
+  position: relative;
+  margin-left: auto;
+}
+
+.project-card-menu {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  z-index: 20;
+  min-width: 185px;
+  max-width: min(280px, 80vw);
+  padding: 0.35rem;
+  border: 1px solid #d7e3f0;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.16);
+}
+
+.project-card-menu-item {
+  width: 100%;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #2d3748;
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  cursor: pointer;
+}
+
+.project-card-menu-item:hover:not(:disabled) {
+  background: #edf2f7;
+}
+
+.project-card-menu-item:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.project-card-menu-divider {
+  height: 1px;
+  margin: 0.2rem 0;
+  background: #e2e8f0;
+}
+
 .delete-btn {
   background: none;
   border: none;
@@ -1758,6 +1974,7 @@ html[data-theme="dark"] {
 .project-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.75rem;
   margin-bottom: 0.75rem;
 }
@@ -1770,6 +1987,16 @@ html[data-theme="dark"] {
   font-size: 0.8rem;
   font-weight: 600;
   font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.project-folder-pill {
+  background: #ebf4ff;
+  color: #2b6cb0;
+  border: 1px solid #bfdbfe;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
 }
 
 .project-stats {
@@ -1839,6 +2066,23 @@ html[data-theme="dark"] {
   color: #a0aec0;
   padding-top: 0.75rem;
   border-top: 1px solid #edf2f7;
+}
+
+@media (max-width: 900px) {
+  .folder-grid,
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .folder-browse-bar {
+    align-items: flex-start;
+  }
+
+  .project-card-menu {
+    right: auto;
+    left: 0;
+    min-width: 170px;
+  }
 }
 
 /* Save to Project Button in SCFWizard */
@@ -1986,6 +2230,68 @@ html[data-theme="dark"] {
     color: #f7fafc;
   }
 
+  .folder-section-header h3 {
+    color: #f7fafc;
+  }
+
+  .folder-section-header span {
+    color: #a0aec0;
+  }
+
+  .folder-card {
+    background: #243244;
+    border-color: #355173;
+  }
+
+  .folder-card:hover {
+    border-color: #63b3ed;
+    box-shadow: 0 4px 12px rgba(99, 179, 237, 0.18);
+  }
+
+  .folder-card.active {
+    border-color: #63b3ed;
+    box-shadow: 0 0 0 1px rgba(99, 179, 237, 0.42);
+  }
+
+  .folder-card-header h4 {
+    color: #90cdf4;
+  }
+
+  .folder-rename-btn {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #90cdf4;
+  }
+
+  .folder-rename-btn:hover {
+    background: #2c5282;
+    border-color: #63b3ed;
+  }
+
+  .folder-empty-text,
+  .folder-tag-empty {
+    color: #a0aec0;
+  }
+
+  .folder-project-title {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #90cdf4;
+  }
+
+  .folder-browse-bar {
+    background: #243244;
+    border-color: #355173;
+  }
+
+  .folder-browse-meta h3 {
+    color: #f7fafc;
+  }
+
+  .folder-browse-meta span {
+    color: #a0aec0;
+  }
+
   .project-card {
     background: #2d3748;
     border-color: #4a5568;
@@ -1998,6 +2304,33 @@ html[data-theme="dark"] {
 
   .project-name {
     color: #f7fafc;
+  }
+
+  .project-card-menu-btn {
+    color: #718096;
+  }
+
+  .project-card-menu-btn:hover {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .project-card-menu {
+    background: #243244;
+    border-color: #355173;
+    box-shadow: 0 16px 30px rgba(2, 6, 23, 0.5);
+  }
+
+  .project-card-menu-item {
+    color: #e2e8f0;
+  }
+
+  .project-card-menu-item:hover:not(:disabled) {
+    background: #2d3748;
+  }
+
+  .project-card-menu-divider {
+    background: #4a5568;
   }
 
   .project-filter-tab {
@@ -2096,6 +2429,12 @@ html[data-theme="dark"] {
   .project-formula {
     background: #2c7a7b;
     color: #b2f5ea;
+  }
+
+  .project-folder-pill {
+    background: #1e3a5f;
+    border-color: #2b6cb0;
+    color: #90cdf4;
   }
 
   .project-calc-tag-scf {
@@ -2203,7 +2542,7 @@ html[data-theme="dark"] {
   position: fixed;
   bottom: var(--floating-control-bottom);
   right: var(--floating-control-inset);
-  z-index: 100;
+  z-index: 300;
 }
 
 .floating-queue {
@@ -2483,18 +2822,66 @@ html[data-theme="dark"] {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
+.settings-window-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 180;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.35);
+}
+
 .floating-settings-menu {
-  position: absolute;
-  bottom: 100%;
-  right: 0;
-  margin-bottom: 0.5rem;
-  min-width: 300px;
-  max-width: min(360px, calc(100vw - 2rem));
+  position: relative;
+  width: min(680px, calc(100vw - 2rem));
+  max-height: min(85vh, 760px);
   background: white;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: 12px;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.24);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+
+.settings-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.settings-window-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #2d3748;
+}
+
+.settings-window-close {
+  border: none;
+  background: transparent;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  color: #718096;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.settings-window-close:hover {
+  background: #edf2f7;
+  color: #4a5568;
+}
+
+.settings-window-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .settings-menu-section {
@@ -2575,6 +2962,19 @@ html[data-theme="dark"] {
 
 .settings-menu-item.warning:hover {
   background: #feebc8;
+}
+
+@media (max-width: 720px) {
+  .settings-window-overlay {
+    align-items: stretch;
+    padding: 0.65rem;
+  }
+
+  .floating-settings-menu {
+    width: 100%;
+    max-height: calc(100vh - 1.3rem);
+    border-radius: 10px;
+  }
 }
 
 /* Delete Confirmation Dialog */
@@ -3050,6 +3450,27 @@ html[data-theme="dark"] {
     border-color: #4a5568;
   }
 
+  .settings-window-overlay {
+    background: rgba(2, 6, 23, 0.55);
+  }
+
+  .settings-window-header {
+    border-bottom-color: #4a5568;
+  }
+
+  .settings-window-header h3 {
+    color: #e2e8f0;
+  }
+
+  .settings-window-close {
+    color: #a0aec0;
+  }
+
+  .settings-window-close:hover {
+    background: #4a5568;
+    color: #e2e8f0;
+  }
+
   .floating-queue-menu {
     background: #2d3748;
     border-color: #4a5568;
@@ -3197,6 +3618,38 @@ html[data-theme="dark"] {
 .dashboard-title h2 {
   margin: 0;
   font-size: 1.5rem;
+  color: #2d3748;
+}
+
+.dashboard-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.project-title-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #718096;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.project-title-edit-btn svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.project-title-edit-btn:hover {
+  background: #edf2f7;
   color: #2d3748;
 }
 
@@ -3453,6 +3906,15 @@ html[data-theme="dark"] {
 
   .dashboard-description {
     color: #a0aec0;
+  }
+
+  .project-title-edit-btn {
+    color: #a0aec0;
+  }
+
+  .project-title-edit-btn:hover {
+    background: #4a5568;
+    color: #f7fafc;
   }
 
   .structure-selector-label {

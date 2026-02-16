@@ -633,7 +633,9 @@ export function BandPlot({
 
       let path = `M ${scales.xScale(kPoints[0])},${scales.yScale(band[0])}`;
       for (let i = 1; i < band.length && i < kPoints.length; i++) {
-        path += ` L ${scales.xScale(kPoints[i])},${scales.yScale(band[i])}`;
+        const command = kPoints[i] <= kPoints[i - 1] + 1e-10 ? "M" : "L";
+        // Restart the polyline at k-path discontinuities to avoid non-physical spikes.
+        path += ` ${command} ${scales.xScale(kPoints[i])},${scales.yScale(band[i])}`;
       }
       return path;
     },

@@ -7,6 +7,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
+import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 
 interface CalculationRun {
   id: string;
@@ -35,7 +36,7 @@ interface FermiSurfaceWizardProps {
 type WizardStep = "source" | "parameters" | "run" | "results";
 const FERMI_WORK_DIR = "/tmp/qcortado_fermi_surface";
 
-interface BxsfFileData {
+interface FrmsfFileData {
   file_name: string;
   size_bytes: number;
 }
@@ -43,10 +44,8 @@ interface BxsfFileData {
 interface FermiSurfaceData {
   k_grid: [number, number, number];
   fermi_energy: number | null;
-  delta_e: number | null;
-  fil_fermi: string;
   primary_file: string;
-  bxsf_files: BxsfFileData[];
+  frmsf_files: FrmsfFileData[];
 }
 
 interface FermiSurfaceTaskPlan {
@@ -154,15 +153,6 @@ function parseOptionalPositiveInt(input: string, label: string): number | null {
   return parsed;
 }
 
-function sanitizeOutputStem(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return "fermi_surface";
-  const sanitized = trimmed
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return sanitized.length > 0 ? sanitized : "fermi_surface";
-}
-
 function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input" | "tetrahedra" {
   const lowered = String(raw || "smearing").toLowerCase();
   if (lowered === "fixed") return "fixed";
@@ -213,12 +203,9 @@ export function FermiSurfaceWizard({
   const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("gaussian");
   const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
   const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
-  const [deltaEInput, setDeltaEInput] = useState("0.02");
-  const [outputStemInput, setOutputStemInput] = useState("fermi_surface");
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     mesh: true,
     nscf: true,
-    fsx: true,
     mpi: false,
   });
 
@@ -257,6 +244,20 @@ export function FermiSurfaceWizard({
 
   const applyScfDefaults = useCallback((scf: CalculationRun) => {
     const params = scf.parameters || {};
+
+    if (Array.isArray(params.kgrid) && params.kgrid.length === 3) {
+      const parsedGrid = params.kgrid.map((value: unknown) => Number(value));
+      if (parsedGrid.every((value: number) => Number.isInteger(value) && value > 0)) {
+        setFermiKGrid([parsedGrid[0], parsedGrid[1], parsedGrid[2]]);
+      }
+    }
+
+    if (Array.isArray(params.kgrid_offset) && params.kgrid_offset.length === 3) {
+      const parsedOffset = params.kgrid_offset.map((value: unknown) => Number(value));
+      if (parsedOffset.every((value: number) => value === 0 || value === 1)) {
+        setFermiKOffset([parsedOffset[0] as 0 | 1, parsedOffset[1] as 0 | 1, parsedOffset[2] as 0 | 1]);
+      }
+    }
 
     const convThr = Number(params.conv_thr);
     if (Number.isFinite(convThr) && convThr > 0) {
@@ -303,11 +304,14 @@ export function FermiSurfaceWizard({
     async function init() {
       try {
         const count = await invoke<number>("get_cpu_count");
-        setCpuCount(count);
-        setMpiProcs(Math.max(1, Math.floor(count * 0.75)));
+        const safeCount = Math.max(1, Math.floor(count));
+        setCpuCount(safeCount);
+        const defaults = await loadGlobalMpiDefaults(safeCount);
 
         const available = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(available);
+        setMpiEnabled(available ? defaults.enabled : false);
+        setMpiProcs(defaults.nprocs);
 
         const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
         const pseudos = await invoke<string[]>("list_pseudopotentials", { pseudoDir });
@@ -369,19 +373,18 @@ export function FermiSurfaceWizard({
       throw new Error("No source SCF calculation selected");
     }
 
-    const parsedDeltaE = parseOptionalPositiveNumber(deltaEInput, "DeltaE");
-    const parsedConvThr = parseOptionalPositiveNumber(nscfConvThrInput, "NSCF convergence threshold");
+    const parsedConvThr = parseOptionalPositiveNumber(nscfConvThrInput, "convergence threshold");
     if (parsedConvThr == null) {
-      throw new Error("Please provide a valid positive NSCF convergence threshold.");
+      throw new Error("Please provide a valid positive convergence threshold.");
     }
 
-    const parsedMixingBeta = parseOptionalPositiveNumber(nscfMixingBetaInput, "NSCF mixing beta");
+    const parsedMixingBeta = parseOptionalPositiveNumber(nscfMixingBetaInput, "mixing beta");
     if (parsedMixingBeta == null || parsedMixingBeta > 1.0) {
-      throw new Error("NSCF mixing beta must be in the range (0, 1].");
+      throw new Error("Mixing beta must be in the range (0, 1].");
     }
 
     const parsedDegauss = nscfOccupations === "smearing"
-      ? parseOptionalPositiveNumber(nscfDegaussInput, "NSCF degauss")
+      ? parseOptionalPositiveNumber(nscfDegaussInput, "degauss")
       : null;
     if (nscfOccupations === "smearing" && parsedDegauss == null) {
       throw new Error("Please provide a positive degauss value when using smearing occupations.");
@@ -390,8 +393,6 @@ export function FermiSurfaceWizard({
     const parsedNbnd = fermiNbnd === "auto"
       ? null
       : parseOptionalPositiveInt(String(fermiNbnd), "number of bands");
-
-    const outputStem = sanitizeOutputStem(outputStemInput);
 
     const scfParams = selectedScf.parameters || {};
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
@@ -516,8 +517,6 @@ export function FermiSurfaceWizard({
         k_grid: fermiKGrid,
         k_offset: fermiKOffset,
         nbnd: parsedNbnd,
-        delta_e: parsedDeltaE,
-        fil_fermi: outputStem,
         project_id: projectId,
         scf_calc_id: selectedScf.id,
       },
@@ -530,18 +529,17 @@ export function FermiSurfaceWizard({
       fermi_k_grid: fermiKGrid,
       fermi_k_offset: fermiKOffset,
       fermi_n_bands_requested: parsedNbnd,
-      fermi_delta_e: parsedDeltaE,
-      fermi_output_stem: outputStem,
       nscf_conv_thr: parsedConvThr,
       nscf_mixing_beta: parsedMixingBeta,
       nscf_occupations: nscfOccupations,
       nscf_smearing: nscfSmearing,
       nscf_degauss: parsedDegauss,
       nscf_verbosity: nscfVerbosity,
-      n_bxsf_files: null,
-      bxsf_files: [],
-      primary_bxsf_file: null,
-      total_bxsf_bytes: null,
+      fermi_surface_tool: "fermi_velocity.x",
+      n_frmsf_files: null,
+      frmsf_files: [],
+      primary_frmsf_file: null,
+      total_frmsf_bytes: null,
       nspin: scfParams.nspin,
       lspinorb: scfParams.lspinorb,
       lda_plus_u: scfParams.lda_plus_u,
@@ -596,8 +594,8 @@ export function FermiSurfaceWizard({
       }));
 
       try {
-        const bxsfFiles = result.bxsf_files.map((file) => file.file_name);
-        const totalBxsfBytes = result.bxsf_files.reduce((sum, file) => sum + (Number(file.size_bytes) || 0), 0);
+        const frmsfFiles = result.frmsf_files.map((file) => file.file_name);
+        const totalFrmsfBytes = result.frmsf_files.reduce((sum, file) => sum + (Number(file.size_bytes) || 0), 0);
 
         await invoke("save_calculation", {
           projectId,
@@ -606,11 +604,10 @@ export function FermiSurfaceWizard({
             calc_type: "fermi_surface",
             parameters: {
               ...plan.saveParameters,
-              fermi_output_stem: result.fil_fermi,
-              n_bxsf_files: result.bxsf_files.length,
-              bxsf_files: bxsfFiles,
-              primary_bxsf_file: result.primary_file,
-              total_bxsf_bytes: totalBxsfBytes,
+              n_frmsf_files: result.frmsf_files.length,
+              frmsf_files: frmsfFiles,
+              primary_frmsf_file: result.primary_file,
+              total_frmsf_bytes: totalFrmsfBytes,
             },
             result: {
               converged: true,
@@ -706,7 +703,7 @@ export function FermiSurfaceWizard({
           </div>
         </div>
         <p className="step-description">
-          Choose the SCF calculation used to build a dense NSCF mesh for `fs.x`.
+          Choose the SCF calculation used to run QE `fermi_velocity.x` (FermiSurfer tutorial workflow).
         </p>
 
         <div className="scf-list">
@@ -760,7 +757,6 @@ export function FermiSurfaceWizard({
   };
 
   const renderParametersStep = () => {
-    const outputStem = sanitizeOutputStem(outputStemInput);
     const safeParsePositive = (value: string): number | null => {
       const trimmed = value.trim();
       if (!trimmed) return null;
@@ -771,35 +767,33 @@ export function FermiSurfaceWizard({
     const parsedConvThr = safeParsePositive(nscfConvThrInput);
     const parsedMixingBeta = safeParsePositive(nscfMixingBetaInput);
     const parsedDegauss = safeParsePositive(nscfDegaussInput);
-    const parsedDeltaE = safeParsePositive(deltaEInput);
     const degaussRequired = nscfOccupations === "smearing";
     const isNbndValid = fermiNbnd === "auto" || (Number.isInteger(fermiNbnd) && fermiNbnd > 0);
     const isConvThrValid = parsedConvThr !== null;
     const isMixingBetaValid = parsedMixingBeta !== null && parsedMixingBeta <= 1.0;
     const isDegaussValid = !degaussRequired || parsedDegauss !== null;
-    const isDeltaEValid = deltaEInput.trim().length === 0 || parsedDeltaE !== null;
-    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid && isDeltaEValid;
+    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid;
 
     return (
       <div className="wizard-step parameters-step">
         <h3>Fermi-Surface Parameters</h3>
         <p className="step-description">
-          Configure dense NSCF controls and `fs.x` options for Fermi-surface BXSF generation.
+          Configure QE `fermi_velocity.x` input controls (Section 7 tutorial workflow).
         </p>
 
         <div className="option-section config-section collapsible">
           <h4 onClick={() => toggleSection("mesh")} className="section-header">
             <span className={`collapse-icon ${expandedSections.mesh ? "expanded" : ""}`}>▶</span>
-            NSCF Mesh & Band Count
-            <Tooltip text="Controls dense NSCF sampling mesh (`K_POINTS automatic`) and optional manual `nbnd` override." />
+            K-Grid & Band Count
+            <Tooltip text="Controls the `K_POINTS automatic` mesh and optional `nbnd` override used to run `fermi_velocity.x`." />
           </h4>
           {expandedSections.mesh && (
             <div className="option-params">
               <div className="phonon-grid">
                 <div className="phonon-field">
                   <label>
-                    Dense k-point grid
-                    <Tooltip text="Finer NSCF meshes improve Fermi-surface topology fidelity but increase runtime and memory usage significantly." />
+                    K-point grid
+                    <Tooltip text="Finer meshes improve Fermi-surface detail, but increase runtime and memory usage." />
                   </label>
                   <div className="qgrid-inputs">
                     <input
@@ -860,7 +854,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Number of bands
-                    <Tooltip text="QE variable: `nbnd` in NSCF `pw.x`. Increase to include enough unoccupied states near Fermi crossings." />
+                    <Tooltip text="QE variable: `nbnd` in the pw-style input used by `fermi_velocity.x`." />
                   </label>
                   <div className="nbnd-input">
                     <select
@@ -891,15 +885,15 @@ export function FermiSurfaceWizard({
         <div className="option-section config-section collapsible">
           <h4 onClick={() => toggleSection("nscf")} className="section-header">
             <span className={`collapse-icon ${expandedSections.nscf ? "expanded" : ""}`}>▶</span>
-            NSCF Electronic Controls
-            <Tooltip text="Advanced NSCF settings: `conv_thr`, `mixing_beta`, occupations/smearing/degauss, and output verbosity." />
+            Electronic Controls
+            <Tooltip text="Advanced controls for the generated pw-style input: `conv_thr`, `mixing_beta`, occupations/smearing/degauss, and verbosity." />
           </h4>
           {expandedSections.nscf && (
             <div className="option-params">
               <div className="phonon-grid">
                 <div className="phonon-field">
                   <label>
-                    NSCF convergence threshold
+                    Convergence threshold
                     <Tooltip text="QE variable: `conv_thr` in `&ELECTRONS`." />
                   </label>
                   <input
@@ -934,7 +928,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Occupations
-                    <Tooltip text="QE variable: `occupations` for NSCF. Metals typically require smearing." />
+                    <Tooltip text="QE variable: `occupations`. Metals typically require smearing." />
                   </label>
                   <select
                     value={nscfOccupations}
@@ -1001,50 +995,6 @@ export function FermiSurfaceWizard({
           )}
         </div>
 
-        <div className="option-section config-section collapsible">
-          <h4 onClick={() => toggleSection("fsx")} className="section-header">
-            <span className={`collapse-icon ${expandedSections.fsx ? "expanded" : ""}`}>▶</span>
-            fs.x Output Controls
-            <Tooltip text="Configure `fs.x` inputs (`filfermi`, `DeltaE`) used to generate BXSF output." />
-          </h4>
-          {expandedSections.fsx && (
-            <div className="option-params">
-              <div className="phonon-grid">
-                <div className="phonon-field">
-                  <label>
-                    Output stem
-                    <Tooltip text="QE variable: `filfermi` in `&fermi`. BXSF output is typically `<stem>_fs.bxsf`." />
-                  </label>
-                  <input
-                    type="text"
-                    value={outputStemInput}
-                    onChange={(e) => setOutputStemInput(e.target.value)}
-                    placeholder="fermi_surface"
-                  />
-                  <span className="param-hint">Resolved stem: `{outputStem}`</span>
-                </div>
-
-                <div className="phonon-field">
-                  <label>
-                    DeltaE (eV, optional)
-                    <Tooltip text="QE variable: `DeltaE` in `fs.x`. Leave blank to use fs.x defaults." />
-                  </label>
-                  <input
-                    type="text"
-                    value={deltaEInput}
-                    onChange={(e) => setDeltaEInput(e.target.value)}
-                    placeholder="0.02"
-                    spellCheck={false}
-                  />
-                  {!isDeltaEValid && (
-                    <span className="param-hint input-error">Use a positive number, or leave blank for default behavior.</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
         <div className="calculation-summary">
           <h4>Summary</h4>
           <div className="summary-row">
@@ -1052,7 +1002,7 @@ export function FermiSurfaceWizard({
             <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
           </div>
           <div className="summary-row">
-            <span>Dense k-grid:</span>
+            <span>K-grid:</span>
             <span>{fermiKGrid[0]}×{fermiKGrid[1]}×{fermiKGrid[2]}</span>
           </div>
           <div className="summary-row">
@@ -1064,16 +1014,8 @@ export function FermiSurfaceWizard({
             <span>{fermiNbnd === "auto" ? "Auto" : fermiNbnd}</span>
           </div>
           <div className="summary-row">
-            <span>Output stem:</span>
-            <span>{outputStem}</span>
-          </div>
-          <div className="summary-row">
-            <span>Expected BXSF:</span>
-            <span>{outputStem}_fs.bxsf</span>
-          </div>
-          <div className="summary-row">
-            <span>DeltaE:</span>
-            <span>{deltaEInput.trim().length > 0 ? `${deltaEInput.trim()} eV` : "Default"}</span>
+            <span>Expected output:</span>
+            <span>`vfermi.frmsf` (or spin-resolved `vfermi1/2.frmsf`)</span>
           </div>
         </div>
 
@@ -1081,7 +1023,7 @@ export function FermiSurfaceWizard({
           <h4 onClick={() => toggleSection("mpi")} className="section-header">
             <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
             Parallelization
-            <Tooltip text="Process-level MPI controls for the NSCF stage." />
+            <Tooltip text="Process-level MPI controls for `fermi_velocity.x` (`npool` is fixed to 1 per tutorial guidance)." />
           </h4>
           {expandedSections.mpi && (
             <div className="option-params">
@@ -1093,7 +1035,7 @@ export function FermiSurfaceWizard({
                       checked={mpiEnabled}
                       onChange={(e) => setMpiEnabled(e.target.checked)}
                     />
-                    Enable MPI for NSCF ({cpuCount} cores available)
+                    Enable MPI ({cpuCount} cores available)
                   </label>
                   {mpiEnabled && (
                     <div className="mpi-procs">
@@ -1174,13 +1116,13 @@ export function FermiSurfaceWizard({
       );
     }
 
-    const totalBytes = fermiData.bxsf_files.reduce((sum, file) => sum + (Number(file.size_bytes) || 0), 0);
+    const totalBytes = fermiData.frmsf_files.reduce((sum, file) => sum + (Number(file.size_bytes) || 0), 0);
 
     return (
       <div className="wizard-step results-step">
         <h3>Fermi Surface Results</h3>
         <p className="step-description">
-          BXSF generation complete. Viewer launch wiring is the next step.
+          FRMSF generation complete.
         </p>
 
         <div className="results-summary">
@@ -1190,8 +1132,8 @@ export function FermiSurfaceWizard({
               <span className="value">{fermiData.k_grid[0]}×{fermiData.k_grid[1]}×{fermiData.k_grid[2]}</span>
             </div>
             <div className="summary-item">
-              <span className="label">BXSF Files:</span>
-              <span className="value">{fermiData.bxsf_files.length}</span>
+              <span className="label">FRMSF Files:</span>
+              <span className="value">{fermiData.frmsf_files.length}</span>
             </div>
             <div className="summary-item">
               <span className="label">Primary File:</span>
@@ -1211,8 +1153,8 @@ export function FermiSurfaceWizard({
         </div>
 
         <div className="detail-item parameters">
-          <label>Generated BXSF Metadata</label>
-          <pre>{JSON.stringify(fermiData.bxsf_files, null, 2)}</pre>
+          <label>Generated FRMSF Metadata</label>
+          <pre>{JSON.stringify(fermiData.frmsf_files, null, 2)}</pre>
         </div>
 
         <div className="output-section">

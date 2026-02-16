@@ -21,6 +21,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
+import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -454,15 +455,9 @@ export function SCFWizard({
   const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
   const [ssspMissing, setSsspMissing] = useState(false);
 
-  // MPI settings - load from localStorage if available
-  const [mpiEnabled, setMpiEnabled] = useState(() => {
-    const saved = localStorage.getItem("qcortado_mpi_enabled");
-    return saved ? JSON.parse(saved) : false;
-  });
-  const [mpiProcs, setMpiProcs] = useState(() => {
-    const saved = localStorage.getItem("qcortado_mpi_procs");
-    return saved ? parseInt(saved, 10) : 1;
-  });
+  // MPI settings
+  const [mpiEnabled, setMpiEnabled] = useState(false);
+  const [mpiProcs, setMpiProcs] = useState(1);
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
 
@@ -512,31 +507,19 @@ export function SCFWizard({
     async function loadMpiInfo() {
       try {
         const cores = await invoke<number>("get_cpu_count");
-        setCpuCount(cores);
-
-        // Only set default if no saved value exists
-        const savedProcs = localStorage.getItem("qcortado_mpi_procs");
-        if (!savedProcs) {
-          setMpiProcs(Math.max(1, Math.floor(cores * 0.75)));
-        }
-
+        const safeCores = Math.max(1, Math.floor(cores));
+        setCpuCount(safeCores);
+        const defaults = await loadGlobalMpiDefaults(safeCores);
         const mpiOk = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(mpiOk);
+        setMpiEnabled(mpiOk ? defaults.enabled : false);
+        setMpiProcs(defaults.nprocs);
       } catch (e) {
         console.error("Failed to load MPI info:", e);
       }
     }
     loadMpiInfo();
   }, []);
-
-  // Persist MPI settings to localStorage
-  useEffect(() => {
-    localStorage.setItem("qcortado_mpi_enabled", JSON.stringify(mpiEnabled));
-  }, [mpiEnabled]);
-
-  useEffect(() => {
-    localStorage.setItem("qcortado_mpi_procs", String(mpiProcs));
-  }, [mpiProcs]);
 
   // Strip oxidation state from element symbol (e.g., "Ni0+" -> "Ni", "Fe3+" -> "Fe")
   function getBaseElement(symbol: string): string {

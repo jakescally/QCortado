@@ -8,7 +8,9 @@ import { parseCIF } from "../lib/cifParser";
 import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, SavedStructureData } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useTheme } from "../lib/ThemeContext";
+import { EditProjectDialog } from "./EditProjectDialog";
 
 interface QEResult {
   converged: boolean;
@@ -287,7 +289,9 @@ function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info
     pushTag(`${k1}×${k2}×${k3} K`, "info");
   }
 
-  if (params.n_bxsf_files) {
+  if (params.n_frmsf_files) {
+    pushTag(`${params.n_frmsf_files} FRMSF`, "info");
+  } else if (params.n_bxsf_files) {
     pushTag(`${params.n_bxsf_files} BXSF`, "info");
   }
 
@@ -387,8 +391,8 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
 
   if (category === "fermi_surface") {
     const kScore = Math.log2(Math.max(1, getMeshProduct(params.fermi_k_grid)));
-    const resolutionScore = getThresholdTightness(params.fermi_delta_e, 12);
-    return convergedBonus + (4 * kScore) + (2 * resolutionScore) + socBonus;
+    const bandScore = Math.log2(Math.max(1, Number(params.fermi_n_bands_requested) || 1));
+    return convergedBonus + (4 * kScore) + bandScore + socBonus;
   }
 
   if (category === "dos") {
@@ -560,11 +564,17 @@ export function ProjectDashboard({
   const [executionPrefixInput, setExecutionPrefixInput] = useState("");
   const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
   const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
+  const [globalMpiEnabled, setGlobalMpiEnabled] = useState(false);
+  const [globalMpiProcs, setGlobalMpiProcs] = useState(1);
+  const [globalMpiCpuCount, setGlobalMpiCpuCount] = useState(1);
+  const [isSavingGlobalMpi, setIsSavingGlobalMpi] = useState(false);
+  const [globalMpiStatus, setGlobalMpiStatus] = useState<string | null>(null);
   const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
   const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
 
   // Delete project confirmation dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showEditProjectDialog, setShowEditProjectDialog] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -589,6 +599,7 @@ export function ProjectDashboard({
 
   useEffect(() => {
     void loadExecutionPrefix();
+    void loadGlobalMpiSettings();
   }, []);
 
   // Close settings menu when clicking outside
@@ -626,6 +637,38 @@ export function ProjectDashboard({
       setPrefixStatus("Failed to save");
     } finally {
       setIsSavingExecutionPrefix(false);
+    }
+  }
+
+  async function loadGlobalMpiSettings() {
+    try {
+      const cores = await invoke<number>("get_cpu_count");
+      const safeCores = Math.max(1, Math.floor(cores));
+      setGlobalMpiCpuCount(safeCores);
+      const defaults = await loadGlobalMpiDefaults(safeCores);
+      setGlobalMpiEnabled(defaults.enabled);
+      setGlobalMpiProcs(defaults.nprocs);
+    } catch (e) {
+      console.error("Failed to load global MPI defaults:", e);
+    }
+  }
+
+  async function saveMpiDefaults() {
+    setIsSavingGlobalMpi(true);
+    setGlobalMpiStatus(null);
+    try {
+      const saved = await saveGlobalMpiDefaults(
+        { enabled: globalMpiEnabled, nprocs: globalMpiProcs },
+        globalMpiCpuCount,
+      );
+      setGlobalMpiEnabled(saved.enabled);
+      setGlobalMpiProcs(saved.nprocs);
+      setGlobalMpiStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save global MPI defaults:", e);
+      setGlobalMpiStatus("Failed to save");
+    } finally {
+      setIsSavingGlobalMpi(false);
     }
   }
 
@@ -780,6 +823,30 @@ export function ProjectDashboard({
     setShowDeleteDialog(true);
   }
 
+  function openEditProjectDialog() {
+    setShowSettingsMenu(false);
+    setShowEditProjectDialog(true);
+  }
+
+  function handleProjectMetadataSaved(updatedProject: {
+    id: string;
+    name: string;
+    description: string | null;
+  }) {
+    setProject((currentProject) => {
+      if (!currentProject || currentProject.id !== updatedProject.id) {
+        return currentProject;
+      }
+      return {
+        ...currentProject,
+        name: updatedProject.name,
+        description: updatedProject.description,
+      };
+    });
+    setInfoMessage(`Updated "${updatedProject.name}".`);
+    setError(null);
+  }
+
   async function handleConfirmDelete() {
     if (deleteConfirmText !== CONFIRM_TEXT) return;
 
@@ -900,17 +967,17 @@ export function ProjectDashboard({
     onRunFermiSurface(selectedCifId, crystalData, variant.calculations);
   }
 
-  async function handleViewFermiSurface(calc: CalculationRun, bxsfFile: string | null) {
+  async function handleViewFermiSurface(calc: CalculationRun, surfaceFile: string | null) {
     setLaunchingFermiCalcId(calc.id);
     setError(null);
     try {
       await invoke("launch_fermi_surface_viewer", {
         projectId,
         calculationId: calc.id,
-        bxsfFile,
+        surfaceFile,
       });
       setInfoMessage(
-        `Opened ${bxsfFile ?? "primary .bxsf"} in FermiSurfer.`,
+        `Opened ${surfaceFile ?? "primary Fermi-surface file"} in FermiSurfer.`,
       );
     } catch (e) {
       console.error("Failed to launch FermiSurfer:", e);
@@ -1226,98 +1293,153 @@ export function ProjectDashboard({
 
   function renderSettingsMenu() {
     return (
-      <div className="floating-settings-menu">
-        <div className="settings-menu-section">
-          <label className="settings-menu-label" htmlFor="execution-prefix-input">
-            Command Prefix
-          </label>
-          <input
-            id="execution-prefix-input"
-            className="settings-menu-input"
-            value={executionPrefixInput}
-            onChange={(e) => {
-              setExecutionPrefixInput(e.target.value);
-              setPrefixStatus(null);
-            }}
-            placeholder="e.g. mpirun"
-          />
-          <p className="settings-menu-hint">
-            Prepended before every QE executable launch.
-          </p>
-          <button
-            className="settings-menu-item"
-            onClick={saveExecutionPrefix}
-            disabled={isSavingExecutionPrefix}
-          >
-            {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
-          </button>
-          {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
-        </div>
-        <div className="settings-menu-divider" />
-        <div className="settings-menu-section">
-          <label className="settings-menu-label">Temporary Storage</label>
-          <p className="settings-menu-hint">
-            Remove `/tmp` and system temp QCortado working folders.
-          </p>
-          <button
-            className="settings-menu-item warning"
-            onClick={clearTempStorage}
-            disabled={isClearingTempStorage}
-          >
-            {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
-          </button>
-          {tempStorageStatus && (
-            <div className="settings-menu-status">{tempStorageStatus}</div>
-          )}
-        </div>
-        <div className="settings-menu-divider" />
-        <div className="settings-menu-section">
-          <label className="settings-menu-label">Recovery</label>
-          <p className="settings-menu-hint">
-            Import a completed phonon scratch run into the current structure history.
-          </p>
-          <button
-            className="settings-menu-item"
-            onClick={() => {
-              setShowSettingsMenu(false);
-              void handleRecoverPhonon();
-            }}
-            disabled={isRecoveringPhonon || !selectedCifId}
-          >
-            {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
-          </button>
-        </div>
-        <div className="settings-menu-divider" />
-        <div className="settings-menu-section">
-          <label className="settings-menu-label">Theme</label>
-          <div className="theme-toggle-group" role="group" aria-label="Theme">
+      <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
+        <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
+          <div className="settings-window-header">
+            <h3>Settings</h3>
             <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
-              onClick={() => setTheme("system")}
+              className="settings-window-close"
+              onClick={() => setShowSettingsMenu(false)}
+              aria-label="Close settings"
             >
-              System
+              &times;
             </button>
-            <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
-              onClick={() => setTheme("light")}
-            >
-              Light
-            </button>
-            <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
-              onClick={() => setTheme("dark")}
-            >
-              Dark
+          </div>
+          <div className="settings-window-content">
+            <div className="settings-menu-section">
+              <label className="settings-menu-label" htmlFor="execution-prefix-input">
+                Command Prefix
+              </label>
+              <input
+                id="execution-prefix-input"
+                className="settings-menu-input"
+                value={executionPrefixInput}
+                onChange={(e) => {
+                  setExecutionPrefixInput(e.target.value);
+                  setPrefixStatus(null);
+                }}
+                placeholder="e.g. mpirun"
+              />
+              <p className="settings-menu-hint">
+                Prepended before every QE executable launch.
+              </p>
+              <button
+                className="settings-menu-item"
+                onClick={saveExecutionPrefix}
+                disabled={isSavingExecutionPrefix}
+              >
+                {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
+              </button>
+              {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
+            </div>
+            <div className="settings-menu-divider" />
+            <div className="settings-menu-section">
+              <label className="settings-menu-label">MPI Defaults</label>
+              <label className="toggle-label">
+                <input
+                  type="checkbox"
+                  checked={globalMpiEnabled}
+                  onChange={(e) => {
+                    setGlobalMpiEnabled(e.target.checked);
+                    setGlobalMpiStatus(null);
+                  }}
+                />
+                <span>Enable MPI by default</span>
+              </label>
+              <label className="settings-menu-label" htmlFor="dashboard-mpi-procs-input">
+                Default MPI Processes
+              </label>
+              <input
+                id="dashboard-mpi-procs-input"
+                type="number"
+                min={1}
+                max={globalMpiCpuCount}
+                className="settings-menu-input"
+                value={globalMpiProcs}
+                onChange={(e) => {
+                  setGlobalMpiProcs(clampMpiProcs(Number.parseInt(e.target.value, 10), globalMpiCpuCount));
+                  setGlobalMpiStatus(null);
+                }}
+              />
+              <p className="settings-menu-hint">
+                Used as the initial MPI option in all calculation wizards ({globalMpiCpuCount} cores available).
+              </p>
+              <button
+                className="settings-menu-item"
+                onClick={saveMpiDefaults}
+                disabled={isSavingGlobalMpi}
+              >
+                {isSavingGlobalMpi ? "Saving..." : "Save MPI Defaults"}
+              </button>
+              {globalMpiStatus && <div className="settings-menu-status">{globalMpiStatus}</div>}
+            </div>
+            <div className="settings-menu-divider" />
+            <div className="settings-menu-section">
+              <label className="settings-menu-label">Temporary Storage</label>
+              <p className="settings-menu-hint">
+                Remove `/tmp` and system temp QCortado working folders.
+              </p>
+              <button
+                className="settings-menu-item warning"
+                onClick={clearTempStorage}
+                disabled={isClearingTempStorage}
+              >
+                {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
+              </button>
+              {tempStorageStatus && (
+                <div className="settings-menu-status">{tempStorageStatus}</div>
+              )}
+            </div>
+            <div className="settings-menu-divider" />
+            <div className="settings-menu-section">
+              <label className="settings-menu-label">Recovery</label>
+              <p className="settings-menu-hint">
+                Import a completed phonon scratch run into the current structure history.
+              </p>
+              <button
+                className="settings-menu-item"
+                onClick={() => {
+                  setShowSettingsMenu(false);
+                  void handleRecoverPhonon();
+                }}
+                disabled={isRecoveringPhonon || !selectedCifId}
+              >
+                {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
+              </button>
+            </div>
+            <div className="settings-menu-divider" />
+            <div className="settings-menu-section">
+              <label className="settings-menu-label">Theme</label>
+              <div className="theme-toggle-group" role="group" aria-label="Theme">
+                <button
+                  type="button"
+                  className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
+                  onClick={() => setTheme("system")}
+                >
+                  System
+                </button>
+                <button
+                  type="button"
+                  className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+                  onClick={() => setTheme("light")}
+                >
+                  Light
+                </button>
+                <button
+                  type="button"
+                  className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+                  onClick={() => setTheme("dark")}
+                >
+                  Dark
+                </button>
+              </div>
+            </div>
+            <div className="settings-menu-divider" />
+            <button className="settings-menu-item danger" onClick={openDeleteDialog}>
+              Delete Project
             </button>
           </div>
         </div>
-        <div className="settings-menu-divider" />
-        <button className="settings-menu-item danger" onClick={openDeleteDialog}>
-          Delete Project
-        </button>
       </div>
     );
   }
@@ -1372,7 +1494,33 @@ export function ProjectDashboard({
             ← Back
           </button>
           <div className="dashboard-title">
-            <h2>{project.name}</h2>
+            <div className="dashboard-title-row">
+              <h2>{project.name}</h2>
+              <button
+                className="project-title-edit-btn"
+                type="button"
+                onClick={openEditProjectDialog}
+                title="Edit project"
+                aria-label="Edit project"
+              >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M13.5 6.5l4 4"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            </div>
             {project.description && (
               <p className="dashboard-description">{project.description}</p>
             )}
@@ -1416,6 +1564,14 @@ export function ProjectDashboard({
         )}
 
         {/* Delete Dialog */}
+        <EditProjectDialog
+          isOpen={showEditProjectDialog}
+          projectId={project.id}
+          initialName={project.name}
+          initialDescription={project.description}
+          onClose={() => setShowEditProjectDialog(false)}
+          onSaved={handleProjectMetadataSaved}
+        />
         {showDeleteDialog && renderDeleteDialog()}
       </div>
     );
@@ -1428,7 +1584,36 @@ export function ProjectDashboard({
           ← Back
         </button>
         <div className="dashboard-title">
-          <h2>{project.name}</h2>
+          <div className="dashboard-title-row">
+            <h2>{project.name}</h2>
+            <button
+              className="project-title-edit-btn"
+              type="button"
+              onClick={openEditProjectDialog}
+              title="Edit project"
+              aria-label="Edit project"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M13.5 6.5l4 4"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+          {project.description && (
+            <p className="dashboard-description">{project.description}</p>
+          )}
         </div>
         <div className="structure-selector">
           <label className="structure-selector-label">Structure</label>
@@ -1579,7 +1764,7 @@ export function ProjectDashboard({
               <span className="calc-action-icon">FS</span>
               <span className="calc-action-label">Fermi Surface</span>
               <span className="calc-action-hint">
-                {hasConvergedSCF() ? "Generate BXSF" : "Requires SCF"}
+                {hasConvergedSCF() ? "Generate FRMSF" : "Requires SCF"}
               </span>
             </button>
             <button
@@ -1968,13 +2153,21 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {fermiSurfaceCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const bxsfFiles = Array.isArray(calc.parameters?.bxsf_files)
+                const frmsfFiles = Array.isArray(calc.parameters?.frmsf_files)
+                  ? calc.parameters.frmsf_files
+                  : [];
+                const legacyBxsfFiles = Array.isArray(calc.parameters?.bxsf_files)
                   ? calc.parameters.bxsf_files
                   : [];
-                const primaryFile = calc.parameters?.primary_bxsf_file
-                  ?? (bxsfFiles.length > 0 ? bxsfFiles[0] : null);
-                const totalBytes = Number(calc.parameters?.total_bxsf_bytes);
-                const deltaE = Number(calc.parameters?.fermi_delta_e);
+                const surfaceFiles = frmsfFiles.length > 0 ? frmsfFiles : legacyBxsfFiles;
+                const primaryFile = calc.parameters?.primary_frmsf_file
+                  ?? calc.parameters?.primary_bxsf_file
+                  ?? (surfaceFiles.length > 0 ? surfaceFiles[0] : null);
+                const totalBytes = Number(
+                  calc.parameters?.total_frmsf_bytes
+                  ?? calc.parameters?.total_bxsf_bytes,
+                );
+                const fileKind = (frmsfFiles.length > 0 || calc.parameters?.n_frmsf_files) ? "FRMSF" : "BXSF";
                 return (
                   <div key={calc.id} className="calculation-item fermi-surface-item">
                     <div
@@ -2034,19 +2227,19 @@ export function ProjectDashboard({
                             </span>
                           </div>
                           <div className="detail-item">
-                            <label>DeltaE</label>
-                            <span>{Number.isFinite(deltaE) ? `${deltaE} eV` : "Default"}</span>
+                            <label>File Format</label>
+                            <span>{fileKind}</span>
                           </div>
                           <div className="detail-item">
-                            <label>BXSF Files</label>
-                            <span>{calc.parameters?.n_bxsf_files ?? bxsfFiles.length ?? "N/A"}</span>
+                            <label>FermiSurfer Files</label>
+                            <span>{calc.parameters?.n_frmsf_files ?? calc.parameters?.n_bxsf_files ?? surfaceFiles.length ?? "N/A"}</span>
                           </div>
                           <div className="detail-item">
-                            <label>Primary BXSF</label>
+                            <label>Primary File</label>
                             <span>{primaryFile || "N/A"}</span>
                           </div>
                           <div className="detail-item">
-                            <label>Total BXSF Size</label>
+                            <label>Total File Size</label>
                             <span>{Number.isFinite(totalBytes) ? formatBytes(totalBytes) : "N/A"}</span>
                           </div>
                           <div className="detail-item">
@@ -2060,10 +2253,10 @@ export function ProjectDashboard({
                             </div>
                           )}
                         </div>
-                        {bxsfFiles.length > 0 && (
+                        {surfaceFiles.length > 0 && (
                           <div className="detail-item parameters">
-                            <label>BXSF Files</label>
-                            <pre>{JSON.stringify(bxsfFiles, null, 2)}</pre>
+                            <label>{fileKind} Files</label>
+                            <pre>{JSON.stringify(surfaceFiles, null, 2)}</pre>
                           </div>
                         )}
                         <div className="calc-actions">
@@ -2073,7 +2266,7 @@ export function ProjectDashboard({
                               e.stopPropagation();
                               void handleViewFermiSurface(calc, primaryFile);
                             }}
-                            disabled={launchingFermiCalcId === calc.id || (!primaryFile && bxsfFiles.length === 0)}
+                            disabled={launchingFermiCalcId === calc.id || (!primaryFile && surfaceFiles.length === 0)}
                           >
                             {launchingFermiCalcId === calc.id ? "Launching..." : "View Fermi Surface"}
                           </button>
@@ -2477,6 +2670,15 @@ export function ProjectDashboard({
           )}
         </div>
       )}
+
+      <EditProjectDialog
+        isOpen={showEditProjectDialog}
+        projectId={project.id}
+        initialName={project.name}
+        initialDescription={project.description}
+        onClose={() => setShowEditProjectDialog(false)}
+        onSaved={handleProjectMetadataSaved}
+      />
 
       {/* Delete Project Dialog */}
       {showDeleteDialog && renderDeleteDialog()}

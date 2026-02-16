@@ -145,15 +145,12 @@ export function updateFermiSurfaceProgress(line: string, state: ProgressState): 
   if (stepMatch) {
     const step = Number.parseInt(stepMatch[1], 10);
     if (step === 1) {
-      return { ...next, percent: 15, phase: "NSCF on dense k-grid" };
-    }
-    if (step === 2) {
-      return { ...next, percent: 72, phase: "fs.x post-processing" };
+      return { ...next, percent: 65, phase: "fermi_velocity.x" };
     }
   }
 
-  if (line.includes("Collecting BXSF artifacts")) {
-    return { ...next, percent: 92, phase: "Collecting BXSF files" };
+  if (line.includes("Collecting FRMSF artifacts")) {
+    return { ...next, percent: 92, phase: "Collecting FRMSF files" };
   }
   if (line.includes("=== Fermi Surface Generation Complete ===")) {
     return { ...next, percent: 100, status: "complete", phase: "Complete" };

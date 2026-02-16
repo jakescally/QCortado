@@ -10,6 +10,7 @@ import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
+import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -290,11 +291,14 @@ export function PhononWizard({
     async function init() {
       try {
         const count = await invoke<number>("get_cpu_count");
-        setCpuCount(count);
-        setMpiProcs(Math.max(1, Math.floor(count * 0.75)));
+        const safeCount = Math.max(1, Math.floor(count));
+        setCpuCount(safeCount);
+        const defaults = await loadGlobalMpiDefaults(safeCount);
 
         const available = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(available);
+        setMpiEnabled(available ? defaults.enabled : false);
+        setMpiProcs(defaults.nprocs);
       } catch (e) {
         console.error("Failed to initialize:", e);
       }

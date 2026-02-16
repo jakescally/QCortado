@@ -32,6 +32,9 @@ pub struct Project {
     pub name: String,
     pub description: Option<String>,
     pub created_at: String,
+    /// Optional parent folder for organizing projects in the browser
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub cif_variants: Vec<CifVariant>,
     /// ID of the last opened CIF variant (for restoring view state)
     #[serde(default)]
@@ -72,11 +75,21 @@ pub struct ProjectSummary {
     pub name: String,
     pub description: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub formula: Option<String>,
     pub calculation_count: usize,
     #[serde(default)]
     pub calculation_types: Vec<String>,
     pub last_activity: String,
+}
+
+/// A folder used to organize projects in the browser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFolder {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
 }
 
 /// Data needed to save a calculation to a project
@@ -155,6 +168,7 @@ const IMPORT_PROGRESS_EMIT_BYTES: u64 = 8 * 1024 * 1024;
 const EXPORT_COPY_BUFFER_SIZE: usize = 256 * 1024;
 const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
+const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
 const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 6] = [
     "scf",
     "bands",
@@ -187,6 +201,39 @@ pub fn ensure_projects_dir(app: &AppHandle) -> Result<PathBuf, String> {
             .map_err(|e| format!("Failed to create projects directory: {}", e))?;
     }
     Ok(projects_dir)
+}
+
+fn get_project_folders_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(ensure_projects_dir(app)?.join(PROJECT_FOLDERS_FILE_NAME))
+}
+
+fn load_project_folders(app: &AppHandle) -> Result<Vec<ProjectFolder>, String> {
+    let folders_path = get_project_folders_path(app)?;
+    if !folders_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&folders_path)
+        .map_err(|e| format!("Failed to read folders metadata: {}", e))?;
+    let folders: Vec<ProjectFolder> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse folders metadata: {}", e))?;
+    Ok(folders)
+}
+
+fn save_project_folders(app: &AppHandle, folders: &[ProjectFolder]) -> Result<(), String> {
+    let folders_path = get_project_folders_path(app)?;
+    let serialized = serde_json::to_string_pretty(folders)
+        .map_err(|e| format!("Failed to serialize folders metadata: {}", e))?;
+    fs::write(&folders_path, serialized)
+        .map_err(|e| format!("Failed to write folders metadata: {}", e))
+}
+
+fn normalize_folder_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Folder name is required".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn export_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
@@ -1030,6 +1077,107 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
 // Tauri Commands
 // ============================================================================
 
+/// Lists all project folders.
+#[tauri::command]
+pub fn list_project_folders(app: AppHandle) -> Result<Vec<ProjectFolder>, String> {
+    let mut folders = load_project_folders(&app)?;
+    folders.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    Ok(folders)
+}
+
+/// Creates a new project folder.
+#[tauri::command]
+pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFolder, String> {
+    let normalized_name = normalize_folder_name(&name)?;
+    let mut folders = load_project_folders(&app)?;
+
+    let name_taken = folders
+        .iter()
+        .any(|folder| folder.name.eq_ignore_ascii_case(&normalized_name));
+    if name_taken {
+        return Err(format!("A folder named \"{}\" already exists", normalized_name));
+    }
+
+    let folder = ProjectFolder {
+        id: generate_id(),
+        name: normalized_name,
+        created_at: now_iso(),
+    };
+    folders.push(folder.clone());
+    save_project_folders(&app, &folders)?;
+    Ok(folder)
+}
+
+/// Renames an existing project folder.
+#[tauri::command]
+pub fn rename_project_folder(
+    app: AppHandle,
+    folder_id: String,
+    name: String,
+) -> Result<ProjectFolder, String> {
+    let normalized_name = normalize_folder_name(&name)?;
+    let mut folders = load_project_folders(&app)?;
+
+    let duplicate_name = folders.iter().any(|folder| {
+        folder.id != folder_id && folder.name.eq_ignore_ascii_case(&normalized_name)
+    });
+    if duplicate_name {
+        return Err(format!("A folder named \"{}\" already exists", normalized_name));
+    }
+
+    let folder = folders
+        .iter_mut()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| format!("Folder not found: {}", folder_id))?;
+    folder.name = normalized_name;
+
+    let updated_folder = folder.clone();
+    save_project_folders(&app, &folders)?;
+    Ok(updated_folder)
+}
+
+/// Moves a project into a folder, or to root when `folder_id` is `None`.
+#[tauri::command]
+pub fn move_project_to_folder(
+    app: AppHandle,
+    project_id: String,
+    folder_id: Option<String>,
+) -> Result<Project, String> {
+    let normalized_folder_id = folder_id
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .and_then(|value| if value.is_empty() { None } else { Some(value) });
+
+    if let Some(target_folder_id) = normalized_folder_id.as_ref() {
+        let folders = load_project_folders(&app)?;
+        let folder_exists = folders.iter().any(|folder| folder.id == *target_folder_id);
+        if !folder_exists {
+            return Err(format!("Folder not found: {}", target_folder_id));
+        }
+    }
+
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    project.folder_id = normalized_folder_id;
+
+    let serialized = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, serialized)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    Ok(project)
+}
+
 /// Lists all projects with summary information
 #[tauri::command]
 pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
@@ -1114,6 +1262,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             name: project.name,
             description: project.description,
             created_at: project.created_at,
+            folder_id: project.folder_id,
             formula,
             calculation_count,
             calculation_types,
@@ -1152,6 +1301,7 @@ pub fn create_project(
         name,
         description,
         created_at: now_iso(),
+        folder_id: None,
         cif_variants: Vec::new(),
         last_opened_cif_id: None,
     };
@@ -1188,6 +1338,49 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
         fs::write(&project_json, updated_project)
             .map_err(|e| format!("Failed to write project.json: {}", e))?;
     }
+
+    Ok(project)
+}
+
+/// Updates a project's editable metadata fields.
+#[tauri::command]
+pub fn update_project_metadata(
+    app: AppHandle,
+    project_id: String,
+    name: String,
+    description: Option<String>,
+) -> Result<Project, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Project name is required".to_string());
+    }
+
+    let normalized_description = description
+        .map(|value| value.trim().to_string())
+        .and_then(|value| if value.is_empty() { None } else { Some(value) });
+
+    // Load existing project
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    project.name = trimmed_name.to_string();
+    project.description = normalized_description;
+
+    // Save updated project
+    let project_json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, project_json)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     Ok(project)
 }

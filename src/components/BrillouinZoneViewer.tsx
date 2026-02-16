@@ -178,21 +178,44 @@ interface KPathLinesProps {
 }
 
 function KPathLines({ path, reciprocalBasis }: KPathLinesProps) {
-  const points = useMemo(() => {
-    return path.map((p) => {
-      const cart = fractionalToCartesian(p.coords, reciprocalBasis);
-      return new THREE.Vector3(...cart);
-    });
+  const polylineSegments = useMemo(() => {
+    const segments: THREE.Vector3[][] = [];
+    let currentSegment: THREE.Vector3[] = [];
+
+    for (let i = 0; i < path.length; i++) {
+      const point = path[i];
+      const cart = fractionalToCartesian(point.coords, reciprocalBasis);
+      currentSegment.push(new THREE.Vector3(...cart));
+
+      // npoints=0 marks the end of a segment (path discontinuity)
+      if (i < path.length - 1 && point.npoints === 0) {
+        if (currentSegment.length >= 2) {
+          segments.push(currentSegment);
+        }
+        currentSegment = [];
+      }
+    }
+
+    if (currentSegment.length >= 2) {
+      segments.push(currentSegment);
+    }
+
+    return segments;
   }, [path, reciprocalBasis]);
 
-  if (points.length < 2) return null;
+  if (polylineSegments.length === 0) return null;
 
   return (
-    <Line
-      points={points}
-      color="#ff6600"
-      lineWidth={3}
-    />
+    <group>
+      {polylineSegments.map((segment, i) => (
+        <Line
+          key={i}
+          points={segment}
+          color="#ff6600"
+          lineWidth={3}
+        />
+      ))}
+    </group>
   );
 }
 
@@ -528,7 +551,9 @@ export function BrillouinZoneViewer({
   // Remove last point from path
   const handleUndo = useCallback(() => {
     if (path.length > 0) {
-      const newPath = path.slice(0, -1);
+      const newPath = path.slice(0, -1).map((point, i, points) =>
+        i === points.length - 1 ? { ...point, npoints: 0 } : point
+      );
       setPath(newPath);
       onPathChange(newPath);
       setSelectedPoint(null);
@@ -544,26 +569,40 @@ export function BrillouinZoneViewer({
 
   // Use recommended path
   const handleUseRecommended = useCallback(() => {
+    const pointByLabel = new Map(bzData.points.map((point) => [point.label, point]));
     const recommendedPath: KPathPoint[] = [];
 
-    for (let i = 0; i < bzData.recommendedPath.length; i++) {
-      const [from, to] = bzData.recommendedPath[i];
+    for (const [fromLabel, toLabel] of bzData.recommendedPath) {
+      const fromPoint = pointByLabel.get(fromLabel);
+      const toPoint = pointByLabel.get(toLabel);
+      if (!fromPoint || !toPoint) {
+        continue;
+      }
 
-      // Add 'from' point if it's the first or different from last added
-      if (recommendedPath.length === 0 || recommendedPath[recommendedPath.length - 1].label !== from) {
-        const fromPoint = bzData.points.find((p) => p.label === from);
-        if (fromPoint) {
+      if (recommendedPath.length === 0) {
+        recommendedPath.push({
+          label: fromPoint.label,
+          coords: fromPoint.coords,
+          npoints: pointsPerSegment,
+        });
+      } else {
+        const lastPoint = recommendedPath[recommendedPath.length - 1];
+        if (lastPoint.label !== fromLabel) {
+          // Disconnected segment (e.g. ... | U→X): end previous segment and restart.
+          lastPoint.npoints = 0;
           recommendedPath.push({
             label: fromPoint.label,
             coords: fromPoint.coords,
             npoints: pointsPerSegment,
           });
+        } else if (lastPoint.npoints === 0) {
+          // Re-entering from a segment endpoint: reopen interpolation to next point.
+          lastPoint.npoints = pointsPerSegment;
         }
       }
 
-      // Add 'to' point
-      const toPoint = bzData.points.find((p) => p.label === to);
-      if (toPoint) {
+      // Avoid duplicate point entries for degenerate segments.
+      if (recommendedPath[recommendedPath.length - 1].label !== toLabel) {
         recommendedPath.push({
           label: toPoint.label,
           coords: toPoint.coords,
@@ -572,23 +611,24 @@ export function BrillouinZoneViewer({
       }
     }
 
-    // Remove duplicate consecutive points and set last npoints to 0
-    const cleanedPath: KPathPoint[] = [];
-    for (const point of recommendedPath) {
-      if (cleanedPath.length === 0 || cleanedPath[cleanedPath.length - 1].label !== point.label) {
-        cleanedPath.push(point);
-      }
-    }
-    if (cleanedPath.length > 0) {
-      cleanedPath[cleanedPath.length - 1].npoints = 0;
+    if (recommendedPath.length > 0) {
+      recommendedPath[recommendedPath.length - 1].npoints = 0;
     }
 
-    setPath(cleanedPath);
-    onPathChange(cleanedPath);
+    setPath(recommendedPath);
+    onPathChange(recommendedPath);
   }, [bzData, pointsPerSegment, onPathChange]);
 
   // Format path for display
-  const pathString = path.map((p) => p.label).join(" → ");
+  const pathString = useMemo(() => {
+    if (path.length === 0) return "";
+    let result = path[0].label;
+    for (let i = 1; i < path.length; i++) {
+      const separator = path[i - 1].npoints === 0 ? " | " : " → ";
+      result += `${separator}${path[i].label}`;
+    }
+    return result;
+  }, [path]);
 
   return (
     <div className="bz-viewer">

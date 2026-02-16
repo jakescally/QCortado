@@ -7,6 +7,13 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+/// Default MPI settings applied when creating new calculation runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpiDefaultsConfig {
+    pub enabled: bool,
+    pub nprocs: u32,
+}
+
 /// Application configuration stored on disk
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -20,6 +27,9 @@ pub struct AppConfig {
     /// Optional absolute path to the FermiSurfer executable
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fermi_surfer_path: Option<String>,
+    /// Optional global defaults for MPI in calculation wizards
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpi_defaults: Option<MpiDefaultsConfig>,
 }
 
 /// Gets the config file path
@@ -82,5 +92,15 @@ pub fn update_execution_prefix(app: &AppHandle, prefix: Option<String>) -> Resul
 pub fn update_fermi_surfer_path(app: &AppHandle, path: Option<String>) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.fermi_surfer_path = path;
+    save_config(app, &config)
+}
+
+/// Updates global MPI defaults and saves
+pub fn update_mpi_defaults(
+    app: &AppHandle,
+    mpi_defaults: Option<MpiDefaultsConfig>,
+) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.mpi_defaults = mpi_defaults;
     save_config(app, &config)
 }

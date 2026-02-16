@@ -38,6 +38,8 @@ pub struct AppState {
     pub fermi_surfer_path: Mutex<Option<PathBuf>>,
     /// Optional command prefix prepended before all QE launches
     pub execution_prefix: Mutex<Option<String>>,
+    /// Optional global MPI defaults used by calculation wizards
+    pub mpi_defaults: Mutex<Option<config::MpiDefaultsConfig>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -50,6 +52,7 @@ impl Default for AppState {
             qe_bin_dir: Mutex::new(None),
             fermi_surfer_path: Mutex::new(None),
             execution_prefix: Mutex::new(None),
+            mpi_defaults: Mutex::new(None),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
         }
@@ -64,6 +67,15 @@ fn normalize_execution_prefix(prefix: Option<String>) -> Option<String> {
         } else {
             Some(trimmed.to_string())
         }
+    })
+}
+
+fn normalize_mpi_defaults(
+    defaults: Option<config::MpiDefaultsConfig>,
+) -> Option<config::MpiDefaultsConfig> {
+    defaults.map(|defaults| config::MpiDefaultsConfig {
+        enabled: defaults.enabled,
+        nprocs: defaults.nprocs.max(1),
     })
 }
 
@@ -370,6 +382,24 @@ fn get_execution_prefix(state: State<AppState>) -> Option<String> {
     state.execution_prefix.lock().unwrap().clone()
 }
 
+/// Sets global MPI defaults used to prefill wizard MPI controls.
+#[tauri::command]
+fn set_mpi_defaults(
+    app: AppHandle,
+    defaults: Option<config::MpiDefaultsConfig>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let normalized = normalize_mpi_defaults(defaults);
+    *state.mpi_defaults.lock().unwrap() = normalized.clone();
+    config::update_mpi_defaults(&app, normalized)
+}
+
+/// Gets global MPI defaults used to prefill wizard MPI controls.
+#[tauri::command]
+fn get_mpi_defaults(state: State<AppState>) -> Option<config::MpiDefaultsConfig> {
+    state.mpi_defaults.lock().unwrap().clone()
+}
+
 /// Checks if QE is configured and which executables are available.
 #[tauri::command]
 fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
@@ -380,7 +410,8 @@ fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
         "pw.x",
         "bands.x",
         "dos.x",
-        "fs.x",
+        "fermi_velocity.x",
+        "fermi_proj.x",
         "projwfc.x",
         "pp.x",
         "ph.x",
@@ -806,30 +837,26 @@ pub struct ElectronicDosData {
     pub points: usize,
 }
 
-/// Configuration for Fermi surface generation (NSCF + fs.x).
+/// Configuration for Fermi-surface generation via QE's FermiSurfer pipeline.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct FermiSurfaceCalculationConfig {
     /// Base SCF calculation to derive system settings from
     pub base_calculation: QECalculation,
-    /// Dense automatic k-grid for NSCF run
+    /// Automatic k-grid used for the fermi_velocity.x input
     pub k_grid: [u32; 3],
     /// Optional automatic k-grid offset (0/1 for each reciprocal direction)
     pub k_offset: Option<[u32; 3]>,
-    /// Optional number of bands for NSCF (auto if None)
+    /// Optional number of bands for the generated pw-style input (auto if None)
     pub nbnd: Option<u32>,
-    /// Optional fs.x energy tolerance (eV)
-    pub delta_e: Option<f64>,
-    /// Optional fs.x output stem (filfermi)
-    pub fil_fermi: Option<String>,
     /// Project ID containing the source SCF calculation
     pub project_id: Option<String>,
     /// SCF calculation ID to get the .save directory from
     pub scf_calc_id: Option<String>,
 }
 
-/// Generated BXSF file metadata.
+/// Generated FermiSurfer FRMSF file metadata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BxsfFileData {
+pub struct FrmsfFileData {
     /// File name in the working directory
     pub file_name: String,
     /// File size in bytes
@@ -839,131 +866,14 @@ pub struct BxsfFileData {
 /// Parsed Fermi surface generation output returned to the frontend.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FermiSurfaceData {
-    /// Dense NSCF mesh used for generation
+    /// K-grid used for generation
     pub k_grid: [u32; 3],
-    /// Fermi energy in eV (if detected from NSCF output)
+    /// Fermi energy in eV (if detected from fermi_velocity.x output)
     pub fermi_energy: Option<f64>,
-    /// fs.x DeltaE parameter in eV, if supplied
-    pub delta_e: Option<f64>,
-    /// fs.x filfermi stem used for output
-    pub fil_fermi: String,
-    /// Preferred BXSF file to open by default
+    /// Preferred FRMSF file to open by default
     pub primary_file: String,
-    /// All generated BXSF files
-    pub bxsf_files: Vec<BxsfFileData>,
-}
-
-fn generate_fs_input(
-    prefix: &str,
-    outdir: &str,
-    fil_fermi: Option<&str>,
-    delta_e: Option<f64>,
-) -> String {
-    let mut output = String::new();
-    output.push_str("&FERMI\n");
-    output.push_str(&format!("  prefix = '{}',\n", prefix));
-    output.push_str(&format!("  outdir = '{}',\n", outdir));
-    if let Some(stem) = fil_fermi {
-        output.push_str(&format!("  filfermi = '{}',\n", stem));
-    }
-    if let Some(delta) = delta_e {
-        output.push_str(&format!("  DeltaE = {},\n", delta));
-    }
-    output.push_str("/\n");
-    output
-}
-
-fn fs_output_has_namelist_error(output: &str) -> bool {
-    let lower = output.to_ascii_lowercase();
-    lower.contains("reading fermi namelist")
-        || (lower.contains("error in routine fermi") && lower.contains("namelist"))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_fsx_attempt(
-    app: &AppHandle,
-    pm: &ProcessManager,
-    task_id: &str,
-    fs_path: &Path,
-    work_path: &Path,
-    execution_prefix: Option<&str>,
-    cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    fs_input: &str,
-) -> Result<(std::process::ExitStatus, String), String> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err("Cancelled by user".to_string());
-    }
-
-    let mut fs_child = tokio_command_with_prefix(fs_path, execution_prefix)
-        .current_dir(work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start fs.x: {}", e))?;
-
-    if let Some(pid) = fs_child.id() {
-        pm.set_child_id(task_id, pid).await;
-    }
-
-    if let Some(mut stdin) = fs_child.stdin.take() {
-        stdin
-            .write_all(fs_input.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write fs.x input: {}", e))?;
-    }
-
-    let fs_stdout = fs_child
-        .stdout
-        .take()
-        .ok_or("Failed to capture fs.x stdout")?;
-    let mut fs_reader = BufReader::new(fs_stdout).lines();
-    let mut fs_output = String::new();
-
-    while let Some(line) = fs_reader.next_line().await.map_err(|e| e.to_string())? {
-        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("Cancelled by user".to_string());
-        }
-        fs_output.push_str(&line);
-        fs_output.push('\n');
-        let _ = app.emit(&format!("task-output:{}", task_id), &line);
-        pm.append_output(task_id, line).await;
-    }
-
-    let fs_status = fs_child.wait().await.map_err(|e| e.to_string())?;
-    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err("Cancelled by user".to_string());
-    }
-
-    Ok((fs_status, fs_output))
-}
-
-fn sanitize_output_stem(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return "fermi_surface".to_string();
-    }
-
-    let mut sanitized: String = trimmed
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    sanitized = sanitized.trim_matches('_').to_string();
-
-    if sanitized.is_empty() {
-        "fermi_surface".to_string()
-    } else {
-        sanitized
-    }
+    /// All generated FRMSF files
+    pub frmsf_files: Vec<FrmsfFileData>,
 }
 
 fn sanitize_output_filename(raw: &str, fallback: &str) -> String {
@@ -1024,44 +934,106 @@ fn insert_system_namelist_line(input: &str, line_to_insert: &str) -> Result<Stri
     }
 }
 
-fn collect_bxsf_files(work_path: &Path) -> Result<Vec<BxsfFileData>, String> {
-    let entries = std::fs::read_dir(work_path).map_err(|e| {
-        format!(
-            "Failed to inspect working directory {}: {}",
-            work_path.display(),
-            e
-        )
-    })?;
-
-    let mut files: Vec<BxsfFileData> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let is_bxsf = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("bxsf"))
-            .unwrap_or(false);
-        if !is_bxsf {
-            continue;
-        }
-
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-        files.push(BxsfFileData {
-            file_name,
-            size_bytes,
-        });
-    }
+fn collect_surface_files(
+    work_path: &Path,
+    extensions: &[&str],
+) -> Result<Vec<FrmsfFileData>, String> {
+    let mut files: Vec<FrmsfFileData> = Vec::new();
+    collect_surface_files_recursive(work_path, work_path, extensions, 0, 8, &mut files)?;
 
     files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(files)
 }
 
-fn is_safe_bxsf_file_name(file_name: &str) -> bool {
+fn collect_surface_files_recursive(
+    root: &Path,
+    current: &Path,
+    extensions: &[&str],
+    depth: usize,
+    max_depth: usize,
+    files: &mut Vec<FrmsfFileData>,
+) -> Result<(), String> {
+    if depth > max_depth {
+        return Ok(());
+    }
+
+    let entries = std::fs::read_dir(current).map_err(|e| {
+        format!(
+            "Failed to inspect working directory {}: {}",
+            current.display(),
+            e
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+
+        if file_type.is_dir() {
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if dir_name.ends_with(".save") {
+                continue;
+            }
+            collect_surface_files_recursive(root, &path, extensions, depth + 1, max_depth, files)?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let matches_extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| {
+                extensions
+                    .iter()
+                    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+            })
+            .unwrap_or(false);
+        if !matches_extension {
+            continue;
+        }
+
+        let relative_path = path.strip_prefix(root).unwrap_or(&path);
+        let file_name = relative_path.to_string_lossy().to_string();
+        let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        files.push(FrmsfFileData {
+            file_name,
+            size_bytes,
+        });
+    }
+
+    Ok(())
+}
+
+fn collect_frmsf_files(work_path: &Path) -> Result<Vec<FrmsfFileData>, String> {
+    collect_surface_files(work_path, &["frmsf"])
+}
+
+fn collect_viewer_input_files(work_path: &Path) -> Result<Vec<FrmsfFileData>, String> {
+    let mut files = collect_surface_files(work_path, &["frmsf", "bxsf"])?;
+    files.sort_by(|a, b| {
+        let a_ext = Path::new(&a.file_name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        let b_ext = Path::new(&b.file_name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let a_rank = if a_ext == "frmsf" { 0 } else { 1 };
+        let b_rank = if b_ext == "frmsf" { 0 } else { 1 };
+        a_rank.cmp(&b_rank).then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    Ok(files)
+}
+
+fn is_safe_surface_file_name(file_name: &str) -> bool {
     let trimmed = file_name.trim();
     if trimmed.is_empty() {
         return false;
@@ -1069,9 +1041,6 @@ fn is_safe_bxsf_file_name(file_name: &str) -> bool {
 
     let path = Path::new(trimmed);
     if path.is_absolute() {
-        return false;
-    }
-    if path.file_name().and_then(|value| value.to_str()) != Some(trimmed) {
         return false;
     }
     if !path
@@ -1083,17 +1052,17 @@ fn is_safe_bxsf_file_name(file_name: &str) -> bool {
 
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("bxsf"))
+        .map(|ext| ext.eq_ignore_ascii_case("frmsf") || ext.eq_ignore_ascii_case("bxsf"))
         .unwrap_or(false)
 }
 
-/// Launches FermiSurfer for a saved Fermi-surface calculation BXSF file.
+/// Launches FermiSurfer for a saved Fermi-surface file.
 #[tauri::command]
 fn launch_fermi_surface_viewer(
     app: AppHandle,
     project_id: String,
     calculation_id: String,
-    bxsf_file: Option<String>,
+    surface_file: Option<String>,
     state: State<AppState>,
 ) -> Result<(), String> {
     let fermi_surfer_path = {
@@ -1124,12 +1093,14 @@ fn launch_fermi_surface_viewer(
         ));
     }
 
-    let available_files = collect_bxsf_files(&calc_tmp_dir)?;
+    let available_files = collect_viewer_input_files(&calc_tmp_dir)?;
     if available_files.is_empty() {
-        return Err("No .bxsf files found for this Fermi-surface calculation.".to_string());
+        return Err(
+            "No .frmsf or .bxsf files found for this Fermi-surface calculation.".to_string(),
+        );
     }
 
-    let requested_file = bxsf_file.and_then(|raw| {
+    let requested_file = surface_file.and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             None
@@ -1139,36 +1110,80 @@ fn launch_fermi_surface_viewer(
     });
 
     let selected_file_name = if let Some(requested) = requested_file {
-        if !is_safe_bxsf_file_name(&requested) {
-            return Err("Invalid BXSF file name.".to_string());
+        if !is_safe_surface_file_name(&requested) {
+            return Err("Invalid Fermi-surface file name.".to_string());
         }
         if !available_files
             .iter()
             .any(|file| file.file_name == requested)
         {
-            return Err(format!("Requested BXSF file not found: {}", requested));
+            return Err(format!("Requested Fermi-surface file not found: {}", requested));
         }
         requested
     } else {
         available_files[0].file_name.clone()
     };
 
-    let bxsf_path = calc_tmp_dir.join(&selected_file_name);
-    if !bxsf_path.exists() || !bxsf_path.is_file() {
+    let surface_path = calc_tmp_dir.join(&selected_file_name);
+    if !surface_path.exists() || !surface_path.is_file() {
         return Err(format!(
-            "BXSF file does not exist: {}",
-            bxsf_path.display()
+            "Fermi-surface file does not exist: {}",
+            surface_path.display()
         ));
     }
 
-    std::process::Command::new(&fermi_surfer_path)
-        .arg(&bxsf_path)
+    let launch_log_path = calc_tmp_dir.join("fermisurfer.launch.log");
+    let mut launch_log = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&launch_log_path)
+        .map_err(|e| format!("Failed to create launch log {}: {}", launch_log_path.display(), e))?;
+    use std::io::Write;
+    let _ = writeln!(
+        launch_log,
+        "Launching FermiSurfer:\n  executable={}\n  input={}",
+        fermi_surfer_path.display(),
+        surface_path.display()
+    );
+    let stdout_log = launch_log
+        .try_clone()
+        .map_err(|e| format!("Failed to prepare launch log: {}", e))?;
+    let stderr_log = launch_log
+        .try_clone()
+        .map_err(|e| format!("Failed to prepare launch log: {}", e))?;
+
+    let mut child = std::process::Command::new(&fermi_surfer_path)
+        .arg(&surface_path)
         .current_dir(&calc_tmp_dir)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout_log))
+        .stderr(std::process::Stdio::from(stderr_log))
         .spawn()
         .map_err(|e| format!("Failed to launch FermiSurfer: {}", e))?;
+
+    // Give GUI startup a brief window. If it exits immediately, surface logs to the user.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|e| format!("Failed while checking FermiSurfer startup: {}", e))?
+    {
+        let launch_log_content = std::fs::read_to_string(&launch_log_path).unwrap_or_default();
+        let mut excerpt = launch_log_content.trim().to_string();
+        if excerpt.len() > 3000 {
+            excerpt = format!("{}...", &excerpt[..3000]);
+        }
+        let detail = if excerpt.is_empty() {
+            format!("See {}", launch_log_path.display())
+        } else {
+            format!("Log ({}):\n{}", launch_log_path.display(), excerpt)
+        };
+        return Err(format!(
+            "FermiSurfer exited immediately with status {:?}. {}",
+            status.code(),
+            detail
+        ));
+    }
 
     Ok(())
 }
@@ -3224,7 +3239,7 @@ async fn run_dos_background(
     Ok(dos_data)
 }
 
-/// Starts a Fermi surface generation task (NSCF + fs.x).
+/// Starts a Fermi-surface generation task using QE's fermi_velocity.x workflow.
 #[tauri::command]
 async fn start_fermi_surface_calculation(
     app: AppHandle,
@@ -3296,7 +3311,7 @@ async fn run_fermi_surface_background(
     pm: ProcessManager,
 ) -> Result<FermiSurfaceData, String> {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     let work_path = PathBuf::from(&working_dir);
     prepare_working_directory(&work_path, false)?;
@@ -3341,100 +3356,95 @@ async fn run_fermi_surface_background(
 
     check_cancel!();
 
-    let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.calculation = qe::CalculationType::Nscf;
-    if nscf_calc.verbosity.is_none() {
-        nscf_calc.verbosity = Some("high".to_string());
+    let mut fermi_calc = config.base_calculation.clone();
+    if fermi_calc.verbosity.is_none() {
+        fermi_calc.verbosity = Some("high".to_string());
     }
     let k_offset = config.k_offset.unwrap_or([0, 0, 0]).map(|value| u32::from(value > 0));
-    nscf_calc.kpoints = qe::KPoints::Automatic {
+    fermi_calc.kpoints = qe::KPoints::Automatic {
         grid: config.k_grid,
         offset: k_offset,
     };
 
-    if nscf_calc.system.degauss.is_none() {
-        nscf_calc.system.degauss = Some(0.02);
+    if fermi_calc.system.degauss.is_none() {
+        fermi_calc.system.degauss = Some(0.02);
     }
 
-    let mut nscf_input = generate_pw_input(&nscf_calc);
+    let mut fermi_input = generate_pw_input(&fermi_calc);
     if let Some(nbnd) = config.nbnd {
-        nscf_input = insert_system_namelist_line(&nscf_input, &format!("nbnd = {},", nbnd))?;
+        fermi_input = insert_system_namelist_line(&fermi_input, &format!("nbnd = {},", nbnd))?;
         emit_line!(format!("Requested nbnd = {}", nbnd));
     }
-    std::fs::write(work_path.join("nscf.in"), &nscf_input)
-        .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
+    std::fs::write(work_path.join("fermi_velocity.in"), &fermi_input)
+        .map_err(|e| format!("Failed to write fermi_velocity.x input: {}", e))?;
 
     emit_line!("".to_string());
     emit_line!("=== Starting Fermi Surface Generation ===".to_string());
     emit_line!(format!(
-        "Dense k-grid: {}×{}×{}",
+        "K-grid: {}×{}×{}",
         config.k_grid[0], config.k_grid[1], config.k_grid[2]
     ));
     emit_line!(format!(
         "K-point offset: {} {} {}",
         k_offset[0], k_offset[1], k_offset[2]
     ));
-    emit_line!("Step 1/2: Running NSCF on dense k-grid...".to_string());
+    emit_line!("Step 1/1: Running fermi_velocity.x...".to_string());
 
-    let pw_path = bin_dir.join("pw.x");
-    if !pw_path.exists() {
-        return Err("pw.x not found".to_string());
+    let fermi_velocity_path = bin_dir.join("fermi_velocity.x");
+    if !fermi_velocity_path.exists() {
+        return Err(
+            "fermi_velocity.x not found. Build QE post-processing tools (`make pp`) and verify the QE bin path."
+                .to_string(),
+        );
     }
 
-    let mut nscf_child = if let Some(ref mpi) = mpi_config {
+    let mut fermi_child = if let Some(ref mpi) = mpi_config {
         if mpi.enabled && mpi.nprocs > 1 {
-            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            emit_line!(format!("Using MPI with {} processes (npool=1)", mpi.nprocs));
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
-                .arg(&pw_path)
+                .arg(&fermi_velocity_path)
+                .args(["-npool", "1", "-in", "fermi_velocity.in"])
                 .current_dir(&work_path)
-                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| format!("Failed to start mpirun: {}", e))?
         } else {
-            tokio_command_with_prefix(&pw_path, execution_prefix.as_deref())
+            tokio_command_with_prefix(&fermi_velocity_path, execution_prefix.as_deref())
+                .args(["-npool", "1", "-in", "fermi_velocity.in"])
                 .current_dir(&work_path)
-                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("Failed to start pw.x: {}", e))?
+                .map_err(|e| format!("Failed to start fermi_velocity.x: {}", e))?
         }
     } else {
-        tokio_command_with_prefix(&pw_path, execution_prefix.as_deref())
+        tokio_command_with_prefix(&fermi_velocity_path, execution_prefix.as_deref())
+            .args(["-npool", "1", "-in", "fermi_velocity.in"])
             .current_dir(&work_path)
-            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to start pw.x: {}", e))?
+            .map_err(|e| format!("Failed to start fermi_velocity.x: {}", e))?
     };
 
-    if let Some(pid) = nscf_child.id() {
+    if let Some(pid) = fermi_child.id() {
         pm.set_child_id(task_id, pid).await;
     }
 
-    if let Some(mut stdin) = nscf_child.stdin.take() {
-        stdin
-            .write_all(nscf_input.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
-    }
-
-    let nscf_stdout = nscf_child
+    let fermi_stdout = fermi_child
         .stdout
         .take()
-        .ok_or("Failed to capture pw.x stdout")?;
-    let mut nscf_reader = BufReader::new(nscf_stdout).lines();
-    let mut nscf_output = String::new();
+        .ok_or("Failed to capture fermi_velocity.x stdout")?;
+    let mut fermi_reader = BufReader::new(fermi_stdout).lines();
+    let mut fermi_output = String::new();
     let mut fermi_energy: Option<f64> = None;
 
-    while let Some(line) = nscf_reader.next_line().await.map_err(|e| e.to_string())? {
+    while let Some(line) = fermi_reader.next_line().await.map_err(|e| e.to_string())? {
         check_cancel!();
-        nscf_output.push_str(&line);
-        nscf_output.push('\n');
+        fermi_output.push_str(&line);
+        fermi_output.push('\n');
         emit_line!(line.clone());
 
         if line.contains("the Fermi energy is") {
@@ -3449,118 +3459,57 @@ async fn run_fermi_surface_background(
         }
     }
 
-    let nscf_status = nscf_child.wait().await.map_err(|e| e.to_string())?;
+    let fermi_status = fermi_child.wait().await.map_err(|e| e.to_string())?;
     check_cancel!();
-    if !nscf_status.success() {
+    if !fermi_status.success() {
         return Err(format!(
-            "pw.x (NSCF) failed with exit code: {:?}",
-            nscf_status.code()
+            "fermi_velocity.x failed with exit code: {:?}",
+            fermi_status.code()
         ));
     }
 
-    std::fs::write(work_path.join("nscf.out"), &nscf_output)
-        .map_err(|e| format!("Failed to write NSCF output: {}", e))?;
+    std::fs::write(work_path.join("fermi_velocity.out"), &fermi_output)
+        .map_err(|e| format!("Failed to write fermi_velocity.x output: {}", e))?;
 
     emit_line!("".to_string());
-    emit_line!("Step 2/2: Running fs.x post-processing...".to_string());
+    emit_line!("Collecting FRMSF artifacts...".to_string());
 
-    let fs_path = bin_dir.join("fs.x");
-    if !fs_path.exists() {
-        return Err("fs.x not found. Make sure your QE installation includes fs.x".to_string());
-    }
-
-    let requested_stem = config.fil_fermi.as_deref().unwrap_or("fermi_surface");
-    let fil_fermi = sanitize_output_stem(requested_stem);
-    if fil_fermi != requested_stem {
-        emit_line!(format!(
-            "Output stem sanitized to '{}' for filesystem safety.",
-            fil_fermi
-        ));
-    }
-
-    let fs_input = generate_fs_input(
-        &nscf_calc.prefix,
-        &nscf_calc.outdir,
-        Some(&fil_fermi),
-        config.delta_e,
-    );
-    std::fs::write(work_path.join("fs.in"), &fs_input)
-        .map_err(|e| format!("Failed to write fs.x input: {}", e))?;
-
-    let (mut fs_status, mut fs_output) = run_fsx_attempt(
-        &app,
-        &pm,
-        task_id,
-        &fs_path,
-        &work_path,
-        execution_prefix.as_deref(),
-        &cancel_flag,
-        &fs_input,
-    )
-    .await?;
-
-    if !fs_status.success() && fs_output_has_namelist_error(&fs_output) {
-        emit_line!("fs.x rejected extended namelist; retrying with minimal input.".to_string());
-        let compat_input = generate_fs_input(&nscf_calc.prefix, &nscf_calc.outdir, None, None);
-        std::fs::write(work_path.join("fs_compat.in"), &compat_input)
-            .map_err(|e| format!("Failed to write compatibility fs.x input: {}", e))?;
-
-        let (compat_status, compat_output) = run_fsx_attempt(
-            &app,
-            &pm,
-            task_id,
-            &fs_path,
-            &work_path,
-            execution_prefix.as_deref(),
-            &cancel_flag,
-            &compat_input,
-        )
-        .await?;
-
-        fs_output.push_str("\n--- compatibility retry ---\n");
-        fs_output.push_str(&compat_output);
-        fs_status = compat_status;
-    }
-
-    if !fs_status.success() {
-        return Err(format!(
-            "fs.x failed with exit code: {:?}",
-            fs_status.code()
-        ));
-    }
-
-    std::fs::write(work_path.join("fs.out"), &fs_output)
-        .map_err(|e| format!("Failed to write fs.x output: {}", e))?;
-
-    emit_line!("".to_string());
-    emit_line!("Collecting BXSF artifacts...".to_string());
-
-    let bxsf_files = collect_bxsf_files(&work_path)?;
-    if bxsf_files.is_empty() {
+    let frmsf_files = collect_frmsf_files(&work_path)?;
+    if frmsf_files.is_empty() {
         return Err(
-            "No .bxsf files were generated. fs.x completed without producing expected output."
+            "No .frmsf files were generated. fermi_velocity.x completed without producing expected output."
                 .to_string(),
         );
     }
 
-    let preferred_name = format!("{}_fs.bxsf", fil_fermi);
-    let primary_file = bxsf_files
+    let primary_file = frmsf_files
         .iter()
-        .find(|file| file.file_name == preferred_name)
+        .find(|file| {
+            let lower = file.file_name.to_ascii_lowercase();
+            lower.ends_with("/vfermi.frmsf")
+                || lower == "vfermi.frmsf"
+                || lower.ends_with("_vfermi.frmsf")
+        })
+        .or_else(|| {
+            frmsf_files.iter().find(|file| {
+                let lower = file.file_name.to_ascii_lowercase();
+                lower.ends_with("/vfermi1.frmsf")
+                    || lower == "vfermi1.frmsf"
+                    || lower.ends_with("_vfermi1.frmsf")
+            })
+        })
         .map(|file| file.file_name.clone())
-        .unwrap_or_else(|| bxsf_files[0].file_name.clone());
+        .unwrap_or_else(|| frmsf_files[0].file_name.clone());
 
     emit_line!("=== Fermi Surface Generation Complete ===".to_string());
-    emit_line!(format!("  Generated {} BXSF file(s)", bxsf_files.len()));
+    emit_line!(format!("  Generated {} FRMSF file(s)", frmsf_files.len()));
     emit_line!(format!("  Primary file: {}", primary_file));
 
     Ok(FermiSurfaceData {
         k_grid: config.k_grid,
         fermi_energy,
-        delta_e: config.delta_e,
-        fil_fermi,
         primary_file,
-        bxsf_files,
+        frmsf_files,
     })
 }
 
@@ -4155,6 +4104,7 @@ pub fn run() {
             let mut qe_bin_dir: Option<PathBuf> = None;
             let mut fermi_surfer_path: Option<PathBuf> = None;
             let mut execution_prefix: Option<String> = None;
+            let mut mpi_defaults: Option<config::MpiDefaultsConfig> = None;
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
                     if let Some(path) = cfg.qe_bin_dir {
@@ -4171,6 +4121,7 @@ pub fn run() {
                         }
                     }
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
+                    mpi_defaults = normalize_mpi_defaults(cfg.mpi_defaults);
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to load config: {}", e);
@@ -4182,6 +4133,7 @@ pub fn run() {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
                 fermi_surfer_path: Mutex::new(fermi_surfer_path),
                 execution_prefix: Mutex::new(execution_prefix),
+                mpi_defaults: Mutex::new(mpi_defaults),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
             });
@@ -4212,6 +4164,8 @@ pub fn run() {
             get_fermi_surfer_path,
             set_execution_prefix,
             get_execution_prefix,
+            set_mpi_defaults,
+            get_mpi_defaults,
             clear_temp_storage,
             launch_fermi_surface_viewer,
             check_qe_executables,
@@ -4242,8 +4196,13 @@ pub fn run() {
             shutdown_and_close,
             // Project management commands
             projects::list_projects,
+            projects::list_project_folders,
             projects::create_project,
+            projects::create_project_folder,
             projects::get_project,
+            projects::update_project_metadata,
+            projects::rename_project_folder,
+            projects::move_project_to_folder,
             projects::add_cif_to_project,
             projects::save_calculation,
             projects::export_project_archive,

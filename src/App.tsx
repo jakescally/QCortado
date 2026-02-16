@@ -19,6 +19,7 @@ import { TaskQueuePage } from "./components/TaskQueuePage";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
+import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { CrystalData, SCFPreset, OptimizedStructureOption } from "./lib/types";
 
 interface ProjectSummary {
@@ -237,6 +238,11 @@ function AppInner() {
   const [executionPrefixInput, setExecutionPrefixInput] = useState("");
   const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
   const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
+  const [globalMpiEnabled, setGlobalMpiEnabled] = useState(false);
+  const [globalMpiProcs, setGlobalMpiProcs] = useState(1);
+  const [globalMpiCpuCount, setGlobalMpiCpuCount] = useState(1);
+  const [isSavingGlobalMpi, setIsSavingGlobalMpi] = useState(false);
+  const [globalMpiStatus, setGlobalMpiStatus] = useState<string | null>(null);
   const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
   const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
   const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
@@ -282,6 +288,7 @@ function AppInner() {
     loadProjectCount();
     void loadFermiSurferPath();
     void loadExecutionPrefix();
+    void loadGlobalMpiSettings();
   }, []);
 
   // Listen for close confirmation events from backend
@@ -469,6 +476,38 @@ function AppInner() {
       setPrefixStatus("Failed to save");
     } finally {
       setIsSavingExecutionPrefix(false);
+    }
+  }
+
+  async function loadGlobalMpiSettings() {
+    try {
+      const cores = await invoke<number>("get_cpu_count");
+      const safeCores = Math.max(1, Math.floor(cores));
+      setGlobalMpiCpuCount(safeCores);
+      const defaults = await loadGlobalMpiDefaults(safeCores);
+      setGlobalMpiEnabled(defaults.enabled);
+      setGlobalMpiProcs(defaults.nprocs);
+    } catch (e) {
+      console.error("Failed to load global MPI defaults:", e);
+    }
+  }
+
+  async function saveGlobalMpiSettings() {
+    setIsSavingGlobalMpi(true);
+    setGlobalMpiStatus(null);
+    try {
+      const saved = await saveGlobalMpiDefaults(
+        { enabled: globalMpiEnabled, nprocs: globalMpiProcs },
+        globalMpiCpuCount,
+      );
+      setGlobalMpiEnabled(saved.enabled);
+      setGlobalMpiProcs(saved.nprocs);
+      setGlobalMpiStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save global MPI defaults:", e);
+      setGlobalMpiStatus("Failed to save");
+    } finally {
+      setIsSavingGlobalMpi(false);
     }
   }
 
@@ -710,102 +749,158 @@ function AppInner() {
       </button>
 
       {showSettingsMenu && (
-        <div className="floating-settings-menu">
-          <div className="settings-menu-section">
-            <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
-              Command Prefix
-            </label>
-            <input
-              id="global-execution-prefix-input"
-              className="settings-menu-input"
-              value={executionPrefixInput}
-              onChange={(e) => {
-                setExecutionPrefixInput(e.target.value);
-                setPrefixStatus(null);
-              }}
-              placeholder="e.g. mpirun"
-            />
-            <p className="settings-menu-hint">
-              Prepended before every QE executable launch.
-            </p>
-            <button
-              className="settings-menu-item"
-              onClick={() => void saveExecutionPrefix()}
-              disabled={isSavingExecutionPrefix}
-            >
-              {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
-            </button>
-            {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
-          </div>
-
-          <div className="settings-menu-divider" />
-          <div className="settings-menu-section">
-            <label className="settings-menu-label">Temporary Storage</label>
-            <p className="settings-menu-hint">
-              Remove `/tmp` and system temp QCortado working folders.
-            </p>
-            <button
-              className="settings-menu-item warning"
-              onClick={() => void clearTempStorage()}
-              disabled={isClearingTempStorage}
-            >
-              {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
-            </button>
-            {tempStorageStatus && <div className="settings-menu-status">{tempStorageStatus}</div>}
-          </div>
-
-          <div className="settings-menu-divider" />
-          <div className="settings-menu-section">
-            <label className="settings-menu-label">Recovery</label>
-            <p className="settings-menu-hint">
-              Import a completed phonon scratch run into the active project history.
-            </p>
-            <button
-              className="settings-menu-item"
-              onClick={() => void recoverPhononFromSettings()}
-              disabled={isRecoveringPhonon || !selectedProjectId}
-            >
-              {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
-            </button>
-            {recoveryStatus && <div className="settings-menu-status">{recoveryStatus}</div>}
-          </div>
-
-          <div className="settings-menu-divider" />
-          <div className="settings-menu-section">
-            <label className="settings-menu-label">Theme</label>
-            <div className="theme-toggle-group" role="group" aria-label="Theme">
+        <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
+          <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
+            <div className="settings-window-header">
+              <h3>Settings</h3>
               <button
-                type="button"
-                className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
-                onClick={() => setTheme("system")}
+                className="settings-window-close"
+                onClick={() => setShowSettingsMenu(false)}
+                aria-label="Close settings"
               >
-                System
-              </button>
-              <button
-                type="button"
-                className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
-                onClick={() => setTheme("light")}
-              >
-                Light
-              </button>
-              <button
-                type="button"
-                className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
-                onClick={() => setTheme("dark")}
-              >
-                Dark
+                &times;
               </button>
             </div>
-          </div>
+            <div className="settings-window-content">
+              <div className="settings-menu-section">
+                <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
+                  Command Prefix
+                </label>
+                <input
+                  id="global-execution-prefix-input"
+                  className="settings-menu-input"
+                  value={executionPrefixInput}
+                  onChange={(e) => {
+                    setExecutionPrefixInput(e.target.value);
+                    setPrefixStatus(null);
+                  }}
+                  placeholder="e.g. mpirun"
+                />
+                <p className="settings-menu-hint">
+                  Prepended before every QE executable launch.
+                </p>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => void saveExecutionPrefix()}
+                  disabled={isSavingExecutionPrefix}
+                >
+                  {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
+                </button>
+                {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
+              </div>
 
-          {selectedProjectId && (
-            <>
               <div className="settings-menu-divider" />
-              <button className="settings-menu-item danger" onClick={() => void openDeleteProjectDialog()}>
-                Delete Project
-              </button>
-            </>
-          )}
+              <div className="settings-menu-section">
+                <label className="settings-menu-label">MPI Defaults</label>
+                <label className="toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={globalMpiEnabled}
+                    onChange={(e) => {
+                      setGlobalMpiEnabled(e.target.checked);
+                      setGlobalMpiStatus(null);
+                    }}
+                  />
+                  <span>Enable MPI by default</span>
+                </label>
+                <label className="settings-menu-label" htmlFor="global-mpi-procs-input">
+                  Default MPI Processes
+                </label>
+                <input
+                  id="global-mpi-procs-input"
+                  type="number"
+                  min={1}
+                  max={globalMpiCpuCount}
+                  className="settings-menu-input"
+                  value={globalMpiProcs}
+                  onChange={(e) => {
+                    setGlobalMpiProcs(clampMpiProcs(Number.parseInt(e.target.value, 10), globalMpiCpuCount));
+                    setGlobalMpiStatus(null);
+                  }}
+                />
+                <p className="settings-menu-hint">
+                  Used as the initial MPI option in all calculation wizards ({globalMpiCpuCount} cores available).
+                </p>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => void saveGlobalMpiSettings()}
+                  disabled={isSavingGlobalMpi}
+                >
+                  {isSavingGlobalMpi ? "Saving..." : "Save MPI Defaults"}
+                </button>
+                {globalMpiStatus && <div className="settings-menu-status">{globalMpiStatus}</div>}
+              </div>
+
+              <div className="settings-menu-divider" />
+              <div className="settings-menu-section">
+                <label className="settings-menu-label">Temporary Storage</label>
+                <p className="settings-menu-hint">
+                  Remove `/tmp` and system temp QCortado working folders.
+                </p>
+                <button
+                  className="settings-menu-item warning"
+                  onClick={() => void clearTempStorage()}
+                  disabled={isClearingTempStorage}
+                >
+                  {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
+                </button>
+                {tempStorageStatus && <div className="settings-menu-status">{tempStorageStatus}</div>}
+              </div>
+
+              <div className="settings-menu-divider" />
+              <div className="settings-menu-section">
+                <label className="settings-menu-label">Recovery</label>
+                <p className="settings-menu-hint">
+                  Import a completed phonon scratch run into the active project history.
+                </p>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => void recoverPhononFromSettings()}
+                  disabled={isRecoveringPhonon || !selectedProjectId}
+                >
+                  {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
+                </button>
+                {recoveryStatus && <div className="settings-menu-status">{recoveryStatus}</div>}
+              </div>
+
+              <div className="settings-menu-divider" />
+              <div className="settings-menu-section">
+                <label className="settings-menu-label">Theme</label>
+                <div className="theme-toggle-group" role="group" aria-label="Theme">
+                  <button
+                    type="button"
+                    className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
+                    onClick={() => setTheme("system")}
+                  >
+                    System
+                  </button>
+                  <button
+                    type="button"
+                    className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
+                    onClick={() => setTheme("light")}
+                  >
+                    Light
+                  </button>
+                  <button
+                    type="button"
+                    className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
+                    onClick={() => setTheme("dark")}
+                  >
+                    Dark
+                  </button>
+                </div>
+              </div>
+
+              {selectedProjectId && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <button className="settings-menu-item danger" onClick={() => void openDeleteProjectDialog()}>
+                    Delete Project
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

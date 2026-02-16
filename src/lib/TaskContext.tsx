@@ -218,6 +218,22 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
       next.n_points = Number(taskResult.points);
     }
   } else if (taskType === "fermi_surface") {
+    if (next.n_frmsf_files == null && Array.isArray(taskResult?.frmsf_files)) {
+      next.n_frmsf_files = taskResult.frmsf_files.length;
+    }
+    if ((!Array.isArray(next.frmsf_files) || next.frmsf_files.length === 0) && Array.isArray(taskResult?.frmsf_files)) {
+      next.frmsf_files = taskResult.frmsf_files.map((entry: any) => entry?.file_name).filter(Boolean);
+    }
+    if (next.primary_frmsf_file == null && typeof taskResult?.primary_file === "string") {
+      next.primary_frmsf_file = taskResult.primary_file;
+    }
+    if (next.total_frmsf_bytes == null && Array.isArray(taskResult?.frmsf_files)) {
+      next.total_frmsf_bytes = taskResult.frmsf_files.reduce(
+        (sum: number, entry: any) => sum + (Number(entry?.size_bytes) || 0),
+        0,
+      );
+    }
+    // Backward compatibility for older fs.x / BXSF task payloads.
     if (next.n_bxsf_files == null && Array.isArray(taskResult?.bxsf_files)) {
       next.n_bxsf_files = taskResult.bxsf_files.length;
     }

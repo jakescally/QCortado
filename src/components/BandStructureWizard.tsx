@@ -13,6 +13,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
+import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 
 interface CalculationRun {
   id: string;
@@ -214,7 +215,7 @@ export function BandStructureWizard({
   const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
   const [bandsFilbandInput, setBandsFilbandInput] = useState("bands.dat");
   const [bandsLsym, setBandsLsym] = useState(true);
-  const [enableProjections, setEnableProjections] = useState(false);
+  const [enableProjections, setEnableProjections] = useState(true);
   const [projectionLsym, setProjectionLsym] = useState(false);
   const [projectionDiagBasis, setProjectionDiagBasis] = useState(false);
   const [projectionPawproj, setProjectionPawproj] = useState(false);
@@ -374,11 +375,14 @@ export function BandStructureWizard({
       try {
         // Check MPI
         const count = await invoke<number>("get_cpu_count");
-        setCpuCount(count);
-        setMpiProcs(Math.max(1, Math.floor(count * 0.75)));
+        const safeCount = Math.max(1, Math.floor(count));
+        setCpuCount(safeCount);
+        const defaults = await loadGlobalMpiDefaults(safeCount);
 
         const available = await invoke<boolean>("check_mpi_available");
         setMpiAvailable(available);
+        setMpiEnabled(available ? defaults.enabled : false);
+        setMpiProcs(defaults.nprocs);
 
         // Load pseudopotentials
         const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
