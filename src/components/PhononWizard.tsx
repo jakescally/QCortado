@@ -11,6 +11,7 @@ import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { isPhononReadyScf } from "../lib/phononReady";
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -43,6 +44,130 @@ function isOptionalPositiveIntValid(value: string): boolean {
   return value.trim() === "" || parseOptionalPositiveInt(value) !== null;
 }
 
+type QPathSamplingMode = "segment" | "total";
+
+const MIN_POINTS_PER_SEGMENT = 5;
+const MAX_POINTS_PER_SEGMENT = 400;
+const MAX_TOTAL_Q_POINTS = 5000;
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function getConnectedSegmentIndices(path: KPathPoint[]): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    if (path[i].npoints > 0) {
+      indices.push(i);
+    }
+  }
+  return indices;
+}
+
+function applyPointsPerSegment(path: KPathPoint[], pointsPerSegment: number): KPathPoint[] {
+  const connectedSegmentIndices = new Set(getConnectedSegmentIndices(path));
+  if (path.length === 0 || connectedSegmentIndices.size === 0) {
+    return path.map((point) => ({
+      ...point,
+      npoints: 0,
+    }));
+  }
+
+  const safePointsPerSegment = clampInt(
+    pointsPerSegment,
+    MIN_POINTS_PER_SEGMENT,
+    MAX_POINTS_PER_SEGMENT,
+  );
+  return path.map((point, index) => {
+    if (index >= path.length - 1) {
+      return { ...point, npoints: 0 };
+    }
+    if (!connectedSegmentIndices.has(index)) {
+      return { ...point, npoints: 0 };
+    }
+    return { ...point, npoints: safePointsPerSegment };
+  });
+}
+
+function applyTotalQPoints(path: KPathPoint[], totalQPoints: number): KPathPoint[] {
+  const connectedSegmentIndices = getConnectedSegmentIndices(path);
+  if (path.length === 0 || connectedSegmentIndices.length === 0) {
+    return path.map((point) => ({
+      ...point,
+      npoints: 0,
+    }));
+  }
+
+  const safeTotal = clampInt(
+    totalQPoints,
+    connectedSegmentIndices.length,
+    MAX_TOTAL_Q_POINTS,
+  );
+  const remainingAfterBaseline = safeTotal - connectedSegmentIndices.length;
+  const lengths = connectedSegmentIndices.map((segmentIndex) => {
+    const from = path[segmentIndex];
+    const to = path[segmentIndex + 1];
+    const dx = to.coords[0] - from.coords[0];
+    const dy = to.coords[1] - from.coords[1];
+    const dz = to.coords[2] - from.coords[2];
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return Number.isFinite(distance) && distance > 1e-9 ? distance : 1e-9;
+  });
+  const totalLength = lengths.reduce((sum, len) => sum + len, 0);
+  const rawExtras = lengths.map((length) =>
+    totalLength > 0
+      ? (length / totalLength) * remainingAfterBaseline
+      : remainingAfterBaseline / connectedSegmentIndices.length,
+  );
+  const extraPoints = rawExtras.map((value) => Math.floor(value));
+  const assignedExtra = extraPoints.reduce((sum, value) => sum + value, 0);
+  let leftovers = remainingAfterBaseline - assignedExtra;
+  const order = rawExtras
+    .map((value, idx) => ({
+      idx,
+      frac: value - Math.floor(value),
+      len: lengths[idx],
+    }))
+    .sort((a, b) => {
+      if (b.frac !== a.frac) return b.frac - a.frac;
+      if (b.len !== a.len) return b.len - a.len;
+      return a.idx - b.idx;
+    });
+
+  for (let i = 0; i < order.length && leftovers > 0; i++) {
+    extraPoints[order[i].idx] += 1;
+    leftovers -= 1;
+  }
+
+  const segmentPoints = new Map<number, number>();
+  for (let i = 0; i < connectedSegmentIndices.length; i++) {
+    segmentPoints.set(connectedSegmentIndices[i], 1 + extraPoints[i]);
+  }
+
+  return path.map((point, index) => {
+    if (index >= path.length - 1) {
+      return { ...point, npoints: 0 };
+    }
+    if (!segmentPoints.has(index)) {
+      return { ...point, npoints: 0 };
+    }
+    return { ...point, npoints: segmentPoints.get(index)! };
+  });
+}
+
+function normalizeQPathSampling(
+  path: KPathPoint[],
+  samplingMode: QPathSamplingMode,
+  pointsPerSegment: number,
+  totalQPoints: number,
+): KPathPoint[] {
+  if (samplingMode === "total") {
+    return applyTotalQPoints(path, totalQPoints);
+  }
+  return applyPointsPerSegment(path, pointsPerSegment);
+}
+
 interface CalculationRun {
   id: string;
   calc_type: string;
@@ -61,6 +186,7 @@ interface CalculationRun {
 function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
   const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
+  const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
   const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {
     if (!tags.some((tag) => tag.label === label)) {
       tags.push({ label, type });
@@ -70,7 +196,9 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
   if (calc.tags) {
     for (const tag of calc.tags) {
       if (tag === "phonon-ready") {
-        pushTag("Phonon-Ready", "special");
+        if (phononReady) {
+          pushTag("Phonon-Ready", "special");
+        }
       } else if (tag === "structure-optimized") {
         pushTag("Optimized", "special");
       } else if (tag === "geometry") {
@@ -94,8 +222,8 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
     pushTag(label, "info");
   }
 
-  // Mark phonon-ready calculations
-  if (params.conv_thr && params.conv_thr <= 1e-10) {
+  // Mark phonon-ready calculations.
+  if (phononReady) {
     pushTag("Phonon-Ready", "special");
   }
 
@@ -254,7 +382,10 @@ export function PhononWizard({
   const [dosDeltaEInput, setDosDeltaEInput] = useState<string>("1.0");
   const [calculateDispersion, setCalculateDispersion] = useState(true);
   const [qPath, setQPath] = useState<KPathPoint[]>([]);
+  const [qPathSamplingMode, setQPathSamplingMode] = useState<QPathSamplingMode>("segment");
   const [pointsPerSegment, setPointsPerSegment] = useState(20);
+  const [totalQPointsTarget, setTotalQPointsTarget] = useState(120);
+  const [totalQPointsInput, setTotalQPointsInput] = useState("120");
 
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
@@ -357,8 +488,43 @@ export function PhononWizard({
 
   // Handle Q-path changes from the BZ viewer
   const handleQPathChange = useCallback((newPath: KPathPoint[]) => {
-    setQPath(newPath);
-  }, []);
+    setQPath(
+      normalizeQPathSampling(newPath, qPathSamplingMode, pointsPerSegment, totalQPointsTarget),
+    );
+  }, [qPathSamplingMode, pointsPerSegment, totalQPointsTarget]);
+
+  useEffect(() => {
+    setQPath((prevPath) =>
+      normalizeQPathSampling(prevPath, qPathSamplingMode, pointsPerSegment, totalQPointsTarget),
+    );
+  }, [qPathSamplingMode, pointsPerSegment, totalQPointsTarget]);
+
+  const qPathSegmentCount = getConnectedSegmentIndices(qPath).length;
+  const totalDispersionQPoints = qPath.reduce((sum, point) => sum + point.npoints, 0);
+  const minimumTotalQPoints = Math.max(1, qPathSegmentCount);
+  const viewerPointsPerSegment = qPathSamplingMode === "total"
+    ? clampInt(
+      totalQPointsTarget / minimumTotalQPoints,
+      1,
+      MAX_POINTS_PER_SEGMENT,
+    )
+    : pointsPerSegment;
+
+  useEffect(() => {
+    setTotalQPointsInput(String(totalQPointsTarget));
+  }, [totalQPointsTarget]);
+
+  const commitTotalQPointsInput = useCallback(() => {
+    const parsed = Number.parseInt(totalQPointsInput.trim(), 10);
+    const fallback = Number.isFinite(totalQPointsTarget)
+      ? totalQPointsTarget
+      : Math.max(120, minimumTotalQPoints);
+    const committed = Number.isFinite(parsed)
+      ? clampInt(parsed, minimumTotalQPoints, MAX_TOTAL_Q_POINTS)
+      : clampInt(fallback, minimumTotalQPoints, MAX_TOTAL_Q_POINTS);
+    setTotalQPointsTarget(committed);
+    setTotalQPointsInput(String(committed));
+  }, [minimumTotalQPoints, totalQPointsInput, totalQPointsTarget]);
 
   function buildPhononTaskPlan(): PhononTaskPlan {
     if (!selectedScf?.result) {
@@ -461,7 +627,7 @@ export function PhononWizard({
         coords: point.coords,
         npoints: point.npoints,
       })) : null,
-      points_per_segment: pointsPerSegment,
+      points_per_segment: qPathSamplingMode === "segment" ? pointsPerSegment : viewerPointsPerSegment,
       project_id: projectId,
       scf_calc_id: selectedScf.id,
     };
@@ -500,7 +666,9 @@ export function PhononWizard({
       dos_delta_e: calculateDos ? parsedDosDeltaE : null,
       calculate_dispersion: shouldCalculateDispersion,
       q_path: pathString,
-      points_per_segment: pointsPerSegment,
+      q_path_sampling_mode: qPathSamplingMode,
+      points_per_segment: qPathSamplingMode === "segment" ? pointsPerSegment : null,
+      total_q_points_target: qPathSamplingMode === "total" ? totalDispersionQPoints : null,
       epw_preparation: {
         enabled: epwPreparationEnabled,
         preserve_full_artifacts: shouldPreserveFullArtifacts,
@@ -645,10 +813,9 @@ export function PhononWizard({
     }
   };
 
-  // Check if SCF is phonon-ready (conv_thr <= 1e-10)
+  // Check if SCF is phonon-ready (optimized structure + conv_thr <= 1e-12).
   const isPhononReady = (calc: CalculationRun): boolean => {
-    const convThr = calc.parameters?.conv_thr;
-    return convThr && convThr <= 1e-10;
+    return isPhononReadyScf(calc.parameters, calc.tags);
   };
 
   // Render current step
@@ -706,13 +873,14 @@ export function PhononWizard({
         </div>
         <p className="step-description">
           Choose an SCF calculation to use as the starting point for phonons.
-          For best results, use a phonon-ready SCF (conv_thr &lt;= 1e-10).
+          For best results, use a phonon-ready SCF from an optimized structure
+          with conv_thr &lt;= 1e-12.
         </p>
 
         {phononReadyScfs.length === 0 && (
           <div className="warning-banner">
-            No phonon-ready SCF calculations found. Consider running an SCF with
-            the "Phonon-Ready" preset (conv_thr = 1e-12) for accurate phonons.
+            No phonon-ready SCF calculations found. Run an SCF on an optimized
+            structure with the "Phonon-Ready" preset (conv_thr = 1e-12).
           </div>
         )}
 
@@ -1390,21 +1558,94 @@ export function PhononWizard({
                     crystalData={crystalData}
                     onPathChange={handleQPathChange}
                     initialPath={qPath}
-                    pointsPerSegment={pointsPerSegment}
+                    pointsPerSegment={viewerPointsPerSegment}
                   />
 
-                  <div className="points-per-segment">
-                    <label>
-                      Points per path segment
-                      <Tooltip text="Number of interpolated points between adjacent high-symmetry nodes in `matdyn.x` path generation. Higher values produce smoother curves with longer runs." />
-                      <input
-                        type="number"
-                        min={5}
-                        max={100}
-                        value={pointsPerSegment}
-                        onChange={(e) => setPointsPerSegment(parseInt(e.target.value) || 20)}
-                      />
-                    </label>
+                  <div className="kpath-sampling-panel">
+                    <div className="kpath-sampling-header">
+                      <div>
+                        <h4>Q-Path Sampling</h4>
+                        <p>Set interpolation density along the selected high-symmetry path.</p>
+                      </div>
+                      <span className="kpath-sampling-summary">
+                        {totalDispersionQPoints} total q-points
+                      </span>
+                    </div>
+
+                    <div className="phonon-unit-toggle kpath-sampling-toggle" role="group" aria-label="Q-path sampling mode">
+                      <button
+                        type="button"
+                        className={`phonon-unit-btn ${qPathSamplingMode === "segment" ? "active" : ""}`}
+                        onClick={() => setQPathSamplingMode("segment")}
+                      >
+                        Points / segment
+                      </button>
+                      <button
+                        type="button"
+                        className={`phonon-unit-btn ${qPathSamplingMode === "total" ? "active" : ""}`}
+                        onClick={() => {
+                          if (totalDispersionQPoints > 0) {
+                            setTotalQPointsTarget(totalDispersionQPoints);
+                            setTotalQPointsInput(String(totalDispersionQPoints));
+                          }
+                          setQPathSamplingMode("total");
+                        }}
+                      >
+                        Total q-points
+                      </button>
+                    </div>
+
+                    {qPathSamplingMode === "segment" ? (
+                      <label className="kpath-sampling-input">
+                        <span>
+                          Points per path segment
+                          <Tooltip text="Number of interpolated points between adjacent high-symmetry nodes in `matdyn.x` path generation. Higher values produce smoother curves with longer runs." />
+                        </span>
+                        <input
+                          type="number"
+                          min={MIN_POINTS_PER_SEGMENT}
+                          max={MAX_POINTS_PER_SEGMENT}
+                          value={pointsPerSegment}
+                          onChange={(e) => {
+                            const parsed = Number.parseInt(e.target.value, 10);
+                            setPointsPerSegment(
+                              Number.isFinite(parsed)
+                                ? clampInt(parsed, MIN_POINTS_PER_SEGMENT, MAX_POINTS_PER_SEGMENT)
+                                : 20,
+                            );
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <label className="kpath-sampling-input">
+                        <span>Total q-points</span>
+                        <input
+                          type="number"
+                          min={minimumTotalQPoints}
+                          max={MAX_TOTAL_Q_POINTS}
+                          value={totalQPointsInput}
+                          onChange={(e) => {
+                            setTotalQPointsInput(e.target.value);
+                          }}
+                          onBlur={commitTotalQPointsInput}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              commitTotalQPointsInput();
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+
+                    {qPathSamplingMode === "total" && (
+                      <p className="kpath-sampling-note">
+                        {qPathSegmentCount > 0
+                          ? `Evenly distributed by segment length across ${qPathSegmentCount} path segment${qPathSegmentCount === 1 ? "" : "s"}.`
+                          : "Add at least 2 points to distribute q-points along the path."}
+                      </p>
+                    )}
+
                     {!dispersionReady && (
                       <span className="param-hint input-error">Select at least 2 Q-path points.</span>
                     )}

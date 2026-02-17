@@ -77,6 +77,9 @@ pub struct BandsXConfig {
     pub filband: String,
     /// Whether to print symmetry labels
     pub lsym: bool,
+    /// If true, keep QE's default ordering (no overlap-based reordering).
+    /// If false (and lsym is false), reorder bands by maximal overlap between neighboring k-points.
+    pub no_overlap: bool,
 }
 
 /// projwfc.x configuration for orbital projection analysis.
@@ -146,6 +149,7 @@ impl Default for BandsXConfig {
             outdir: "./tmp".to_string(),
             filband: "bands.dat".to_string(),
             lsym: true,
+            no_overlap: true,
         }
     }
 }
@@ -162,6 +166,12 @@ pub fn generate_bands_x_input(config: &BandsXConfig) -> String {
         output,
         "  lsym = .{}.,",
         if config.lsym { "true" } else { "false" }
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  no_overlap = .{}.,",
+        if config.no_overlap { "true" } else { "false" }
     )
     .unwrap();
     writeln!(output, "/").unwrap();
@@ -760,6 +770,7 @@ mod tests {
             outdir: "./tmp".to_string(),
             filband: "si_bands.dat".to_string(),
             lsym: true,
+            no_overlap: true,
         };
 
         let input = generate_bands_x_input(&config);
@@ -768,6 +779,7 @@ mod tests {
         assert!(input.contains("outdir = './tmp'"));
         assert!(input.contains("filband = 'si_bands.dat'"));
         assert!(input.contains("lsym = .true."));
+        assert!(input.contains("no_overlap = .true."));
     }
 
     #[test]

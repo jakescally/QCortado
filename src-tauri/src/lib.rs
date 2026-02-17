@@ -797,6 +797,8 @@ pub struct BandsPostProcessingOptions {
     pub filband: Option<String>,
     /// bands.x lsym option (print symmetry labels/order)
     pub lsym: Option<bool>,
+    /// bands.x no_overlap option (overlap-based reordering toggle)
+    pub no_overlap: Option<bool>,
 }
 
 /// Configuration for electronic DOS calculation (NSCF + dos.x).
@@ -1463,12 +1465,16 @@ async fn run_bands_calculation(
         .map(|raw| sanitize_output_filename(raw, "bands.dat"))
         .unwrap_or_else(|| "bands.dat".to_string());
     let bands_lsym = bands_x_options.and_then(|opts| opts.lsym).unwrap_or(true);
+    let bands_no_overlap = bands_x_options
+        .and_then(|opts| opts.no_overlap)
+        .unwrap_or(true);
 
     let bands_x_config = BandsXConfig {
         prefix: bands_calc.prefix.clone(),
         outdir: bands_calc.outdir.clone(),
         filband: bands_filband.clone(),
         lsym: bands_lsym,
+        no_overlap: bands_no_overlap,
     };
     let bands_x_input = generate_bands_x_input(&bands_x_config);
 
@@ -1476,13 +1482,39 @@ async fn run_bands_calculation(
     std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
         .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
 
-    let mut bands_child = tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
-        .current_dir(&work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start bands.x: {}", e))?;
+    let mut bands_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            let _ = app.emit(
+                "qe-output-line",
+                format!("Running bands.x with MPI ({} processes)", mpi.nprocs),
+            );
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&bands_x_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun for bands.x: {}", e))?
+        } else {
+            tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start bands.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start bands.x: {}", e))?
+    };
 
     if let Some(mut stdin) = bands_child.stdin.take() {
         stdin
@@ -1903,13 +1935,39 @@ async fn run_phonon_calculation(
     std::fs::write(work_path.join("q2r.in"), &q2r_input)
         .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
 
-    let mut q2r_child = tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
-        .current_dir(&work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start q2r.x: {}", e))?;
+    let mut q2r_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            let _ = app.emit(
+                "qe-output-line",
+                format!("Running q2r.x with MPI ({} processes)", mpi.nprocs),
+            );
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&q2r_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun for q2r.x: {}", e))?
+        } else {
+            tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start q2r.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start q2r.x: {}", e))?
+    };
 
     if let Some(mut stdin) = q2r_child.stdin.take() {
         stdin
@@ -1983,14 +2041,39 @@ async fn run_phonon_calculation(
         std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
             .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
 
-        let mut matdyn_dos_child =
+        let mut matdyn_dos_child = if let Some(ref mpi) = mpi_config {
+            if mpi.enabled && mpi.nprocs > 1 {
+                let _ = app.emit(
+                    "qe-output-line",
+                    format!("Running matdyn.x (DOS) with MPI ({} processes)", mpi.nprocs),
+                );
+                tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                    .args(["-np", &mpi.nprocs.to_string()])
+                    .arg(&matdyn_exe)
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start mpirun for matdyn.x DOS: {}", e))?
+            } else {
+                tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?
+            }
+        } else {
             tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?
+        };
 
         if let Some(mut stdin) = matdyn_dos_child.stdin.take() {
             stdin
@@ -2068,18 +2151,14 @@ async fn run_phonon_calculation(
         if let Some(ref q_path) = config.q_path {
             let _ = app.emit("qe-output-line", format!("Q-path: {} points", q_path.len()));
 
-            // Create q_path with correct npoints
+            // Preserve per-segment interpolation from the frontend path payload.
             let q_path_with_points: Vec<QPathPoint> = q_path
                 .iter()
                 .enumerate()
                 .map(|(i, p)| QPathPoint {
                     label: p.label.clone(),
                     coords: p.coords,
-                    npoints: if i < q_path.len() - 1 {
-                        config.points_per_segment
-                    } else {
-                        0
-                    },
+                    npoints: if i < q_path.len() - 1 { p.npoints } else { 0 },
                 })
                 .collect();
 
@@ -2098,14 +2177,44 @@ async fn run_phonon_calculation(
             std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
                 .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
 
-            let mut matdyn_bands_child =
+            let mut matdyn_bands_child = if let Some(ref mpi) = mpi_config {
+                if mpi.enabled && mpi.nprocs > 1 {
+                    let _ = app.emit(
+                        "qe-output-line",
+                        format!(
+                            "Running matdyn.x (dispersion) with MPI ({} processes)",
+                            mpi.nprocs
+                        ),
+                    );
+                    tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                        .args(["-np", &mpi.nprocs.to_string()])
+                        .arg(&matdyn_exe)
+                        .current_dir(&work_path)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|e| {
+                            format!("Failed to start mpirun for matdyn.x dispersion: {}", e)
+                        })?
+                } else {
+                    tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                        .current_dir(&work_path)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?
+                }
+            } else {
                 tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
                     .current_dir(&work_path)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
-                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?
+            };
 
             if let Some(mut stdin) = matdyn_bands_child.stdin.take() {
                 stdin
@@ -2672,24 +2781,54 @@ async fn run_bands_background(
         .map(|raw| sanitize_output_filename(raw, "bands.dat"))
         .unwrap_or_else(|| "bands.dat".to_string());
     let bands_lsym = bands_x_options.and_then(|opts| opts.lsym).unwrap_or(true);
+    let bands_no_overlap = bands_x_options
+        .and_then(|opts| opts.no_overlap)
+        .unwrap_or(true);
 
     let bands_x_config = BandsXConfig {
         prefix: bands_calc.prefix.clone(),
         outdir: bands_calc.outdir.clone(),
         filband: bands_filband.clone(),
         lsym: bands_lsym,
+        no_overlap: bands_no_overlap,
     };
     let bands_x_input = generate_bands_x_input(&bands_x_config);
     std::fs::write(work_path.join("bands_pp.in"), &bands_x_input)
         .map_err(|e| format!("Failed to write bands.x input: {}", e))?;
 
-    let mut bands_child = tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
-        .current_dir(&work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start bands.x: {}", e))?;
+    let mut bands_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!(
+                "Running bands.x with MPI ({} processes)",
+                mpi.nprocs
+            ));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&bands_x_path)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun for bands.x: {}", e))?
+        } else {
+            tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start bands.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&bands_x_path, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start bands.x: {}", e))?
+    };
 
     if let Some(pid) = bands_child.id() {
         pm.set_child_id(task_id, pid).await;
@@ -3746,13 +3885,39 @@ async fn run_phonon_background(
     std::fs::write(work_path.join("q2r.in"), &q2r_input)
         .map_err(|e| format!("Failed to write q2r.x input: {}", e))?;
 
-    let mut q2r_child = tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
-        .current_dir(&work_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start q2r.x: {}", e))?;
+    let mut q2r_child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!(
+                "Running q2r.x with MPI ({} processes)",
+                mpi.nprocs
+            ));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&q2r_exe)
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun for q2r.x: {}", e))?
+        } else {
+            tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start q2r.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&q2r_exe, execution_prefix.as_deref())
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start q2r.x: {}", e))?
+    };
 
     if let Some(pid) = q2r_child.id() {
         pm.set_child_id(task_id, pid).await;
@@ -3822,14 +3987,39 @@ async fn run_phonon_background(
         std::fs::write(work_path.join("matdyn_dos.in"), &matdyn_dos_input)
             .map_err(|e| format!("Failed to write matdyn.x DOS input: {}", e))?;
 
-        let mut matdyn_dos_child =
+        let mut matdyn_dos_child = if let Some(ref mpi) = mpi_config {
+            if mpi.enabled && mpi.nprocs > 1 {
+                emit_line!(format!(
+                    "Running matdyn.x (DOS) with MPI ({} processes)",
+                    mpi.nprocs
+                ));
+                tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                    .args(["-np", &mpi.nprocs.to_string()])
+                    .arg(&matdyn_exe)
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start mpirun for matdyn.x DOS: {}", e))?
+            } else {
+                tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                    .current_dir(&work_path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?
+            }
+        } else {
             tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?;
+                .map_err(|e| format!("Failed to start matdyn.x for DOS: {}", e))?
+        };
 
         if let Some(pid) = matdyn_dos_child.id() {
             pm.set_child_id(task_id, pid).await;
@@ -3905,11 +4095,7 @@ async fn run_phonon_background(
                 .map(|(i, p)| QPathPoint {
                     label: p.label.clone(),
                     coords: p.coords,
-                    npoints: if i < q_path.len() - 1 {
-                        config.points_per_segment
-                    } else {
-                        0
-                    },
+                    npoints: if i < q_path.len() - 1 { p.npoints } else { 0 },
                 })
                 .collect();
 
@@ -3927,14 +4113,41 @@ async fn run_phonon_background(
             std::fs::write(work_path.join("matdyn_bands.in"), &matdyn_bands_input)
                 .map_err(|e| format!("Failed to write matdyn.x bands input: {}", e))?;
 
-            let mut matdyn_bands_child =
+            let mut matdyn_bands_child = if let Some(ref mpi) = mpi_config {
+                if mpi.enabled && mpi.nprocs > 1 {
+                    emit_line!(format!(
+                        "Running matdyn.x (dispersion) with MPI ({} processes)",
+                        mpi.nprocs
+                    ));
+                    tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                        .args(["-np", &mpi.nprocs.to_string()])
+                        .arg(&matdyn_exe)
+                        .current_dir(&work_path)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|e| {
+                            format!("Failed to start mpirun for matdyn.x dispersion: {}", e)
+                        })?
+                } else {
+                    tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
+                        .current_dir(&work_path)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?
+                }
+            } else {
                 tokio_command_with_prefix(&matdyn_exe, execution_prefix.as_deref())
                     .current_dir(&work_path)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
-                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?;
+                    .map_err(|e| format!("Failed to start matdyn.x for dispersion: {}", e))?
+            };
 
             if let Some(pid) = matdyn_bands_child.id() {
                 pm.set_child_id(task_id, pid).await;

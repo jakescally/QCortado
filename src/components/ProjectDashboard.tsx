@@ -9,6 +9,7 @@ import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, Sav
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { isPhononReadyScf } from "../lib/phononReady";
 import { useTheme } from "../lib/ThemeContext";
 import { EditProjectDialog } from "./EditProjectDialog";
 
@@ -80,6 +81,12 @@ type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
 type CalculationCategory = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "optimization";
+type CalculationRuntimeKind = "wall" | "cpu";
+
+interface CalculationRuntimeDisplay {
+  kind: CalculationRuntimeKind;
+  seconds: number;
+}
 
 interface DisplayCellMetrics {
   a: number;
@@ -106,30 +113,42 @@ const PINNED_TAG = "pinned";
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
+  const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
   let hasGeometryTag = false;
+  const pushTag = (label: string, type: CalcTagType) => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
 
-  // Special tags from stored tags array (phonon-ready, structure-optimized)
+  // Special tags from stored tags array (phonon-ready, structure-optimized).
   if (calc.tags) {
     for (const tag of calc.tags) {
       if (tag === "phonon-ready") {
-        tags.push({ label: "Phonon-Ready", type: "special" });
+        if (phononReady) {
+          pushTag("Phonon-Ready", "special");
+        }
       } else if (tag === "structure-optimized") {
-        tags.push({ label: "Optimized", type: "special" });
+        pushTag("Optimized", "special");
       } else if (tag === "geometry") {
-        tags.push({ label: "Geometry", type: "geometry" });
+        pushTag("Geometry", "geometry");
         hasGeometryTag = true;
       }
     }
   }
 
   if (!hasGeometryTag && params.structure_source?.type === "optimization") {
-    tags.push({ label: "Geometry", type: "geometry" });
+    pushTag("Geometry", "geometry");
+  }
+
+  if (phononReady) {
+    pushTag("Phonon-Ready", "special");
   }
 
   // K-points grid
   if (params.kgrid) {
     const [k1, k2, k3] = params.kgrid;
-    tags.push({ label: `${k1}×${k2}×${k3}`, type: "info" });
+    pushTag(`${k1}×${k2}×${k3}`, "info");
   }
 
   // Convergence threshold
@@ -137,26 +156,26 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
     const thr = params.conv_thr;
     // Format as scientific notation if small
     const label = thr < 0.001 ? thr.toExponential(0) : thr.toString();
-    tags.push({ label: label, type: "info" });
+    pushTag(label, "info");
   }
 
   // Feature tags
   if (params.lspinorb) {
-    tags.push({ label: "SOC", type: "feature" });
+    pushTag("SOC", "feature");
   }
 
   if (params.nspin === 4) {
-    tags.push({ label: "Non-collinear", type: "feature" });
+    pushTag("Non-collinear", "feature");
   } else if (params.nspin === 2) {
-    tags.push({ label: "Magnetic", type: "feature" });
+    pushTag("Magnetic", "feature");
   }
 
   if (params.lda_plus_u) {
-    tags.push({ label: "DFT+U", type: "feature" });
+    pushTag("DFT+U", "feature");
   }
 
   if (params.vdw_corr && params.vdw_corr !== "none") {
-    tags.push({ label: "vdW", type: "feature" });
+    pushTag("vdW", "feature");
   }
 
   return tags;
@@ -361,6 +380,70 @@ function formatThreshold(value: unknown): string | null {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
   return numeric < 0.001 ? numeric.toExponential(1) : numeric.toString();
+}
+
+function parseQeTimeToken(token: string): number | null {
+  const value = token.trim();
+  if (!value) return null;
+
+  let totalSeconds = 0;
+  let matched = false;
+
+  const hourMatch = value.match(/([\d.]+)h/);
+  if (hourMatch) {
+    const hours = Number(hourMatch[1]);
+    if (!Number.isFinite(hours)) return null;
+    totalSeconds += hours * 3600;
+    matched = true;
+  }
+
+  const minuteMatch = value.match(/([\d.]+)m/);
+  if (minuteMatch) {
+    const minutes = Number(minuteMatch[1]);
+    if (!Number.isFinite(minutes)) return null;
+    totalSeconds += minutes * 60;
+    matched = true;
+  }
+
+  const secondMatch = value.match(/([\d.]+)s/);
+  if (secondMatch) {
+    const seconds = Number(secondMatch[1]);
+    if (!Number.isFinite(seconds)) return null;
+    totalSeconds += seconds;
+    matched = true;
+  }
+
+  if (matched) {
+    return totalSeconds;
+  }
+
+  const fallbackSeconds = Number(value);
+  return Number.isFinite(fallbackSeconds) ? fallbackSeconds : null;
+}
+
+function parseRuntimeFromRawOutput(rawOutput: string): CalculationRuntimeDisplay | null {
+  let totalCpuSeconds = 0;
+  let totalWallSeconds = 0;
+  let foundTimingLine = false;
+
+  const timingPattern = /^\s*[A-Za-z0-9_.+-]+\s*:\s*([0-9.hms]+)\s+CPU(?:\s+([0-9.hms]+)\s+WALL)?/gim;
+  for (const match of rawOutput.matchAll(timingPattern)) {
+    foundTimingLine = true;
+    const cpuSeconds = parseQeTimeToken(match[1]);
+    const wallSeconds = match[2] ? parseQeTimeToken(match[2]) : null;
+
+    if (typeof cpuSeconds === "number" && cpuSeconds > 0) {
+      totalCpuSeconds += cpuSeconds;
+    }
+    if (typeof wallSeconds === "number" && wallSeconds > 0) {
+      totalWallSeconds += wallSeconds;
+    }
+  }
+
+  if (!foundTimingLine) return null;
+  if (totalWallSeconds > 0) return { kind: "wall", seconds: totalWallSeconds };
+  if (totalCpuSeconds > 0) return { kind: "cpu", seconds: totalCpuSeconds };
+  return null;
 }
 
 function getCalculationBestScore(calc: CalculationRun, category: CalculationCategory): number {
@@ -1092,6 +1175,45 @@ export function ProjectDashboard({
     return variant.calculations.some(c => c.calc_type === "scf" && c.result?.converged);
   }
 
+  function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
+    const wallSeconds = calc.result?.wall_time_seconds;
+    if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
+      return { kind: "wall", seconds: wallSeconds };
+    }
+
+    const rawOutput = calc.result?.raw_output;
+    if (typeof rawOutput === "string" && rawOutput.trim().length > 0) {
+      const parsedRuntime = parseRuntimeFromRawOutput(rawOutput);
+      if (parsedRuntime) return parsedRuntime;
+    }
+
+    if (!calc.completed_at) return null;
+    const startMs = Date.parse(calc.started_at);
+    const endMs = Date.parse(calc.completed_at);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+      return { kind: "wall", seconds: (endMs - startMs) / 1000 };
+    }
+
+    return null;
+  }
+
+  function formatRuntimeDuration(seconds: number): string {
+    const clamped = Math.max(0, seconds);
+    if (clamped < 60) {
+      return `${clamped.toFixed(1)} s`;
+    }
+
+    const rounded = Math.round(clamped);
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const secs = rounded % 60;
+
+    if (hours > 0) {
+      return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(secs).padStart(2, "0")}s`;
+    }
+    return `${minutes}m ${String(secs).padStart(2, "0")}s`;
+  }
+
   function formatDate(isoString: string): string {
     try {
       const date = new Date(isoString);
@@ -1793,6 +1915,7 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {scfCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
@@ -1845,6 +1968,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -1875,10 +2003,10 @@ export function ProjectDashboard({
                               <span>{calc.result.n_scf_steps}</span>
                             </div>
                           )}
-                          {calc.result.wall_time_seconds && (
+                          {runtime && (
                             <div className="detail-item">
-                              <label>Wall Time</label>
-                              <span>{calc.result.wall_time_seconds.toFixed(1)} s</span>
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
                         </div>
@@ -1913,6 +2041,7 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {bandCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
                 return (
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
@@ -1954,6 +2083,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -1988,6 +2122,12 @@ export function ProjectDashboard({
                             <label>Source SCF</label>
                             <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
                           </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
                         </div>
                         <div className="calc-actions">
                           {calc.result?.band_data && (
@@ -2027,6 +2167,7 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {dosCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
                 const dosData = calc.result?.dos_data ?? null;
                 const energyMin = Number(calc.parameters?.dos_emin);
                 const energyMax = Number(calc.parameters?.dos_emax);
@@ -2068,6 +2209,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -2108,6 +2254,12 @@ export function ProjectDashboard({
                             <label>Source SCF</label>
                             <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
                           </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
                           {calc.result?.fermi_energy != null && (
                             <div className="detail-item">
                               <label>Fermi Energy</label>
@@ -2153,6 +2305,7 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {fermiSurfaceCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
                 const frmsfFiles = Array.isArray(calc.parameters?.frmsf_files)
                   ? calc.parameters.frmsf_files
                   : [];
@@ -2206,6 +2359,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -2246,6 +2404,12 @@ export function ProjectDashboard({
                             <label>Source SCF</label>
                             <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
                           </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
                           {calc.result?.fermi_energy != null && (
                             <div className="detail-item">
                               <label>Fermi Energy</label>
@@ -2296,6 +2460,7 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {phononCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
                 const resultData = calc.result as any;
                 const phononData = resultData?.phonon_data
                   ?? ((resultData?.dos_data != null || resultData?.dispersion_data != null)
@@ -2351,6 +2516,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -2391,6 +2561,12 @@ export function ProjectDashboard({
                             <label>Source SCF</label>
                             <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
                           </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
                         </div>
                         <div className="calc-actions">
                           {hasDispersion && (
@@ -2500,6 +2676,7 @@ export function ProjectDashboard({
                 const energyConvLabel = formatThreshold(calc.parameters?.etot_conv_thr);
                 const pressValue = Number(calc.parameters?.press);
                 const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
 
                 return (
                   <div key={calc.id} className="calculation-item">
@@ -2553,6 +2730,11 @@ export function ProjectDashboard({
                             ? formatDate(calc.completed_at)
                             : "In progress..."}
                         </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
                         {calc.storage_bytes != null && (
                           <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
                         )}
@@ -2625,10 +2807,10 @@ export function ProjectDashboard({
                               <span>{`${displaySummary.volume.toFixed(4)} ${displaySummary.units === "angstrom" ? "A^3" : `${displaySummary.units}^3`}`}</span>
                             </div>
                           )}
-                          {calc.result?.wall_time_seconds && (
+                          {runtime && (
                             <div className="detail-item">
-                              <label>Wall Time</label>
-                              <span>{calc.result.wall_time_seconds.toFixed(1)} s</span>
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
                         </div>

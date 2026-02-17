@@ -229,6 +229,7 @@ function AppInner() {
   const [projectCount, setProjectCount] = useState<number>(0);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showQueueMenu, setShowQueueMenu] = useState(false);
   const [lastNonQueueView, setLastNonQueueView] = useState<AppView>("home");
@@ -1310,6 +1311,7 @@ function AppInner() {
     return (
       <>
         <ProjectBrowser
+          initialActiveFolderId={projectBrowserFolderId}
           onBack={() => {
             setCurrentView("home");
             loadProjectCount();
@@ -1317,8 +1319,9 @@ function AppInner() {
           onProjectsChanged={() => {
             void loadProjectCount();
           }}
-          onSelectProject={(projectId) => {
+          onSelectProject={(projectId, folderId) => {
             setSelectedProjectId(projectId);
+            setProjectBrowserFolderId(folderId);
             setCurrentView("project-dashboard");
           }}
         />
@@ -1527,7 +1530,10 @@ function AppInner() {
                 </button>
                 <button
                   className="action-btn"
-                  onClick={() => setCurrentView("project-browser")}
+                  onClick={() => {
+                    setProjectBrowserFolderId(null);
+                    setCurrentView("project-browser");
+                  }}
                   disabled={projectCount === 0}
                 >
                   <span className="action-icon">{projectCount}</span>

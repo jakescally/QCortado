@@ -22,6 +22,7 @@ import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { isPhononReadyScf } from "../lib/phononReady";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -255,8 +256,18 @@ export function SCFWizard({
     disk_io: "low",
   });
   const [selectedPreset, setSelectedPreset] = useState<SCFPreset | null>(null);
+  const [structureSource, setStructureSource] = useState<string>("cif");
+  const selectedOptimizedStructure =
+    structureSource === "cif"
+      ? null
+      : optimizedStructures.find((option) => option.calcId === structureSource) || null;
+  const phononPresetDisabled = structureSource === "cif";
+  const phononPresetDisabledMessage = "Select an optimized structure (or run a structure optimization) to start a phonon-ready calculation.";
 
   const applyPreset = useCallback((preset: SCFPreset) => {
+    if (preset === "phonon" && phononPresetDisabled) {
+      return;
+    }
     setSelectedPreset(preset);
     setConfig((prev) => {
       switch (preset) {
@@ -293,7 +304,7 @@ export function SCFWizard({
     } else if (preset === "standard") {
       setConvThrInput("1e-6");
     }
-  }, []);
+  }, [phononPresetDisabled]);
 
   useEffect(() => {
     if (initialPreset) {
@@ -396,11 +407,6 @@ export function SCFWizard({
   const displayedCellMetrics = cellViewMode === "primitive" && primitiveCellMetrics
     ? primitiveCellMetrics
     : conventionalCellMetrics;
-  const [structureSource, setStructureSource] = useState<string>("cif");
-  const selectedOptimizedStructure =
-    structureSource === "cif"
-      ? null
-      : optimizedStructures.find((option) => option.calcId === structureSource) || null;
 
   useEffect(() => {
     if (structureSource === "cif") return;
@@ -408,6 +414,12 @@ export function SCFWizard({
       setStructureSource("cif");
     }
   }, [structureSource, selectedOptimizedStructure]);
+
+  useEffect(() => {
+    if (phononPresetDisabled && selectedPreset === "phonon") {
+      setSelectedPreset(null);
+    }
+  }, [phononPresetDisabled, selectedPreset]);
 
   useEffect(() => {
     if (!hasPrimitiveDisplay && cellViewMode === "primitive") {
@@ -1228,6 +1240,10 @@ export function SCFWizard({
   ) {
     const isOptimization = config.calculation === "relax" || config.calculation === "vcrelax";
     const usesOptimizedSource = sourceDescriptor.type === "optimization";
+    const isPhononReady = !isOptimization && isPhononReadyScf({
+      conv_thr: config.conv_thr,
+      structure_source: sourceDescriptor,
+    });
     const optimizedStructure = isOptimization
       ? extractOptimizedStructure(calcResult?.raw_output || "", sourceStructure)
       : null;
@@ -1271,8 +1287,8 @@ export function SCFWizard({
         ...(isOptimization || usesOptimizedSource ? ["geometry"] : []),
         // Tag as structure-optimized for vcrelax or relax
         ...(config.calculation === "vcrelax" || config.calculation === "relax" ? ["structure-optimized"] : []),
-        // Tag as phonon-ready if conv_thr is very tight (1e-10 or tighter)
-        ...(config.conv_thr <= 1e-10 ? ["phonon-ready"] : []),
+        // Tag as phonon-ready only for optimized-source SCFs with tight convergence.
+        ...(isPhononReady ? ["phonon-ready"] : []),
       ],
     };
   }
@@ -1493,14 +1509,21 @@ export function SCFWizard({
                               </button>
                             )}
                             {showPhononPreset && (
-                              <button
-                                type="button"
-                                className={`preset-btn preset-phonon ${selectedPreset === "phonon" ? "active" : ""}`}
-                                onClick={() => applyPreset("phonon")}
-                                title="High-precision SCF for phonon calculations (conv_thr=1e-12)"
-                              >
-                                Phonon-Ready
-                              </button>
+                              <span className="preset-tooltip-container">
+                                <button
+                                  type="button"
+                                  className={`preset-btn preset-phonon ${selectedPreset === "phonon" && !phononPresetDisabled ? "active" : ""} ${phononPresetDisabled ? "preset-disabled" : ""}`}
+                                  onClick={() => applyPreset("phonon")}
+                                  aria-disabled={phononPresetDisabled}
+                                >
+                                  Phonon-Ready
+                                </button>
+                                {phononPresetDisabled && (
+                                  <span className="tooltip-text preset-disabled-tooltip">
+                                    {phononPresetDisabledMessage}
+                                  </span>
+                                )}
+                              </span>
                             )}
                             {showRelaxPreset && (
                               <button

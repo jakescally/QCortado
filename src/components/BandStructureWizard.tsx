@@ -14,6 +14,7 @@ import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { isPhononReadyScf } from "../lib/phononReady";
 
 interface CalculationRun {
   id: string;
@@ -33,6 +34,7 @@ interface CalculationRun {
 function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
   const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
+  const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
   const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {
     if (!tags.some((tag) => tag.label === label)) {
       tags.push({ label, type });
@@ -42,7 +44,9 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
   if (calc.tags) {
     for (const tag of calc.tags) {
       if (tag === "phonon-ready") {
-        pushTag("Phonon-Ready", "special");
+        if (phononReady) {
+          pushTag("Phonon-Ready", "special");
+        }
       } else if (tag === "structure-optimized") {
         pushTag("Optimized", "special");
       } else if (tag === "geometry") {
@@ -66,6 +70,10 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
     const thr = params.conv_thr;
     const label = thr < 0.001 ? thr.toExponential(0) : thr.toString();
     pushTag(label, "info");
+  }
+
+  if (phononReady) {
+    pushTag("Phonon-Ready", "special");
   }
 
   // Feature tags
@@ -152,6 +160,130 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
   return "gaussian";
 }
 
+type KPathSamplingMode = "segment" | "total";
+
+const MIN_POINTS_PER_SEGMENT = 5;
+const MAX_POINTS_PER_SEGMENT = 400;
+const MAX_TOTAL_K_POINTS = 5000;
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function getConnectedSegmentIndices(path: KPathPoint[]): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    if (path[i].npoints > 0) {
+      indices.push(i);
+    }
+  }
+  return indices;
+}
+
+function applyPointsPerSegment(path: KPathPoint[], pointsPerSegment: number): KPathPoint[] {
+  const connectedSegmentIndices = new Set(getConnectedSegmentIndices(path));
+  if (path.length === 0 || connectedSegmentIndices.size === 0) {
+    return path.map((point) => ({
+      ...point,
+      npoints: 0,
+    }));
+  }
+
+  const safePointsPerSegment = clampInt(
+    pointsPerSegment,
+    MIN_POINTS_PER_SEGMENT,
+    MAX_POINTS_PER_SEGMENT,
+  );
+  return path.map((point, index) => {
+    if (index >= path.length - 1) {
+      return { ...point, npoints: 0 };
+    }
+    if (!connectedSegmentIndices.has(index)) {
+      return { ...point, npoints: 0 };
+    }
+    return { ...point, npoints: safePointsPerSegment };
+  });
+}
+
+function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint[] {
+  const connectedSegmentIndices = getConnectedSegmentIndices(path);
+  if (path.length === 0 || connectedSegmentIndices.length === 0) {
+    return path.map((point) => ({
+      ...point,
+      npoints: 0,
+    }));
+  }
+
+  const safeTotal = clampInt(
+    totalKPoints,
+    connectedSegmentIndices.length,
+    MAX_TOTAL_K_POINTS,
+  );
+  const remainingAfterBaseline = safeTotal - connectedSegmentIndices.length;
+  const lengths = connectedSegmentIndices.map((segmentIndex) => {
+    const from = path[segmentIndex];
+    const to = path[segmentIndex + 1];
+    const dx = to.coords[0] - from.coords[0];
+    const dy = to.coords[1] - from.coords[1];
+    const dz = to.coords[2] - from.coords[2];
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return Number.isFinite(distance) && distance > 1e-9 ? distance : 1e-9;
+  });
+  const totalLength = lengths.reduce((sum, len) => sum + len, 0);
+  const rawExtras = lengths.map((length) =>
+    totalLength > 0
+      ? (length / totalLength) * remainingAfterBaseline
+      : remainingAfterBaseline / connectedSegmentIndices.length,
+  );
+  const extraPoints = rawExtras.map((value) => Math.floor(value));
+  const assignedExtra = extraPoints.reduce((sum, value) => sum + value, 0);
+  let leftovers = remainingAfterBaseline - assignedExtra;
+  const order = rawExtras
+    .map((value, idx) => ({
+      idx,
+      frac: value - Math.floor(value),
+      len: lengths[idx],
+    }))
+    .sort((a, b) => {
+      if (b.frac !== a.frac) return b.frac - a.frac;
+      if (b.len !== a.len) return b.len - a.len;
+      return a.idx - b.idx;
+    });
+
+  for (let i = 0; i < order.length && leftovers > 0; i++) {
+    extraPoints[order[i].idx] += 1;
+    leftovers -= 1;
+  }
+
+  const segmentPoints = new Map<number, number>();
+  for (let i = 0; i < connectedSegmentIndices.length; i++) {
+    segmentPoints.set(connectedSegmentIndices[i], 1 + extraPoints[i]);
+  }
+
+  return path.map((point, index) => {
+    if (index >= path.length - 1) {
+      return { ...point, npoints: 0 };
+    }
+    if (!segmentPoints.has(index)) {
+      return { ...point, npoints: 0 };
+    }
+    return { ...point, npoints: segmentPoints.get(index)! };
+  });
+}
+
+function normalizeKPathSampling(
+  path: KPathPoint[],
+  samplingMode: KPathSamplingMode,
+  pointsPerSegment: number,
+  totalKPoints: number,
+): KPathPoint[] {
+  if (samplingMode === "total") {
+    return applyTotalKPoints(path, totalKPoints);
+  }
+  return applyPointsPerSegment(path, pointsPerSegment);
+}
+
 interface BandStructureWizardProps {
   onBack: () => void;
   onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
@@ -203,7 +335,10 @@ export function BandStructureWizard({
 
   // Step 2: K-Path (using BrillouinZoneViewer)
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
+  const [kPathSamplingMode, setKPathSamplingMode] = useState<KPathSamplingMode>("segment");
   const [pointsPerSegment, setPointsPerSegment] = useState(20);
+  const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
+  const [totalKPointsInput, setTotalKPointsInput] = useState("120");
 
   // Step 3: Parameters
   const [nbnd, setNbnd] = useState<number | "auto">("auto");
@@ -215,6 +350,7 @@ export function BandStructureWizard({
   const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
   const [bandsFilbandInput, setBandsFilbandInput] = useState("bands.dat");
   const [bandsLsym, setBandsLsym] = useState(true);
+  const [bandsNoOverlap, setBandsNoOverlap] = useState(true);
   const [enableProjections, setEnableProjections] = useState(true);
   const [projectionLsym, setProjectionLsym] = useState(false);
   const [projectionDiagBasis, setProjectionDiagBasis] = useState(false);
@@ -449,8 +585,49 @@ export function BandStructureWizard({
 
   // Handle k-path changes from the BZ viewer
   const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
-    setKPath(newPath);
-  }, []);
+    setKPath(
+      normalizeKPathSampling(newPath, kPathSamplingMode, pointsPerSegment, totalKPointsTarget),
+    );
+  }, [kPathSamplingMode, pointsPerSegment, totalKPointsTarget]);
+
+  useEffect(() => {
+    setKPath((prevPath) =>
+      normalizeKPathSampling(prevPath, kPathSamplingMode, pointsPerSegment, totalKPointsTarget),
+    );
+  }, [kPathSamplingMode, pointsPerSegment, totalKPointsTarget]);
+
+  const kPathSegmentCount = useMemo(
+    () => getConnectedSegmentIndices(kPath).length,
+    [kPath],
+  );
+  const totalKPoints = useMemo(
+    () => kPath.reduce((sum, point) => sum + point.npoints, 0),
+    [kPath],
+  );
+  const minimumTotalKPoints = Math.max(1, kPathSegmentCount);
+  const viewerPointsPerSegment = kPathSamplingMode === "total"
+    ? clampInt(
+      totalKPointsTarget / minimumTotalKPoints,
+      1,
+      MAX_POINTS_PER_SEGMENT,
+    )
+    : pointsPerSegment;
+
+  useEffect(() => {
+    setTotalKPointsInput(String(totalKPointsTarget));
+  }, [totalKPointsTarget]);
+
+  const commitTotalKPointsInput = useCallback(() => {
+    const parsed = Number.parseInt(totalKPointsInput.trim(), 10);
+    const fallback = Number.isFinite(totalKPointsTarget)
+      ? totalKPointsTarget
+      : Math.max(120, minimumTotalKPoints);
+    const committed = Number.isFinite(parsed)
+      ? clampInt(parsed, minimumTotalKPoints, MAX_TOTAL_K_POINTS)
+      : clampInt(fallback, minimumTotalKPoints, MAX_TOTAL_K_POINTS);
+    setTotalKPointsTarget(committed);
+    setTotalKPointsInput(String(committed));
+  }, [minimumTotalKPoints, totalKPointsInput, totalKPointsTarget]);
 
   const buildBandTaskPlan = (): BandTaskPlan => {
     if (!selectedScf?.result) {
@@ -653,6 +830,7 @@ export function BandStructureWizard({
         bands_x: {
           filband: bandsFilband,
           lsym: bandsLsym,
+          no_overlap: bandsNoOverlap,
         },
         projections: {
           enabled: enableProjections,
@@ -670,7 +848,9 @@ export function BandStructureWizard({
     const saveParameters = {
       source_scf_id: selectedScf.id,
       k_path: pathString,
-      points_per_segment: pointsPerSegment,
+      k_path_sampling_mode: kPathSamplingMode,
+      points_per_segment: kPathSamplingMode === "segment" ? pointsPerSegment : null,
+      total_k_points_target: kPathSamplingMode === "total" ? totalKPoints : null,
       total_k_points: null,
       n_bands: manualNbnd,
       n_bands_requested: manualNbnd,
@@ -682,6 +862,7 @@ export function BandStructureWizard({
       nscf_verbosity: nscfVerbosity,
       bands_x_filband: bandsFilband,
       bands_x_lsym: bandsLsym,
+      bands_x_no_overlap: bandsNoOverlap,
       // Inherit SCF parameters for tags
       ecutwfc: scfParams.ecutwfc,
       nspin: scfParams.nspin,
@@ -944,20 +1125,90 @@ export function BandStructureWizard({
           crystalData={crystalData}
           onPathChange={handleKPathChange}
           initialPath={kPath}
-          pointsPerSegment={pointsPerSegment}
+          pointsPerSegment={viewerPointsPerSegment}
         />
 
-        <div className="points-per-segment">
-          <label>
-            Points per segment:
-            <input
-              type="number"
-              min={5}
-              max={100}
-              value={pointsPerSegment}
-              onChange={(e) => setPointsPerSegment(parseInt(e.target.value) || 20)}
-            />
-          </label>
+        <div className="kpath-sampling-panel">
+          <div className="kpath-sampling-header">
+            <div>
+              <h4>K-Path Sampling</h4>
+              <p>Choose how k-points are distributed along the selected path.</p>
+            </div>
+            <span className="kpath-sampling-summary">
+              {totalKPoints} total k-points
+            </span>
+          </div>
+
+          <div className="phonon-unit-toggle kpath-sampling-toggle" role="group" aria-label="K-path sampling mode">
+            <button
+              type="button"
+              className={`phonon-unit-btn ${kPathSamplingMode === "segment" ? "active" : ""}`}
+              onClick={() => setKPathSamplingMode("segment")}
+            >
+              Points / segment
+            </button>
+            <button
+              type="button"
+              className={`phonon-unit-btn ${kPathSamplingMode === "total" ? "active" : ""}`}
+              onClick={() => {
+                if (totalKPoints > 0) {
+                  setTotalKPointsTarget(totalKPoints);
+                  setTotalKPointsInput(String(totalKPoints));
+                }
+                setKPathSamplingMode("total");
+              }}
+            >
+              Total k-points
+            </button>
+          </div>
+
+          {kPathSamplingMode === "segment" ? (
+            <label className="kpath-sampling-input">
+              <span>Points per segment</span>
+              <input
+                type="number"
+                min={MIN_POINTS_PER_SEGMENT}
+                max={MAX_POINTS_PER_SEGMENT}
+                value={pointsPerSegment}
+                onChange={(e) => {
+                  const parsed = Number.parseInt(e.target.value, 10);
+                  setPointsPerSegment(
+                    Number.isFinite(parsed)
+                      ? clampInt(parsed, MIN_POINTS_PER_SEGMENT, MAX_POINTS_PER_SEGMENT)
+                      : 20,
+                  );
+                }}
+              />
+            </label>
+          ) : (
+            <label className="kpath-sampling-input">
+              <span>Total k-points</span>
+              <input
+                type="number"
+                min={minimumTotalKPoints}
+                max={MAX_TOTAL_K_POINTS}
+                value={totalKPointsInput}
+                onChange={(e) => {
+                  setTotalKPointsInput(e.target.value);
+                }}
+                onBlur={commitTotalKPointsInput}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitTotalKPointsInput();
+                  }
+                }}
+              />
+            </label>
+          )}
+
+          {kPathSamplingMode === "total" && (
+            <p className="kpath-sampling-note">
+              {kPathSegmentCount > 0
+                ? `Evenly distributed by segment length across ${kPathSegmentCount} path segment${kPathSegmentCount === 1 ? "" : "s"}.`
+                : "Add at least 2 points to distribute k-points along the path."}
+            </p>
+          )}
         </div>
 
         <div className="step-actions">
@@ -1167,7 +1418,7 @@ export function BandStructureWizard({
           <h4 onClick={() => toggleSection("post")} className="section-header">
             <span className={`collapse-icon ${expandedSections.post ? "expanded" : ""}`}>▶</span>
             bands.x Post-Processing
-            <Tooltip text="Configure `bands.x` output file and symmetry labeling (`filband`, `lsym`)." />
+            <Tooltip text="Configure `bands.x` output file and ordering controls (`filband`, `lsym`, `no_overlap`)." />
           </h4>
           {expandedSections.post && (
             <div className="option-params">
@@ -1196,9 +1447,25 @@ export function BandStructureWizard({
                 <span>
                   Enable symmetry handling in bands.x
                   <span className="band-control-tech-name">lsym</span>
-                  <Tooltip text="QE variable: `lsym` in `&BANDS`. Enables symmetry treatment/labeling in post-processing output." />
+                  <Tooltip text="QE variable: `lsym` in `&BANDS`. Reorders/classifies bands using symmetry information; this can change band index assignment across crossings." />
                 </span>
               </label>
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={bandsNoOverlap}
+                  onChange={(e) => setBandsNoOverlap(e.target.checked)}
+                  disabled={bandsLsym}
+                />
+                <span>
+                  Keep default energy-order indexing
+                  <span className="band-control-tech-name">no_overlap</span>
+                  <Tooltip text="QE variable: `no_overlap` in `&BANDS`. Only used when `lsym = .false.`. Keep enabled for default ordering at each k-point; disable to order by maximal overlap with neighboring k-points." />
+                </span>
+              </label>
+              {bandsLsym && (
+                <span className="param-hint">`no_overlap` is ignored while `lsym` is enabled.</span>
+              )}
             </div>
           )}
         </div>

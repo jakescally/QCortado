@@ -3245,6 +3245,12 @@ html[data-theme="dark"] {
   font-family: "SF Mono", Monaco, Consolas, monospace;
 }
 
+.calc-runtime {
+  font-size: 0.78rem;
+  color: #718096;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
 .expand-icon {
   color: #a0aec0;
   font-size: 0.75rem;
@@ -3373,6 +3379,10 @@ html[data-theme="dark"] {
   }
 
   .calc-size {
+    color: #a6adc8;
+  }
+
+  .calc-runtime {
     color: #a6adc8;
   }
 
@@ -4968,6 +4978,131 @@ html[data-theme="dark"] .points-per-segment input {
   background: #313244;
   border-color: #45475a;
   color: #cdd6f4;
+}
+
+.kpath-sampling-panel {
+  margin-top: 1rem;
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid #d6e0ea;
+  background: #f7fafc;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.kpath-sampling-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.kpath-sampling-header h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  color: #2d3748;
+}
+
+.kpath-sampling-header p {
+  margin: 0.25rem 0 0 0;
+  font-size: 0.82rem;
+  color: #718096;
+}
+
+.kpath-sampling-summary {
+  align-self: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid #cbd5e0;
+  background: #ffffff;
+  color: #2d3748;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.kpath-sampling-toggle {
+  margin-bottom: 0.75rem;
+}
+
+.kpath-sampling-input {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: #2d3748;
+  font-size: 0.9rem;
+}
+
+.kpath-sampling-input input {
+  width: 110px;
+  padding: 0.4rem 0.6rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  color: #2d3748;
+  font-size: 0.9rem;
+}
+
+.kpath-sampling-note {
+  margin: 0.6rem 0 0 0;
+  font-size: 0.8rem;
+  color: #718096;
+}
+
+html[data-theme="dark"] .kpath-sampling-panel {
+  background: #1f2433;
+  border-color: #3f4c63;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+html[data-theme="dark"] .kpath-sampling-header h4 {
+  color: #e2e8f0;
+}
+
+html[data-theme="dark"] .kpath-sampling-header p {
+  color: #a0aec0;
+}
+
+html[data-theme="dark"] .kpath-sampling-summary {
+  background: #2d3748;
+  border-color: #4a5568;
+  color: #e2e8f0;
+}
+
+html[data-theme="dark"] .kpath-sampling-input {
+  color: #e2e8f0;
+}
+
+html[data-theme="dark"] .kpath-sampling-input input {
+  background: #313244;
+  border-color: #45475a;
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .kpath-sampling-note {
+  color: #a0aec0;
+}
+
+@media (max-width: 720px) {
+  .kpath-sampling-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .kpath-sampling-summary {
+    align-self: flex-start;
+  }
+
+  .kpath-sampling-input {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .kpath-sampling-input input {
+    width: 100%;
+    max-width: 180px;
+  }
 }
 
 /* Parameters Step */
@@ -6573,6 +6708,21 @@ html[data-theme="dark"] {
   flex-wrap: wrap;
 }
 
+.preset-tooltip-container {
+  position: relative;
+  display: inline-flex;
+}
+
+.preset-tooltip-container:hover .tooltip-text,
+.preset-tooltip-container:focus-within .tooltip-text {
+  visibility: visible;
+  opacity: 1;
+}
+
+.preset-disabled-tooltip {
+  width: 320px;
+}
+
 .preset-btn {
   padding: 0.4rem 0.75rem;
   background: #e2e8f0;
@@ -6602,6 +6752,23 @@ html[data-theme="dark"] {
 .preset-btn.preset-phonon:hover {
   background: #9ae6b4;
   border-color: #68d391;
+}
+
+.preset-btn.preset-phonon.preset-disabled {
+  background: #edf2f7;
+  border-color: #cbd5e0;
+  color: #718096;
+  cursor: help;
+  opacity: 0.75;
+}
+
+.preset-btn.preset-phonon.preset-disabled:hover {
+  background: #edf2f7;
+  border-color: #cbd5e0;
+}
+
+.preset-btn.preset-phonon.preset-disabled.active {
+  box-shadow: none;
 }
 
 .preset-btn.preset-relax {
@@ -6638,6 +6805,23 @@ html[data-theme="dark"] {
 
   .preset-btn.preset-phonon:hover {
     background: #38a169;
+  }
+
+  .preset-btn.preset-phonon.preset-disabled {
+    background: #4a5568;
+    border-color: #718096;
+    color: #a0aec0;
+    cursor: help;
+    opacity: 0.75;
+  }
+
+  .preset-btn.preset-phonon.preset-disabled:hover {
+    background: #4a5568;
+    border-color: #718096;
+  }
+
+  .preset-btn.preset-phonon.preset-disabled.active {
+    box-shadow: none;
   }
 
   .preset-btn.preset-relax {

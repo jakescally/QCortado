@@ -116,8 +116,9 @@ function getProjectCalculationTypes(project: ProjectSummary): ProjectCalculation
 
 interface ProjectBrowserProps {
   onBack: () => void;
-  onSelectProject?: (projectId: string) => void;
+  onSelectProject?: (projectId: string, folderId: string | null) => void;
   onProjectsChanged?: () => void;
+  initialActiveFolderId?: string | null;
 }
 
 interface ProjectArchiveExportResult {
@@ -150,10 +151,16 @@ interface ProjectArchiveImportProgress {
   progress_percent: number;
 }
 
+interface CreatedProject {
+  id: string;
+  name: string;
+}
+
 export function ProjectBrowser({
   onBack,
   onSelectProject,
   onProjectsChanged,
+  initialActiveFolderId = null,
 }: ProjectBrowserProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [folders, setFolders] = useState<ProjectFolder[]>([]);
@@ -167,7 +174,7 @@ export function ProjectBrowser({
   const [renamingFolder, setRenamingFolder] = useState<ProjectFolder | null>(null);
   const [renameFolderName, setRenameFolderName] = useState("");
   const [isSavingFolder, setIsSavingFolder] = useState(false);
-  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(initialActiveFolderId);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -307,6 +314,10 @@ export function ProjectBrowser({
       setActiveFolderId(null);
     }
   }, [activeFolderId, folderById]);
+
+  useEffect(() => {
+    setActiveFolderId(initialActiveFolderId ?? null);
+  }, [initialActiveFolderId]);
 
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
@@ -712,6 +723,32 @@ export function ProjectBrowser({
     }
   }
 
+  async function handleProjectCreated(project: CreatedProject) {
+    setShowCreateDialog(false);
+    setError(null);
+    setStatusMessage(null);
+
+    const targetFolderId = activeFolderId;
+    try {
+      if (targetFolderId) {
+        await invoke("move_project_to_folder", {
+          projectId: project.id,
+          folderId: targetFolderId,
+        });
+        const targetFolderName = folderById.get(targetFolderId)?.name ?? "folder";
+        setStatusMessage(`Created "${project.name}" in "${targetFolderName}".`);
+      } else {
+        setStatusMessage(`Created "${project.name}".`);
+      }
+    } catch (e) {
+      console.error("Project created but move failed:", e);
+      setError(`Project was created, but moving it failed: ${e}`);
+    } finally {
+      await loadProjectsAndFolders(false);
+      onProjectsChanged?.();
+    }
+  }
+
   const editingProject = editingProjectId
     ? projects.find((project) => project.id === editingProjectId) ?? null
     : null;
@@ -942,7 +979,7 @@ export function ProjectBrowser({
                   <div
                     key={project.id}
                     className="project-card"
-                    onClick={() => onSelectProject?.(project.id)}
+                    onClick={() => onSelectProject?.(project.id, project.folder_id ?? null)}
                   >
                     <div className="project-card-header">
                       <h3 className="project-name">{project.name}</h3>
@@ -1051,10 +1088,8 @@ export function ProjectBrowser({
       <CreateProjectDialog
         isOpen={showCreateDialog}
         onClose={() => setShowCreateDialog(false)}
-        onCreated={() => {
-          setShowCreateDialog(false);
-          void loadProjectsAndFolders(false);
-          onProjectsChanged?.();
+        onCreated={(project) => {
+          void handleProjectCreated(project);
         }}
       />
 

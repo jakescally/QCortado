@@ -398,16 +398,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     [subscribeToTask],
   );
 
-  const startTask = useCallback(
-    async (
-      type: TaskType,
-      params: Record<string, any>,
-      label: string,
-    ): Promise<string> => startTaskInternal(type, params, label),
-    [startTaskInternal],
-  );
-
-  const enqueueTask = useCallback(
+  const enqueueTaskInternal = useCallback(
     (
       type: TaskType,
       params: Record<string, any>,
@@ -432,6 +423,16 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       return queueItemId;
     },
     [],
+  );
+
+  const enqueueTask = useCallback(
+    (
+      type: TaskType,
+      params: Record<string, any>,
+      label: string,
+      saveSpec?: QueueSaveSpec | null,
+    ): string => enqueueTaskInternal(type, params, label, saveSpec),
+    [enqueueTaskInternal],
   );
 
   const cancelTask = useCallback(async (taskId: string) => {
@@ -830,6 +831,47 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [saveQueuedTaskResult, startTaskInternal, waitForTaskCompletion]);
+
+  const waitForQueueTaskStart = useCallback(async (queueItemId: string): Promise<string> => {
+    const startMs = Date.now();
+    const maxWaitMs = 30_000;
+
+    while (true) {
+      const queueItem = queueRef.current.find((item) => item.id === queueItemId);
+      if (!queueItem) {
+        if (Date.now() - startMs > maxWaitMs) {
+          throw new Error("Queued task was removed before it could start.");
+        }
+        await sleep(50);
+        continue;
+      }
+
+      if (queueItem.taskId) {
+        return queueItem.taskId;
+      }
+
+      if (queueItem.status === "failed" || queueItem.status === "cancelled") {
+        throw new Error(queueItem.error ?? "Queued task failed before starting.");
+      }
+
+      await sleep(100);
+    }
+  }, []);
+
+  const startTask = useCallback(
+    async (
+      type: TaskType,
+      params: Record<string, any>,
+      label: string,
+    ): Promise<string> => {
+      const queueItemId = enqueueTaskInternal(type, params, label, null);
+      window.setTimeout(() => {
+        void processQueue();
+      }, 0);
+      return waitForQueueTaskStart(queueItemId);
+    },
+    [enqueueTaskInternal, processQueue, waitForQueueTaskStart],
+  );
 
   const hasQueuedItems = queueItems.some((item) => item.status === "queued");
   const hasRunningTask = useMemo(

@@ -5,7 +5,7 @@
  * users to click points to build a k-path for band structure calculations.
  */
 
-import { useRef, useState, useMemo, useCallback } from "react";
+import { useRef, useState, useMemo, useCallback, useEffect } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Text, Line, OrthographicCamera, PerspectiveCamera, Cone, Billboard } from "@react-three/drei";
 import * as THREE from "three";
@@ -440,6 +440,10 @@ export function BrillouinZoneViewer({
   const [path, setPath] = useState<KPathPoint[]>(initialPath);
   const [selectedPoint, setSelectedPoint] = useState<HighSymmetryPoint | null>(null);
   const [useOrthographic, setUseOrthographic] = useState(true);
+
+  useEffect(() => {
+    setPath(initialPath);
+  }, [initialPath]);
 
   // Determine Bravais lattice type first (needed for centering)
   const bravaisInfo = useMemo(() => {

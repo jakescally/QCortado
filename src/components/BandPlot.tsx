@@ -143,6 +143,35 @@ function bandColorForIndex(
   return rainbowPalette === "jet" ? jetColor(t) : sinebowColor(t);
 }
 
+function getYAxisTickStep(range: number): number {
+  if (range > 500) return 100;
+  if (range > 200) return 50;
+  if (range > 100) return 25;
+  if (range > 20) return 5;
+  if (range > 10) return 2;
+  if (range > 5) return 1;
+  return 0.5;
+}
+
+function getYAxisTicks(eMin: number, eMax: number): number[] {
+  if (!Number.isFinite(eMin) || !Number.isFinite(eMax) || eMax < eMin) {
+    return [0];
+  }
+  const step = getYAxisTickStep(eMax - eMin);
+  const ticks: number[] = [];
+  let tick = Math.ceil(eMin / step) * step;
+  while (tick <= eMax + 1e-9) {
+    ticks.push(tick);
+    tick += step;
+  }
+  return ticks;
+}
+
+function isElectronicEFLabel(label: string): boolean {
+  const normalized = label.replace(/\s+/g, "").replace(/−/g, "-").toLowerCase();
+  return normalized === "e-e_f(ev)";
+}
+
 function createZeroWeightGrid(nBands: number, nKpoints: number): number[][] {
   return Array.from({ length: nBands }, () => Array(nKpoints).fill(0));
 }
@@ -293,7 +322,7 @@ export function BandPlot({
   showFermiLevel = true,
   scfFermiEnergy,
   yAxisLabel = "E − E_F (eV)",
-  pointLabel = "Band",
+  pointLabel = "Band index",
   valueLabel = "E − E_F",
   valueUnit = "eV",
   valueDecimals = 3,
@@ -349,6 +378,7 @@ export function BandPlot({
   // Appearance controls
   const [lineWidth, setLineWidth] = useState(1.5);
   const [lineOpacity, setLineOpacity] = useState(0.85);
+  const [plotTextScale, setPlotTextScale] = useState(1);
   const [colorMode, setColorMode] = useState<ColorMode>("rainbow");
   const [singleBandColor, setSingleBandColor] = useState("#1565c0");
   const [rainbowPalette, setRainbowPalette] = useState<RainbowPalette>("jet");
@@ -374,15 +404,6 @@ export function BandPlot({
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
 
-  // Margins & dimensions — prefer ResizeObserver, fall back to props
-  const margin = { top: 30, right: 30, bottom: 50, left: 70 };
-  const fallbackWidth = Math.max(240, width);
-  const fallbackHeight = Math.max(220, height);
-  const resolvedWidth = containerSize ? Math.max(1, containerSize.width) : fallbackWidth;
-  const resolvedHeight = containerSize ? Math.max(1, containerSize.height) : fallbackHeight;
-  const plotWidth = Math.max(1, resolvedWidth - margin.left - margin.right);
-  const plotHeight = Math.max(1, resolvedHeight - margin.top - margin.bottom);
-
   // Use SCF Fermi energy if available, otherwise fall back to data.fermi_energy
   const fermiEnergy = scfFermiEnergy ?? data.fermi_energy;
 
@@ -399,35 +420,84 @@ export function BandPlot({
     ];
   }, [data.energy_range, fermiEnergy]);
 
+  const yDomain = useMemo((): [number, number] => {
+    if (yMin !== null && yMax !== null) {
+      return [yMin, yMax];
+    }
+    if (energyRange) {
+      return energyRange;
+    }
+
+    let [eMin, eMax] = shiftedEnergyRange;
+    const span = Math.max(eMax - eMin, 1e-6);
+    const padding = span * 0.1;
+    eMin -= padding;
+    eMax += padding;
+
+    // Clamp to reasonable range around Fermi level (now at 0) if too wide
+    const maxRange = 20; // eV
+    if (eMax - eMin > maxRange * 2) {
+      eMin = -maxRange;
+      eMax = maxRange;
+    }
+
+    return [eMin, eMax];
+  }, [energyRange, shiftedEnergyRange, yMax, yMin]);
+
+  const axisTickFontSize = Math.max(8, 11 * plotTextScale);
+  const axisLabelFontSize = Math.max(10, 14 * plotTextScale);
+  const symmetryLabelFontSize = axisLabelFontSize;
+  const symmetryLabelYOffset = Math.max(20, symmetryLabelFontSize * 1.35);
+  const yTickLabelYOffset = axisTickFontSize * 0.35;
+  const yTicks = useMemo(() => getYAxisTicks(yDomain[0], yDomain[1]), [yDomain]);
+  const maxYTickLabelChars = useMemo(() => {
+    if (yTicks.length === 0) return 3;
+    let maxChars = 0;
+    for (const tick of yTicks) {
+      maxChars = Math.max(maxChars, tick.toFixed(1).length);
+    }
+    return maxChars;
+  }, [yTicks]);
+  const estimatedYTickLabelWidth = Math.max(
+    axisTickFontSize * 3,
+    maxYTickLabelChars * axisTickFontSize * 0.62,
+  );
+  const fermiLabelFontSize = axisTickFontSize;
+  const fermiLabelYOffset = fermiLabelFontSize * 0.35;
+
+  // Margins & dimensions — scale from actual axis text footprint.
+  const margin = useMemo(() => ({
+    top: 30,
+    right: Math.round(Math.max(30, 16 + fermiLabelFontSize * 2.2)),
+    bottom: Math.round(Math.max(50, 18 + symmetryLabelFontSize * 2.2)),
+    left: Math.round(
+      Math.max(70, 20 + estimatedYTickLabelWidth + axisLabelFontSize * 1.6),
+    ),
+  }), [axisLabelFontSize, estimatedYTickLabelWidth, fermiLabelFontSize, symmetryLabelFontSize]);
+
+  const fallbackWidth = Math.max(240, width);
+  const fallbackHeight = Math.max(220, height);
+  const resolvedWidth = containerSize ? Math.max(1, containerSize.width) : fallbackWidth;
+  const resolvedHeight = containerSize ? Math.max(1, containerSize.height) : fallbackHeight;
+  const plotWidth = Math.max(1, resolvedWidth - margin.left - margin.right);
+  const plotHeight = Math.max(1, resolvedHeight - margin.top - margin.bottom);
+  const yAxisLabelXOffset = Math.max(
+    axisLabelFontSize + 14,
+    Math.min(
+      margin.left - 8,
+      estimatedYTickLabelWidth + axisLabelFontSize * 0.95 + 16,
+    ),
+  );
+  const yTickLabelX = -(8 + axisTickFontSize * 0.18);
+  const yTickMarkX = -(4 + axisTickFontSize * 0.1);
+  const fermiLabelXOffset = Math.max(5, fermiLabelFontSize * 0.45);
+
   // Calculate scales - X is always fixed, Y is adjustable
   const scales = useMemo(() => {
     const kMin = data.k_points.length > 0 ? data.k_points[0] : 0;
     const kMax = data.k_points[data.k_points.length - 1] ?? 1;
     const kSpan = Math.abs(kMax - kMin) > 1e-12 ? kMax - kMin : 1;
-
-    // Use provided energy range, custom Y range, or calculate from shifted data with padding
-    let eMin: number;
-    let eMax: number;
-
-    if (yMin !== null && yMax !== null) {
-      eMin = yMin;
-      eMax = yMax;
-    } else if (energyRange) {
-      [eMin, eMax] = energyRange;
-    } else {
-      [eMin, eMax] = shiftedEnergyRange;
-      const span = Math.max(eMax - eMin, 1e-6);
-      const padding = span * 0.1;
-      eMin -= padding;
-      eMax += padding;
-
-      // Clamp to reasonable range around Fermi level (now at 0) if too wide
-      const maxRange = 20; // eV
-      if (eMax - eMin > maxRange * 2) {
-        eMin = -maxRange;
-        eMax = maxRange;
-      }
-    }
+    const [eMin, eMax] = yDomain;
 
     const eSpan = Math.abs(eMax - eMin) > 1e-12 ? eMax - eMin : 1;
 
@@ -439,7 +509,7 @@ export function BandPlot({
       xScale: (k: number) => ((k - kMin) / kSpan) * plotWidth,
       yScale: (e: number) => plotHeight - ((e - eMin) / eSpan) * plotHeight,
     };
-  }, [data.k_points, energyRange, plotWidth, plotHeight, yMin, yMax, shiftedEnergyRange]);
+  }, [data.k_points, plotWidth, plotHeight, yDomain]);
 
   const bandColors = useMemo(
     () =>
@@ -834,32 +904,6 @@ export function BandPlot({
     setExportNote("Export UI stub added. Wire export logic when ready.");
   }, []);
 
-  // Y-axis ticks
-  const yTicks = useMemo(() => {
-    const range = scales.eMax - scales.eMin;
-    const step =
-      range > 500
-        ? 100
-        : range > 200
-          ? 50
-          : range > 100
-            ? 25
-            : range > 20
-              ? 5
-              : range > 10
-                ? 2
-                : range > 5
-                  ? 1
-                  : 0.5;
-    const ticks: number[] = [];
-    let tick = Math.ceil(scales.eMin / step) * step;
-    while (tick <= scales.eMax) {
-      ticks.push(tick);
-      tick += step;
-    }
-    return ticks;
-  }, [scales]);
-
   // Prevent page scroll while interacting with the plot area.
   useEffect(() => {
     if (!isHoveringPlot || typeof document === "undefined") return;
@@ -939,10 +983,10 @@ export function BandPlot({
                   />
                   <text
                     x={scales.xScale(point.k_distance)}
-                    y={plotHeight + 20}
+                    y={plotHeight + symmetryLabelYOffset}
                     textAnchor="middle"
                     fill={colors.text}
-                    fontSize={14}
+                    fontSize={symmetryLabelFontSize}
                     fontFamily="serif"
                     fontStyle="italic"
                   >
@@ -964,10 +1008,10 @@ export function BandPlot({
                     strokeDasharray="4,4"
                   />
                   <text
-                    x={plotWidth + 5}
-                    y={scales.yScale(0) + 4}
+                    x={plotWidth + fermiLabelXOffset}
+                    y={scales.yScale(0) + fermiLabelYOffset}
                     fill="#d32f2f"
-                    fontSize={11}
+                    fontSize={fermiLabelFontSize}
                   >
                     E_F
                   </text>
@@ -1021,30 +1065,48 @@ export function BandPlot({
                 {yTicks.map((tick) => (
                   <g key={tick}>
                     <line
-                      x1={-5}
+                      x1={yTickMarkX}
                       x2={0}
                       y1={scales.yScale(tick)}
                       y2={scales.yScale(tick)}
                       stroke={colors.axis}
                     />
                     <text
-                      x={-10}
-                      y={scales.yScale(tick) + 4}
+                      x={yTickLabelX}
+                      y={scales.yScale(tick) + yTickLabelYOffset}
                       textAnchor="end"
                       fill={colors.text}
-                      fontSize={11}
+                      fontSize={axisTickFontSize}
                     >
                       {tick.toFixed(1)}
                     </text>
                   </g>
                 ))}
                 <text
-                  transform={`translate(-50, ${plotHeight / 2}) rotate(-90)`}
+                  x={-yAxisLabelXOffset}
+                  y={plotHeight / 2}
+                  transform={`rotate(-90 ${-yAxisLabelXOffset} ${plotHeight / 2})`}
                   textAnchor="middle"
+                  dominantBaseline="middle"
                   fill={colors.text}
-                  fontSize={14}
+                  fontSize={axisLabelFontSize}
+                  fontFamily="serif"
+                  fontStyle="italic"
                 >
-                  {yAxisLabel}
+                  {isElectronicEFLabel(yAxisLabel) ? (
+                    <>
+                      <tspan>E − E</tspan>
+                      <tspan
+                        baselineShift="sub"
+                        fontSize={Math.max(8, axisLabelFontSize * 0.72)}
+                      >
+                        F
+                      </tspan>
+                      <tspan baselineShift="baseline"> (eV)</tspan>
+                    </>
+                  ) : (
+                    yAxisLabel
+                  )}
                 </text>
               </g>
 
@@ -1164,6 +1226,19 @@ export function BandPlot({
                     onChange={(event) => setLineOpacity(Number.parseFloat(event.target.value))}
                   />
                   <span className="band-control-value">{lineOpacity.toFixed(2)}</span>
+                </div>
+
+                <div className="band-control-row">
+                  <label>Plot Text Size</label>
+                  <input
+                    type="range"
+                    min={0.7}
+                    max={2}
+                    step={0.05}
+                    value={plotTextScale}
+                    onChange={(event) => setPlotTextScale(Number.parseFloat(event.target.value))}
+                  />
+                  <span className="band-control-value">{plotTextScale.toFixed(2)}x</span>
                 </div>
 
                 <div className="band-control-row">
