@@ -765,7 +765,7 @@ function AppInner() {
             <div className="settings-window-content">
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
-                  Command Prefix
+                  MPI Command Path
                 </label>
                 <input
                   id="global-execution-prefix-input"
@@ -775,17 +775,17 @@ function AppInner() {
                     setExecutionPrefixInput(e.target.value);
                     setPrefixStatus(null);
                   }}
-                  placeholder="e.g. mpirun"
+                  placeholder="e.g. /opt/homebrew/bin/mpirun"
                 />
                 <p className="settings-menu-hint">
-                  Prepended before every QE executable launch.
+                  Path to MPI launcher command (recommended: absolute path). Prepended before every QE executable launch.
                 </p>
                 <button
                   className="settings-menu-item"
                   onClick={() => void saveExecutionPrefix()}
                   disabled={isSavingExecutionPrefix}
                 >
-                  {isSavingExecutionPrefix ? "Saving..." : "Save Prefix"}
+                  {isSavingExecutionPrefix ? "Saving..." : "Save MPI Command"}
                 </button>
                 {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
               </div>

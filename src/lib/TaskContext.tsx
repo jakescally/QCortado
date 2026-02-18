@@ -73,6 +73,7 @@ interface TaskContextValue {
     type: TaskType,
     params: Record<string, any>,
     label: string,
+    saveSpec?: QueueSaveSpec | null,
   ) => Promise<string>;
   enqueueTask: (
     type: TaskType,
@@ -90,6 +91,7 @@ interface TaskContextValue {
   dismissTask: (taskId: string) => Promise<void>;
   getTask: (taskId: string) => TaskState | undefined;
   waitForTaskCompletion: (taskId: string) => Promise<TaskState>;
+  waitForQueueItemCompletion: (taskId: string) => Promise<QueueItem | null>;
   reconnectToTask: (taskId: string) => Promise<void>;
 }
 
@@ -858,13 +860,36 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const waitForQueueItemCompletion = useCallback(async (taskId: string): Promise<QueueItem | null> => {
+    const startMs = Date.now();
+    const maxWaitMs = 120_000;
+
+    while (true) {
+      const queueItem = queueRef.current.find((item) => item.taskId === taskId);
+      if (!queueItem) {
+        if (Date.now() - startMs > maxWaitMs) {
+          return null;
+        }
+        await sleep(100);
+        continue;
+      }
+
+      if (queueItem.status === "completed" || queueItem.status === "failed" || queueItem.status === "cancelled") {
+        return queueItem;
+      }
+
+      await sleep(100);
+    }
+  }, []);
+
   const startTask = useCallback(
     async (
       type: TaskType,
       params: Record<string, any>,
       label: string,
+      saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
-      const queueItemId = enqueueTaskInternal(type, params, label, null);
+      const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);
       window.setTimeout(() => {
         void processQueue();
       }, 0);
@@ -916,6 +941,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     dismissTask,
     getTask,
     waitForTaskCompletion,
+    waitForQueueItemCompletion,
     reconnectToTask,
   };
 

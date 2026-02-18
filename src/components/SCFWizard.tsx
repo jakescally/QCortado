@@ -160,7 +160,7 @@ export function SCFWizard({
   const [error, setError] = useState<string | null>(null);
 
   // Track project context for saving
-  const [projectContext] = useState<{ projectId: string; cifId: string } | null>(
+  const [projectContext, setProjectContext] = useState<{ projectId: string; cifId: string } | null>(
     initialCif ? { projectId: initialCif.projectId, cifId: initialCif.cifId } : null
   );
   const [pseudopotentials, setPseudopotentials] = useState<string[]>([]);
@@ -179,10 +179,6 @@ export function SCFWizard({
   const [runSourceDescriptor, setRunSourceDescriptor] = useState<{ type: "cif" | "optimization"; calc_id?: string } | null>(null);
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
 
-  // Exit confirmation dialog
-  const [showExitConfirm, setShowExitConfirm] = useState(false);
-  const [pendingExitAction, setPendingExitAction] = useState<(() => void) | null>(null);
-
   // Ref for output auto-follow (only when user is at the bottom)
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
@@ -193,6 +189,14 @@ export function SCFWizard({
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     followOutputRef.current = distanceToBottom <= 16;
   };
+
+  const activeQueueItem = useMemo(
+    () => (activeTaskId ? taskContext.queueItems.find((item) => item.taskId === activeTaskId) ?? null : null),
+    [activeTaskId, taskContext.queueItems],
+  );
+  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const hasTaskLinkedAutosave = Boolean(activeQueueItem?.saveSpec);
+  const autoSaveExpected = Boolean(projectContext || hasTaskLinkedAutosave);
 
   const [config, setConfig] = useState<SCFConfig>({
     // Calculation type
@@ -312,46 +316,114 @@ export function SCFWizard({
     }
   }, [initialPreset, applyPreset]);
 
+  useEffect(() => {
+    if (projectContext || !activeQueueItem?.saveSpec) return;
+    setProjectContext({
+      projectId: activeQueueItem.saveSpec.projectId,
+      cifId: activeQueueItem.saveSpec.cifId,
+    });
+  }, [activeQueueItem, projectContext]);
+
   // Reconnect to a running/completed background task
   useEffect(() => {
     if (!activeTaskId) return;
-    const task = taskContext.getTask(activeTaskId);
-    if (!task) {
+    if (!activeTask) {
       // Task may not be loaded yet, try reconnecting
       taskContext.reconnectToTask(activeTaskId);
       return;
     }
 
     // Sync wizard state from task
-    setIsRunning(task.status === "running");
-    setOutput(task.output.join("\n") + "\n");
-    setProgress(task.progress);
-    setCalcStartTime(task.startedAt);
+    setIsRunning(activeTask.status === "running");
+    setOutput(activeTask.output.join("\n") + "\n");
+    if (activeTask.status === "completed" && activeQueueItem?.saveSpec) {
+      if (activeQueueItem.status === "completed") {
+        setProgress({
+          ...activeTask.progress,
+          status: "complete",
+          percent: 100,
+          phase: "Complete",
+        });
+      } else if (activeQueueItem.status === "failed" || activeQueueItem.status === "cancelled") {
+        setProgress({
+          ...activeTask.progress,
+          status: "error",
+          percent: null,
+          phase: "Save Error",
+        });
+      } else {
+        setProgress({
+          ...activeTask.progress,
+          status: "running",
+          percent: null,
+          phase: "Saving to project",
+        });
+      }
+    } else {
+      setProgress(activeTask.progress);
+    }
+    setCalcStartTime(activeTask.startedAt);
 
-    if (task.status === "completed" && task.result) {
-      setResult(task.result);
+    if (activeTask.status === "completed" && activeTask.result) {
+      setResult(activeTask.result);
       setCalcEndTime(new Date().toISOString());
       setStep("results");
-    } else if (task.status === "failed" || task.status === "cancelled") {
-      setError(task.error || "Task failed");
+    } else if (activeTask.status === "failed" || activeTask.status === "cancelled") {
+      setError(activeTask.error || "Task failed");
     } else {
       setStep("run");
     }
-  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.status]);
+  }, [activeQueueItem, activeTask, activeTaskId, taskContext.reconnectToTask]);
 
   // When active task updates, sync output/progress
   useEffect(() => {
-    if (!activeTaskId) return;
-    const task = taskContext.getTask(activeTaskId);
-    if (!task || task.status !== "running") return;
-
-    setOutput(task.output.join("\n") + "\n");
-    setProgress(task.progress);
+    if (!activeTask || activeTask.status !== "running") return;
+    setOutput(activeTask.output.join("\n") + "\n");
+    setProgress(activeTask.progress);
 
     if (followOutputRef.current && outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
     }
-  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.output.length]);
+  }, [activeTask]);
+
+  useEffect(() => {
+    if (!autoSaveExpected || !activeTask?.result) return;
+    if (!activeQueueItem?.saveSpec || !activeTaskId) return;
+
+    if (activeQueueItem.status === "completed") {
+      setIsSaving(false);
+      setResultSaved(true);
+      setProgress((prev) => ({
+        ...prev,
+        status: "complete",
+        percent: 100,
+        phase: "Complete",
+      }));
+      return;
+    }
+
+    if (activeQueueItem.status === "failed" || activeQueueItem.status === "cancelled") {
+      setIsSaving(false);
+      setProgress((prev) => ({
+        ...prev,
+        status: "error",
+        percent: null,
+        phase: "Save Error",
+      }));
+      setError(activeQueueItem.error || "Failed to auto-save calculation.");
+      return;
+    }
+
+    if (activeTask?.status === "completed") {
+      setIsSaving(true);
+      setProgress((prev) => ({
+        ...prev,
+        status: "running",
+        percent: null,
+        phase: "Saving to project",
+      }));
+    }
+  }, [activeQueueItem, activeTask, activeTaskId, autoSaveExpected]);
 
   const lockedPreset = presetLock && initialPreset ? initialPreset : null;
   const isOptimizationWizard = lockedPreset === "relax";
@@ -822,13 +894,41 @@ export function SCFWizard({
     try {
       const plan = await buildScfTaskPlan();
       const { inputText, taskLabel, sourceStructure, sourceDescriptor } = plan;
+      const draftCalcData = buildCalculationData(
+        {
+          converged: false,
+          total_energy: null,
+          fermi_energy: null,
+          n_scf_steps: null,
+          wall_time_seconds: null,
+          raw_output: "",
+        },
+        startTime,
+        startTime,
+        inputText,
+        sourceStructure,
+        sourceDescriptor,
+      );
+      const queueCalcType: "scf" | "optimization" = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
+      const runSaveSpec = projectContext
+        ? {
+            projectId: projectContext.projectId,
+            cifId: projectContext.cifId,
+            workingDir: WORK_DIR,
+            calcType: queueCalcType,
+            parameters: draftCalcData.parameters,
+            tags: draftCalcData.tags,
+            inputContent: inputText,
+          }
+        : null;
+
       setRunSourceStructure(sourceStructure);
       setRunSourceDescriptor(sourceDescriptor);
       setGeneratedInput(inputText);
       setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running pw.x ===\n`);
 
       // Start as a background task
-      const taskId = await taskContext.startTask("scf", plan.taskParams, `SCF - ${taskLabel}`);
+      const taskId = await taskContext.startTask("scf", plan.taskParams, `SCF - ${taskLabel}`, runSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);
@@ -845,38 +945,41 @@ export function SCFWizard({
       setResult(calcResult);
       setOutput((prev) => prev + "\n=== Calculation Complete ===\n");
       setStep("results");
-      setProgress((prev) => ({
-        ...prev,
-        status: "complete",
-        percent: 100,
-        phase: "Complete",
-      }));
-
-      // Auto-save to project if we have project context
-      if (projectContext) {
-        try {
-          setIsSaving(true);
-          const calcData = buildCalculationData(
-            calcResult,
-            startTime,
-            endTime,
-            inputText,
-            sourceStructure,
-            sourceDescriptor,
-          );
-          await invoke("save_calculation", {
-            projectId: projectContext.projectId,
-            cifId: projectContext.cifId,
-            calcData,
-            workingDir: WORK_DIR,
-          });
+      if (runSaveSpec) {
+        setIsSaving(true);
+        setProgress((prev) => ({
+          ...prev,
+          status: "running",
+          percent: null,
+          phase: "Saving to project",
+        }));
+        const saveQueueItem = await taskContext.waitForQueueItemCompletion(taskId);
+        setIsSaving(false);
+        if (saveQueueItem?.status === "completed") {
           setResultSaved(true);
-        } catch (saveError) {
-          console.error("Failed to auto-save calculation:", saveError);
-          setError(`Failed to auto-save calculation: ${saveError}`);
-        } finally {
-          setIsSaving(false);
+          setProgress((prev) => ({
+            ...prev,
+            status: "complete",
+            percent: 100,
+            phase: "Complete",
+          }));
+        } else {
+          const queueError = saveQueueItem?.error || "Unknown save failure";
+          setError(`Failed to auto-save calculation: ${queueError}`);
+          setProgress((prev) => ({
+            ...prev,
+            status: "error",
+            percent: null,
+            phase: "Save Error",
+          }));
         }
+      } else {
+        setProgress((prev) => ({
+          ...prev,
+          status: "complete",
+          percent: 100,
+          phase: "Complete",
+        }));
       }
     } catch (e) {
       setError(`Calculation failed: ${e}`);
@@ -941,29 +1044,6 @@ export function SCFWizard({
     } catch (e) {
       setError(`Failed to queue calculation: ${e}`);
     }
-  }
-
-  // Handle exit attempts - show confirmation if results not saved
-  function handleExitAttempt(action: () => void) {
-    if (result && !resultSaved) {
-      setPendingExitAction(() => action);
-      setShowExitConfirm(true);
-    } else {
-      action();
-    }
-  }
-
-  function confirmExit() {
-    if (pendingExitAction) {
-      pendingExitAction();
-    }
-    setShowExitConfirm(false);
-    setPendingExitAction(null);
-  }
-
-  function cancelExit() {
-    setShowExitConfirm(false);
-    setPendingExitAction(null);
   }
 
   function calculateCVector(data: CrystalData): [number, number, number] {
@@ -1324,7 +1404,7 @@ export function SCFWizard({
   return (
     <div className={`wizard-container wizard-step-${step}`}>
       <div className="wizard-header">
-        <button className="back-btn" onClick={() => handleExitAttempt(onBack)}>
+        <button className="back-btn" onClick={onBack}>
           ← Back
         </button>
         <h2>{wizardTitle}</h2>
@@ -2272,17 +2352,22 @@ export function SCFWizard({
                       <span className="saved">Saved to project</span>
                     </div>
                   )}
+                  {autoSaveExpected && isSaving && (
+                    <div className="save-status save-status-inline">
+                      <span>Saving to project...</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             <div className="run-actions">
-              <button onClick={() => handleExitAttempt(() => setStep("configure"))}>
+              <button onClick={() => setStep("configure")}>
                 ← Back to Configure
               </button>
               {result && (
                 <>
-                  {!projectContext && (
+                  {!autoSaveExpected && (
                     <button
                       onClick={() => setShowSaveDialog(true)}
                       className="save-project-btn"
@@ -2291,7 +2376,7 @@ export function SCFWizard({
                       {resultSaved ? "Saved" : "Save to Project"}
                     </button>
                   )}
-                  <button onClick={() => handleExitAttempt(() => setStep("import"))} className="new-calc-btn">
+                  <button onClick={() => setStep("import")} className="new-calc-btn">
                     New Calculation
                   </button>
                 </>
@@ -2302,7 +2387,7 @@ export function SCFWizard({
       </div>
 
       {/* Save to Project Dialog */}
-      {!projectContext && showSaveDialog && crystalData && calculationData && (
+      {!autoSaveExpected && showSaveDialog && crystalData && calculationData && (
         <SaveToProjectDialog
           isOpen={showSaveDialog}
           onClose={() => setShowSaveDialog(false)}
@@ -2320,44 +2405,6 @@ export function SCFWizard({
           workingDir={WORK_DIR}
           projectContext={projectContext || undefined}
         />
-      )}
-
-      {/* Exit Confirmation Dialog */}
-      {showExitConfirm && (
-        <div className="dialog-overlay" onClick={cancelExit}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Unsaved Results</h2>
-              <button className="dialog-close" onClick={cancelExit}>
-                &times;
-              </button>
-            </div>
-
-            <div className="dialog-body">
-              <p className="exit-warning">
-                {projectContext
-                  ? "Your calculation results have not finished auto-saving to this project yet."
-                  : "Your calculation results have not been saved to a project."}
-                {" "}
-                If you leave now, the results may be lost.
-              </p>
-              <p className="exit-hint">
-                {projectContext
-                  ? "Wait for auto-save to complete, or choose \"Leave Anyway\" to discard this run."
-                  : "Click \"Save to Project\" to keep your results, or \"Leave Anyway\" to discard them."}
-              </p>
-            </div>
-
-            <div className="dialog-footer">
-              <button className="dialog-btn cancel" onClick={cancelExit}>
-                Stay Here
-              </button>
-              <button className="dialog-btn delete" onClick={confirmExit}>
-                Leave Anyway
-              </button>
-            </div>
-          </div>
-        </div>
       )}
     </div>
   );

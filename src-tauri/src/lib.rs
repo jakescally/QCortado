@@ -7,6 +7,7 @@
 //! - Project management
 
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -114,8 +115,41 @@ fn command_basename(command: &str) -> String {
         .to_string()
 }
 
-fn is_same_command(prefix_command: &str, program: &str) -> bool {
-    command_basename(prefix_command) == command_basename(program)
+fn is_explicit_command_path(command: &str) -> bool {
+    Path::new(command).components().count() > 1
+}
+
+fn resolve_command_path(program: &OsStr) -> OsString {
+    let program_path = Path::new(program);
+
+    if program_path.components().count() > 1 {
+        return program.to_os_string();
+    }
+
+    let Some(program_name) = program_path.file_name() else {
+        return program.to_os_string();
+    };
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for path_dir in std::env::split_paths(&path_var) {
+            let candidate = path_dir.join(program_name);
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for fallback_dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let candidate = Path::new(fallback_dir).join(program_name);
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+
+    program.to_os_string()
 }
 
 fn tokio_command_with_prefix(
@@ -124,21 +158,27 @@ fn tokio_command_with_prefix(
 ) -> tokio::process::Command {
     let program_os = program.as_ref();
     let program_text = program_os.to_string_lossy().to_string();
+    let resolved_program = resolve_command_path(program_os);
 
     if let Some(tokens) = parse_execution_prefix_tokens(execution_prefix) {
-        let mut command = if is_same_command(&tokens[0], &program_text) {
-            tokio::process::Command::new(program_os)
+        let mut command = if command_basename(&tokens[0]) == command_basename(&program_text) {
+            let executable = if is_explicit_command_path(&tokens[0]) {
+                OsString::from(&tokens[0])
+            } else {
+                resolved_program.clone()
+            };
+            tokio::process::Command::new(executable)
         } else {
-            let mut cmd = tokio::process::Command::new(&tokens[0]);
+            let mut cmd = tokio::process::Command::new(resolve_command_path(OsStr::new(&tokens[0])));
             cmd.args(tokens.iter().skip(1));
-            cmd.arg(program_os);
+            cmd.arg(&resolved_program);
             return cmd;
         };
         command.args(tokens.iter().skip(1));
         return command;
     }
 
-    tokio::process::Command::new(program_os)
+    tokio::process::Command::new(resolved_program)
 }
 
 fn std_command_with_prefix(
@@ -147,21 +187,27 @@ fn std_command_with_prefix(
 ) -> std::process::Command {
     let program_os = program.as_ref();
     let program_text = program_os.to_string_lossy().to_string();
+    let resolved_program = resolve_command_path(program_os);
 
     if let Some(tokens) = parse_execution_prefix_tokens(execution_prefix) {
-        let mut command = if is_same_command(&tokens[0], &program_text) {
-            std::process::Command::new(program_os)
+        let mut command = if command_basename(&tokens[0]) == command_basename(&program_text) {
+            let executable = if is_explicit_command_path(&tokens[0]) {
+                OsString::from(&tokens[0])
+            } else {
+                resolved_program.clone()
+            };
+            std::process::Command::new(executable)
         } else {
-            let mut cmd = std::process::Command::new(&tokens[0]);
+            let mut cmd = std::process::Command::new(resolve_command_path(OsStr::new(&tokens[0])));
             cmd.args(tokens.iter().skip(1));
-            cmd.arg(program_os);
+            cmd.arg(&resolved_program);
             return cmd;
         };
         command.args(tokens.iter().skip(1));
         return command;
     }
 
-    std::process::Command::new(program_os)
+    std::process::Command::new(resolved_program)
 }
 
 #[derive(Debug, serde::Serialize)]
