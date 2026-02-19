@@ -1,31 +1,124 @@
-// K-path database for band structure calculations
-// Based on: Setyawan & Curtarolo, Comp. Mat. Sci. 49, 299 (2010)
+// K-path compatibility adapter.
+//
+// Canonical source of high-symmetry points/paths now lives in
+// `brillouinZoneData.ts`, which is also used by the BZ viewer.
 
-import { BravaisLattice } from './brillouinZone';
+import { BravaisLattice } from "./brillouinZone";
+import { BravaisLatticeType, getBrillouinZoneData } from "./brillouinZoneData";
 
 export interface HighSymmetryPoint {
-  label: string;           // Display label (e.g., "Γ", "X", "M")
-  qeLabel: string;         // Label for QE input (e.g., "gG", "X", "M")
-  coords: [number, number, number];  // Crystal coordinates
-  description: string;     // Human-readable description
+  label: string; // Display label (e.g., "Γ", "X", "M")
+  qeLabel: string; // Label for QE text output (e.g., "gG", "X", "M")
+  coords: [number, number, number]; // Crystal coordinates
+  description: string; // Human-readable description
 }
 
 export interface KPathSegment {
-  from: string;  // Label of starting point
-  to: string;    // Label of ending point
+  from: string;
+  to: string;
 }
 
 export interface StandardKPath {
   lattice: BravaisLattice;
   displayName: string;
   points: HighSymmetryPoint[];
-  defaultPath: KPathSegment[];  // Default path as segments
+  defaultPath: KPathSegment[];
   description: string;
+}
+
+export interface KPathLatticeParams {
+  a: number;
+  b: number;
+  c: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+}
+
+const SUBSCRIPT_TO_ASCII: Record<string, string> = {
+  "₀": "0",
+  "₁": "1",
+  "₂": "2",
+  "₃": "3",
+  "₄": "4",
+  "₅": "5",
+  "₆": "6",
+  "₇": "7",
+  "₈": "8",
+  "₉": "9",
+};
+
+const BRAVAIS_TO_BZ: Record<BravaisLattice, BravaisLatticeType> = {
+  "cubic-P": "cP",
+  "cubic-F": "cF",
+  "cubic-I": "cI",
+  "tetragonal-P": "tP",
+  "tetragonal-I": "tI",
+  "orthorhombic-P": "oP",
+  "orthorhombic-C": "oC",
+  "orthorhombic-I": "oI",
+  "orthorhombic-F": "oF",
+  "hexagonal": "hP",
+  "trigonal-R": "hR",
+  "monoclinic-P": "mP",
+  "monoclinic-C": "mC",
+  "triclinic": "aP",
+};
+
+const BRAVAIS_DISPLAY_NAME: Record<BravaisLattice, string> = {
+  "cubic-P": "Simple Cubic",
+  "cubic-F": "Face-Centered Cubic",
+  "cubic-I": "Body-Centered Cubic",
+  "tetragonal-P": "Simple Tetragonal",
+  "tetragonal-I": "Body-Centered Tetragonal",
+  "orthorhombic-P": "Simple Orthorhombic",
+  "orthorhombic-C": "Base-Centered Orthorhombic",
+  "orthorhombic-I": "Body-Centered Orthorhombic",
+  "orthorhombic-F": "Face-Centered Orthorhombic",
+  "hexagonal": "Hexagonal",
+  "trigonal-R": "Rhombohedral",
+  "monoclinic-P": "Simple Monoclinic",
+  "monoclinic-C": "Base-Centered Monoclinic",
+  "triclinic": "Triclinic",
+};
+
+const DEFAULT_PARAMS: Record<BravaisLattice, KPathLatticeParams> = {
+  "cubic-P": { a: 1, b: 1, c: 1, alpha: 90, beta: 90, gamma: 90 },
+  "cubic-F": { a: 1, b: 1, c: 1, alpha: 90, beta: 90, gamma: 90 },
+  "cubic-I": { a: 1, b: 1, c: 1, alpha: 90, beta: 90, gamma: 90 },
+  "tetragonal-P": { a: 1, b: 1, c: 1.3, alpha: 90, beta: 90, gamma: 90 },
+  "tetragonal-I": { a: 1, b: 1, c: 1.3, alpha: 90, beta: 90, gamma: 90 },
+  "orthorhombic-P": { a: 1, b: 1.15, c: 1.4, alpha: 90, beta: 90, gamma: 90 },
+  "orthorhombic-C": { a: 1, b: 1.15, c: 1.4, alpha: 90, beta: 90, gamma: 90 },
+  "orthorhombic-I": { a: 1, b: 1.15, c: 1.4, alpha: 90, beta: 90, gamma: 90 },
+  "orthorhombic-F": { a: 1, b: 1.15, c: 1.4, alpha: 90, beta: 90, gamma: 90 },
+  "hexagonal": { a: 1, b: 1, c: 1.6, alpha: 90, beta: 90, gamma: 120 },
+  // hR defaults to alpha < 90 so the richer hR1 point set is exposed by default.
+  "trigonal-R": { a: 1, b: 1, c: 1, alpha: 78, beta: 78, gamma: 78 },
+  "monoclinic-P": { a: 1, b: 1.1, c: 1.3, alpha: 90, beta: 105, gamma: 90 },
+  "monoclinic-C": { a: 1, b: 1.1, c: 1.3, alpha: 90, beta: 105, gamma: 90 },
+  "triclinic": { a: 1, b: 1.07, c: 1.21, alpha: 82, beta: 96, gamma: 108 },
+};
+
+function toQeLabel(label: string): string {
+  if (label === "Γ") {
+    return "gG";
+  }
+  return label
+    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (ch) => SUBSCRIPT_TO_ASCII[ch] ?? ch)
+    .replace(/[^A-Za-z0-9]/g, "");
+}
+
+function resolveParams(lattice: BravaisLattice, overrides?: Partial<KPathLatticeParams>): KPathLatticeParams {
+  return {
+    ...DEFAULT_PARAMS[lattice],
+    ...overrides,
+  };
 }
 
 // Helper to create a path string for display
 export function pathToString(segments: KPathSegment[]): string {
-  if (segments.length === 0) return '';
+  if (segments.length === 0) return "";
 
   let result = segments[0].from;
   let lastTo = segments[0].from;
@@ -49,10 +142,10 @@ export function getOrderedPoints(
 ): { point: HighSymmetryPoint; npoints: number }[] {
   if (segments.length === 0) return [];
 
-  const pointMap = new Map(allPoints.map(p => [p.label, p]));
+  const pointMap = new Map(allPoints.map((p) => [p.label, p]));
   const result: { point: HighSymmetryPoint; npoints: number }[] = [];
 
-  let lastTo = '';
+  let lastTo = "";
 
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
@@ -62,14 +155,13 @@ export function getOrderedPoints(
     if (isNewPath || i === 0) {
       const fromPoint = pointMap.get(segment.from);
       if (fromPoint) {
-        result.push({ point: fromPoint, npoints: 20 }); // default 20 points per segment
+        result.push({ point: fromPoint, npoints: 20 });
       }
     }
 
     // Add "to" point
     const toPoint = pointMap.get(segment.to);
     if (toPoint) {
-      // Last point in a disconnected segment or final point gets 0
       const isLastInPath = i === segments.length - 1 || segments[i + 1].from !== segment.to;
       result.push({ point: toPoint, npoints: isLastInPath ? 0 : 20 });
     }
@@ -80,302 +172,68 @@ export function getOrderedPoints(
   return result;
 }
 
-// ============================================================================
-// K-PATH DATABASE
-// ============================================================================
-
-const KPATH_CUBIC_P: StandardKPath = {
-  lattice: 'cubic-P',
-  displayName: 'Simple Cubic',
-  description: 'Standard path for primitive cubic lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'X', qeLabel: 'X', coords: [0, 0.5, 0], description: 'Face center' },
-    { label: 'M', qeLabel: 'M', coords: [0.5, 0.5, 0], description: 'Edge center' },
-    { label: 'R', qeLabel: 'R', coords: [0.5, 0.5, 0.5], description: 'Corner' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'M' },
-    { from: 'M', to: 'Γ' },
-    { from: 'Γ', to: 'R' },
-    { from: 'R', to: 'X' },
-    { from: 'M', to: 'R' },
-  ],
-};
-
-const KPATH_CUBIC_F: StandardKPath = {
-  lattice: 'cubic-F',
-  displayName: 'Face-Centered Cubic',
-  description: 'Standard path for FCC lattices (e.g., Cu, Al, Si)',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'X', qeLabel: 'X', coords: [0.5, 0, 0.5], description: 'Face center' },
-    { label: 'W', qeLabel: 'W', coords: [0.5, 0.25, 0.75], description: 'Corner of square face' },
-    { label: 'K', qeLabel: 'K', coords: [0.375, 0.375, 0.75], description: 'Middle of edge' },
-    { label: 'L', qeLabel: 'L', coords: [0.5, 0.5, 0.5], description: 'Center of hexagonal face' },
-    { label: 'U', qeLabel: 'U', coords: [0.625, 0.25, 0.625], description: 'On square face edge' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'W' },
-    { from: 'W', to: 'K' },
-    { from: 'K', to: 'Γ' },
-    { from: 'Γ', to: 'L' },
-    { from: 'L', to: 'U' },
-    { from: 'U', to: 'W' },
-    { from: 'L', to: 'K' },
-    { from: 'U', to: 'X' },
-  ],
-};
-
-const KPATH_CUBIC_I: StandardKPath = {
-  lattice: 'cubic-I',
-  displayName: 'Body-Centered Cubic',
-  description: 'Standard path for BCC lattices (e.g., Fe, W, Na)',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'H', qeLabel: 'H', coords: [0.5, -0.5, 0.5], description: 'Corner' },
-    { label: 'N', qeLabel: 'N', coords: [0, 0, 0.5], description: 'Face center' },
-    { label: 'P', qeLabel: 'P', coords: [0.25, 0.25, 0.25], description: 'Edge midpoint' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'H' },
-    { from: 'H', to: 'N' },
-    { from: 'N', to: 'Γ' },
-    { from: 'Γ', to: 'P' },
-    { from: 'P', to: 'H' },
-    { from: 'P', to: 'N' },
-  ],
-};
-
-const KPATH_HEXAGONAL: StandardKPath = {
-  lattice: 'hexagonal',
-  displayName: 'Hexagonal',
-  description: 'Standard path for hexagonal lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'M', qeLabel: 'M', coords: [0.5, 0, 0], description: 'Edge midpoint' },
-    { label: 'K', qeLabel: 'K', coords: [1/3, 1/3, 0], description: 'Corner' },
-    { label: 'A', qeLabel: 'A', coords: [0, 0, 0.5], description: 'Top center' },
-    { label: 'L', qeLabel: 'L', coords: [0.5, 0, 0.5], description: 'Top edge midpoint' },
-    { label: 'H', qeLabel: 'H', coords: [1/3, 1/3, 0.5], description: 'Top corner' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'M' },
-    { from: 'M', to: 'K' },
-    { from: 'K', to: 'Γ' },
-    { from: 'Γ', to: 'A' },
-    { from: 'A', to: 'L' },
-    { from: 'L', to: 'H' },
-    { from: 'H', to: 'A' },
-    { from: 'L', to: 'M' },
-    { from: 'K', to: 'H' },
-  ],
-};
-
-const KPATH_TETRAGONAL_P: StandardKPath = {
-  lattice: 'tetragonal-P',
-  displayName: 'Simple Tetragonal',
-  description: 'Standard path for primitive tetragonal lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'X', qeLabel: 'X', coords: [0, 0.5, 0], description: 'Face center' },
-    { label: 'M', qeLabel: 'M', coords: [0.5, 0.5, 0], description: 'Edge center' },
-    { label: 'Z', qeLabel: 'Z', coords: [0, 0, 0.5], description: 'Top center' },
-    { label: 'R', qeLabel: 'R', coords: [0, 0.5, 0.5], description: 'Top face center' },
-    { label: 'A', qeLabel: 'A', coords: [0.5, 0.5, 0.5], description: 'Top corner' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'M' },
-    { from: 'M', to: 'Γ' },
-    { from: 'Γ', to: 'Z' },
-    { from: 'Z', to: 'R' },
-    { from: 'R', to: 'A' },
-    { from: 'A', to: 'Z' },
-    { from: 'X', to: 'R' },
-    { from: 'M', to: 'A' },
-  ],
-};
-
-const KPATH_TETRAGONAL_I: StandardKPath = {
-  lattice: 'tetragonal-I',
-  displayName: 'Body-Centered Tetragonal',
-  description: 'Standard path for body-centered tetragonal lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'M', qeLabel: 'M', coords: [-0.5, 0.5, 0.5], description: 'Edge center' },
-    { label: 'X', qeLabel: 'X', coords: [0, 0, 0.5], description: 'Face center' },
-    { label: 'P', qeLabel: 'P', coords: [0.25, 0.25, 0.25], description: 'Body point' },
-    { label: 'N', qeLabel: 'N', coords: [0, 0.5, 0], description: 'Face point' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'M' },
-    { from: 'M', to: 'Γ' },
-    { from: 'Γ', to: 'N' },
-    { from: 'N', to: 'P' },
-    { from: 'P', to: 'M' },
-  ],
-};
-
-const KPATH_ORTHORHOMBIC_P: StandardKPath = {
-  lattice: 'orthorhombic-P',
-  displayName: 'Simple Orthorhombic',
-  description: 'Standard path for primitive orthorhombic lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'X', qeLabel: 'X', coords: [0.5, 0, 0], description: 'Face center (a)' },
-    { label: 'Y', qeLabel: 'Y', coords: [0, 0.5, 0], description: 'Face center (b)' },
-    { label: 'Z', qeLabel: 'Z', coords: [0, 0, 0.5], description: 'Face center (c)' },
-    { label: 'S', qeLabel: 'S', coords: [0.5, 0.5, 0], description: 'Edge (ab)' },
-    { label: 'T', qeLabel: 'T', coords: [0, 0.5, 0.5], description: 'Edge (bc)' },
-    { label: 'U', qeLabel: 'U', coords: [0.5, 0, 0.5], description: 'Edge (ac)' },
-    { label: 'R', qeLabel: 'R', coords: [0.5, 0.5, 0.5], description: 'Corner' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'S' },
-    { from: 'S', to: 'Y' },
-    { from: 'Y', to: 'Γ' },
-    { from: 'Γ', to: 'Z' },
-    { from: 'Z', to: 'U' },
-    { from: 'U', to: 'R' },
-    { from: 'R', to: 'T' },
-    { from: 'T', to: 'Z' },
-  ],
-};
-
-const KPATH_TRIGONAL_R: StandardKPath = {
-  lattice: 'trigonal-R',
-  displayName: 'Rhombohedral',
-  description: 'Standard path for rhombohedral lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'L', qeLabel: 'L', coords: [0.5, 0, 0], description: 'Face center' },
-    { label: 'F', qeLabel: 'F', coords: [0.5, 0.5, 0], description: 'Edge point' },
-    { label: 'Z', qeLabel: 'Z', coords: [0.5, 0.5, 0.5], description: 'Body point' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'L' },
-    { from: 'L', to: 'F' },
-    { from: 'F', to: 'Γ' },
-    { from: 'Γ', to: 'Z' },
-  ],
-};
-
-const KPATH_MONOCLINIC_P: StandardKPath = {
-  lattice: 'monoclinic-P',
-  displayName: 'Simple Monoclinic',
-  description: 'Standard path for primitive monoclinic lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'Y', qeLabel: 'Y', coords: [0.5, 0, 0], description: 'Face center' },
-    { label: 'A', qeLabel: 'A', coords: [0, 0.5, 0], description: 'Face center' },
-    { label: 'B', qeLabel: 'B', coords: [0, 0, 0.5], description: 'Face center' },
-    { label: 'C', qeLabel: 'C', coords: [0.5, 0.5, 0], description: 'Edge point' },
-    { label: 'D', qeLabel: 'D', coords: [0.5, 0, 0.5], description: 'Edge point' },
-    { label: 'E', qeLabel: 'E', coords: [0, 0.5, 0.5], description: 'Edge point' },
-    { label: 'Z', qeLabel: 'Z', coords: [0.5, 0.5, 0.5], description: 'Corner' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'Y' },
-    { from: 'Y', to: 'C' },
-    { from: 'C', to: 'A' },
-    { from: 'A', to: 'Γ' },
-    { from: 'Γ', to: 'B' },
-    { from: 'B', to: 'D' },
-    { from: 'D', to: 'Z' },
-    { from: 'Z', to: 'E' },
-    { from: 'E', to: 'B' },
-  ],
-};
-
-const KPATH_TRICLINIC: StandardKPath = {
-  lattice: 'triclinic',
-  displayName: 'Triclinic',
-  description: 'Simple path for triclinic lattices',
-  points: [
-    { label: 'Γ', qeLabel: 'gG', coords: [0, 0, 0], description: 'Zone center' },
-    { label: 'X', qeLabel: 'X', coords: [0.5, 0, 0], description: 'a* direction' },
-    { label: 'Y', qeLabel: 'Y', coords: [0, 0.5, 0], description: 'b* direction' },
-    { label: 'Z', qeLabel: 'Z', coords: [0, 0, 0.5], description: 'c* direction' },
-  ],
-  defaultPath: [
-    { from: 'Γ', to: 'X' },
-    { from: 'X', to: 'Γ' },
-    { from: 'Γ', to: 'Y' },
-    { from: 'Y', to: 'Γ' },
-    { from: 'Γ', to: 'Z' },
-  ],
-};
-
-// Fallback paths for lattice types not fully specified above
-const KPATH_ORTHORHOMBIC_C: StandardKPath = {
-  ...KPATH_ORTHORHOMBIC_P,
-  lattice: 'orthorhombic-C',
-  displayName: 'Base-Centered Orthorhombic',
-  description: 'Standard path for C-centered orthorhombic lattices',
-};
-
-const KPATH_ORTHORHOMBIC_I: StandardKPath = {
-  ...KPATH_ORTHORHOMBIC_P,
-  lattice: 'orthorhombic-I',
-  displayName: 'Body-Centered Orthorhombic',
-  description: 'Standard path for I-centered orthorhombic lattices',
-};
-
-const KPATH_ORTHORHOMBIC_F: StandardKPath = {
-  ...KPATH_ORTHORHOMBIC_P,
-  lattice: 'orthorhombic-F',
-  displayName: 'Face-Centered Orthorhombic',
-  description: 'Standard path for F-centered orthorhombic lattices',
-};
-
-const KPATH_MONOCLINIC_C: StandardKPath = {
-  ...KPATH_MONOCLINIC_P,
-  lattice: 'monoclinic-C',
-  displayName: 'Base-Centered Monoclinic',
-  description: 'Standard path for C-centered monoclinic lattices',
-};
-
-// ============================================================================
-// EXPORTS
-// ============================================================================
-
-export const KPATH_DATABASE: Record<BravaisLattice, StandardKPath> = {
-  'cubic-P': KPATH_CUBIC_P,
-  'cubic-F': KPATH_CUBIC_F,
-  'cubic-I': KPATH_CUBIC_I,
-  'tetragonal-P': KPATH_TETRAGONAL_P,
-  'tetragonal-I': KPATH_TETRAGONAL_I,
-  'orthorhombic-P': KPATH_ORTHORHOMBIC_P,
-  'orthorhombic-C': KPATH_ORTHORHOMBIC_C,
-  'orthorhombic-I': KPATH_ORTHORHOMBIC_I,
-  'orthorhombic-F': KPATH_ORTHORHOMBIC_F,
-  'hexagonal': KPATH_HEXAGONAL,
-  'trigonal-R': KPATH_TRIGONAL_R,
-  'monoclinic-P': KPATH_MONOCLINIC_P,
-  'monoclinic-C': KPATH_MONOCLINIC_C,
-  'triclinic': KPATH_TRICLINIC,
-};
-
-/**
- * Get the standard k-path for a given Bravais lattice
- */
-export function getStandardKPath(lattice: BravaisLattice): StandardKPath {
-  return KPATH_DATABASE[lattice];
+function buildStandardKPath(lattice: BravaisLattice, params: KPathLatticeParams): StandardKPath {
+  const bzType = BRAVAIS_TO_BZ[lattice];
+  const bzData = getBrillouinZoneData(bzType, params);
+  return {
+    lattice,
+    displayName: BRAVAIS_DISPLAY_NAME[lattice],
+    description: `Canonical path for ${BRAVAIS_DISPLAY_NAME[lattice]} (${bzData.latticeType}).`,
+    points: bzData.points.map((p) => ({
+      label: p.label,
+      qeLabel: toQeLabel(p.label),
+      coords: [p.coords[0], p.coords[1], p.coords[2]],
+      description: p.description,
+    })),
+    defaultPath: bzData.recommendedPath.map(([from, to]) => ({ from, to })),
+  };
 }
 
 /**
- * Format k-path for QE bands input
+ * Compatibility export for previous API shape.
+ *
+ * This material-agnostic table uses representative lattice parameters per
+ * Bravais family. Use `getStandardKPath(lattice, params)` when branch-sensitive
+ * families (hR, oF, mC, tI) require exact metric-dependent paths.
+ */
+export const KPATH_DATABASE: Record<BravaisLattice, StandardKPath> = {
+  "cubic-P": buildStandardKPath("cubic-P", DEFAULT_PARAMS["cubic-P"]),
+  "cubic-F": buildStandardKPath("cubic-F", DEFAULT_PARAMS["cubic-F"]),
+  "cubic-I": buildStandardKPath("cubic-I", DEFAULT_PARAMS["cubic-I"]),
+  "tetragonal-P": buildStandardKPath("tetragonal-P", DEFAULT_PARAMS["tetragonal-P"]),
+  "tetragonal-I": buildStandardKPath("tetragonal-I", DEFAULT_PARAMS["tetragonal-I"]),
+  "orthorhombic-P": buildStandardKPath("orthorhombic-P", DEFAULT_PARAMS["orthorhombic-P"]),
+  "orthorhombic-C": buildStandardKPath("orthorhombic-C", DEFAULT_PARAMS["orthorhombic-C"]),
+  "orthorhombic-I": buildStandardKPath("orthorhombic-I", DEFAULT_PARAMS["orthorhombic-I"]),
+  "orthorhombic-F": buildStandardKPath("orthorhombic-F", DEFAULT_PARAMS["orthorhombic-F"]),
+  "hexagonal": buildStandardKPath("hexagonal", DEFAULT_PARAMS["hexagonal"]),
+  "trigonal-R": buildStandardKPath("trigonal-R", DEFAULT_PARAMS["trigonal-R"]),
+  "monoclinic-P": buildStandardKPath("monoclinic-P", DEFAULT_PARAMS["monoclinic-P"]),
+  "monoclinic-C": buildStandardKPath("monoclinic-C", DEFAULT_PARAMS["monoclinic-C"]),
+  triclinic: buildStandardKPath("triclinic", DEFAULT_PARAMS["triclinic"]),
+};
+
+/**
+ * Get the standard k-path for a Bravais lattice.
+ *
+ * Optional lattice parameters let callers resolve branch-dependent conventions
+ * (e.g., hR1/hR2, oF1/oF2/oF3, mC1-5).
+ */
+export function getStandardKPath(
+  lattice: BravaisLattice,
+  params?: Partial<KPathLatticeParams>
+): StandardKPath {
+  return buildStandardKPath(lattice, resolveParams(lattice, params));
+}
+
+/**
+ * Format k-path for QE bands input.
  */
 export function formatKPathForQE(
   points: { point: HighSymmetryPoint; npoints: number }[]
 ): string {
   const lines: string[] = [];
-  lines.push(`K_POINTS {crystal_b}`);
+  lines.push("K_POINTS {crystal_b}");
   lines.push(`${points.length}`);
 
   for (const { point, npoints } of points) {
@@ -383,5 +241,5 @@ export function formatKPathForQE(
     lines.push(`${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)} ${npoints}  ${point.qeLabel}`);
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }

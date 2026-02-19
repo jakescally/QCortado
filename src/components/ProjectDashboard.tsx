@@ -9,6 +9,7 @@ import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, Sav
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "../lib/saveSizeMode";
 import { isPhononReadyScf } from "../lib/phononReady";
 import { useTheme } from "../lib/ThemeContext";
 import { EditProjectDialog } from "./EditProjectDialog";
@@ -652,6 +653,9 @@ export function ProjectDashboard({
   const [globalMpiCpuCount, setGlobalMpiCpuCount] = useState(1);
   const [isSavingGlobalMpi, setIsSavingGlobalMpi] = useState(false);
   const [globalMpiStatus, setGlobalMpiStatus] = useState<string | null>(null);
+  const [saveSizeMode, setSaveSizeMode] = useState<SaveSizeMode>("large");
+  const [isSavingSaveSizeMode, setIsSavingSaveSizeMode] = useState(false);
+  const [saveSizeStatus, setSaveSizeStatus] = useState<string | null>(null);
   const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
   const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
 
@@ -670,6 +674,7 @@ export function ProjectDashboard({
   const [isImporting, setIsImporting] = useState(false);
   const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [isRefreshingProject, setIsRefreshingProject] = useState(false);
   const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
 
   // Expanded calculation
@@ -683,6 +688,7 @@ export function ProjectDashboard({
   useEffect(() => {
     void loadExecutionPrefix();
     void loadGlobalMpiSettings();
+    void loadGlobalSaveSizeSetting();
   }, []);
 
   // Close settings menu when clicking outside
@@ -755,6 +761,26 @@ export function ProjectDashboard({
     }
   }
 
+  async function loadGlobalSaveSizeSetting() {
+    const mode = await loadGlobalSaveSizeMode();
+    setSaveSizeMode(mode);
+  }
+
+  async function saveSaveSizeMode() {
+    setIsSavingSaveSizeMode(true);
+    setSaveSizeStatus(null);
+    try {
+      const saved = await saveGlobalSaveSizeMode(saveSizeMode);
+      setSaveSizeMode(saved);
+      setSaveSizeStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save global save-size mode:", e);
+      setSaveSizeStatus("Failed to save");
+    } finally {
+      setIsSavingSaveSizeMode(false);
+    }
+  }
+
   function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -792,7 +818,7 @@ export function ProjectDashboard({
     }
   }
 
-  async function loadProject(options: { showLoading?: boolean; refreshSelectedCif?: boolean } = {}) {
+  async function loadProject(options: { showLoading?: boolean; refreshSelectedCif?: boolean } = {}): Promise<boolean> {
     const { showLoading = true, refreshSelectedCif = true } = options;
     if (showLoading) {
       setIsLoading(true);
@@ -814,7 +840,7 @@ export function ProjectDashboard({
               ? proj.last_opened_cif_id
               : proj.cif_variants[0].id;
 
-        if (!cifToOpen) return;
+        if (!cifToOpen) return true;
 
         if (refreshSelectedCif || cifToOpen !== selectedCifId || !crystalData) {
           await selectCif(cifToOpen);
@@ -825,14 +851,27 @@ export function ProjectDashboard({
         setCifContent("");
         setExpandedCalc(null);
       }
+      return true;
     } catch (e) {
       console.error("Failed to load project:", e);
       setError(String(e));
+      return false;
     } finally {
       if (showLoading) {
         setIsLoading(false);
       }
     }
+  }
+
+  async function handleRefreshProject() {
+    if (isRefreshingProject) return;
+    setIsRefreshingProject(true);
+    setInfoMessage(null);
+    const refreshed = await loadProject({ showLoading: false, refreshSelectedCif: false });
+    if (refreshed) {
+      setInfoMessage("Project refreshed.");
+    }
+    setIsRefreshingProject(false);
   }
 
   async function selectCif(cifId: string) {
@@ -1497,6 +1536,36 @@ export function ProjectDashboard({
             </div>
             <div className="settings-menu-divider" />
             <div className="settings-menu-section">
+              <label className="settings-menu-label" htmlFor="dashboard-save-size-mode">
+                Calculation Save Size
+              </label>
+              <select
+                id="dashboard-save-size-mode"
+                className="settings-menu-input"
+                value={saveSizeMode}
+                onChange={(event) => {
+                  const value = event.target.value === "small" ? "small" : "large";
+                  setSaveSizeMode(value);
+                  setSaveSizeStatus(null);
+                }}
+              >
+                <option value="large">Large (full restart data)</option>
+                <option value="small">Small (strip wavefunction archives)</option>
+              </select>
+              <p className="settings-menu-hint">
+                `Small` keeps useful outputs while removing large `wfc*` scratch files from saved calculation folders.
+              </p>
+              <button
+                className="settings-menu-item"
+                onClick={saveSaveSizeMode}
+                disabled={isSavingSaveSizeMode}
+              >
+                {isSavingSaveSizeMode ? "Saving..." : "Save Size Mode"}
+              </button>
+              {saveSizeStatus && <div className="settings-menu-status">{saveSizeStatus}</div>}
+            </div>
+            <div className="settings-menu-divider" />
+            <div className="settings-menu-section">
               <label className="settings-menu-label">Temporary Storage</label>
               <p className="settings-menu-hint">
                 Remove `/tmp` and system temp QCortado working folders.
@@ -1647,6 +1716,16 @@ export function ProjectDashboard({
               <p className="dashboard-description">{project.description}</p>
             )}
           </div>
+          <div className="dashboard-header-actions">
+            <button
+              className="dashboard-refresh-btn"
+              onClick={() => void handleRefreshProject()}
+              disabled={isRefreshingProject}
+              title="Reload project data"
+            >
+              {isRefreshingProject ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
 
         {infoMessage && <div className="info-banner">{infoMessage}</div>}
@@ -1737,26 +1816,36 @@ export function ProjectDashboard({
             <p className="dashboard-description">{project.description}</p>
           )}
         </div>
-        <div className="structure-selector">
-          <label className="structure-selector-label">Structure</label>
-          <select
-            value={selectedCifId || ""}
-            onChange={(e) => selectCif(e.target.value)}
-          >
-            {project.cif_variants.map((variant) => (
-              <option key={variant.id} value={variant.id}>
-                {variant.formula} ({variant.filename})
-              </option>
-            ))}
-          </select>
+        <div className="dashboard-header-actions">
           <button
-            className="add-structure-inline-btn"
-            onClick={handleImportCIF}
-            disabled={isImporting}
-            title="Add new structure"
+            className="dashboard-refresh-btn"
+            onClick={() => void handleRefreshProject()}
+            disabled={isRefreshingProject}
+            title="Reload project data"
           >
-            +
+            {isRefreshingProject ? "Refreshing..." : "Refresh"}
           </button>
+          <div className="structure-selector">
+            <label className="structure-selector-label">Structure</label>
+            <select
+              value={selectedCifId || ""}
+              onChange={(e) => selectCif(e.target.value)}
+            >
+              {project.cif_variants.map((variant) => (
+                <option key={variant.id} value={variant.id}>
+                  {variant.formula} ({variant.filename})
+                </option>
+              ))}
+            </select>
+            <button
+              className="add-structure-inline-btn"
+              onClick={handleImportCIF}
+              disabled={isImporting}
+              title="Add new structure"
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
 

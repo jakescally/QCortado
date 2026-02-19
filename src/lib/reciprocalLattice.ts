@@ -9,6 +9,13 @@ export type Vec3 = [number, number, number];
 export type Matrix3x3 = [Vec3, Vec3, Vec3];
 
 /**
+ * Rhombohedral lattice setting.
+ * - "hexagonal": 3x conventional hex cell (common CIF representation for R lattices)
+ * - "rhombohedral": primitive rhombohedral setting
+ */
+export type RhombohedralSetting = "hexagonal" | "rhombohedral";
+
+/**
  * Compute the cross product of two 3D vectors.
  */
 export function cross(a: Vec3, b: Vec3): Vec3 {
@@ -175,6 +182,48 @@ export function metricTensor(lattice: Matrix3x3): Matrix3x3 {
  */
 export type CenteringType = "P" | "F" | "I" | "C" | "A" | "B" | "R";
 
+function angleDegrees(a: Vec3, b: Vec3): number {
+  const denom = magnitude(a) * magnitude(b);
+  if (denom <= 0) return 0;
+  const cosine = Math.max(-1, Math.min(1, dot(a, b) / denom));
+  return (Math.acos(cosine) * 180) / Math.PI;
+}
+
+function approximatelyEqual(a: number, b: number, relativeTolerance = 0.03): boolean {
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= relativeTolerance * scale;
+}
+
+function approximatelyAngle(angle: number, target: number, toleranceDeg = 3): boolean {
+  return Math.abs(angle - target) <= toleranceDeg;
+}
+
+/**
+ * Detect whether an R-lattice is expressed in hexagonal or rhombohedral setting.
+ *
+ * Most CIFs for space groups 146, 148, 155, 160, 161, 166, 167 are reported in
+ * hexagonal setting (a=b, alpha=beta=90, gamma=120). In that case we need an
+ * explicit transformation to primitive rhombohedral vectors for BZ/k-path logic.
+ */
+export function detectRhombohedralSettingFromLattice(
+  conventional: Matrix3x3
+): RhombohedralSetting {
+  const [a, b, c] = conventional;
+  const aLen = magnitude(a);
+  const bLen = magnitude(b);
+  const alpha = angleDegrees(b, c);
+  const beta = angleDegrees(a, c);
+  const gamma = angleDegrees(a, b);
+
+  const isHexLike =
+    approximatelyEqual(aLen, bLen) &&
+    approximatelyAngle(alpha, 90) &&
+    approximatelyAngle(beta, 90) &&
+    approximatelyAngle(gamma, 120);
+
+  return isHexLike ? "hexagonal" : "rhombohedral";
+}
+
 /**
  * Convert conventional cell vectors to primitive cell vectors.
  *
@@ -252,8 +301,19 @@ export function conventionalToPrimitive(
       ];
 
     case "R":
-      // Rhombohedral - already primitive in rhombohedral setting
-      // If given in hexagonal setting, would need different transformation
+      // Rhombohedral: CIFs are frequently provided in hexagonal setting.
+      // Convert hexagonal conventional vectors to primitive rhombohedral vectors:
+      // [a_h, b_h, c_h]^T = M [a_r, b_r, c_r]^T
+      // with M = [[1,-1,0],[0,1,-1],[1,1,1]]
+      // therefore [a_r, b_r, c_r]^T = M^-1 [a_h, b_h, c_h]^T.
+      if (detectRhombohedralSettingFromLattice(conventional) === "hexagonal") {
+        const [a_h, b_h, c_h] = conventional;
+        const a_r = scale(add(add(scale(a_h, 2), b_h), c_h), 1 / 3);
+        const b_r = scale(add(add(scale(a_h, -1), b_h), c_h), 1 / 3);
+        const c_r = scale(add(add(scale(a_h, -1), scale(b_h, -2)), c_h), 1 / 3);
+        return [a_r, b_r, c_r];
+      }
+      // Already in primitive rhombohedral setting.
       return conventional;
 
     default:
@@ -278,7 +338,8 @@ export function conventionalToPrimitive(
  */
 export function kPointPrimitiveToConventional(
   kPoint: Vec3,
-  centering: CenteringType
+  centering: CenteringType,
+  options?: { rhombohedralSetting?: RhombohedralSetting }
 ): Vec3 {
   const [k1, k2, k3] = kPoint;
 
@@ -331,8 +392,20 @@ export function kPointPrimitiveToConventional(
       ];
 
     case "R":
-      // Rhombohedral - typically already in correct basis
-      return kPoint;
+      // Rhombohedral primitive -> hexagonal conventional basis transform:
+      // k_conv = (P^-1)^T k_prim where:
+      // [a_r b_r c_r] = [a_h b_h c_h] P
+      // P = (1/3) * [[2,-1,-1],[1,1,-2],[1,1,1]]
+      // (P^-1)^T = [[1,-1,0],[0,1,-1],[1,1,1]]
+      // If already in rhombohedral setting, keep coordinates unchanged.
+      if (options?.rhombohedralSetting === "rhombohedral") {
+        return kPoint;
+      }
+      return [
+        k1 - k2,
+        k2 - k3,
+        k1 + k2 + k3,
+      ];
 
     default:
       return kPoint;

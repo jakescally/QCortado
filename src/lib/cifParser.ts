@@ -134,6 +134,64 @@ function extractValue(content: string, tag: string): string | undefined {
   return undefined;
 }
 
+function extractValueCaseInsensitive(content: string, tag: string): string | undefined {
+  const regex = new RegExp(
+    `^${tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+(.+)$`,
+    "mi"
+  );
+  const match = content.match(regex);
+  if (match) {
+    let value = match[1].trim();
+    if (
+      (value.startsWith("'") && value.endsWith("'")) ||
+      (value.startsWith('"') && value.endsWith('"'))
+    ) {
+      value = value.slice(1, -1);
+    }
+    return value;
+  }
+  return undefined;
+}
+
+function extractFirstAvailableValue(content: string, tags: string[]): string | undefined {
+  for (const tag of tags) {
+    const direct = extractValue(content, tag);
+    if (direct != null && direct.length > 0) return direct;
+  }
+  for (const tag of tags) {
+    const ci = extractValueCaseInsensitive(content, tag);
+    if (ci != null && ci.length > 0) return ci;
+  }
+  return undefined;
+}
+
+function parseSpaceGroupNumber(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  const parsedDirect = Number.parseInt(trimmed, 10);
+  if (Number.isInteger(parsedDirect) && parsedDirect >= 1 && parsedDirect <= 230) {
+    return parsedDirect;
+  }
+  const match = trimmed.match(/(\d{1,3})/);
+  if (!match) return undefined;
+  const parsedFromMatch = Number.parseInt(match[1], 10);
+  if (Number.isInteger(parsedFromMatch) && parsedFromMatch >= 1 && parsedFromMatch <= 230) {
+    return parsedFromMatch;
+  }
+  return undefined;
+}
+
+function parseSpaceGroupNumberFromHM(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const match = raw.match(/#\s*(\d{1,3})/);
+  if (!match) return undefined;
+  const parsed = Number.parseInt(match[1], 10);
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 230) {
+    return parsed;
+  }
+  return undefined;
+}
+
 function extractMultilineValue(content: string, tag: string): string | undefined {
   const tagIndex = content.indexOf(tag);
   if (tagIndex === -1) return undefined;
@@ -513,15 +571,27 @@ export function parseCIF(content: string): CrystalData {
   if (cellZ) crystalData.cell_formula_units_Z = parseInt(cellZ);
 
   // Space group
-  const spaceGroupHM =
-    extractValue(content, "_space_group_name_H-M_alt") ||
-    extractValue(content, "_symmetry_space_group_name_H-M");
+  const spaceGroupHM = extractFirstAvailableValue(content, [
+    "_space_group_name_H-M_alt",
+    "_symmetry_space_group_name_H-M",
+    "_space_group.name_H-M_alt",
+    "_space_group.name_H-M_ref",
+    "_space_group_name_H-M_ref",
+  ]);
   if (spaceGroupHM) crystalData.space_group_HM = spaceGroupHM;
 
-  const spaceGroupIT =
-    extractValue(content, "_space_group_IT_number") ||
-    extractValue(content, "_symmetry_Int_Tables_number");
-  if (spaceGroupIT) crystalData.space_group_IT_number = parseInt(spaceGroupIT);
+  const spaceGroupIT = extractFirstAvailableValue(content, [
+    "_space_group_IT_number",
+    "_symmetry_Int_Tables_number",
+    "_symmetry_int_tables_number",
+    "_space_group.it_number",
+    "_space_group_IT_no",
+  ]);
+  const parsedITNumber =
+    parseSpaceGroupNumber(spaceGroupIT) ?? parseSpaceGroupNumberFromHM(spaceGroupHM);
+  if (parsedITNumber != null) {
+    crystalData.space_group_IT_number = parsedITNumber;
+  }
 
   // Physical properties
   const density = extractValue(content, "_exptl_crystal_density_diffrn");

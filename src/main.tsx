@@ -1,6 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { validateBrillouinZoneFixtures } from "./lib/brillouinZoneFixtures";
+
+if (import.meta.env.DEV) {
+  validateBrillouinZoneFixtures();
+}
 
 const userAgent = navigator.userAgent.toLowerCase();
 const platform = userAgent.includes("linux")

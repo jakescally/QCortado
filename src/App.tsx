@@ -20,6 +20,7 @@ import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
+import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
 import { CrystalData, SCFPreset, OptimizedStructureOption } from "./lib/types";
 
 interface ProjectSummary {
@@ -244,6 +245,9 @@ function AppInner() {
   const [globalMpiCpuCount, setGlobalMpiCpuCount] = useState(1);
   const [isSavingGlobalMpi, setIsSavingGlobalMpi] = useState(false);
   const [globalMpiStatus, setGlobalMpiStatus] = useState<string | null>(null);
+  const [saveSizeMode, setSaveSizeMode] = useState<SaveSizeMode>("large");
+  const [isSavingSaveSizeMode, setIsSavingSaveSizeMode] = useState(false);
+  const [saveSizeStatus, setSaveSizeStatus] = useState<string | null>(null);
   const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
   const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
   const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
@@ -290,6 +294,7 @@ function AppInner() {
     void loadFermiSurferPath();
     void loadExecutionPrefix();
     void loadGlobalMpiSettings();
+    void loadGlobalSaveSizeSetting();
   }, []);
 
   // Listen for close confirmation events from backend
@@ -509,6 +514,26 @@ function AppInner() {
       setGlobalMpiStatus("Failed to save");
     } finally {
       setIsSavingGlobalMpi(false);
+    }
+  }
+
+  async function loadGlobalSaveSizeSetting() {
+    const mode = await loadGlobalSaveSizeMode();
+    setSaveSizeMode(mode);
+  }
+
+  async function saveGlobalSaveSizeSetting() {
+    setIsSavingSaveSizeMode(true);
+    setSaveSizeStatus(null);
+    try {
+      const saved = await saveGlobalSaveSizeMode(saveSizeMode);
+      setSaveSizeMode(saved);
+      setSaveSizeStatus("Saved");
+    } catch (e) {
+      console.error("Failed to save global save-size mode:", e);
+      setSaveSizeStatus("Failed to save");
+    } finally {
+      setIsSavingSaveSizeMode(false);
     }
   }
 
@@ -830,6 +855,37 @@ function AppInner() {
                   {isSavingGlobalMpi ? "Saving..." : "Save MPI Defaults"}
                 </button>
                 {globalMpiStatus && <div className="settings-menu-status">{globalMpiStatus}</div>}
+              </div>
+
+              <div className="settings-menu-divider" />
+              <div className="settings-menu-section">
+                <label className="settings-menu-label" htmlFor="global-save-size-mode">
+                  Calculation Save Size
+                </label>
+                <select
+                  id="global-save-size-mode"
+                  className="settings-menu-input"
+                  value={saveSizeMode}
+                  onChange={(event) => {
+                    const value = event.target.value === "small" ? "small" : "large";
+                    setSaveSizeMode(value);
+                    setSaveSizeStatus(null);
+                  }}
+                >
+                  <option value="large">Large (full restart data)</option>
+                  <option value="small">Small (strip wavefunction archives)</option>
+                </select>
+                <p className="settings-menu-hint">
+                  `Small` keeps useful outputs while removing large `wfc*` scratch files from saved calculation folders.
+                </p>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => void saveGlobalSaveSizeSetting()}
+                  disabled={isSavingSaveSizeMode}
+                >
+                  {isSavingSaveSizeMode ? "Saving..." : "Save Size Mode"}
+                </button>
+                {saveSizeStatus && <div className="settings-menu-status">{saveSizeStatus}</div>}
               </div>
 
               <div className="settings-menu-divider" />

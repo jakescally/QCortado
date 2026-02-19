@@ -7,6 +7,15 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+/// Controls how much calculation scratch data is persisted in project history.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveSizeMode {
+    #[default]
+    Large,
+    Small,
+}
+
 /// Default MPI settings applied when creating new calculation runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MpiDefaultsConfig {
@@ -30,6 +39,9 @@ pub struct AppConfig {
     /// Optional global defaults for MPI in calculation wizards
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mpi_defaults: Option<MpiDefaultsConfig>,
+    /// Global save-size mode for persisted project artifacts.
+    #[serde(default)]
+    pub save_size_mode: SaveSizeMode,
 }
 
 /// Gets the config file path
@@ -102,5 +114,12 @@ pub fn update_mpi_defaults(
 ) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.mpi_defaults = mpi_defaults;
+    save_config(app, &config)
+}
+
+/// Updates global save-size mode and saves.
+pub fn update_save_size_mode(app: &AppHandle, mode: SaveSizeMode) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.save_size_mode = mode;
     save_config(app, &config)
 }

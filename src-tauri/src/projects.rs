@@ -19,6 +19,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
+use crate::config::{self, SaveSizeMode};
 use crate::qe::{read_phonon_dispersion_file, read_phonon_dos_file, QEResult};
 
 // ============================================================================
@@ -790,7 +791,13 @@ fn extract_project_archive_to_directory(
         .map_err(|e| format!("Failed to open archive {}: {}", archive_path.display(), e))?;
     let archive_total_bytes = archive_file
         .metadata()
-        .map_err(|e| format!("Failed to read archive metadata {}: {}", archive_path.display(), e))?
+        .map_err(|e| {
+            format!(
+                "Failed to read archive metadata {}: {}",
+                archive_path.display(),
+                e
+            )
+        })?
         .len();
     let mut magic = [0_u8; 4];
     let read_count = archive_file
@@ -809,7 +816,9 @@ fn extract_project_archive_to_directory(
             Box::new(BufReader::new(counting_reader))
         };
     let mut emit_stream_progress = || {
-        let processed = read_counter.load(Ordering::Relaxed).min(archive_total_bytes);
+        let processed = read_counter
+            .load(Ordering::Relaxed)
+            .min(archive_total_bytes);
         on_progress(processed, archive_total_bytes)
     };
     emit_stream_progress()?;
@@ -1064,7 +1073,10 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
         "bands" | "band" => Some("bands"),
         "dos" => Some("dos"),
         "phonon" => Some("phonon"),
-        "optimization" | "geometry_optimization" | "geometry optimization" | "relax"
+        "optimization"
+        | "geometry_optimization"
+        | "geometry optimization"
+        | "relax"
         | "vcrelax" => Some("optimization"),
         "fermi_surface" | "fermisurface" | "fermi-surface" | "fermi surface" => {
             Some("fermi_surface")
@@ -1081,7 +1093,11 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
 #[tauri::command]
 pub fn list_project_folders(app: AppHandle) -> Result<Vec<ProjectFolder>, String> {
     let mut folders = load_project_folders(&app)?;
-    folders.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    folders.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
     Ok(folders)
 }
 
@@ -1095,7 +1111,10 @@ pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFold
         .iter()
         .any(|folder| folder.name.eq_ignore_ascii_case(&normalized_name));
     if name_taken {
-        return Err(format!("A folder named \"{}\" already exists", normalized_name));
+        return Err(format!(
+            "A folder named \"{}\" already exists",
+            normalized_name
+        ));
     }
 
     let folder = ProjectFolder {
@@ -1118,11 +1137,14 @@ pub fn rename_project_folder(
     let normalized_name = normalize_folder_name(&name)?;
     let mut folders = load_project_folders(&app)?;
 
-    let duplicate_name = folders.iter().any(|folder| {
-        folder.id != folder_id && folder.name.eq_ignore_ascii_case(&normalized_name)
-    });
+    let duplicate_name = folders
+        .iter()
+        .any(|folder| folder.id != folder_id && folder.name.eq_ignore_ascii_case(&normalized_name));
     if duplicate_name {
-        return Err(format!("A folder named \"{}\" already exists", normalized_name));
+        return Err(format!(
+            "A folder named \"{}\" already exists",
+            normalized_name
+        ));
     }
 
     let folder = folders
@@ -1454,6 +1476,10 @@ pub fn save_calculation(
     calc_data: SaveCalculationData,
     working_dir: Option<String>,
 ) -> Result<CalculationRun, String> {
+    let save_size_mode = config::load_config(&app)
+        .map(|cfg| cfg.save_size_mode)
+        .unwrap_or_else(|_| SaveSizeMode::Large);
+
     let projects_dir = ensure_projects_dir(&app)?;
     let project_dir = projects_dir.join(&project_id);
 
@@ -1515,6 +1541,9 @@ pub fn save_calculation(
             // For phonons, default to compact artifacts unless EPW-prep explicitly asks for full data.
             if calc_data.calc_type == "phonon" && !preserve_full_phonon_artifacts {
                 copy_compact_phonon_artifacts(&work_path, &tmp_dir)?;
+            } else if save_size_mode == SaveSizeMode::Small {
+                // Compact mode strips heavy wavefunction archives while preserving useful artifacts.
+                copy_dir_recursive_compact(&work_path, &tmp_dir)?;
             } else {
                 // Copy all files and directories for non-phonon, or EPW-preserving phonon calculations.
                 copy_dir_recursive(&work_path, &tmp_dir)?;
@@ -1577,6 +1606,49 @@ pub fn save_calculation(
 fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     let mut no_progress = |_delta: u64| Ok(());
     copy_dir_recursive_with_progress(src.as_path(), dst.as_path(), &mut no_progress)
+}
+
+fn is_wavefunction_archive_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    let lower = file_name.to_ascii_lowercase();
+    if !lower.starts_with("wfc") {
+        return false;
+    }
+
+    lower.ends_with(".dat") || lower.ends_with(".hdf5") || !lower.contains('.')
+}
+
+fn copy_dir_recursive_compact(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory {}: {}", dst.display(), e))?;
+    }
+
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+
+        if path.is_dir() {
+            copy_dir_recursive_compact(&path, &dest_path)?;
+        } else if path.is_file() {
+            if is_wavefunction_archive_file(&path) {
+                continue;
+            }
+            fs::copy(&path, &dest_path)
+                .map_err(|e| format!("Failed to copy {}: {}", path.display(), e))?;
+        } else if path.is_symlink() {
+            return Err(format!(
+                "Copy operation does not support symbolic links: {}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn copy_dir_recursive_with_progress(
@@ -2323,10 +2395,17 @@ pub async fn import_project_archive(
             .metadata()
             .map_err(|e| format!("Failed to read archive metadata: {}", e))?
             .len();
-        emit_project_import_progress(&app_handle, &import_id, "extracting", 0, archive_total_bytes);
+        emit_project_import_progress(
+            &app_handle,
+            &import_id,
+            "extracting",
+            0,
+            archive_total_bytes,
+        );
 
         let projects_dir = ensure_projects_dir(&app_handle)?;
-        let extraction_dir = std::env::temp_dir().join(format!("qcortado_import_{}", generate_id()));
+        let extraction_dir =
+            std::env::temp_dir().join(format!("qcortado_import_{}", generate_id()));
         fs::create_dir_all(&extraction_dir).map_err(|e| {
             format!(
                 "Failed to create temporary import directory {}: {}",
@@ -2344,7 +2423,8 @@ pub async fn import_project_archive(
                 &mut |processed_bytes, total_bytes| {
                     let processed = processed_bytes.min(total_bytes);
                     let should_emit = processed == total_bytes
-                        || processed.saturating_sub(last_extract_emitted) >= IMPORT_PROGRESS_EMIT_BYTES
+                        || processed.saturating_sub(last_extract_emitted)
+                            >= IMPORT_PROGRESS_EMIT_BYTES
                         || last_extract_emit_time.elapsed()
                             >= Duration::from_millis(IMPORT_PROGRESS_EMIT_INTERVAL_MS);
                     if should_emit {
@@ -2411,7 +2491,13 @@ pub async fn import_project_archive(
             }
 
             let install_total_bytes = calculate_directory_size(&extraction_dir)?;
-            emit_project_import_progress(&app_handle, &import_id, "installing", 0, install_total_bytes);
+            emit_project_import_progress(
+                &app_handle,
+                &import_id,
+                "installing",
+                0,
+                install_total_bytes,
+            );
 
             let mut installed_bytes = 0_u64;
             let mut last_install_emitted = 0_u64;
@@ -2423,7 +2509,8 @@ pub async fn import_project_archive(
                     installed_bytes = installed_bytes.saturating_add(copied);
                     let processed = installed_bytes.min(install_total_bytes);
                     let should_emit = processed == install_total_bytes
-                        || processed.saturating_sub(last_install_emitted) >= IMPORT_PROGRESS_EMIT_BYTES
+                        || processed.saturating_sub(last_install_emitted)
+                            >= IMPORT_PROGRESS_EMIT_BYTES
                         || last_install_emit_time.elapsed()
                             >= Duration::from_millis(IMPORT_PROGRESS_EMIT_INTERVAL_MS);
                     if should_emit {

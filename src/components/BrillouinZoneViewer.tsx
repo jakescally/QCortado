@@ -12,6 +12,8 @@ import * as THREE from "three";
 import { CrystalData } from "../lib/types";
 import {
   Vec3,
+  dot,
+  magnitude,
   realSpaceLatticeVectors,
   reciprocalLatticeVectors,
   fractionalToCartesian,
@@ -25,8 +27,10 @@ import {
   HighSymmetryPoint,
   getBrillouinZoneData,
   BravaisLatticeType,
+  findHighSymmetryPoint,
 } from "../lib/brillouinZoneData";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
+import { SymmetryTransformResult } from "../lib/symmetryTransform";
 
 // ============================================================================
 // Types
@@ -43,6 +47,82 @@ interface BrillouinZoneViewerProps {
   onPathChange: (path: KPathPoint[]) => void;
   initialPath?: KPathPoint[];
   pointsPerSegment?: number;
+  symmetryTransform?: SymmetryTransformResult | null;
+}
+
+function coerceSpaceGroupNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 230) {
+    return null;
+  }
+  return parsed;
+}
+
+function extractSpaceGroupNumberFromHM(hm: string | undefined): number | null {
+  if (!hm) return null;
+  const match = hm.match(/#\s*(\d{1,3})/);
+  if (!match) return null;
+  return coerceSpaceGroupNumber(match[1]);
+}
+
+function normalizeSpaceGroupHM(value: string | undefined): string {
+  if (!value) return "";
+  return value
+    .toLowerCase()
+    .replace(/[−–—]/g, "-")
+    .replace(/[\s_:'"]/g, "");
+}
+
+function detectBravaisFromHMSymbol(value: string | undefined): BravaisLattice | null {
+  const normalized = normalizeSpaceGroupHM(value);
+  if (!normalized) return null;
+
+  // Rhombohedral setting (e.g., "R -3 m H", "R-3m", "R3c")
+  if (normalized.startsWith("r")) {
+    return "trigonal-R";
+  }
+
+  // Common hexagonal HM symbols in P setting.
+  if (
+    normalized.startsWith("p6") ||
+    normalized.startsWith("p-6") ||
+    normalized.startsWith("p63")
+  ) {
+    return "hexagonal";
+  }
+
+  return null;
+}
+
+const SUBSCRIPT_TO_ASCII: Record<string, string> = {
+  "₀": "0",
+  "₁": "1",
+  "₂": "2",
+  "₃": "3",
+  "₄": "4",
+  "₅": "5",
+  "₆": "6",
+  "₇": "7",
+  "₈": "8",
+  "₉": "9",
+};
+
+function formatLabelForDisplay(label: string): string {
+  return label.replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (char) => SUBSCRIPT_TO_ASCII[char] ?? char);
+}
+
+function crystalSystemRankFromSpaceGroup(spaceGroupNumber: number): number {
+  if (spaceGroupNumber >= 1 && spaceGroupNumber <= 2) return 0; // triclinic
+  if (spaceGroupNumber >= 3 && spaceGroupNumber <= 15) return 1; // monoclinic
+  if (spaceGroupNumber >= 16 && spaceGroupNumber <= 74) return 2; // orthorhombic
+  if (spaceGroupNumber >= 75 && spaceGroupNumber <= 142) return 3; // tetragonal
+  if (spaceGroupNumber >= 143 && spaceGroupNumber <= 167) return 4; // trigonal
+  if (spaceGroupNumber >= 168 && spaceGroupNumber <= 194) return 5; // hexagonal
+  if (spaceGroupNumber >= 195 && spaceGroupNumber <= 230) return 6; // cubic
+  return -1;
 }
 
 // ============================================================================
@@ -82,6 +162,7 @@ function HighSymmetryPointMesh({
     }
   });
 
+  const displayLabel = formatLabelForDisplay(point.label);
   const color = isSelected
     ? "#ff4444"
     : isInPath
@@ -123,7 +204,7 @@ function HighSymmetryPointMesh({
           outlineWidth={0.003}
           outlineColor="#000000"
         >
-          {point.label}
+          {displayLabel}
           {pathIndex !== null ? ` (${pathIndex + 1})` : ""}
         </Text>
       </Billboard>
@@ -436,6 +517,7 @@ export function BrillouinZoneViewer({
   onPathChange,
   initialPath = [],
   pointsPerSegment = 20,
+  symmetryTransform = null,
 }: BrillouinZoneViewerProps) {
   const [path, setPath] = useState<KPathPoint[]>(initialPath);
   const [selectedPoint, setSelectedPoint] = useState<HighSymmetryPoint | null>(null);
@@ -447,10 +529,48 @@ export function BrillouinZoneViewer({
 
   // Determine Bravais lattice type first (needed for centering)
   const bravaisInfo = useMemo(() => {
-    const spaceGroup = crystalData.space_group_IT_number;
-    const bravaisType: BravaisLattice = spaceGroup
-      ? detectBravaisLattice(spaceGroup)
-      : "triclinic";
+    const cifSpaceGroup =
+      coerceSpaceGroupNumber(crystalData.space_group_IT_number) ??
+      extractSpaceGroupNumberFromHM(crystalData.space_group_HM);
+    const symmetrySpaceGroup = coerceSpaceGroupNumber(symmetryTransform?.spacegroupNumber);
+    const preferCifSpaceGroup =
+      cifSpaceGroup != null &&
+      symmetrySpaceGroup != null &&
+      crystalSystemRankFromSpaceGroup(symmetrySpaceGroup) <
+        crystalSystemRankFromSpaceGroup(cifSpaceGroup);
+
+    if (
+      preferCifSpaceGroup &&
+      symmetrySpaceGroup != null &&
+      cifSpaceGroup != null &&
+      symmetrySpaceGroup !== cifSpaceGroup
+    ) {
+      console.warn(
+        `Ignoring downgraded spglib space group ${symmetrySpaceGroup} in favor of CIF space group ${cifSpaceGroup} for BZ labeling.`,
+      );
+    }
+
+    const spaceGroup = preferCifSpaceGroup
+      ? cifSpaceGroup
+      : (symmetrySpaceGroup ?? cifSpaceGroup);
+
+    const hmFallback = preferCifSpaceGroup
+      ? (detectBravaisFromHMSymbol(crystalData.space_group_HM) ??
+        detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol))
+      : (detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol) ??
+        detectBravaisFromHMSymbol(crystalData.space_group_HM));
+
+    let bravaisType: BravaisLattice = hmFallback ?? "triclinic";
+    if (spaceGroup != null) {
+      try {
+        bravaisType = detectBravaisLattice(spaceGroup);
+      } catch (error) {
+        console.warn("Failed to detect Bravais lattice from space group:", spaceGroup, error);
+        if (hmFallback) {
+          bravaisType = hmFallback;
+        }
+      }
+    }
 
     // Map BravaisLattice type to BravaisLatticeType and centering
     const typeMap: Record<BravaisLattice, { latticeType: BravaisLatticeType; centering: CenteringType }> = {
@@ -470,23 +590,47 @@ export function BrillouinZoneViewer({
       "triclinic": { latticeType: "aP", centering: "P" },
     };
 
-    return typeMap[bravaisType] || { latticeType: "aP" as BravaisLatticeType, centering: "P" as CenteringType };
-  }, [crystalData.space_group_IT_number]);
+    const mapped =
+      typeMap[bravaisType] || {
+        latticeType: "aP" as BravaisLatticeType,
+        centering: "P" as CenteringType,
+      };
+
+    const useSymmetryTransform = symmetryTransform != null && !preferCifSpaceGroup;
+    return { ...mapped, useSymmetryTransform };
+  }, [
+    crystalData.space_group_HM,
+    crystalData.space_group_IT_number,
+    symmetryTransform?.internationalSymbol,
+    symmetryTransform?.spacegroupNumber,
+  ]);
 
   // Compute lattice data
   const latticeData = useMemo(() => {
-    const a = crystalData.cell_length_a.value;
-    const b = crystalData.cell_length_b.value;
-    const c = crystalData.cell_length_c.value;
-    const alpha = crystalData.cell_angle_alpha.value;
-    const beta = crystalData.cell_angle_beta.value;
-    const gamma = crystalData.cell_angle_gamma.value;
+    const angleDegrees = (u: Vec3, v: Vec3): number => {
+      const denom = magnitude(u) * magnitude(v);
+      if (denom <= 0) return 0;
+      const cosine = Math.max(-1, Math.min(1, dot(u, v) / denom));
+      return (Math.acos(cosine) * 180) / Math.PI;
+    };
 
-    // Conventional cell vectors
-    const conventionalLattice = realSpaceLatticeVectors(a, b, c, alpha, beta, gamma);
+    const useSymmetryTransform = bravaisInfo.useSymmetryTransform && symmetryTransform != null;
+    const conventionalLattice = useSymmetryTransform
+      ? symmetryTransform.standardizedConventionalLattice
+      : realSpaceLatticeVectors(
+          crystalData.cell_length_a.value,
+          crystalData.cell_length_b.value,
+          crystalData.cell_length_c.value,
+          crystalData.cell_angle_alpha.value,
+          crystalData.cell_angle_beta.value,
+          crystalData.cell_angle_gamma.value,
+        );
 
-    // Convert to primitive cell for BZ calculation
-    const primitiveLattice = conventionalToPrimitive(conventionalLattice, bravaisInfo.centering);
+    // Convert to primitive cell for BZ calculation unless backend provided one.
+    const primitiveLattice = useSymmetryTransform
+      ? symmetryTransform.standardizedPrimitiveLattice
+      : conventionalToPrimitive(conventionalLattice, bravaisInfo.centering);
+    const primitiveAlpha = angleDegrees(primitiveLattice[1], primitiveLattice[2]);
 
     // Reciprocal lattice of the PRIMITIVE cell (for BZ calculation)
     const primitiveRecipLattice = reciprocalLatticeVectors(primitiveLattice);
@@ -495,22 +639,35 @@ export function BrillouinZoneViewer({
     // Standard k-point tables use conventional reciprocal lattice coordinates
     const conventionalRecipLattice = reciprocalLatticeVectors(conventionalLattice);
 
+    const a = magnitude(conventionalLattice[0]);
+    const b = magnitude(conventionalLattice[1]);
+    const c = magnitude(conventionalLattice[2]);
+    const alpha = angleDegrees(conventionalLattice[1], conventionalLattice[2]);
+    const beta = angleDegrees(conventionalLattice[0], conventionalLattice[2]);
+    const gamma = angleDegrees(conventionalLattice[0], conventionalLattice[1]);
+
     return {
       conventionalLattice,
       primitiveLattice,
       primitiveRecipLattice,
       conventionalRecipLattice,
+      primitiveAlpha,
       a, b, c, alpha, beta, gamma,
     };
-  }, [crystalData, bravaisInfo.centering]);
+  }, [crystalData, bravaisInfo.centering, bravaisInfo.useSymmetryTransform, symmetryTransform]);
 
   // Get BZ high-symmetry point data (uses conventional coordinates)
   const bzData = useMemo(() => {
+    const alphaForPath =
+      bravaisInfo.latticeType === "hR"
+        ? latticeData.primitiveAlpha
+        : latticeData.alpha;
+
     return getBrillouinZoneData(bravaisInfo.latticeType, {
       a: latticeData.a,
       b: latticeData.b,
       c: latticeData.c,
-      alpha: latticeData.alpha,
+      alpha: alphaForPath,
       beta: latticeData.beta,
       gamma: latticeData.gamma,
     });
@@ -573,12 +730,11 @@ export function BrillouinZoneViewer({
 
   // Use recommended path
   const handleUseRecommended = useCallback(() => {
-    const pointByLabel = new Map(bzData.points.map((point) => [point.label, point]));
     const recommendedPath: KPathPoint[] = [];
 
     for (const [fromLabel, toLabel] of bzData.recommendedPath) {
-      const fromPoint = pointByLabel.get(fromLabel);
-      const toPoint = pointByLabel.get(toLabel);
+      const fromPoint = findHighSymmetryPoint(bzData, fromLabel);
+      const toPoint = findHighSymmetryPoint(bzData, toLabel);
       if (!fromPoint || !toPoint) {
         continue;
       }
@@ -626,10 +782,10 @@ export function BrillouinZoneViewer({
   // Format path for display
   const pathString = useMemo(() => {
     if (path.length === 0) return "";
-    let result = path[0].label;
+    let result = formatLabelForDisplay(path[0].label);
     for (let i = 1; i < path.length; i++) {
       const separator = path[i - 1].npoints === 0 ? " | " : " → ";
-      result += `${separator}${path[i].label}`;
+      result += `${separator}${formatLabelForDisplay(path[i].label)}`;
     }
     return result;
   }, [path]);
@@ -639,7 +795,7 @@ export function BrillouinZoneViewer({
       <div className="bz-viewer-header">
         <h4>Brillouin Zone - {bzData.name}</h4>
         <div className="bz-viewer-info">
-          <span>Click points to build k-path</span>
+          <span>Click points to build k-path (Setyawan-Curtarolo convention)</span>
         </div>
       </div>
 
@@ -695,7 +851,7 @@ export function BrillouinZoneViewer({
               }`}
               onClick={() => handlePointClick(point)}
             >
-              <span className="bz-point-label">{point.label}</span>
+              <span className="bz-point-label">{formatLabelForDisplay(point.label)}</span>
               <span className="bz-point-coords">
                 ({point.coords.map((c) => c.toFixed(3)).join(", ")})
               </span>

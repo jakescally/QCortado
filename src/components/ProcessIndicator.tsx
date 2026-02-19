@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTaskContext } from "../lib/TaskContext";
 import { ElapsedTimer } from "./ElapsedTimer";
 
@@ -9,10 +9,18 @@ interface ProcessIndicatorProps {
 export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
   const { activeTasks, cancelTask, dismissTask, queueSummary } = useTaskContext();
   const [confirmingCancel, setConfirmingCancel] = useState<string | null>(null);
+  const [isHidden, setIsHidden] = useState(false);
 
   // Show the most relevant task: prefer running, then most recent non-running
   const task = activeTasks.find((t) => t.status === "running") ??
     activeTasks[activeTasks.length - 1] ?? null;
+
+  useEffect(() => {
+    if (activeTasks.length === 0) {
+      setIsHidden(false);
+      setConfirmingCancel(null);
+    }
+  }, [activeTasks.length]);
 
   if (!task) return null;
 
@@ -45,6 +53,11 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
     await dismissTask(task.taskId);
   }
 
+  function handleHide() {
+    setIsHidden(true);
+    setConfirmingCancel(null);
+  }
+
   const typeLabels: Record<string, string> = {
     scf: "SCF",
     bands: "Band Structure",
@@ -53,6 +66,43 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
     phonon: "Phonon",
   };
   const typeLabel = typeLabels[task.taskType] || task.taskType.toUpperCase();
+
+  if (isHidden) {
+    const summary = isRunning
+      ? `${typeLabel} in progress`
+      : isComplete
+        ? `${typeLabel} complete`
+        : `${typeLabel} ${task.status === "cancelled" ? "cancelled" : "failed"}`;
+    return (
+      <button
+        type="button"
+        className={`process-indicator-collapsed ${statusClass}`}
+        onClick={() => setIsHidden(false)}
+        title={`Show status: ${summary}`}
+        aria-label={`Show status box: ${summary}`}
+      >
+        <svg
+          className="process-indicator-collapsed-ring"
+          viewBox="0 0 86 34"
+          preserveAspectRatio="none"
+          aria-hidden="true"
+        >
+          <rect
+            className="process-indicator-collapsed-ring-head"
+            x="1"
+            y="1"
+            width="84"
+            height="32"
+            rx="16"
+            ry="16"
+            pathLength="100"
+          />
+        </svg>
+        <span className="process-indicator-collapsed-dot" aria-hidden="true" />
+        <span className="process-indicator-collapsed-text">Status</span>
+      </button>
+    );
+  }
 
   return (
     <div className={`process-indicator ${statusClass}`}>
@@ -101,22 +151,32 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
       </div>
 
       <div className="process-indicator-actions">
+        <button
+          type="button"
+          className="process-indicator-btn process-indicator-hide"
+          onClick={(e) => { e.stopPropagation(); handleHide(); }}
+          title="Hide status box"
+        >
+          Hide
+        </button>
         {isRunning && (
           <button
+            type="button"
             className="process-indicator-btn process-indicator-cancel"
             onClick={(e) => { e.stopPropagation(); handleCancel(); }}
             title={confirmingCancel === task.taskId ? "Click again to confirm" : "Cancel calculation"}
           >
-            {confirmingCancel === task.taskId ? "Confirm?" : "\u00D7"}
+            {confirmingCancel === task.taskId ? "Confirm cancel" : "Cancel"}
           </button>
         )}
         {!isRunning && (
           <button
+            type="button"
             className="process-indicator-btn process-indicator-dismiss"
             onClick={(e) => { e.stopPropagation(); handleDismiss(); }}
             title="Dismiss"
           >
-            {"\u00D7"}
+            Dismiss
           </button>
         )}
       </div>

@@ -76,6 +76,7 @@ type RainbowPalette = "jet" | "sinebow";
 type ProjectionMode = "atom" | "orbital";
 type ProjectionNormalizeMode = "global" | "band";
 type FatColorMode = "accent" | "band";
+type FermiReferenceMode = "scf" | "bands";
 
 interface OrbitalElementOption {
   key: string;
@@ -165,6 +166,11 @@ function getYAxisTicks(eMin: number, eMax: number): number[] {
     tick += step;
   }
   return ticks;
+}
+
+function formatAxisInputValue(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  return Number.parseFloat(value.toFixed(6)).toString();
 }
 
 function isElectronicEFLabel(label: string): boolean {
@@ -374,6 +380,9 @@ export function BandPlot({
   // Y-axis energy window (adjustable via scroll)
   const [yMin, setYMin] = useState<number | null>(null);
   const [yMax, setYMax] = useState<number | null>(null);
+  const [manualYMinInput, setManualYMinInput] = useState("");
+  const [manualYMaxInput, setManualYMaxInput] = useState("");
+  const [manualRangeError, setManualRangeError] = useState<string | null>(null);
 
   // Appearance controls
   const [lineWidth, setLineWidth] = useState(1.5);
@@ -404,8 +413,37 @@ export function BandPlot({
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
 
-  // Use SCF Fermi energy if available, otherwise fall back to data.fermi_energy
-  const fermiEnergy = scfFermiEnergy ?? data.fermi_energy;
+  const hasScfFermi = scfFermiEnergy != null && Number.isFinite(scfFermiEnergy);
+  const hasBandsFermi = Number.isFinite(data.fermi_energy);
+  const [fermiReferenceMode, setFermiReferenceMode] = useState<FermiReferenceMode>(
+    hasScfFermi ? "scf" : "bands",
+  );
+
+  useEffect(() => {
+    if (fermiReferenceMode === "scf" && !hasScfFermi) {
+      setFermiReferenceMode("bands");
+      return;
+    }
+    if (fermiReferenceMode === "bands" && !hasBandsFermi && hasScfFermi) {
+      setFermiReferenceMode("scf");
+    }
+  }, [fermiReferenceMode, hasBandsFermi, hasScfFermi]);
+
+  const fermiEnergy = useMemo(() => {
+    if (fermiReferenceMode === "scf" && hasScfFermi) {
+      return scfFermiEnergy as number;
+    }
+    if (hasBandsFermi) {
+      return data.fermi_energy;
+    }
+    if (hasScfFermi) {
+      return scfFermiEnergy as number;
+    }
+    return 0;
+  }, [data.fermi_energy, fermiReferenceMode, hasBandsFermi, hasScfFermi, scfFermiEnergy]);
+
+  const activeFermiSourceLabel = fermiReferenceMode === "scf" ? "SCF" : "Bands run";
+  const activeFermiDisplay = Number.isFinite(fermiEnergy) ? `${fermiEnergy.toFixed(3)} eV` : "N/A";
 
   // Shift all energies relative to Fermi level (E - E_F)
   const shiftedEnergies = useMemo(() => {
@@ -443,6 +481,11 @@ export function BandPlot({
 
     return [eMin, eMax];
   }, [energyRange, shiftedEnergyRange, yMax, yMin]);
+
+  useEffect(() => {
+    setManualYMinInput(formatAxisInputValue(yDomain[0]));
+    setManualYMaxInput(formatAxisInputValue(yDomain[1]));
+  }, [yDomain[0], yDomain[1]]);
 
   const axisTickFontSize = Math.max(8, 11 * plotTextScale);
   const axisLabelFontSize = Math.max(10, 14 * plotTextScale);
@@ -890,14 +933,42 @@ export function BandPlot({
 
       setYMin(newMin);
       setYMax(newMax);
+      setManualRangeError(null);
     },
     [yMin, yMax, scales, yClampRange],
+  );
+
+  const applyManualRange = useCallback(() => {
+    const parsedMin = Number.parseFloat(manualYMinInput.trim());
+    const parsedMax = Number.parseFloat(manualYMaxInput.trim());
+    if (!Number.isFinite(parsedMin) || !Number.isFinite(parsedMax)) {
+      setManualRangeError("Enter valid numeric values for Y min and Y max.");
+      return;
+    }
+    if (parsedMax <= parsedMin) {
+      setManualRangeError("Y max must be greater than Y min.");
+      return;
+    }
+
+    setYMin(parsedMin);
+    setYMax(parsedMax);
+    setManualRangeError(null);
+  }, [manualYMaxInput, manualYMinInput]);
+
+  const handleManualRangeKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      applyManualRange();
+    },
+    [applyManualRange],
   );
 
   // Reset view
   const resetView = useCallback(() => {
     setYMin(null);
     setYMax(null);
+    setManualRangeError(null);
   }, []);
 
   const handleExportPlaceholder = useCallback(() => {
@@ -1164,7 +1235,7 @@ export function BandPlot({
           </span>
           {showFermiLevel && (
             <span>
-              E_F = {scfFermiEnergy != null ? `${scfFermiEnergy.toFixed(3)} eV` : "N/A"}
+              E_F ({activeFermiSourceLabel}) = {activeFermiDisplay}
             </span>
           )}
           {showProjectionSummary && (
@@ -1202,6 +1273,68 @@ export function BandPlot({
             </button>
             {appearanceExpanded && (
               <div className="band-control-grid">
+                {viewerType === "electronic" && (hasScfFermi || hasBandsFermi) && (
+                  <div className="band-control-row">
+                    <label>Fermi Reference</label>
+                    <select
+                      value={fermiReferenceMode}
+                      onChange={(event) =>
+                        setFermiReferenceMode(event.target.value as FermiReferenceMode)
+                      }
+                    >
+                      {hasScfFermi && (
+                        <option value="scf">
+                          SCF ({(scfFermiEnergy as number).toFixed(3)} eV)
+                        </option>
+                      )}
+                      {hasBandsFermi && (
+                        <option value="bands">
+                          Bands run ({data.fermi_energy.toFixed(3)} eV)
+                        </option>
+                      )}
+                    </select>
+                  </div>
+                )}
+
+                <div className="band-control-row">
+                  <label>Y Range ({valueUnit})</label>
+                  <div className="band-control-range-inputs">
+                    <input
+                      type="number"
+                      step="any"
+                      value={manualYMinInput}
+                      onChange={(event) => {
+                        setManualYMinInput(event.target.value);
+                        setManualRangeError(null);
+                      }}
+                      onKeyDown={handleManualRangeKeyDown}
+                      aria-label="Y minimum"
+                    />
+                    <span className="band-control-range-separator">to</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={manualYMaxInput}
+                      onChange={(event) => {
+                        setManualYMaxInput(event.target.value);
+                        setManualRangeError(null);
+                      }}
+                      onKeyDown={handleManualRangeKeyDown}
+                      aria-label="Y maximum"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="band-control-apply"
+                    onClick={applyManualRange}
+                  >
+                    Apply
+                  </button>
+                  {manualRangeError && (
+                    <span className="band-control-range-error">{manualRangeError}</span>
+                  )}
+                </div>
+
                 <div className="band-control-row">
                   <label>Line Thickness</label>
                   <input

@@ -8,10 +8,19 @@
  * This is the convention used by Quantum ESPRESSO's crystal_b k-point format.
  */
 
-import { Vec3 } from "./reciprocalLattice";
+import {
+  Vec3,
+  realSpaceLatticeVectors,
+  reciprocalLatticeVectors,
+  conventionalToPrimitive,
+  magnitude,
+  dot,
+} from "./reciprocalLattice";
 
 export interface HighSymmetryPoint {
   label: string;
+  /** Optional alias labels used in other conventions (Bilbao/papers/QE snippets). */
+  aliases?: string[];
   /** Fractional coordinates in reciprocal lattice basis [k1, k2, k3] */
   coords: Vec3;
   /** Description of the point location */
@@ -37,6 +46,94 @@ export interface BrillouinZoneData {
    * For visualization purposes.
    */
   edges: [number, number][];
+}
+
+const NUMERIC_TOLERANCE = 1e-9;
+const SUBSCRIPT_TO_ASCII: Record<string, string> = {
+  "₀": "0",
+  "₁": "1",
+  "₂": "2",
+  "₃": "3",
+  "₄": "4",
+  "₅": "5",
+  "₆": "6",
+  "₇": "7",
+  "₈": "8",
+  "₉": "9",
+};
+
+function toAsciiLabel(label: string): string {
+  return label
+    .trim()
+    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (ch) => SUBSCRIPT_TO_ASCII[ch] ?? ch)
+    .replace(/Γ/gi, "G")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .toUpperCase();
+}
+
+function autoAliasesForLabel(label: string): string[] {
+  const aliases = new Set<string>();
+  if (label === "Γ") {
+    aliases.add("G");
+    aliases.add("Gamma");
+    aliases.add("gG");
+  }
+  const ascii = label.replace(/[₀₁₂₃₄₅₆₇₈₉]/g, (ch) => SUBSCRIPT_TO_ASCII[ch] ?? ch);
+  if (ascii !== label) {
+    aliases.add(ascii);
+  }
+  return [...aliases];
+}
+
+function angleDegrees(u: Vec3, v: Vec3): number {
+  const denom = magnitude(u) * magnitude(v);
+  if (denom <= 0) return 0;
+  const cosine = Math.max(-1, Math.min(1, dot(u, v) / denom));
+  return (Math.acos(cosine) * 180) / Math.PI;
+}
+
+function nearlyEqual(a: number, b: number, tolerance = NUMERIC_TOLERANCE): boolean {
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= tolerance * scale;
+}
+
+/**
+ * Normalize high-symmetry labels across common variants:
+ * - Γ / G / gamma / gG
+ * - subscript digits (X₁ <-> X1)
+ */
+export function normalizeHighSymmetryLabel(label: string): string {
+  const ascii = toAsciiLabel(label);
+  if (ascii === "GG" || ascii === "GAMMA" || ascii === "G") {
+    return "Γ";
+  }
+  return ascii;
+}
+
+/**
+ * Resolve a point by label using both canonical labels and aliases.
+ */
+export function findHighSymmetryPoint(
+  data: BrillouinZoneData,
+  label: string,
+): HighSymmetryPoint | null {
+  const needle = normalizeHighSymmetryLabel(label);
+  for (const point of data.points) {
+    if (normalizeHighSymmetryLabel(point.label) === needle) {
+      return point;
+    }
+    for (const alias of autoAliasesForLabel(point.label)) {
+      if (normalizeHighSymmetryLabel(alias) === needle) {
+        return point;
+      }
+    }
+    for (const alias of point.aliases ?? []) {
+      if (normalizeHighSymmetryLabel(alias) === needle) {
+        return point;
+      }
+    }
+  }
+  return null;
 }
 
 // ============================================================================
@@ -278,6 +375,170 @@ export function getOrthorhombicPrimitiveBZ(): BrillouinZoneData {
   };
 }
 
+/**
+ * Face-centered orthorhombic (oF)
+ * Three branches depending on reciprocal metric.
+ */
+export function getOrthorhombicFaceCenteredBZ(a: number, b: number, c: number): BrillouinZoneData {
+  const invA2 = 1 / (a * a);
+  const invB2 = 1 / (b * b);
+  const invC2 = 1 / (c * c);
+  const metricSplit = invB2 + invC2;
+
+  if (invA2 > metricSplit && !nearlyEqual(invA2, metricSplit)) {
+    // oF1
+    const eta = (1 + (a * a) / (b * b) + (a * a) / (c * c)) / 4;
+    const zeta = (1 + (a * a) / (b * b) - (a * a) / (c * c)) / 4;
+    return {
+      latticeType: "oF1",
+      name: "Orthorhombic (Face-Centered, oF1)",
+      points: [
+        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+        { label: "A", coords: [0.5, 0.5 + zeta, zeta], description: "Face point" },
+        { label: "A₁", coords: [0.5, 0.5 - zeta, 1 - zeta], description: "Face point" },
+        { label: "L", coords: [0.5, 0.5, 0.5], description: "Zone boundary point" },
+        { label: "T", coords: [1, 0.5, 0.5], description: "Edge point" },
+        { label: "X", coords: [0, eta, eta], description: "Edge point" },
+        { label: "X₁", coords: [1, 1 - eta, 1 - eta], description: "Edge point" },
+        { label: "Y", coords: [0.5, 0, 0.5], description: "Face center" },
+        { label: "Z", coords: [0.5, 0.5, 0], description: "Face center" },
+      ],
+      recommendedPath: [
+        ["Γ", "Y"], ["Y", "T"], ["T", "Z"], ["Z", "Γ"], ["Γ", "X"], ["X", "A₁"], ["A₁", "Y"],
+        ["T", "X₁"],
+        ["X", "A"], ["A", "Z"],
+        ["L", "Γ"],
+      ],
+      vertices: [],
+      edges: [],
+    };
+  }
+
+  if (invA2 < metricSplit && !nearlyEqual(invA2, metricSplit)) {
+    // oF2
+    const eta = (1 + (a * a) / (b * b) - (a * a) / (c * c)) / 4;
+    const phi = (1 + (c * c) / (b * b) - (c * c) / (a * a)) / 4;
+    const delta = (1 + (b * b) / (a * a) - (b * b) / (c * c)) / 4;
+    return {
+      latticeType: "oF2",
+      name: "Orthorhombic (Face-Centered, oF2)",
+      points: [
+        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+        { label: "C", coords: [0.5, 0.5 - eta, 1 - eta], description: "Face point" },
+        { label: "C₁", coords: [0.5, 0.5 + eta, eta], description: "Face point" },
+        { label: "D", coords: [0.5 - delta, 0.5, 1 - delta], description: "Edge point" },
+        { label: "D₁", coords: [0.5 + delta, 0.5, delta], description: "Edge point" },
+        { label: "L", coords: [0.5, 0.5, 0.5], description: "Zone boundary point" },
+        { label: "H", coords: [1 - phi, 0.5 - phi, 0.5], description: "Edge point" },
+        { label: "H₁", coords: [phi, 0.5 + phi, 0.5], description: "Edge point" },
+        { label: "X", coords: [0, 0.5, 0.5], description: "Face center" },
+        { label: "Y", coords: [0.5, 0, 0.5], description: "Face center" },
+        { label: "Z", coords: [0.5, 0.5, 0], description: "Face center" },
+      ],
+      recommendedPath: [
+        ["Γ", "Y"], ["Y", "C"], ["C", "D"], ["D", "X"], ["X", "Γ"], ["Γ", "Z"], ["Z", "D₁"], ["D₁", "H"], ["H", "C"],
+        ["C₁", "Z"],
+        ["X", "H₁"],
+        ["H", "Y"],
+        ["L", "Γ"],
+      ],
+      vertices: [],
+      edges: [],
+    };
+  }
+
+  // oF3: boundary condition invA2 == invB2 + invC2
+  const zeta = (1 + (a * a) / (b * b) - (a * a) / (c * c)) / 4;
+  const eta = (1 + (a * a) / (b * b) + (a * a) / (c * c)) / 4;
+  return {
+    latticeType: "oF3",
+    name: "Orthorhombic (Face-Centered, oF3)",
+    points: [
+      { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+      { label: "A", coords: [0.5, 0.5 + zeta, zeta], description: "Face point" },
+      { label: "A₁", coords: [0.5, 0.5 - zeta, 1 - zeta], description: "Face point" },
+      { label: "L", coords: [0.5, 0.5, 0.5], description: "Zone boundary point" },
+      { label: "T", coords: [1, 0.5, 0.5], description: "Edge point" },
+      { label: "X", coords: [0, eta, eta], description: "Edge point" },
+      { label: "Y", coords: [0.5, 0, 0.5], description: "Face center" },
+      { label: "Z", coords: [0.5, 0.5, 0], description: "Face center" },
+    ],
+    recommendedPath: [
+      ["Γ", "Y"], ["Y", "T"], ["T", "Z"], ["Z", "Γ"], ["Γ", "X"], ["X", "A₁"], ["A₁", "Y"],
+      ["X", "A"], ["A", "Z"],
+      ["L", "Γ"],
+    ],
+    vertices: [],
+    edges: [],
+  };
+}
+
+/**
+ * Body-centered orthorhombic (oI).
+ */
+export function getOrthorhombicBodyCenteredBZ(a: number, b: number, c: number): BrillouinZoneData {
+  const zeta = (1 + (a * a) / (c * c)) / 4;
+  const eta = (1 + (b * b) / (c * c)) / 4;
+  const delta = ((b * b) - (a * a)) / (4 * c * c);
+  const mu = ((a * a) + (b * b)) / (4 * c * c);
+
+  return {
+    latticeType: "oI",
+    name: "Orthorhombic (Body-Centered)",
+    points: [
+      { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+      { label: "L", coords: [-mu, mu, 0.5 - delta], description: "Edge point" },
+      { label: "L₁", coords: [mu, -mu, 0.5 + delta], description: "Edge point" },
+      { label: "L₂", coords: [0.5 - delta, 0.5 + delta, -mu], description: "Edge point" },
+      { label: "R", coords: [0, 0.5, 0], description: "Face center" },
+      { label: "S", coords: [0.5, 0, 0], description: "Face center" },
+      { label: "T", coords: [0, 0, 0.5], description: "Face center" },
+      { label: "W", coords: [0.25, 0.25, 0.25], description: "Body point" },
+      { label: "X", coords: [-zeta, zeta, zeta], description: "Edge point" },
+      { label: "X₁", coords: [zeta, 1 - zeta, -zeta], description: "Edge point" },
+      { label: "Y", coords: [eta, -eta, eta], description: "Edge point" },
+      { label: "Y₁", coords: [1 - eta, eta, -eta], description: "Edge point" },
+      { label: "Z", coords: [0.5, 0.5, -0.5], description: "Corner" },
+    ],
+    recommendedPath: [
+      ["Γ", "X"], ["X", "L"], ["L", "T"], ["T", "W"], ["W", "R"], ["R", "X₁"], ["X₁", "Z"], ["Z", "Γ"], ["Γ", "Y"], ["Y", "S"], ["S", "W"],
+      ["L₁", "Y"],
+      ["Y₁", "Z"],
+    ],
+    vertices: [],
+    edges: [],
+  };
+}
+
+/**
+ * Base-centered orthorhombic (oC).
+ */
+export function getOrthorhombicBaseCenteredBZ(a: number, b: number): BrillouinZoneData {
+  const zeta = (1 + (a * a) / (b * b)) / 4;
+  return {
+    latticeType: "oC",
+    name: "Orthorhombic (Base-Centered)",
+    points: [
+      { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+      { label: "A", coords: [zeta, zeta, 0.5], description: "Face point" },
+      { label: "A₁", coords: [-zeta, 1 - zeta, 0.5], description: "Face point" },
+      { label: "R", coords: [0, 0.5, 0.5], description: "Edge center" },
+      { label: "S", coords: [0, 0.5, 0], description: "Face center" },
+      { label: "T", coords: [-0.5, 0.5, 0.5], description: "Corner" },
+      { label: "X", coords: [zeta, zeta, 0], description: "Face point" },
+      { label: "X₁", coords: [-zeta, 1 - zeta, 0], description: "Face point" },
+      { label: "Y", coords: [-0.5, 0.5, 0], description: "Edge center" },
+      { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+    ],
+    recommendedPath: [
+      ["Γ", "X"], ["X", "S"], ["S", "R"], ["R", "A"], ["A", "Z"], ["Z", "Γ"], ["Γ", "Y"], ["Y", "X₁"], ["X₁", "A₁"], ["A₁", "T"], ["T", "Y"],
+      ["Z", "T"],
+    ],
+    vertices: [],
+    edges: [],
+  };
+}
+
 // ============================================================================
 // Hexagonal Lattice
 // ============================================================================
@@ -429,6 +690,249 @@ export function getMonoclinicPrimitiveBZ(b_over_a: number, c_over_a: number, bet
   };
 }
 
+/**
+ * Base-centered monoclinic (mC).
+ * Branch selection and formulas follow Setyawan-Curtarolo conventions.
+ */
+export function getMonoclinicBaseCenteredBZ(
+  a: number,
+  b: number,
+  c: number,
+  alpha: number,
+  beta: number,
+  gamma: number,
+): BrillouinZoneData {
+  // Convert conventional mC vectors to primitive vectors so branch logic
+  // and point formulas use the correct primitive metric.
+  const conventional = realSpaceLatticeVectors(a, b, c, alpha, beta, gamma);
+  const primitive = conventionalToPrimitive(conventional, "C");
+  const aP = magnitude(primitive[0]);
+  const bP = magnitude(primitive[1]);
+  const cP = magnitude(primitive[2]);
+  const alphaP = angleDegrees(primitive[1], primitive[2]);
+  const alphaRad = (alphaP * Math.PI) / 180;
+  const sinAlpha = Math.sin(alphaRad);
+  const cosAlpha = Math.cos(alphaRad);
+
+  const primitiveReciprocal = reciprocalLatticeVectors(primitive);
+  const kGamma = angleDegrees(primitiveReciprocal[0], primitiveReciprocal[1]);
+  const criterion =
+    (bP * cosAlpha) / cP + ((bP * bP) * (sinAlpha * sinAlpha)) / (aP * aP);
+
+  const isKGamma90 = nearlyEqual(kGamma, 90, 1e-7);
+  const isCriterion1 = nearlyEqual(criterion, 1, 1e-7);
+
+  if (kGamma > 90 && !isKGamma90) {
+    if (criterion < 1 && !isCriterion1) {
+      // mC1
+      const zeta = (2 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
+      const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+      const psi = 0.75 - (aP * aP) / (4 * bP * bP * sinAlpha * sinAlpha);
+      const phi = psi + (0.75 - psi) * ((bP * cosAlpha) / cP);
+      return {
+        latticeType: "mC1",
+        name: "Monoclinic (Base-Centered, mC1)",
+        points: [
+          { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+          { label: "N", coords: [0.5, 0, 0], description: "Face center" },
+          { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
+          { label: "F", coords: [1 - zeta, 1 - zeta, 1 - eta], description: "Face point" },
+          { label: "F₁", coords: [zeta, zeta, eta], description: "Face point" },
+          { label: "F₂", coords: [zeta, zeta - 1, eta], description: "Face point" },
+          { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
+          { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
+          { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
+          { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
+          { label: "X", coords: [1 - psi, psi - 1, 0], description: "Edge point" },
+          { label: "X₁", coords: [psi, 1 - psi, 0], description: "Edge point" },
+          { label: "X₂", coords: [psi - 1, -psi, 0], description: "Edge point" },
+          { label: "Y", coords: [0.5, 0.5, 0], description: "Face center" },
+          { label: "Y₁", coords: [-0.5, -0.5, 0], description: "Face center" },
+          { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+        ],
+        recommendedPath: [
+          ["Γ", "Y"], ["Y", "F"], ["F", "L"], ["L", "I"],
+          ["I₁", "Z"], ["Z", "F₁"],
+          ["Y", "X₁"],
+          ["X", "Γ"], ["Γ", "N"],
+          ["M", "Γ"],
+        ],
+        vertices: [],
+        edges: [],
+      };
+    }
+
+    if (isCriterion1) {
+      // mC2
+      const zeta = (2 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
+      const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+      const psi = 0.75 - (aP * aP) / (4 * bP * bP * sinAlpha * sinAlpha);
+      const phi = psi + (0.75 - psi) * ((bP * cosAlpha) / cP);
+      return {
+        latticeType: "mC2",
+        name: "Monoclinic (Base-Centered, mC2)",
+        points: [
+          { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+          { label: "N", coords: [0.5, 0, 0], description: "Face center" },
+          { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
+          { label: "F", coords: [1 - zeta, 1 - zeta, 1 - eta], description: "Face point" },
+          { label: "F₁", coords: [zeta, zeta, eta], description: "Face point" },
+          { label: "F₂", coords: [zeta, zeta - 1, eta], description: "Face point" },
+          { label: "F₃", coords: [1 - zeta, -zeta, 1 - eta], description: "Face point" },
+          { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
+          { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
+          { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
+          { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
+          { label: "X", coords: [1 - psi, psi - 1, 0], description: "Edge point" },
+          { label: "Y", coords: [0.5, 0.5, 0], description: "Face center" },
+          { label: "Y₁", coords: [-0.5, -0.5, 0], description: "Face center" },
+          { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+        ],
+        recommendedPath: [
+          ["Γ", "Y"], ["Y", "F"], ["F", "L"], ["L", "I"],
+          ["I₁", "Z"], ["Z", "F₁"],
+          ["N", "Γ"], ["Γ", "M"],
+        ],
+        vertices: [],
+        edges: [],
+      };
+    }
+
+    // mC3
+    const mu = (1 + (bP * bP) / (aP * aP)) / 4;
+    const delta = (bP * cP * cosAlpha) / (2 * aP * aP);
+    const zeta =
+      mu -
+      0.25 +
+      (1 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
+    const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+    const phi = 1 + zeta - 2 * mu;
+    const psi = eta - 2 * delta;
+    return {
+      latticeType: "mC3",
+      name: "Monoclinic (Base-Centered, mC3)",
+      points: [
+        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+        { label: "F", coords: [1 - phi, 1 - phi, 1 - psi], description: "Face point" },
+        { label: "F₁", coords: [phi, phi - 1, psi], description: "Face point" },
+        { label: "F₂", coords: [1 - phi, -phi, 1 - psi], description: "Face point" },
+        { label: "H", coords: [zeta, zeta, eta], description: "Edge point" },
+        { label: "H₁", coords: [1 - zeta, -zeta, 1 - eta], description: "Edge point" },
+        { label: "H₂", coords: [-zeta, -zeta, 1 - eta], description: "Edge point" },
+        { label: "I", coords: [0.5, -0.5, 0.5], description: "Edge center" },
+        { label: "I₁", coords: [0.5, 0.5, -0.5], description: "Edge center" },
+        { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
+        { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
+        { label: "N", coords: [0.5, 0, 0], description: "Face center" },
+        { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
+        { label: "X", coords: [0.5, -0.5, 0], description: "Edge center" },
+        { label: "Y", coords: [mu, mu, delta], description: "Edge point" },
+        { label: "Y₁", coords: [1 - mu, -mu, -delta], description: "Edge point" },
+        { label: "Y₂", coords: [-mu, -mu, -delta], description: "Edge point" },
+        { label: "Y₃", coords: [mu, mu - 1, delta], description: "Edge point" },
+        { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+      ],
+      recommendedPath: [
+        ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"], ["I", "F₁"],
+        ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
+        ["M", "Γ"],
+      ],
+      vertices: [],
+      edges: [],
+    };
+  }
+
+  if (isKGamma90) {
+    // mC4
+    const mu = (1 + (bP * bP) / (aP * aP)) / 4;
+    const delta = (bP * cP * cosAlpha) / (2 * aP * aP);
+    const zeta =
+      mu -
+      0.25 +
+      (1 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
+    const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+    const phi = 1 + zeta - 2 * mu;
+    const psi = eta - 2 * delta;
+    return {
+      latticeType: "mC4",
+      name: "Monoclinic (Base-Centered, mC4)",
+      points: [
+        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+        { label: "F", coords: [1 - phi, 1 - phi, 1 - psi], description: "Face point" },
+        { label: "F₁", coords: [phi, phi - 1, psi], description: "Face point" },
+        { label: "F₂", coords: [1 - phi, -phi, 1 - psi], description: "Face point" },
+        { label: "H", coords: [zeta, zeta, eta], description: "Edge point" },
+        { label: "H₁", coords: [1 - zeta, -zeta, 1 - eta], description: "Edge point" },
+        { label: "H₂", coords: [-zeta, -zeta, 1 - eta], description: "Edge point" },
+        { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
+        { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
+        { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
+        { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
+        { label: "N", coords: [0.5, 0, 0], description: "Face center" },
+        { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
+        { label: "X", coords: [0.5, -0.5, 0], description: "Edge center" },
+        { label: "Y", coords: [mu, mu, delta], description: "Edge point" },
+        { label: "Y₁", coords: [1 - mu, -mu, -delta], description: "Edge point" },
+        { label: "Y₂", coords: [-mu, -mu, -delta], description: "Edge point" },
+        { label: "Y₃", coords: [mu, mu - 1, delta], description: "Edge point" },
+        { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+      ],
+      recommendedPath: [
+        ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"],
+        ["F₁", "H₁"], ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
+        ["M", "Γ"],
+      ],
+      vertices: [],
+      edges: [],
+    };
+  }
+
+  // mC5: kGamma < 90
+  const zeta =
+    ((bP * bP) / (aP * aP) + (1 - (bP * cosAlpha) / cP) / (sinAlpha * sinAlpha)) / 4;
+  const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+  const mu = eta / 2 + (bP * bP) / (4 * aP * aP) - (bP * cP * cosAlpha) / (2 * aP * aP);
+  const nu = 2 * mu - zeta;
+  const rho = 1 - (zeta * aP * aP) / (bP * bP);
+  const omega =
+    ((4 * nu - 1 - ((bP * bP) * (sinAlpha * sinAlpha)) / (aP * aP)) * cP) /
+    (2 * bP * cosAlpha);
+  const delta = (zeta * cP * cosAlpha) / bP + omega / 2 - 0.25;
+
+  return {
+    latticeType: "mC5",
+    name: "Monoclinic (Base-Centered, mC5)",
+    points: [
+      { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
+      { label: "F", coords: [nu, nu, omega], description: "Face point" },
+      { label: "F₁", coords: [1 - nu, 1 - nu, 1 - omega], description: "Face point" },
+      { label: "F₂", coords: [nu, nu - 1, omega], description: "Face point" },
+      { label: "H", coords: [zeta, zeta, eta], description: "Edge point" },
+      { label: "H₁", coords: [1 - zeta, -zeta, 1 - eta], description: "Edge point" },
+      { label: "H₂", coords: [-zeta, -zeta, 1 - eta], description: "Edge point" },
+      { label: "I", coords: [rho, 1 - rho, 0.5], description: "Edge point" },
+      { label: "I₁", coords: [1 - rho, rho - 1, 0.5], description: "Edge point" },
+      { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
+      { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
+      { label: "N", coords: [0.5, 0, 0], description: "Face center" },
+      { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
+      { label: "X", coords: [0.5, -0.5, 0], description: "Edge center" },
+      { label: "Y", coords: [mu, mu, delta], description: "Edge point" },
+      { label: "Y₁", coords: [1 - mu, -mu, -delta], description: "Edge point" },
+      { label: "Y₂", coords: [-mu, -mu, -delta], description: "Edge point" },
+      { label: "Y₃", coords: [mu, mu - 1, delta], description: "Edge point" },
+      { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
+    ],
+    recommendedPath: [
+      ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"], ["I", "F₁"],
+      ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
+      ["M", "Γ"],
+    ],
+    vertices: [],
+    edges: [],
+  };
+}
+
 // ============================================================================
 // Triclinic Lattice
 // ============================================================================
@@ -492,7 +996,7 @@ export function getBrillouinZoneData(
     gamma: number;
   }
 ): BrillouinZoneData {
-  const { a, b, c, alpha, beta } = params;
+  const { a, b, c, alpha, beta, gamma } = params;
   const c_over_a = c / a;
   const b_over_a = b / a;
 
@@ -508,19 +1012,21 @@ export function getBrillouinZoneData(
     case "tI":
       return getTetragonalBodyCenteredBZ(c_over_a);
     case "oP":
-    case "oC":
-    case "oI":
-    case "oF":
-      // All orthorhombic types use similar BZ with different points
-      // For now, use primitive orthorhombic as base
       return getOrthorhombicPrimitiveBZ();
+    case "oC":
+      return getOrthorhombicBaseCenteredBZ(a, b);
+    case "oI":
+      return getOrthorhombicBodyCenteredBZ(a, b, c);
+    case "oF":
+      return getOrthorhombicFaceCenteredBZ(a, b, c);
     case "hP":
       return getHexagonalBZ();
     case "hR":
       return getRhombohedralBZ(alpha);
     case "mP":
-    case "mC":
       return getMonoclinicPrimitiveBZ(b_over_a, c_over_a, beta);
+    case "mC":
+      return getMonoclinicBaseCenteredBZ(a, b, c, alpha, beta, gamma);
     case "aP":
     default:
       return getTriclinicBZ();

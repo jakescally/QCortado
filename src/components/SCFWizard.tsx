@@ -16,7 +16,11 @@ import {
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
 import { SaveToProjectDialog } from "./SaveToProjectDialog";
-import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import {
+  analyzeCrystalSymmetry,
+  buildConventionalLatticeFromCrystalData,
+  SymmetryTransformResult,
+} from "../lib/symmetryTransform";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
@@ -178,6 +182,8 @@ export function SCFWizard({
   const [runSourceStructure, setRunSourceStructure] = useState<SavedStructureData | null>(null);
   const [runSourceDescriptor, setRunSourceDescriptor] = useState<{ type: "cif" | "optimization"; calc_id?: string } | null>(null);
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
+  const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
+  const [symmetryError, setSymmetryError] = useState<string | null>(null);
 
   // Ref for output auto-follow (only when user is at the bottom)
   const outputRef = useRef<HTMLPreElement>(null);
@@ -445,35 +451,10 @@ export function SCFWizard({
   }, [crystalData]);
 
   const primitiveCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
-    if (!crystalData) return null;
-    const primitive = getPrimitiveCell(crystalData);
-    if (!primitive) return null;
-    const BOHR_TO_ANGSTROM = 0.529177;
-    const a = primitive.celldm1 * BOHR_TO_ANGSTROM;
-
-    if (primitive.ibrav === "cubic_f") {
-      const v1: [number, number, number] = [0, a / 2, a / 2];
-      const v2: [number, number, number] = [a / 2, 0, a / 2];
-      const v3: [number, number, number] = [a / 2, a / 2, 0];
-      return calculateMetricsFromVectors(v1, v2, v3);
-    }
-
-    if (primitive.ibrav === "cubic_i") {
-      const v1: [number, number, number] = [a / 2, a / 2, -a / 2];
-      const v2: [number, number, number] = [-a / 2, a / 2, a / 2];
-      const v3: [number, number, number] = [a / 2, -a / 2, a / 2];
-      return calculateMetricsFromVectors(v1, v2, v3);
-    }
-
-    return {
-      a,
-      b: a,
-      c: a,
-      alpha: 90,
-      beta: 90,
-      gamma: 90,
-    };
-  }, [crystalData]);
+    if (!symmetryTransform) return null;
+    const [v1, v2, v3] = symmetryTransform.standardizedPrimitiveLattice;
+    return calculateMetricsFromVectors(v1, v2, v3);
+  }, [symmetryTransform]);
 
   const hasPrimitiveDisplay = primitiveCellMetrics !== null;
   const displayedCellMetrics = cellViewMode === "primitive" && primitiveCellMetrics
@@ -670,6 +651,32 @@ export function SCFWizard({
     }
   }, [crystalData, pseudopotentials, ssspData, structureSource, optimizedStructures]);
 
+  useEffect(() => {
+    if (!crystalData || structureSource !== "cif") {
+      setSymmetryTransform(null);
+      setSymmetryError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setSymmetryError(null);
+    analyzeCrystalSymmetry(crystalData)
+      .then((result) => {
+        if (cancelled) return;
+        setSymmetryTransform(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to analyze symmetry with spglib:", err);
+        setSymmetryTransform(null);
+        setSymmetryError(String(err));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [crystalData, structureSource]);
+
   async function handleImportCIF() {
     try {
       const selected = await open({
@@ -724,13 +731,26 @@ export function SCFWizard({
       ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
       : { type: "cif" as const };
 
-    // Check if this is an FCC structure that should use primitive cell
-    // Using primitive cell with ibrav gives correct symmetry and faster calculations
-    const primitiveCell: PrimitiveCell | null = selectedOptimizedStructure ? null : getPrimitiveCell(crystalData);
-    const usePrimitiveCell = !selectedOptimizedStructure && primitiveCell !== null;
+    let resolvedSymmetry = symmetryTransform;
+    if (!selectedOptimizedStructure && !resolvedSymmetry) {
+      try {
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        setSymmetryTransform(resolvedSymmetry);
+        setSymmetryError(null);
+      } catch (err) {
+        setSymmetryError(String(err));
+      }
+    }
 
-    if (usePrimitiveCell && primitiveCell) {
-      console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
+    const canUseSymmetryPrimitive =
+      !selectedOptimizedStructure &&
+      resolvedSymmetry !== null &&
+      resolvedSymmetry.standardizedPrimitiveAtoms.length > 0;
+
+    if (canUseSymmetryPrimitive && resolvedSymmetry) {
+      console.log(
+        `Using spglib primitive cell: nat=${resolvedSymmetry.standardizedPrimitiveAtoms.length}, spacegroup=${resolvedSymmetry.spacegroupNumber}`,
+      );
     }
 
     // Build species list (same for both primitive and conventional)
@@ -784,34 +804,21 @@ export function SCFWizard({
         position: atom.position,
         if_pos: [true, true, true],
       }));
-    } else if (usePrimitiveCell && primitiveCell) {
-      // Primitive cell with ibrav (e.g., ibrav=2 for FCC)
-      systemConfig.ibrav = primitiveCell.ibrav;
-      // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
-      // For cubic, only celldm(1) = a is needed
-      systemConfig.celldm = [primitiveCell.celldm1, 0, 0, 0, 0, 0];
-      systemConfig.cell_parameters = null;
-      systemConfig.cell_units = null;
-      systemConfig.atoms = primitiveCell.atoms.map((atom) => ({
+    } else if (canUseSymmetryPrimitive && resolvedSymmetry) {
+      systemConfig.ibrav = "free";
+      systemConfig.celldm = null;
+      systemConfig.cell_parameters = resolvedSymmetry.standardizedPrimitiveLattice;
+      systemConfig.cell_units = "angstrom";
+      systemConfig.atoms = resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
         symbol: atom.symbol,
         position: atom.position,
         if_pos: [true, true, true],
       }));
     } else {
-      // Conventional cell with ibrav=0 (fallback for non-FCC structures)
+      // Conventional cell with ibrav=0 fallback when primitive extraction is unavailable.
       systemConfig.ibrav = "free";
       systemConfig.celldm = null;
-      systemConfig.cell_parameters = [
-        [crystalData.cell_length_a.value, 0, 0],
-        [
-          crystalData.cell_length_b.value *
-            Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-          crystalData.cell_length_b.value *
-            Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-          0,
-        ],
-        calculateCVector(crystalData),
-      ];
+      systemConfig.cell_parameters = buildConventionalLatticeFromCrystalData(crystalData);
       systemConfig.cell_units = "angstrom";
       systemConfig.atoms = crystalData.atom_sites.map((site) => ({
         symbol: getBaseElement(site.type_symbol),
@@ -1046,19 +1053,6 @@ export function SCFWizard({
     }
   }
 
-  function calculateCVector(data: CrystalData): [number, number, number] {
-    const c = data.cell_length_c.value;
-    const alpha = (data.cell_angle_alpha.value * Math.PI) / 180;
-    const beta = (data.cell_angle_beta.value * Math.PI) / 180;
-    const gamma = (data.cell_angle_gamma.value * Math.PI) / 180;
-
-    const cx = c * Math.cos(beta);
-    const cy = (c * (Math.cos(alpha) - Math.cos(beta) * Math.cos(gamma))) / Math.sin(gamma);
-    const cz = Math.sqrt(c * c - cx * cx - cy * cy);
-
-    return [cx, cy, cz];
-  }
-
   function calculateMetricsFromVectors(
     v1: [number, number, number],
     v2: [number, number, number],
@@ -1171,15 +1165,7 @@ export function SCFWizard({
     return {
       position_units: "crystal",
       cell_units: "angstrom",
-      cell_parameters: [
-        [data.cell_length_a.value, 0, 0],
-        [
-          data.cell_length_b.value * Math.cos((data.cell_angle_gamma.value * Math.PI) / 180),
-          data.cell_length_b.value * Math.sin((data.cell_angle_gamma.value * Math.PI) / 180),
-          0,
-        ],
-        calculateCVector(data),
-      ],
+      cell_parameters: buildConventionalLatticeFromCrystalData(data),
       atoms: data.atom_sites.map((site) => ({
         symbol: getBaseElement(site.type_symbol),
         position: [site.fract_x, site.fract_y, site.fract_z] as [number, number, number],
@@ -1345,6 +1331,13 @@ export function SCFWizard({
         selected_pseudos: selectedPseudos,
         structure_source: sourceDescriptor,
         source_structure: sourceStructure,
+        cell_representation:
+          sourceDescriptor.type === "optimization"
+            ? "optimized_source"
+            : (symmetryTransform ? "primitive_spglib" : "conventional_input"),
+        symmetry_spacegroup: symmetryTransform?.spacegroupNumber ?? null,
+        symmetry_hall_number: symmetryTransform?.hallNumber ?? null,
+        symmetry_error: symmetryError,
         // Feature flags for tags
         nspin: config.nspin,
         lspinorb: config.lspinorb,

@@ -16,6 +16,7 @@ pub mod config;
 pub mod process_manager;
 pub mod projects;
 pub mod qe;
+pub mod symmetry;
 
 use process_manager::ProcessManager;
 
@@ -41,6 +42,8 @@ pub struct AppState {
     pub execution_prefix: Mutex<Option<String>>,
     /// Optional global MPI defaults used by calculation wizards
     pub mpi_defaults: Mutex<Option<config::MpiDefaultsConfig>>,
+    /// Global project save-size mode
+    pub save_size_mode: Mutex<config::SaveSizeMode>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -54,6 +57,7 @@ impl Default for AppState {
             fermi_surfer_path: Mutex::new(None),
             execution_prefix: Mutex::new(None),
             mpi_defaults: Mutex::new(None),
+            save_size_mode: Mutex::new(config::SaveSizeMode::Large),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
         }
@@ -169,7 +173,8 @@ fn tokio_command_with_prefix(
             };
             tokio::process::Command::new(executable)
         } else {
-            let mut cmd = tokio::process::Command::new(resolve_command_path(OsStr::new(&tokens[0])));
+            let mut cmd =
+                tokio::process::Command::new(resolve_command_path(OsStr::new(&tokens[0])));
             cmd.args(tokens.iter().skip(1));
             cmd.arg(&resolved_program);
             return cmd;
@@ -446,6 +451,23 @@ fn get_mpi_defaults(state: State<AppState>) -> Option<config::MpiDefaultsConfig>
     state.mpi_defaults.lock().unwrap().clone()
 }
 
+/// Sets global save-size mode used when persisting project calculation artifacts.
+#[tauri::command]
+fn set_save_size_mode(
+    app: AppHandle,
+    mode: config::SaveSizeMode,
+    state: State<AppState>,
+) -> Result<(), String> {
+    *state.save_size_mode.lock().unwrap() = mode;
+    config::update_save_size_mode(&app, mode)
+}
+
+/// Gets global save-size mode used when persisting project calculation artifacts.
+#[tauri::command]
+fn get_save_size_mode(state: State<AppState>) -> config::SaveSizeMode {
+    *state.save_size_mode.lock().unwrap()
+}
+
 /// Checks if QE is configured and which executables are available.
 #[tauri::command]
 fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
@@ -476,6 +498,15 @@ fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
         .collect();
 
     Ok(available)
+}
+
+/// Analyzes symmetry and returns standardized conventional/primitive cells plus
+/// reciprocal-coordinate transform matrices between them.
+#[tauri::command]
+fn analyze_structure_symmetry(
+    input: symmetry::SymmetryAnalyzeInput,
+) -> Result<symmetry::SymmetryAnalyzeResult, String> {
+    symmetry::analyze_structure(input)
 }
 
 /// Generates a pw.x input file from a calculation configuration.
@@ -1076,7 +1107,9 @@ fn collect_viewer_input_files(work_path: &Path) -> Result<Vec<FrmsfFileData>, St
 
         let a_rank = if a_ext == "frmsf" { 0 } else { 1 };
         let b_rank = if b_ext == "frmsf" { 0 } else { 1 };
-        a_rank.cmp(&b_rank).then_with(|| a.file_name.cmp(&b.file_name))
+        a_rank
+            .cmp(&b_rank)
+            .then_with(|| a.file_name.cmp(&b.file_name))
     });
     Ok(files)
 }
@@ -1165,7 +1198,10 @@ fn launch_fermi_surface_viewer(
             .iter()
             .any(|file| file.file_name == requested)
         {
-            return Err(format!("Requested Fermi-surface file not found: {}", requested));
+            return Err(format!(
+                "Requested Fermi-surface file not found: {}",
+                requested
+            ));
         }
         requested
     } else {
@@ -1186,7 +1222,13 @@ fn launch_fermi_surface_viewer(
         .write(true)
         .truncate(true)
         .open(&launch_log_path)
-        .map_err(|e| format!("Failed to create launch log {}: {}", launch_log_path.display(), e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to create launch log {}: {}",
+                launch_log_path.display(),
+                e
+            )
+        })?;
     use std::io::Write;
     let _ = writeln!(
         launch_log,
@@ -1601,7 +1643,10 @@ async fn run_bands_calculation(
     let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
     let gnu_file = work_path.join(&gnu_file_name);
     if !gnu_file.exists() {
-        return Err(format!("{} not found. bands.x may have failed.", gnu_file_name));
+        return Err(format!(
+            "{} not found. bands.x may have failed.",
+            gnu_file_name
+        ));
     }
 
     // Log file size for debugging
@@ -2913,7 +2958,10 @@ async fn run_bands_background(
     let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
     let gnu_file = work_path.join(&gnu_file_name);
     if !gnu_file.exists() {
-        return Err(format!("{} not found. bands.x may have failed.", gnu_file_name));
+        return Err(format!(
+            "{} not found. bands.x may have failed.",
+            gnu_file_name
+        ));
     }
 
     if let Ok(metadata) = std::fs::metadata(&gnu_file) {
@@ -3545,7 +3593,10 @@ async fn run_fermi_surface_background(
     if fermi_calc.verbosity.is_none() {
         fermi_calc.verbosity = Some("high".to_string());
     }
-    let k_offset = config.k_offset.unwrap_or([0, 0, 0]).map(|value| u32::from(value > 0));
+    let k_offset = config
+        .k_offset
+        .unwrap_or([0, 0, 0])
+        .map(|value| u32::from(value > 0));
     fermi_calc.kpoints = qe::KPoints::Automatic {
         grid: config.k_grid,
         offset: k_offset,
@@ -3933,10 +3984,7 @@ async fn run_phonon_background(
 
     let mut q2r_child = if let Some(ref mpi) = mpi_config {
         if mpi.enabled && mpi.nprocs > 1 {
-            emit_line!(format!(
-                "Running q2r.x with MPI ({} processes)",
-                mpi.nprocs
-            ));
+            emit_line!(format!("Running q2r.x with MPI ({} processes)", mpi.nprocs));
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&q2r_exe)
@@ -4364,6 +4412,7 @@ pub fn run() {
             let mut fermi_surfer_path: Option<PathBuf> = None;
             let mut execution_prefix: Option<String> = None;
             let mut mpi_defaults: Option<config::MpiDefaultsConfig> = None;
+            let mut save_size_mode = config::SaveSizeMode::Large;
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
                     if let Some(path) = cfg.qe_bin_dir {
@@ -4381,6 +4430,7 @@ pub fn run() {
                     }
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
                     mpi_defaults = normalize_mpi_defaults(cfg.mpi_defaults);
+                    save_size_mode = cfg.save_size_mode;
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to load config: {}", e);
@@ -4393,6 +4443,7 @@ pub fn run() {
                 fermi_surfer_path: Mutex::new(fermi_surfer_path),
                 execution_prefix: Mutex::new(execution_prefix),
                 mpi_defaults: Mutex::new(mpi_defaults),
+                save_size_mode: Mutex::new(save_size_mode),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
             });
@@ -4425,9 +4476,12 @@ pub fn run() {
             get_execution_prefix,
             set_mpi_defaults,
             get_mpi_defaults,
+            set_save_size_mode,
+            get_save_size_mode,
             clear_temp_storage,
             launch_fermi_surface_viewer,
             check_qe_executables,
+            analyze_structure_symmetry,
             generate_input,
             validate_calculation,
             parse_output,

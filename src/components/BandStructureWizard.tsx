@@ -5,9 +5,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { BandData } from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
-import { kPointPrimitiveToConventional, CenteringType } from "../lib/reciprocalLattice";
+import {
+  Vec3,
+  CenteringType,
+  RhombohedralSetting,
+  detectRhombohedralSettingFromLattice,
+  kPointPrimitiveToConventional,
+} from "../lib/reciprocalLattice";
+import {
+  analyzeCrystalSymmetry,
+  buildConventionalLatticeFromCrystalData,
+  multiplyMatrixVector,
+  SymmetryTransformResult,
+} from "../lib/symmetryTransform";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
-import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
@@ -158,6 +169,126 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
   return "gaussian";
+}
+
+function coerceSpaceGroupNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 230) {
+    return null;
+  }
+  return parsed;
+}
+
+function extractSpaceGroupNumberFromHM(hm: string | undefined): number | null {
+  if (!hm) return null;
+  const match = hm.match(/#\s*(\d{1,3})/);
+  if (!match) return null;
+  return coerceSpaceGroupNumber(match[1]);
+}
+
+function normalizeSpaceGroupHM(value: string | undefined): string {
+  if (!value) return "";
+  return value
+    .toLowerCase()
+    .replace(/[−–—]/g, "-")
+    .replace(/[\s_:'"]/g, "");
+}
+
+function detectBravaisFromHMSymbol(value: string | undefined): BravaisLattice | null {
+  const normalized = normalizeSpaceGroupHM(value);
+  if (!normalized) return null;
+  if (normalized.startsWith("r")) {
+    return "trigonal-R";
+  }
+  if (
+    normalized.startsWith("p6") ||
+    normalized.startsWith("p-6") ||
+    normalized.startsWith("p63")
+  ) {
+    return "hexagonal";
+  }
+  return null;
+}
+
+function crystalSystemRankFromSpaceGroup(spaceGroupNumber: number): number {
+  if (spaceGroupNumber >= 1 && spaceGroupNumber <= 2) return 0; // triclinic
+  if (spaceGroupNumber >= 3 && spaceGroupNumber <= 15) return 1; // monoclinic
+  if (spaceGroupNumber >= 16 && spaceGroupNumber <= 74) return 2; // orthorhombic
+  if (spaceGroupNumber >= 75 && spaceGroupNumber <= 142) return 3; // tetragonal
+  if (spaceGroupNumber >= 143 && spaceGroupNumber <= 167) return 4; // trigonal
+  if (spaceGroupNumber >= 168 && spaceGroupNumber <= 194) return 5; // hexagonal
+  if (spaceGroupNumber >= 195 && spaceGroupNumber <= 230) return 6; // cubic
+  return -1;
+}
+
+function resolveKPathCentering(
+  crystalData: CrystalData,
+  symmetryTransform: SymmetryTransformResult | null,
+): {
+  centering: CenteringType;
+  rhombohedralSetting?: RhombohedralSetting;
+} {
+  const cifSpaceGroup =
+    coerceSpaceGroupNumber(crystalData.space_group_IT_number) ??
+    extractSpaceGroupNumberFromHM(crystalData.space_group_HM);
+  const symmetrySpaceGroup = coerceSpaceGroupNumber(symmetryTransform?.spacegroupNumber);
+
+  const preferCifSpaceGroup =
+    cifSpaceGroup != null &&
+    symmetrySpaceGroup != null &&
+    crystalSystemRankFromSpaceGroup(symmetrySpaceGroup) <
+      crystalSystemRankFromSpaceGroup(cifSpaceGroup);
+
+  const spaceGroup = preferCifSpaceGroup
+    ? cifSpaceGroup
+    : (symmetrySpaceGroup ?? cifSpaceGroup);
+
+  const hmFallback = preferCifSpaceGroup
+    ? (detectBravaisFromHMSymbol(crystalData.space_group_HM) ??
+      detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol))
+    : (detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol) ??
+      detectBravaisFromHMSymbol(crystalData.space_group_HM));
+
+  let bravaisType: BravaisLattice = hmFallback ?? "triclinic";
+  if (spaceGroup != null) {
+    try {
+      bravaisType = detectBravaisLattice(spaceGroup);
+    } catch {
+      if (hmFallback) {
+        bravaisType = hmFallback;
+      }
+    }
+  }
+
+  const centeringMap: Record<BravaisLattice, CenteringType> = {
+    "cubic-P": "P",
+    "cubic-F": "F",
+    "cubic-I": "I",
+    "tetragonal-P": "P",
+    "tetragonal-I": "I",
+    "orthorhombic-P": "P",
+    "orthorhombic-C": "C",
+    "orthorhombic-I": "I",
+    "orthorhombic-F": "F",
+    "hexagonal": "P",
+    "trigonal-R": "R",
+    "monoclinic-P": "P",
+    "monoclinic-C": "C",
+    "triclinic": "P",
+  };
+
+  const centering = centeringMap[bravaisType] ?? "P";
+  const rhombohedralSetting = centering === "R"
+    ? detectRhombohedralSettingFromLattice(buildConventionalLatticeFromCrystalData(crystalData))
+    : undefined;
+
+  return {
+    centering,
+    rhombohedralSetting,
+  };
 }
 
 type KPathSamplingMode = "segment" | "total";
@@ -405,6 +536,8 @@ export function BandStructureWizard({
   // Pseudopotentials (pseudopotentials list used internally for auto-selection)
   const [, setPseudopotentials] = useState<string[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+  const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
+  const [symmetryError, setSymmetryError] = useState<string | null>(null);
 
   // Helper functions
   function getBaseElement(symbol: string): string {
@@ -420,47 +553,6 @@ export function BandStructureWizard({
       lowerFile.startsWith(lowerEl + "-")
     );
   }
-
-  function calculateCVector(data: CrystalData): [number, number, number] {
-    const c = data.cell_length_c.value;
-    const alpha = (data.cell_angle_alpha.value * Math.PI) / 180;
-    const beta = (data.cell_angle_beta.value * Math.PI) / 180;
-    const gamma = (data.cell_angle_gamma.value * Math.PI) / 180;
-
-    const cx = c * Math.cos(beta);
-    const cy = (c * (Math.cos(alpha) - Math.cos(beta) * Math.cos(gamma))) / Math.sin(gamma);
-    const cz = Math.sqrt(c * c - cx * cx - cy * cy);
-
-    return [cx, cy, cz];
-  }
-
-  // Detect centering type for k-point transformation
-  const centeringType = useMemo((): CenteringType => {
-    const spaceGroup = crystalData.space_group_IT_number;
-    const bravaisType: BravaisLattice = spaceGroup
-      ? detectBravaisLattice(spaceGroup)
-      : "triclinic";
-
-    // Map Bravais lattice to centering type
-    const centeringMap: Record<BravaisLattice, CenteringType> = {
-      "cubic-P": "P",
-      "cubic-F": "F",
-      "cubic-I": "I",
-      "tetragonal-P": "P",
-      "tetragonal-I": "I",
-      "orthorhombic-P": "P",
-      "orthorhombic-C": "C",
-      "orthorhombic-I": "I",
-      "orthorhombic-F": "F",
-      "hexagonal": "P",
-      "trigonal-R": "R",
-      "monoclinic-P": "P",
-      "monoclinic-C": "C",
-      "triclinic": "P",
-    };
-
-    return centeringMap[bravaisType] || "P";
-  }, [crystalData]);
 
   const applyScfDefaults = useCallback((scf: CalculationRun) => {
     const params = scf.parameters || {};
@@ -541,6 +633,25 @@ export function BandStructureWizard({
     }
     init();
   }, [qePath, crystalData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSymmetryError(null);
+    analyzeCrystalSymmetry(crystalData)
+      .then((result) => {
+        if (cancelled) return;
+        setSymmetryTransform(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to analyze symmetry with spglib:", err);
+        setSymmetryTransform(null);
+        setSymmetryError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [crystalData]);
 
   // Auto-scroll output only if user is at the bottom
   useEffect(() => {
@@ -629,7 +740,7 @@ export function BandStructureWizard({
     setTotalKPointsInput(String(committed));
   }, [minimumTotalKPoints, totalKPointsInput, totalKPointsTarget]);
 
-  const buildBandTaskPlan = (): BandTaskPlan => {
+  const buildBandTaskPlan = async (): Promise<BandTaskPlan> => {
     if (!selectedScf?.result) {
       throw new Error("No source SCF calculation selected");
     }
@@ -703,64 +814,82 @@ export function BandStructureWizard({
     const sourceNspin = Number(scfParams.nspin);
     const nspin = Number.isFinite(sourceNspin) && sourceNspin > 0 ? sourceNspin : 1;
 
-    // Check if this is an FCC structure (diamond, zincblende) that should use primitive cell
-    // Using primitive cell with ibrav=2 gives correct band structure matching literature
-    const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
-    const usePrimitiveCell = primitiveCell !== null;
+    let resolvedSymmetry = symmetryTransform;
+    let resolvedSymmetryError = symmetryError;
+    if (!resolvedSymmetry) {
+      try {
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        setSymmetryTransform(resolvedSymmetry);
+        setSymmetryError(null);
+        resolvedSymmetryError = null;
+      } catch (err) {
+        resolvedSymmetryError = String(err);
+        setSymmetryError(resolvedSymmetryError);
+      }
+    }
+
+    const sourceCellRepresentation = String(scfParams.cell_representation || "").toLowerCase();
+    const sourceUsesPrimitive = sourceCellRepresentation.startsWith("primitive");
+    const canUseSymmetryPrimitive =
+      sourceUsesPrimitive &&
+      resolvedSymmetry !== null &&
+      resolvedSymmetry.standardizedPrimitiveAtoms.length > 0;
+    if (sourceUsesPrimitive && !canUseSymmetryPrimitive) {
+      throw new Error(
+        "Selected SCF was run in a primitive cell, but symmetry conversion data is unavailable. Re-run the SCF or refresh the structure metadata.",
+      );
+    }
+
+    const conventionalLattice = buildConventionalLatticeFromCrystalData(crystalData);
+
+    const species = elements.map((el) => ({
+      symbol: el,
+      mass: ELEMENT_MASSES[el] || 1.0,
+      pseudopotential: resolvedPseudos[el],
+    }));
+
+    const roundCoord = (value: number): number => {
+      const rounded = Math.abs(value) < 1e-12 ? 0 : Number(value.toFixed(12));
+      return Math.abs(rounded) < 1e-12 ? 0 : rounded;
+    };
+    const roundVec3 = (coords: Vec3): Vec3 => [
+      roundCoord(coords[0]),
+      roundCoord(coords[1]),
+      roundCoord(coords[2]),
+    ];
+
+    const {
+      centering: kPathCentering,
+      rhombohedralSetting: kPathRhombohedralSetting,
+    } = resolveKPathCentering(crystalData, resolvedSymmetry);
+    const toInputConventionalKCoords = (coords: Vec3): Vec3 => {
+      return roundVec3(
+        kPointPrimitiveToConventional(
+          coords,
+          kPathCentering,
+          kPathCentering === "R"
+            ? { rhombohedralSetting: kPathRhombohedralSetting }
+            : undefined,
+        ),
+      );
+    };
+    const toSymmetryPrimitiveKCoords = (coords: Vec3): Vec3 => {
+      const inputCoords = toInputConventionalKCoords(coords);
+      if (!resolvedSymmetry) {
+        return inputCoords;
+      }
+      return roundVec3(
+        multiplyMatrixVector(
+          resolvedSymmetry.inputToPrimitiveReciprocal,
+          inputCoords,
+        ),
+      );
+    };
 
     let baseCalculation;
-    let transformedKPath;
+    let transformedKPath: KPathPoint[];
 
-    if (usePrimitiveCell && primitiveCell) {
-      // Use primitive cell with ibrav (e.g., ibrav=2 for FCC)
-      // This is the standard approach for band structure calculations
-      console.log(`Using primitive cell: ibrav=${primitiveCell.ibravNumeric} (${primitiveCell.ibrav}), celldm(1)=${primitiveCell.celldm1.toFixed(4)} Bohr, ${primitiveCell.nat} atoms`);
-
-      baseCalculation = {
-        calculation: "scf",
-        prefix: scfPrefix,
-        outdir: "./tmp",
-        pseudo_dir: pseudoDir,
-        system: {
-          ibrav: primitiveCell.ibrav,
-          // celldm array: [a, b/a, c/a, cos(alpha), cos(beta), cos(gamma)]
-          // For cubic, only celldm(1) = a is needed
-          celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
-          cell_parameters: null, // Not needed when using ibrav
-          cell_units: null,
-          species: elements.map((el) => ({
-            symbol: el,
-            mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: resolvedPseudos[el],
-          })),
-          atoms: primitiveCell.atoms.map((atom) => ({
-            symbol: atom.symbol,
-            position: atom.position,
-            if_pos: [true, true, true],
-          })),
-          position_units: "crystal",
-          ecutwfc,
-          ecutrho,
-          nspin,
-          occupations: nscfOccupations,
-          smearing: nscfSmearing,
-          degauss: parsedDegauss,
-        },
-        kpoints: { type: "gamma" }, // Will be replaced by backend
-        conv_thr: parsedConvThr,
-        mixing_beta: parsedMixingBeta,
-        tprnfor: false,
-        tstress: false,
-        forc_conv_thr: null,
-        etot_conv_thr: null,
-        verbosity: nscfVerbosity,
-      };
-
-      // For primitive cell, k-points are already in the correct basis
-      // No transformation needed - use them directly
-      transformedKPath = kPath;
-    } else {
-      // Fall back to conventional cell with ibrav=0 for non-FCC structures
+    if (canUseSymmetryPrimitive && resolvedSymmetry) {
       baseCalculation = {
         calculation: "scf",
         prefix: scfPrefix,
@@ -769,26 +898,12 @@ export function BandStructureWizard({
         system: {
           ibrav: "free",
           celldm: null,
-          cell_parameters: [
-            [crystalData.cell_length_a.value, 0, 0],
-            [
-              crystalData.cell_length_b.value *
-                Math.cos((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              crystalData.cell_length_b.value *
-                Math.sin((crystalData.cell_angle_gamma.value * Math.PI) / 180),
-              0,
-            ],
-            calculateCVector(crystalData),
-          ],
+          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
           cell_units: "angstrom",
-          species: elements.map((el) => ({
-            symbol: el,
-            mass: ELEMENT_MASSES[el] || 1.0,
-            pseudopotential: resolvedPseudos[el],
-          })),
-          atoms: crystalData.atom_sites.map((site) => ({
-            symbol: getBaseElement(site.type_symbol),
-            position: [site.fract_x, site.fract_y, site.fract_z],
+          species,
+          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: roundVec3(atom.position),
             if_pos: [true, true, true],
           })),
           position_units: "crystal",
@@ -799,7 +914,45 @@ export function BandStructureWizard({
           smearing: nscfSmearing,
           degauss: parsedDegauss,
         },
-        kpoints: { type: "gamma" }, // Will be replaced by backend
+        kpoints: { type: "gamma" },
+        conv_thr: parsedConvThr,
+        mixing_beta: parsedMixingBeta,
+        tprnfor: false,
+        tstress: false,
+        forc_conv_thr: null,
+        etot_conv_thr: null,
+        verbosity: nscfVerbosity,
+      };
+      transformedKPath = kPath.map((point) => ({
+        ...point,
+        coords: toSymmetryPrimitiveKCoords(point.coords as Vec3),
+      }));
+    } else {
+      baseCalculation = {
+        calculation: "scf",
+        prefix: scfPrefix,
+        outdir: "./tmp",
+        pseudo_dir: pseudoDir,
+        system: {
+          ibrav: "free",
+          celldm: null,
+          cell_parameters: conventionalLattice,
+          cell_units: "angstrom",
+          species,
+          atoms: crystalData.atom_sites.map((site) => ({
+            symbol: getBaseElement(site.type_symbol),
+            position: roundVec3([site.fract_x, site.fract_y, site.fract_z]),
+            if_pos: [true, true, true],
+          })),
+          position_units: "crystal",
+          ecutwfc,
+          ecutrho,
+          nspin,
+          occupations: nscfOccupations,
+          smearing: nscfSmearing,
+          degauss: parsedDegauss,
+        },
+        kpoints: { type: "gamma" },
         conv_thr: parsedConvThr,
         mixing_beta: parsedMixingBeta,
         tprnfor: false,
@@ -809,15 +962,15 @@ export function BandStructureWizard({
         verbosity: nscfVerbosity,
       };
 
-      // Transform k-points from primitive to conventional reciprocal lattice
-      // This is necessary because the standard k-point coordinates (e.g., from
-      // Setyawan & Curtarolo) are in the primitive reciprocal basis, but QE's
-      // crystal_b format with ibrav=0 uses the conventional reciprocal basis.
       transformedKPath = kPath.map((point) => ({
         ...point,
-        coords: kPointPrimitiveToConventional(point.coords, centeringType),
+        coords: toInputConventionalKCoords(point.coords as Vec3),
       }));
     }
+
+    const bandCellRepresentation = canUseSymmetryPrimitive
+      ? "primitive_spglib"
+      : "conventional_input";
 
     const taskLabel = `Bands - ${crystalData?.formula_sum || ""}`;
     const taskParams = {
@@ -875,6 +1028,11 @@ export function BandStructureWizard({
       projection_diag_basis: projectionDiagBasis,
       projection_pawproj: projectionPawproj,
       scf_fermi_energy: selectedScf.result?.fermi_energy ?? scfFermiEnergy,
+      cell_representation: bandCellRepresentation,
+      symmetry_spacegroup: resolvedSymmetry?.spacegroupNumber ?? null,
+      symmetry_hall_number: resolvedSymmetry?.hallNumber ?? null,
+      primitive_to_input_reciprocal: resolvedSymmetry?.primitiveToInputReciprocal ?? null,
+      symmetry_error: resolvedSymmetryError,
     };
 
     return {
@@ -903,7 +1061,7 @@ export function BandStructureWizard({
     setStep("run");
 
     try {
-      const plan = buildBandTaskPlan();
+      const plan = await buildBandTaskPlan();
 
       const taskId = await taskContext.startTask("bands", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
@@ -974,9 +1132,9 @@ export function BandStructureWizard({
     }
   };
 
-  const queueCalculation = () => {
+  const queueCalculation = async () => {
     try {
-      const plan = buildBandTaskPlan();
+      const plan = await buildBandTaskPlan();
       setError(null);
       taskContext.enqueueTask(
         "bands",
@@ -1126,6 +1284,7 @@ export function BandStructureWizard({
           onPathChange={handleKPathChange}
           initialPath={kPath}
           pointsPerSegment={viewerPointsPerSegment}
+          symmetryTransform={symmetryTransform}
         />
 
         <div className="kpath-sampling-panel">
