@@ -61,7 +61,7 @@ interface SettingsProjectSnapshot {
   cif_variants: RecoveryCifVariant[];
 }
 
-const DELETE_CONFIRM_TEXT = "delete my project for good";
+const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 
 type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue";
@@ -860,7 +860,7 @@ function AppInner() {
               <div className="settings-menu-divider" />
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="global-save-size-mode">
-                  Calculation Save Size
+                  Non-SCF Save Size
                 </label>
                 <select
                   id="global-save-size-mode"
@@ -872,18 +872,18 @@ function AppInner() {
                     setSaveSizeStatus(null);
                   }}
                 >
-                  <option value="large">Large (full restart data)</option>
-                  <option value="small">Small (strip wavefunction archives)</option>
+                  <option value="large">Large (keep full non-SCF restart files)</option>
+                  <option value="small">Small (compact non-SCF saves)</option>
                 </select>
                 <p className="settings-menu-hint">
-                  `Small` keeps useful outputs while removing large `wfc*` scratch files from saved calculation folders.
+                  This only affects non-SCF saves. SCF always keeps restart files required for phonon workflows.
                 </p>
                 <button
                   className="settings-menu-item"
                   onClick={() => void saveGlobalSaveSizeSetting()}
                   disabled={isSavingSaveSizeMode}
                 >
-                  {isSavingSaveSizeMode ? "Saving..." : "Save Size Mode"}
+                  {isSavingSaveSizeMode ? "Saving..." : "Save Non-SCF Size Mode"}
                 </button>
                 {saveSizeStatus && <div className="settings-menu-status">{saveSizeStatus}</div>}
               </div>

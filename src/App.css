@@ -1927,6 +1927,14 @@ html[data-theme="dark"] {
   background: #edf2f7;
 }
 
+.project-card-menu-item.danger {
+  color: #e53e3e;
+}
+
+.project-card-menu-item.danger:hover:not(:disabled) {
+  background: #fed7d7;
+}
+
 .project-card-menu-item:disabled {
   opacity: 0.48;
   cursor: not-allowed;

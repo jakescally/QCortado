@@ -106,7 +106,7 @@ interface TempCleanupResult {
 
 type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
 
-const CONFIRM_TEXT = "delete my project for good";
+const DELETE_CONFIRM_TEXT = "DELETE";
 const SOC_PRIORITY_BOOST = 250;
 const PINNED_TAG = "pinned";
 
@@ -970,7 +970,7 @@ export function ProjectDashboard({
   }
 
   async function handleConfirmDelete() {
-    if (deleteConfirmText !== CONFIRM_TEXT) return;
+    if (deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
 
     setIsDeleting(true);
     try {
@@ -1537,7 +1537,7 @@ export function ProjectDashboard({
             <div className="settings-menu-divider" />
             <div className="settings-menu-section">
               <label className="settings-menu-label" htmlFor="dashboard-save-size-mode">
-                Calculation Save Size
+                Non-SCF Save Size
               </label>
               <select
                 id="dashboard-save-size-mode"
@@ -1549,18 +1549,18 @@ export function ProjectDashboard({
                   setSaveSizeStatus(null);
                 }}
               >
-                <option value="large">Large (full restart data)</option>
-                <option value="small">Small (strip wavefunction archives)</option>
+                <option value="large">Large (keep full non-SCF restart files)</option>
+                <option value="small">Small (compact non-SCF saves)</option>
               </select>
               <p className="settings-menu-hint">
-                `Small` keeps useful outputs while removing large `wfc*` scratch files from saved calculation folders.
+                This only affects non-SCF saves. SCF always keeps restart files required for phonon workflows.
               </p>
               <button
                 className="settings-menu-item"
                 onClick={saveSaveSizeMode}
                 disabled={isSavingSaveSizeMode}
               >
-                {isSavingSaveSizeMode ? "Saving..." : "Save Size Mode"}
+                {isSavingSaveSizeMode ? "Saving..." : "Save Non-SCF Size Mode"}
               </button>
               {saveSizeStatus && <div className="settings-menu-status">{saveSizeStatus}</div>}
             </div>
@@ -3035,13 +3035,13 @@ export function ProjectDashboard({
 
             <div className="form-group">
               <label>
-                Type <code>{CONFIRM_TEXT}</code> to confirm:
+                Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
               </label>
               <input
                 type="text"
                 value={deleteConfirmText}
                 onChange={(e) => setDeleteConfirmText(e.target.value)}
-                placeholder={CONFIRM_TEXT}
+                placeholder={DELETE_CONFIRM_TEXT}
                 disabled={isDeleting}
                 autoFocus
               />
@@ -3056,11 +3056,11 @@ export function ProjectDashboard({
             >
               Cancel
             </button>
-            <button
-              className="dialog-btn delete"
-              onClick={handleConfirmDelete}
-              disabled={deleteConfirmText !== CONFIRM_TEXT || isDeleting}
-            >
+              <button
+                className="dialog-btn delete"
+                onClick={handleConfirmDelete}
+                disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeleting}
+              >
               {isDeleting ? "Deleting..." : "Delete Project"}
             </button>
           </div>

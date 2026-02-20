@@ -287,6 +287,58 @@ fn prepare_working_directory(work_path: &Path, preserve_existing: bool) -> Resul
     Ok(())
 }
 
+fn has_wavefunction_restart_files(save_dir: &Path) -> Result<bool, String> {
+    let entries = std::fs::read_dir(save_dir).map_err(|e| {
+        format!(
+            "Failed to read SCF restart directory {}: {}",
+            save_dir.display(),
+            e
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "Failed to inspect SCF restart directory {}: {}",
+                save_dir.display(),
+                e
+            )
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if file_name.starts_with("wfc") {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn ensure_phonon_restart_inputs(work_path: &Path) -> Result<(), String> {
+    let save_dir = work_path.join("tmp").join("qcortado_scf.save");
+    if !save_dir.exists() {
+        return Err(format!(
+            "SCF restart directory not found at {}. \
+Phonon calculations require the SCF .save data in ./tmp/qcortado_scf.save.",
+            save_dir.display()
+        ));
+    }
+
+    if !has_wavefunction_restart_files(&save_dir)? {
+        return Err(format!(
+            "SCF restart files are incomplete in {} (missing wfc* wavefunction files). \
+This usually means the SCF was compacted for small storage. \
+Phonon calculations require full SCF restart data. Re-run SCF with save size mode set to Large, then retry phonons.",
+            save_dir.display()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Clears QCortado temporary working directories from system temp roots.
 #[tauri::command]
 fn clear_temp_storage() -> Result<TempCleanupResult, String> {
@@ -1889,6 +1941,8 @@ async fn run_phonon_calculation(
             ));
         }
     }
+
+    ensure_phonon_restart_inputs(&work_path)?;
 
     // ========================================================================
     // Step 1: Run ph.x
@@ -3866,6 +3920,8 @@ async fn run_phonon_background(
             ));
         }
     }
+
+    ensure_phonon_restart_inputs(&work_path)?;
 
     check_cancel!();
 

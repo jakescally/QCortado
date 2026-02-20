@@ -1541,8 +1541,9 @@ pub fn save_calculation(
             // For phonons, default to compact artifacts unless EPW-prep explicitly asks for full data.
             if calc_data.calc_type == "phonon" && !preserve_full_phonon_artifacts {
                 copy_compact_phonon_artifacts(&work_path, &tmp_dir)?;
-            } else if save_size_mode == SaveSizeMode::Small {
-                // Compact mode strips heavy wavefunction archives while preserving useful artifacts.
+            } else if save_size_mode == SaveSizeMode::Small && calc_data.calc_type != "scf" {
+                // Compact mode strips heavy wavefunction archives for non-SCF runs.
+                // SCF keeps wfc* restart files so downstream phonon workflows remain valid.
                 copy_dir_recursive_compact(&work_path, &tmp_dir)?;
             } else {
                 // Copy all files and directories for non-phonon, or EPW-preserving phonon calculations.

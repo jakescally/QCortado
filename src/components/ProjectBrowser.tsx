@@ -156,6 +156,16 @@ interface CreatedProject {
   name: string;
 }
 
+interface DeleteProjectSnapshot {
+  id: string;
+  name: string;
+  cif_variants: Array<{
+    calculations: unknown[];
+  }>;
+}
+
+const DELETE_CONFIRM_TEXT = "DELETE";
+
 export function ProjectBrowser({
   onBack,
   onSelectProject,
@@ -169,6 +179,9 @@ export function ProjectBrowser({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [deleteProjectSnapshot, setDeleteProjectSnapshot] = useState<DeleteProjectSnapshot | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
   const [showCreateFolderDialog, setShowCreateFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [renamingFolder, setRenamingFolder] = useState<ProjectFolder | null>(null);
@@ -605,6 +618,12 @@ export function ProjectBrowser({
     setEditingProjectId(null);
   }
 
+  function closeDeleteProjectDialog() {
+    if (isDeletingProject) return;
+    setDeleteProjectSnapshot(null);
+    setDeleteConfirmText("");
+  }
+
   function handleProjectMetadataSaved(updatedProject: {
     id: string;
     name: string;
@@ -723,6 +742,43 @@ export function ProjectBrowser({
     }
   }
 
+  async function openDeleteProjectDialog(projectId: string) {
+    setOpenProjectMenuId(null);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      const project = await invoke<DeleteProjectSnapshot>("get_project", { projectId });
+      setDeleteProjectSnapshot(project);
+      setDeleteConfirmText("");
+    } catch (e) {
+      console.error("Failed to load project for deletion:", e);
+      setError(String(e));
+    }
+  }
+
+  async function handleConfirmDeleteProject() {
+    if (!deleteProjectSnapshot || deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
+    const projectId = deleteProjectSnapshot.id;
+    const projectName = deleteProjectSnapshot.name;
+
+    setIsDeletingProject(true);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      await invoke("delete_project", { projectId });
+      setDeleteProjectSnapshot(null);
+      setDeleteConfirmText("");
+      await loadProjectsAndFolders(false);
+      onProjectsChanged?.();
+      setStatusMessage(`Deleted "${projectName}" and all associated data.`);
+    } catch (e) {
+      console.error("Failed to delete project:", e);
+      setError(String(e));
+    } finally {
+      setIsDeletingProject(false);
+    }
+  }
+
   async function handleProjectCreated(project: CreatedProject) {
     setShowCreateDialog(false);
     setError(null);
@@ -752,6 +808,9 @@ export function ProjectBrowser({
   const editingProject = editingProjectId
     ? projects.find((project) => project.id === editingProjectId) ?? null
     : null;
+  const deleteProjectCalculationCount = deleteProjectSnapshot
+    ? deleteProjectSnapshot.cif_variants.reduce((sum, variant) => sum + variant.calculations.length, 0)
+    : 0;
 
   return (
     <div className="browser-container">
@@ -1032,6 +1091,17 @@ export function ProjectBrowser({
                                 Move to {folder.name}
                               </button>
                             ))}
+                            <div className="project-card-menu-divider" />
+                            <button
+                              type="button"
+                              className="project-card-menu-item danger"
+                              onClick={() => {
+                                void openDeleteProjectDialog(project.id);
+                              }}
+                              disabled={isDeletingProject}
+                            >
+                              Delete Project
+                            </button>
                           </div>
                         )}
                       </div>
@@ -1101,6 +1171,76 @@ export function ProjectBrowser({
         onClose={closeEditProjectDialog}
         onSaved={handleProjectMetadataSaved}
       />
+
+      {deleteProjectSnapshot && (
+        <div className="dialog-overlay" onClick={closeDeleteProjectDialog}>
+          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>Delete Project</h2>
+              <button
+                className="dialog-close"
+                onClick={closeDeleteProjectDialog}
+                disabled={isDeletingProject}
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="dialog-body">
+              <div className="delete-warning">
+                <p>
+                  You are about to permanently delete <strong>{deleteProjectSnapshot.name}</strong> and all of its
+                  data:
+                </p>
+                <ul>
+                  <li>
+                    {deleteProjectSnapshot.cif_variants.length} structure
+                    {deleteProjectSnapshot.cif_variants.length !== 1 ? "s" : ""}
+                  </li>
+                  <li>
+                    {deleteProjectCalculationCount}{" "}
+                    calculation
+                    {deleteProjectCalculationCount !== 1 ? "s" : ""}
+                  </li>
+                  <li>All input/output files</li>
+                </ul>
+                <p className="delete-warning-emphasis">
+                  This action cannot be undone.
+                </p>
+              </div>
+
+              <div className="form-group">
+                <label>
+                  Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  placeholder={DELETE_CONFIRM_TEXT}
+                  disabled={isDeletingProject}
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="dialog-footer">
+              <button className="dialog-btn cancel" onClick={closeDeleteProjectDialog} disabled={isDeletingProject}>
+                Cancel
+              </button>
+              <button
+                className="dialog-btn delete"
+                onClick={() => {
+                  void handleConfirmDeleteProject();
+                }}
+                disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeletingProject}
+              >
+                {isDeletingProject ? "Deleting..." : "Delete Project"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCreateFolderDialog && (
         <div className="dialog-overlay" onClick={closeCreateFolderModal}>
