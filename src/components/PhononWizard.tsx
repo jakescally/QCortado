@@ -12,6 +12,17 @@ import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
+import {
+  createPathCoordinateConverters,
+  mapPathCoordinates,
+  resolvePathTransformContext,
+  sourceScfUsesPrimitiveCell,
+} from "../lib/kPathTransforms";
+import {
+  RhombohedralConvention,
+  defaultRhombohedralConventionForSetting,
+} from "../lib/brillouinZoneData";
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -329,6 +340,8 @@ export function PhononWizard({
   // Step 1: Source SCF
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
   const [scfSortMode, setScfSortMode] = useState<ScfSortMode>(() => getStoredSortMode());
+  const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
+  const [symmetryError, setSymmetryError] = useState<string | null>(null);
 
   const handleScfSortModeChange = useCallback((mode: ScfSortMode) => {
     setScfSortMode(mode);
@@ -382,6 +395,7 @@ export function PhononWizard({
   const [dosDeltaEInput, setDosDeltaEInput] = useState<string>("1.0");
   const [calculateDispersion, setCalculateDispersion] = useState(true);
   const [qPath, setQPath] = useState<KPathPoint[]>([]);
+  const [qPathRhombohedralConvention, setQPathRhombohedralConvention] = useState<RhombohedralConvention | undefined>(undefined);
   const [qPathSamplingMode, setQPathSamplingMode] = useState<QPathSamplingMode>("segment");
   const [pointsPerSegment, setPointsPerSegment] = useState(20);
   const [totalQPointsTarget, setTotalQPointsTarget] = useState(120);
@@ -436,6 +450,29 @@ export function PhononWizard({
     }
     init();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSymmetryError(null);
+    analyzeCrystalSymmetry(crystalData)
+      .then((result) => {
+        if (cancelled) return;
+        setSymmetryTransform(result);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to analyze symmetry with spglib:", err);
+        setSymmetryTransform(null);
+        setSymmetryError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [crystalData]);
+
+  useEffect(() => {
+    setQPathRhombohedralConvention(undefined);
+  }, [crystalData]);
 
   useEffect(() => {
     if (!epwPreparationEnabled) return;
@@ -526,15 +563,46 @@ export function PhononWizard({
     setTotalQPointsInput(String(committed));
   }, [minimumTotalQPoints, totalQPointsInput, totalQPointsTarget]);
 
-  function buildPhononTaskPlan(): PhononTaskPlan {
+  async function buildPhononTaskPlan(): Promise<PhononTaskPlan> {
     if (!selectedScf?.result) {
       throw new Error("No source SCF calculation selected");
+    }
+
+    const scfParams = selectedScf.parameters || {};
+    let resolvedSymmetry = symmetryTransform;
+    let resolvedSymmetryError = symmetryError;
+    if (!resolvedSymmetry) {
+      try {
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        setSymmetryTransform(resolvedSymmetry);
+        setSymmetryError(null);
+        resolvedSymmetryError = null;
+      } catch (err) {
+        resolvedSymmetryError = String(err);
+        setSymmetryError(resolvedSymmetryError);
+      }
     }
 
     const shouldCalculateDispersion = calculateDispersion && qPath.length >= 2;
     if (calculateDispersion && !shouldCalculateDispersion) {
       throw new Error("Select at least 2 Q-path points for dispersion, or disable dispersion.");
     }
+
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
+    const canUseSymmetryPrimitive =
+      sourceUsesPrimitive &&
+      resolvedSymmetry !== null &&
+      resolvedSymmetry.standardizedPrimitiveAtoms.length > 0;
+    if (shouldCalculateDispersion && sourceUsesPrimitive && !canUseSymmetryPrimitive) {
+      throw new Error(
+        "Selected SCF was run in a primitive cell, but symmetry conversion data is unavailable. Re-run the SCF or refresh the structure metadata.",
+      );
+    }
+
+    const context = resolvePathTransformContext(crystalData, resolvedSymmetry);
+    const effectiveRhombohedralConvention = qPathRhombohedralConvention ??
+      defaultRhombohedralConventionForSetting(context.rhombohedralSetting ?? null);
+    const converters = createPathCoordinateConverters(context, resolvedSymmetry);
 
     const parsedDosDeltaE = parseOptionalPositiveNumber(dosDeltaEInput);
     if (calculateDos && parsedDosDeltaE === null) {
@@ -591,6 +659,21 @@ export function PhononWizard({
     const fildvscfPath = fildvscfEnabled ? (fildvscf.trim() || "dvscf") : null;
     const verbosityValue = verbosity === "default" ? null : verbosity;
     const shouldPreserveFullArtifacts = epwPreparationEnabled && preserveFullArtifacts;
+    const transformedQPath = shouldCalculateDispersion
+      ? mapPathCoordinates(
+        qPath,
+        canUseSymmetryPrimitive
+          ? converters.toSymmetryPrimitiveCoords
+          : converters.toInputConventionalCoords,
+      ).map((point) => ({
+        label: point.label,
+        coords: point.coords,
+        npoints: point.npoints,
+      }))
+      : null;
+    const phononCellRepresentation = canUseSymmetryPrimitive
+      ? "primitive_spglib"
+      : "conventional_input";
     const phononConfig = {
       phonon: {
         prefix: "qcortado_scf",
@@ -622,11 +705,7 @@ export function PhononWizard({
       dos_grid: calculateDos ? dosGrid : null,
       dos_delta_e: calculateDos ? parsedDosDeltaE : null,
       calculate_dispersion: shouldCalculateDispersion,
-      q_path: shouldCalculateDispersion ? qPath.map((point) => ({
-        label: point.label,
-        coords: point.coords,
-        npoints: point.npoints,
-      })) : null,
+      q_path: transformedQPath,
       points_per_segment: qPathSamplingMode === "segment" ? pointsPerSegment : viewerPointsPerSegment,
       project_id: projectId,
       scf_calc_id: selectedScf.id,
@@ -669,6 +748,13 @@ export function PhononWizard({
       q_path_sampling_mode: qPathSamplingMode,
       points_per_segment: qPathSamplingMode === "segment" ? pointsPerSegment : null,
       total_q_points_target: qPathSamplingMode === "total" ? totalDispersionQPoints : null,
+      q_path_convention: context.centering === "R" ? effectiveRhombohedralConvention : null,
+      q_path_rhombohedral_setting: context.centering === "R" ? (context.rhombohedralSetting ?? null) : null,
+      cell_representation: phononCellRepresentation,
+      symmetry_spacegroup: resolvedSymmetry?.spacegroupNumber ?? null,
+      symmetry_hall_number: resolvedSymmetry?.hallNumber ?? null,
+      primitive_to_input_reciprocal: resolvedSymmetry?.primitiveToInputReciprocal ?? null,
+      symmetry_error: resolvedSymmetryError,
       epw_preparation: {
         enabled: epwPreparationEnabled,
         preserve_full_artifacts: shouldPreserveFullArtifacts,
@@ -698,7 +784,7 @@ export function PhononWizard({
     }
     let plan: PhononTaskPlan;
     try {
-      plan = buildPhononTaskPlan();
+      plan = await buildPhononTaskPlan();
     } catch (e) {
       setError(String(e));
       return;
@@ -791,9 +877,9 @@ export function PhononWizard({
     }
   };
 
-  const queueCalculation = () => {
+  const queueCalculation = async () => {
     try {
-      const plan = buildPhononTaskPlan();
+      const plan = await buildPhononTaskPlan();
       setError(null);
       taskContext.enqueueTask(
         "phonon",
@@ -1559,6 +1645,9 @@ export function PhononWizard({
                     onPathChange={handleQPathChange}
                     initialPath={qPath}
                     pointsPerSegment={viewerPointsPerSegment}
+                    symmetryTransform={symmetryTransform}
+                    rhombohedralConvention={qPathRhombohedralConvention}
+                    onRhombohedralConventionChange={setQPathRhombohedralConvention}
                   />
 
                   <div className="kpath-sampling-panel">

@@ -6146,6 +6146,32 @@ html[data-theme="dark"] .band-plot-info {
   color: #a6adc8;
 }
 
+.bz-convention-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: #313244;
+  border: 1px solid #45475a;
+}
+
+.bz-convention-toggle {
+  max-width: 480px;
+}
+
+.bz-convention-note {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #a6adc8;
+}
+
+.bz-convention-warning {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #f9e2af;
+}
+
 .bz-viewer-canvas {
   width: 100%;
   height: 400px;

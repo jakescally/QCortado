@@ -5,20 +5,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { CrystalData, ELEMENT_MASSES } from "../lib/types";
 import { BandData } from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
-import {
-  Vec3,
-  CenteringType,
-  RhombohedralSetting,
-  detectRhombohedralSettingFromLattice,
-  kPointPrimitiveToConventional,
-} from "../lib/reciprocalLattice";
+import { Vec3 } from "../lib/reciprocalLattice";
 import {
   analyzeCrystalSymmetry,
   buildConventionalLatticeFromCrystalData,
-  multiplyMatrixVector,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
+import {
+  createPathCoordinateConverters,
+  mapPathCoordinates,
+  roundVec3,
+  resolvePathTransformContext,
+  sourceScfUsesPrimitiveCell,
+} from "../lib/kPathTransforms";
+import {
+  RhombohedralConvention,
+  defaultRhombohedralConventionForSetting,
+} from "../lib/brillouinZoneData";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
@@ -169,126 +172,6 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
   return "gaussian";
-}
-
-function coerceSpaceGroupNumber(value: unknown): number | null {
-  if (value == null) return null;
-  const parsed = typeof value === "number"
-    ? value
-    : Number.parseInt(String(value).trim(), 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 230) {
-    return null;
-  }
-  return parsed;
-}
-
-function extractSpaceGroupNumberFromHM(hm: string | undefined): number | null {
-  if (!hm) return null;
-  const match = hm.match(/#\s*(\d{1,3})/);
-  if (!match) return null;
-  return coerceSpaceGroupNumber(match[1]);
-}
-
-function normalizeSpaceGroupHM(value: string | undefined): string {
-  if (!value) return "";
-  return value
-    .toLowerCase()
-    .replace(/[−–—]/g, "-")
-    .replace(/[\s_:'"]/g, "");
-}
-
-function detectBravaisFromHMSymbol(value: string | undefined): BravaisLattice | null {
-  const normalized = normalizeSpaceGroupHM(value);
-  if (!normalized) return null;
-  if (normalized.startsWith("r")) {
-    return "trigonal-R";
-  }
-  if (
-    normalized.startsWith("p6") ||
-    normalized.startsWith("p-6") ||
-    normalized.startsWith("p63")
-  ) {
-    return "hexagonal";
-  }
-  return null;
-}
-
-function crystalSystemRankFromSpaceGroup(spaceGroupNumber: number): number {
-  if (spaceGroupNumber >= 1 && spaceGroupNumber <= 2) return 0; // triclinic
-  if (spaceGroupNumber >= 3 && spaceGroupNumber <= 15) return 1; // monoclinic
-  if (spaceGroupNumber >= 16 && spaceGroupNumber <= 74) return 2; // orthorhombic
-  if (spaceGroupNumber >= 75 && spaceGroupNumber <= 142) return 3; // tetragonal
-  if (spaceGroupNumber >= 143 && spaceGroupNumber <= 167) return 4; // trigonal
-  if (spaceGroupNumber >= 168 && spaceGroupNumber <= 194) return 5; // hexagonal
-  if (spaceGroupNumber >= 195 && spaceGroupNumber <= 230) return 6; // cubic
-  return -1;
-}
-
-function resolveKPathCentering(
-  crystalData: CrystalData,
-  symmetryTransform: SymmetryTransformResult | null,
-): {
-  centering: CenteringType;
-  rhombohedralSetting?: RhombohedralSetting;
-} {
-  const cifSpaceGroup =
-    coerceSpaceGroupNumber(crystalData.space_group_IT_number) ??
-    extractSpaceGroupNumberFromHM(crystalData.space_group_HM);
-  const symmetrySpaceGroup = coerceSpaceGroupNumber(symmetryTransform?.spacegroupNumber);
-
-  const preferCifSpaceGroup =
-    cifSpaceGroup != null &&
-    symmetrySpaceGroup != null &&
-    crystalSystemRankFromSpaceGroup(symmetrySpaceGroup) <
-      crystalSystemRankFromSpaceGroup(cifSpaceGroup);
-
-  const spaceGroup = preferCifSpaceGroup
-    ? cifSpaceGroup
-    : (symmetrySpaceGroup ?? cifSpaceGroup);
-
-  const hmFallback = preferCifSpaceGroup
-    ? (detectBravaisFromHMSymbol(crystalData.space_group_HM) ??
-      detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol))
-    : (detectBravaisFromHMSymbol(symmetryTransform?.internationalSymbol) ??
-      detectBravaisFromHMSymbol(crystalData.space_group_HM));
-
-  let bravaisType: BravaisLattice = hmFallback ?? "triclinic";
-  if (spaceGroup != null) {
-    try {
-      bravaisType = detectBravaisLattice(spaceGroup);
-    } catch {
-      if (hmFallback) {
-        bravaisType = hmFallback;
-      }
-    }
-  }
-
-  const centeringMap: Record<BravaisLattice, CenteringType> = {
-    "cubic-P": "P",
-    "cubic-F": "F",
-    "cubic-I": "I",
-    "tetragonal-P": "P",
-    "tetragonal-I": "I",
-    "orthorhombic-P": "P",
-    "orthorhombic-C": "C",
-    "orthorhombic-I": "I",
-    "orthorhombic-F": "F",
-    "hexagonal": "P",
-    "trigonal-R": "R",
-    "monoclinic-P": "P",
-    "monoclinic-C": "C",
-    "triclinic": "P",
-  };
-
-  const centering = centeringMap[bravaisType] ?? "P";
-  const rhombohedralSetting = centering === "R"
-    ? detectRhombohedralSettingFromLattice(buildConventionalLatticeFromCrystalData(crystalData))
-    : undefined;
-
-  return {
-    centering,
-    rhombohedralSetting,
-  };
 }
 
 type KPathSamplingMode = "segment" | "total";
@@ -466,6 +349,7 @@ export function BandStructureWizard({
 
   // Step 2: K-Path (using BrillouinZoneViewer)
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
+  const [kPathRhombohedralConvention, setKPathRhombohedralConvention] = useState<RhombohedralConvention | undefined>(undefined);
   const [kPathSamplingMode, setKPathSamplingMode] = useState<KPathSamplingMode>("segment");
   const [pointsPerSegment, setPointsPerSegment] = useState(20);
   const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
@@ -653,6 +537,10 @@ export function BandStructureWizard({
     };
   }, [crystalData]);
 
+  useEffect(() => {
+    setKPathRhombohedralConvention(undefined);
+  }, [crystalData]);
+
   // Auto-scroll output only if user is at the bottom
   useEffect(() => {
     const el = outputRef.current;
@@ -828,8 +716,7 @@ export function BandStructureWizard({
       }
     }
 
-    const sourceCellRepresentation = String(scfParams.cell_representation || "").toLowerCase();
-    const sourceUsesPrimitive = sourceCellRepresentation.startsWith("primitive");
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
     const canUseSymmetryPrimitive =
       sourceUsesPrimitive &&
       resolvedSymmetry !== null &&
@@ -848,43 +735,10 @@ export function BandStructureWizard({
       pseudopotential: resolvedPseudos[el],
     }));
 
-    const roundCoord = (value: number): number => {
-      const rounded = Math.abs(value) < 1e-12 ? 0 : Number(value.toFixed(12));
-      return Math.abs(rounded) < 1e-12 ? 0 : rounded;
-    };
-    const roundVec3 = (coords: Vec3): Vec3 => [
-      roundCoord(coords[0]),
-      roundCoord(coords[1]),
-      roundCoord(coords[2]),
-    ];
-
-    const {
-      centering: kPathCentering,
-      rhombohedralSetting: kPathRhombohedralSetting,
-    } = resolveKPathCentering(crystalData, resolvedSymmetry);
-    const toInputConventionalKCoords = (coords: Vec3): Vec3 => {
-      return roundVec3(
-        kPointPrimitiveToConventional(
-          coords,
-          kPathCentering,
-          kPathCentering === "R"
-            ? { rhombohedralSetting: kPathRhombohedralSetting }
-            : undefined,
-        ),
-      );
-    };
-    const toSymmetryPrimitiveKCoords = (coords: Vec3): Vec3 => {
-      const inputCoords = toInputConventionalKCoords(coords);
-      if (!resolvedSymmetry) {
-        return inputCoords;
-      }
-      return roundVec3(
-        multiplyMatrixVector(
-          resolvedSymmetry.inputToPrimitiveReciprocal,
-          inputCoords,
-        ),
-      );
-    };
+    const context = resolvePathTransformContext(crystalData, resolvedSymmetry);
+    const effectiveRhombohedralConvention = kPathRhombohedralConvention ??
+      defaultRhombohedralConventionForSetting(context.rhombohedralSetting ?? null);
+    const converters = createPathCoordinateConverters(context, resolvedSymmetry);
 
     let baseCalculation;
     let transformedKPath: KPathPoint[];
@@ -923,9 +777,10 @@ export function BandStructureWizard({
         etot_conv_thr: null,
         verbosity: nscfVerbosity,
       };
-      transformedKPath = kPath.map((point) => ({
-        ...point,
-        coords: toSymmetryPrimitiveKCoords(point.coords as Vec3),
+      transformedKPath = mapPathCoordinates(kPath, converters.toSymmetryPrimitiveCoords).map((point) => ({
+        label: point.label,
+        coords: point.coords as Vec3,
+        npoints: point.npoints,
       }));
     } else {
       baseCalculation = {
@@ -962,9 +817,10 @@ export function BandStructureWizard({
         verbosity: nscfVerbosity,
       };
 
-      transformedKPath = kPath.map((point) => ({
-        ...point,
-        coords: toInputConventionalKCoords(point.coords as Vec3),
+      transformedKPath = mapPathCoordinates(kPath, converters.toInputConventionalCoords).map((point) => ({
+        label: point.label,
+        coords: point.coords as Vec3,
+        npoints: point.npoints,
       }));
     }
 
@@ -1029,6 +885,8 @@ export function BandStructureWizard({
       projection_pawproj: projectionPawproj,
       scf_fermi_energy: selectedScf.result?.fermi_energy ?? scfFermiEnergy,
       cell_representation: bandCellRepresentation,
+      k_path_convention: context.centering === "R" ? effectiveRhombohedralConvention : null,
+      k_path_rhombohedral_setting: context.centering === "R" ? (context.rhombohedralSetting ?? null) : null,
       symmetry_spacegroup: resolvedSymmetry?.spacegroupNumber ?? null,
       symmetry_hall_number: resolvedSymmetry?.hallNumber ?? null,
       primitive_to_input_reciprocal: resolvedSymmetry?.primitiveToInputReciprocal ?? null,
@@ -1285,6 +1143,8 @@ export function BandStructureWizard({
           initialPath={kPath}
           pointsPerSegment={viewerPointsPerSegment}
           symmetryTransform={symmetryTransform}
+          rhombohedralConvention={kPathRhombohedralConvention}
+          onRhombohedralConventionChange={setKPathRhombohedralConvention}
         />
 
         <div className="kpath-sampling-panel">

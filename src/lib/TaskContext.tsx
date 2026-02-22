@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, useCallback, u
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
+import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "./optimizedStructure";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
@@ -208,7 +209,23 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
 function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<string, any>, taskResult: any): Record<string, any> {
   const next = { ...baseParameters };
 
-  if (taskType === "bands") {
+  if (taskType === "scf") {
+    const mode = String(next.optimization_mode ?? next.calculation_mode ?? "").toLowerCase();
+    const isOptimization = mode === "relax" || mode === "vcrelax";
+    if (isOptimization) {
+      const rawOutput = typeof taskResult?.raw_output === "string" ? taskResult.raw_output : "";
+      const fallbackSource = isSavedStructureData(next.source_structure) ? next.source_structure : null;
+      const fallbackOptimized = isSavedStructureData(next.optimized_structure) ? next.optimized_structure : null;
+      const optimizedStructure = extractOptimizedStructure(rawOutput, fallbackOptimized || fallbackSource);
+      if (optimizedStructure) {
+        next.optimized_structure = optimizedStructure;
+        const optimizedSummary = summarizeCell(optimizedStructure);
+        if (optimizedSummary) {
+          next.optimized_cell_summary = optimizedSummary;
+        }
+      }
+    }
+  } else if (taskType === "bands") {
     if (next.total_k_points == null && Number.isFinite(Number(taskResult?.n_kpoints))) {
       next.total_k_points = Number(taskResult.n_kpoints);
     }

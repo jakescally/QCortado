@@ -17,7 +17,18 @@ import {
   dot,
 } from "./reciprocalLattice";
 
+export type RhombohedralConvention = "sc_primitive" | "bilbao_hex";
+
+export interface BrillouinZoneDataOptions {
+  rhombohedralConvention?: RhombohedralConvention;
+}
+
 export interface HighSymmetryPoint {
+  /**
+   * Convention-stable point identifier used to remap paths when labels change
+   * across naming schemes (e.g., rhombohedral primitive vs HEX labels).
+   */
+  id?: string;
   label: string;
   /** Optional alias labels used in other conventions (Bilbao/papers/QE snippets). */
   aliases?: string[];
@@ -85,6 +96,18 @@ function autoAliasesForLabel(label: string): string[] {
   return [...aliases];
 }
 
+export function getHighSymmetryPointId(point: Pick<HighSymmetryPoint, "id" | "label">): string {
+  const explicitId = point.id?.trim();
+  if (explicitId && explicitId.length > 0) {
+    return explicitId;
+  }
+  return normalizeHighSymmetryLabel(point.label);
+}
+
+export function defaultRhombohedralConventionForSetting(setting: "hexagonal" | "rhombohedral" | null | undefined): RhombohedralConvention {
+  return setting === "hexagonal" ? "bilbao_hex" : "sc_primitive";
+}
+
 function angleDegrees(u: Vec3, v: Vec3): number {
   const denom = magnitude(u) * magnitude(v);
   if (denom <= 0) return 0;
@@ -118,19 +141,45 @@ export function findHighSymmetryPoint(
   label: string,
 ): HighSymmetryPoint | null {
   const needle = normalizeHighSymmetryLabel(label);
+
+  // Pass 1: canonical labels and explicit ids.
   for (const point of data.points) {
     if (normalizeHighSymmetryLabel(point.label) === needle) {
       return point;
     }
+    if (normalizeHighSymmetryLabel(getHighSymmetryPointId(point)) === needle) {
+      return point;
+    }
+  }
+
+  // Pass 2: generated aliases.
+  for (const point of data.points) {
     for (const alias of autoAliasesForLabel(point.label)) {
       if (normalizeHighSymmetryLabel(alias) === needle) {
         return point;
       }
     }
+  }
+
+  // Pass 3: convention-specific aliases.
+  for (const point of data.points) {
     for (const alias of point.aliases ?? []) {
       if (normalizeHighSymmetryLabel(alias) === needle) {
         return point;
       }
+    }
+  }
+  return null;
+}
+
+export function findHighSymmetryPointById(
+  data: BrillouinZoneData,
+  id: string,
+): HighSymmetryPoint | null {
+  const needle = normalizeHighSymmetryLabel(id);
+  for (const point of data.points) {
+    if (normalizeHighSymmetryLabel(getHighSymmetryPointId(point)) === needle) {
+      return point;
     }
   }
   return null;
@@ -590,34 +639,132 @@ export function getHexagonalBZ(): BrillouinZoneData {
  * Rhombohedral (hR)
  * Two cases depending on rhombohedral angle
  */
-export function getRhombohedralBZ(alpha: number): BrillouinZoneData {
+export function getRhombohedralBZ(
+  alpha: number,
+  convention: RhombohedralConvention = "sc_primitive",
+): BrillouinZoneData {
   const alphaRad = (alpha * Math.PI) / 180;
+
+  interface RhombohedralPointTemplate {
+    id: string;
+    coords: Vec3;
+    description: string;
+  }
+
+  const hR1PrimitiveLabels: Record<string, string> = {
+    gamma: "Γ",
+    b: "B",
+    b1: "B₁",
+    f_face: "F",
+    l_edge: "L",
+    l1_edge: "L₁",
+    p: "P",
+    p1: "P₁",
+    p2: "P₂",
+    q: "Q",
+    x: "X",
+    z_corner: "Z",
+  };
+  const hR2PrimitiveLabels: Record<string, string> = {
+    gamma: "Γ",
+    f_face: "F",
+    l_edge: "L",
+    p: "P",
+    p1: "P₁",
+    q: "Q",
+    q1: "Q₁",
+    z_corner: "Z",
+  };
+  const hR1BilbaoLabels: Record<string, string> = {
+    gamma: "Γ",
+    b: "B",
+    b1: "B₁",
+    f_face: "L",
+    l_edge: "F",
+    l1_edge: "F₁",
+    p: "P",
+    p1: "P₁",
+    p2: "P₂",
+    q: "Q",
+    x: "X",
+    z_corner: "T",
+  };
+  const hR2BilbaoLabels: Record<string, string> = {
+    gamma: "Γ",
+    f_face: "L",
+    l_edge: "F",
+    p: "P",
+    p1: "P₁",
+    q: "Q",
+    q1: "Q₁",
+    z_corner: "T",
+  };
+
+  const pathFromIds = (
+    ids: [string, string][],
+    labels: Record<string, string>,
+  ): [string, string][] => ids.map(([fromId, toId]) => [labels[fromId], labels[toId]]);
+
+  const makePoints = (
+    templates: RhombohedralPointTemplate[],
+    activeLabels: Record<string, string>,
+    alternateLabels: Record<string, string>,
+  ): HighSymmetryPoint[] => {
+    return templates.map((point) => {
+      const label = activeLabels[point.id];
+      const alternate = alternateLabels[point.id];
+      const aliases = alternate && alternate !== label ? [alternate] : undefined;
+      return {
+        id: point.id,
+        label,
+        aliases,
+        coords: point.coords,
+        description: point.description,
+      };
+    });
+  };
 
   if (alpha < 90) {
     // hR1 (alpha < 90°)
     const eta = (1 + 4 * Math.cos(alphaRad)) / (2 + 4 * Math.cos(alphaRad));
     const nu = 0.75 - eta / 2;
+    const hR1Points: RhombohedralPointTemplate[] = [
+      { id: "gamma", coords: [0, 0, 0], description: "Zone center" },
+      { id: "b", coords: [eta, 0.5, 1 - eta], description: "Edge point" },
+      { id: "b1", coords: [0.5, 1 - eta, eta - 1], description: "Edge point" },
+      { id: "f_face", coords: [0.5, 0.5, 0], description: "Face center" },
+      { id: "l_edge", coords: [0.5, 0, 0], description: "Edge center" },
+      { id: "l1_edge", coords: [0, 0, -0.5], description: "Edge center" },
+      { id: "p", coords: [eta, nu, nu], description: "On Λ line" },
+      { id: "p1", coords: [1 - nu, 1 - nu, 1 - eta], description: "On P line" },
+      { id: "p2", coords: [nu, nu, eta - 1], description: "On P line" },
+      { id: "q", coords: [1 - nu, nu, 0], description: "On Q line" },
+      { id: "x", coords: [nu, 0, -nu], description: "On X line" },
+      { id: "z_corner", coords: [0.5, 0.5, 0.5], description: "Corner" },
+    ];
+    const labels = convention === "bilbao_hex" ? hR1BilbaoLabels : hR1PrimitiveLabels;
+    const alternateLabels = convention === "bilbao_hex" ? hR1PrimitiveLabels : hR1BilbaoLabels;
+    const pathIds: [string, string][] = [
+      ["gamma", "l_edge"],
+      ["l_edge", "b1"],
+      ["b1", "b"],
+      ["b", "z_corner"],
+      ["z_corner", "gamma"],
+      ["gamma", "x"],
+      ["x", "q"],
+      ["q", "f_face"],
+      ["f_face", "p1"],
+      ["p1", "z_corner"],
+      ["l_edge", "p"],
+    ];
 
     return {
       latticeType: "hR1",
-      name: "Rhombohedral (α < 90°)",
-      points: [
-        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
-        { label: "B", coords: [eta, 0.5, 1 - eta], description: "Edge point" },
-        { label: "B₁", coords: [0.5, 1 - eta, eta - 1], description: "Edge point" },
-        { label: "F", coords: [0.5, 0.5, 0], description: "Face center" },
-        { label: "L", coords: [0.5, 0, 0], description: "Edge center" },
-        { label: "L₁", coords: [0, 0, -0.5], description: "Edge center" },
-        { label: "P", coords: [eta, nu, nu], description: "On Λ line" },
-        { label: "P₁", coords: [1 - nu, 1 - nu, 1 - eta], description: "On P line" },
-        { label: "P₂", coords: [nu, nu, eta - 1], description: "On P line" },
-        { label: "Q", coords: [1 - nu, nu, 0], description: "On Q line" },
-        { label: "X", coords: [nu, 0, -nu], description: "On X line" },
-        { label: "Z", coords: [0.5, 0.5, 0.5], description: "Corner" },
-      ],
-      recommendedPath: [
-        ["Γ", "L"], ["L", "B₁"], ["B₁", "B"], ["B", "Z"], ["Z", "Γ"], ["Γ", "X"], ["X", "Q"], ["Q", "F"], ["F", "P₁"], ["P₁", "Z"], ["L", "P"]
-      ],
+      name: convention === "bilbao_hex"
+        ? "Rhombohedral (α < 90°, Bilbao/CDML HEX labels)"
+        : "Rhombohedral (α < 90°)",
+      points: makePoints(hR1Points, labels, alternateLabels),
+      recommendedPath: pathFromIds(pathIds, labels),
       vertices: [],
       edges: [],
     };
@@ -625,23 +772,37 @@ export function getRhombohedralBZ(alpha: number): BrillouinZoneData {
     // hR2 (alpha > 90°)
     const eta = 1 / (2 * Math.tan(alphaRad / 2) * Math.tan(alphaRad / 2));
     const nu = 0.75 - eta / 2;
+    const hR2Points: RhombohedralPointTemplate[] = [
+      { id: "gamma", coords: [0, 0, 0], description: "Zone center" },
+      { id: "f_face", coords: [0.5, -0.5, 0], description: "Face center" },
+      { id: "l_edge", coords: [0.5, 0, 0], description: "Edge center" },
+      { id: "p", coords: [1 - nu, -nu, 1 - nu], description: "Vertex" },
+      { id: "p1", coords: [nu, nu - 1, nu - 1], description: "Vertex" },
+      { id: "q", coords: [eta, eta, eta], description: "On Λ line" },
+      { id: "q1", coords: [1 - eta, -eta, -eta], description: "On Q line" },
+      { id: "z_corner", coords: [0.5, -0.5, 0.5], description: "Corner" },
+    ];
+    const labels = convention === "bilbao_hex" ? hR2BilbaoLabels : hR2PrimitiveLabels;
+    const alternateLabels = convention === "bilbao_hex" ? hR2PrimitiveLabels : hR2BilbaoLabels;
+    const pathIds: [string, string][] = [
+      ["gamma", "p"],
+      ["p", "z_corner"],
+      ["z_corner", "q"],
+      ["q", "gamma"],
+      ["gamma", "f_face"],
+      ["f_face", "p1"],
+      ["p1", "q1"],
+      ["q1", "l_edge"],
+      ["l_edge", "z_corner"],
+    ];
 
     return {
       latticeType: "hR2",
-      name: "Rhombohedral (α > 90°)",
-      points: [
-        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
-        { label: "F", coords: [0.5, -0.5, 0], description: "Face center" },
-        { label: "L", coords: [0.5, 0, 0], description: "Edge center" },
-        { label: "P", coords: [1 - nu, -nu, 1 - nu], description: "Vertex" },
-        { label: "P₁", coords: [nu, nu - 1, nu - 1], description: "Vertex" },
-        { label: "Q", coords: [eta, eta, eta], description: "On Λ line" },
-        { label: "Q₁", coords: [1 - eta, -eta, -eta], description: "On Q line" },
-        { label: "Z", coords: [0.5, -0.5, 0.5], description: "Corner" },
-      ],
-      recommendedPath: [
-        ["Γ", "P"], ["P", "Z"], ["Z", "Q"], ["Q", "Γ"], ["Γ", "F"], ["F", "P₁"], ["P₁", "Q₁"], ["Q₁", "L"], ["L", "Z"]
-      ],
+      name: convention === "bilbao_hex"
+        ? "Rhombohedral (α > 90°, Bilbao/CDML HEX labels)"
+        : "Rhombohedral (α > 90°)",
+      points: makePoints(hR2Points, labels, alternateLabels),
+      recommendedPath: pathFromIds(pathIds, labels),
       vertices: [],
       edges: [],
     };
@@ -994,7 +1155,8 @@ export function getBrillouinZoneData(
     alpha: number;
     beta: number;
     gamma: number;
-  }
+  },
+  options?: BrillouinZoneDataOptions,
 ): BrillouinZoneData {
   const { a, b, c, alpha, beta, gamma } = params;
   const c_over_a = c / a;
@@ -1022,7 +1184,7 @@ export function getBrillouinZoneData(
     case "hP":
       return getHexagonalBZ();
     case "hR":
-      return getRhombohedralBZ(alpha);
+      return getRhombohedralBZ(alpha, options?.rhombohedralConvention);
     case "mP":
       return getMonoclinicPrimitiveBZ(b_over_a, c_over_a, beta);
     case "mC":

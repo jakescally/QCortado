@@ -21,10 +21,16 @@ import {
   BrillouinZoneGeometry,
   conventionalToPrimitive,
   CenteringType,
+  RhombohedralSetting,
+  detectRhombohedralSettingFromLattice,
 } from "../lib/reciprocalLattice";
 import {
   BrillouinZoneData,
   HighSymmetryPoint,
+  RhombohedralConvention,
+  defaultRhombohedralConventionForSetting,
+  findHighSymmetryPointById,
+  getHighSymmetryPointId,
   getBrillouinZoneData,
   BravaisLatticeType,
   findHighSymmetryPoint,
@@ -37,6 +43,7 @@ import { SymmetryTransformResult } from "../lib/symmetryTransform";
 // ============================================================================
 
 export interface KPathPoint {
+  pointId?: string;
   label: string;
   coords: Vec3;
   npoints: number;
@@ -48,6 +55,8 @@ interface BrillouinZoneViewerProps {
   initialPath?: KPathPoint[];
   pointsPerSegment?: number;
   symmetryTransform?: SymmetryTransformResult | null;
+  rhombohedralConvention?: RhombohedralConvention;
+  onRhombohedralConventionChange?: (convention: RhombohedralConvention) => void;
 }
 
 function coerceSpaceGroupNumber(value: unknown): number | null {
@@ -123,6 +132,61 @@ function crystalSystemRankFromSpaceGroup(spaceGroupNumber: number): number {
   if (spaceGroupNumber >= 168 && spaceGroupNumber <= 194) return 5; // hexagonal
   if (spaceGroupNumber >= 195 && spaceGroupNumber <= 230) return 6; // cubic
   return -1;
+}
+
+function getPathPointId(point: KPathPoint): string {
+  return getHighSymmetryPointId({ id: point.pointId, label: point.label });
+}
+
+function pointsEqual(a: KPathPoint, b: KPathPoint): boolean {
+  const sameId = getPathPointId(a) === getPathPointId(b);
+  if (!sameId || a.label !== b.label || a.npoints !== b.npoints) {
+    return false;
+  }
+  return (
+    Math.abs(a.coords[0] - b.coords[0]) < 1e-12 &&
+    Math.abs(a.coords[1] - b.coords[1]) < 1e-12 &&
+    Math.abs(a.coords[2] - b.coords[2]) < 1e-12
+  );
+}
+
+function pathsEqual(a: KPathPoint[], b: KPathPoint[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!pointsEqual(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function remapPathToData(
+  path: KPathPoint[],
+  data: BrillouinZoneData,
+): { path: KPathPoint[]; droppedCount: number } {
+  const remapped: KPathPoint[] = [];
+  let droppedCount = 0;
+
+  for (const point of path) {
+    const pointId = point.pointId?.trim();
+    const targetPoint = (pointId ? findHighSymmetryPointById(data, pointId) : null)
+      ?? findHighSymmetryPoint(data, point.label);
+    if (!targetPoint) {
+      droppedCount += 1;
+      continue;
+    }
+
+    remapped.push({
+      pointId: getHighSymmetryPointId(targetPoint),
+      label: targetPoint.label,
+      coords: targetPoint.coords,
+      npoints: point.npoints,
+    });
+  }
+
+  if (remapped.length > 0) {
+    remapped[remapped.length - 1].npoints = 0;
+  }
+
+  return { path: remapped, droppedCount };
 }
 
 // ============================================================================
@@ -468,14 +532,15 @@ function BZScene({
       {/* High-symmetry points */}
       {bzData.points.map((point) => {
         const cartesian = fractionalToCartesian(point.coords, scaledBasis);
-        const pathIndex = path.findIndex((p) => p.label === point.label);
+        const pointId = getHighSymmetryPointId(point);
+        const pathIndex = path.findIndex((p) => getPathPointId(p) === pointId);
 
         return (
           <HighSymmetryPointMesh
-            key={point.label}
+            key={pointId}
             point={point}
             position={cartesian as [number, number, number]}
-            isSelected={selectedPoint?.label === point.label}
+            isSelected={selectedPoint ? getHighSymmetryPointId(selectedPoint) === pointId : false}
             isInPath={pathIndex >= 0}
             pathIndex={pathIndex >= 0 ? pathIndex : null}
             onClick={() => onPointClick(point)}
@@ -518,14 +583,14 @@ export function BrillouinZoneViewer({
   initialPath = [],
   pointsPerSegment = 20,
   symmetryTransform = null,
+  rhombohedralConvention,
+  onRhombohedralConventionChange,
 }: BrillouinZoneViewerProps) {
   const [path, setPath] = useState<KPathPoint[]>(initialPath);
   const [selectedPoint, setSelectedPoint] = useState<HighSymmetryPoint | null>(null);
   const [useOrthographic, setUseOrthographic] = useState(true);
-
-  useEffect(() => {
-    setPath(initialPath);
-  }, [initialPath]);
+  const [pathRemapNotice, setPathRemapNotice] = useState<string | null>(null);
+  const [internalRhombohedralConvention, setInternalRhombohedralConvention] = useState<RhombohedralConvention | null>(null);
 
   // Determine Bravais lattice type first (needed for centering)
   const bravaisInfo = useMemo(() => {
@@ -645,6 +710,9 @@ export function BrillouinZoneViewer({
     const alpha = angleDegrees(conventionalLattice[1], conventionalLattice[2]);
     const beta = angleDegrees(conventionalLattice[0], conventionalLattice[2]);
     const gamma = angleDegrees(conventionalLattice[0], conventionalLattice[1]);
+    const rhombohedralSetting: RhombohedralSetting | null = bravaisInfo.centering === "R"
+      ? detectRhombohedralSettingFromLattice(conventionalLattice)
+      : null;
 
     return {
       conventionalLattice,
@@ -652,9 +720,31 @@ export function BrillouinZoneViewer({
       primitiveRecipLattice,
       conventionalRecipLattice,
       primitiveAlpha,
+      rhombohedralSetting,
       a, b, c, alpha, beta, gamma,
     };
   }, [crystalData, bravaisInfo.centering, bravaisInfo.useSymmetryTransform, symmetryTransform]);
+
+  const isRhombohedral = bravaisInfo.latticeType === "hR";
+  const defaultRhombohedralConvention = useMemo(
+    () => defaultRhombohedralConventionForSetting(latticeData.rhombohedralSetting),
+    [latticeData.rhombohedralSetting],
+  );
+  const effectiveRhombohedralConvention: RhombohedralConvention = isRhombohedral
+    ? (rhombohedralConvention ?? internalRhombohedralConvention ?? defaultRhombohedralConvention)
+    : "sc_primitive";
+
+  useEffect(() => {
+    if (!isRhombohedral) {
+      setInternalRhombohedralConvention(null);
+    }
+  }, [isRhombohedral]);
+
+  const setRhombohedralConvention = useCallback((convention: RhombohedralConvention) => {
+    if (!isRhombohedral) return;
+    setInternalRhombohedralConvention(convention);
+    onRhombohedralConventionChange?.(convention);
+  }, [isRhombohedral, onRhombohedralConventionChange]);
 
   // Get BZ high-symmetry point data (uses conventional coordinates)
   const bzData = useMemo(() => {
@@ -670,21 +760,57 @@ export function BrillouinZoneViewer({
       alpha: alphaForPath,
       beta: latticeData.beta,
       gamma: latticeData.gamma,
-    });
-  }, [bravaisInfo.latticeType, latticeData]);
+    }, isRhombohedral
+      ? { rhombohedralConvention: effectiveRhombohedralConvention }
+      : undefined,
+    );
+  }, [bravaisInfo.latticeType, latticeData, isRhombohedral, effectiveRhombohedralConvention]);
 
   // Calculate BZ geometry (Wigner-Seitz cell) from PRIMITIVE reciprocal lattice
   const bzGeometry = useMemo(() => {
     return calculateBrillouinZone(latticeData.primitiveRecipLattice);
   }, [latticeData.primitiveRecipLattice]);
 
+  useEffect(() => {
+    const { path: remappedPath, droppedCount } = remapPathToData(initialPath, bzData);
+    setPath((currentPath) => (pathsEqual(currentPath, remappedPath) ? currentPath : remappedPath));
+    if (droppedCount > 0) {
+      setPathRemapNotice(`Dropped ${droppedCount} path point${droppedCount === 1 ? "" : "s"} that are not valid in this convention.`);
+    } else {
+      setPathRemapNotice(null);
+    }
+  }, [initialPath, bzData]);
+
+  useEffect(() => {
+    const { path: remappedPath, droppedCount } = remapPathToData(path, bzData);
+    if (!pathsEqual(path, remappedPath)) {
+      setPath(remappedPath);
+      onPathChange(remappedPath);
+      if (droppedCount > 0) {
+        setPathRemapNotice(`Dropped ${droppedCount} path point${droppedCount === 1 ? "" : "s"} that are not valid in this convention.`);
+      } else {
+        setPathRemapNotice(null);
+      }
+    }
+  }, [bzData, onPathChange, path]);
+
+  useEffect(() => {
+    if (!selectedPoint) return;
+    const selectedId = getHighSymmetryPointId(selectedPoint);
+    const remapped = findHighSymmetryPointById(bzData, selectedId)
+      ?? findHighSymmetryPoint(bzData, selectedPoint.label);
+    setSelectedPoint(remapped);
+  }, [bzData, selectedPoint]);
+
   // Handle point click - add to path
   const handlePointClick = useCallback(
     (point: HighSymmetryPoint) => {
       setSelectedPoint(point);
 
+      const pointId = getHighSymmetryPointId(point);
+
       // Check if point is already last in path
-      if (path.length > 0 && path[path.length - 1].label === point.label) {
+      if (path.length > 0 && getPathPointId(path[path.length - 1]) === pointId) {
         return;
       }
 
@@ -692,6 +818,7 @@ export function BrillouinZoneViewer({
       // npoints = number of k-points from THIS point to the NEXT point
       // Last point should have npoints = 0 (no segment after it)
       const newPoint: KPathPoint = {
+        pointId,
         label: point.label,
         coords: point.coords,
         npoints: 0,  // New point is last, so no segment after it
@@ -741,16 +868,18 @@ export function BrillouinZoneViewer({
 
       if (recommendedPath.length === 0) {
         recommendedPath.push({
+          pointId: getHighSymmetryPointId(fromPoint),
           label: fromPoint.label,
           coords: fromPoint.coords,
           npoints: pointsPerSegment,
         });
       } else {
         const lastPoint = recommendedPath[recommendedPath.length - 1];
-        if (lastPoint.label !== fromLabel) {
+        if (getPathPointId(lastPoint) !== getHighSymmetryPointId(fromPoint)) {
           // Disconnected segment (e.g. ... | U→X): end previous segment and restart.
           lastPoint.npoints = 0;
           recommendedPath.push({
+            pointId: getHighSymmetryPointId(fromPoint),
             label: fromPoint.label,
             coords: fromPoint.coords,
             npoints: pointsPerSegment,
@@ -762,8 +891,9 @@ export function BrillouinZoneViewer({
       }
 
       // Avoid duplicate point entries for degenerate segments.
-      if (recommendedPath[recommendedPath.length - 1].label !== toLabel) {
+      if (getPathPointId(recommendedPath[recommendedPath.length - 1]) !== getHighSymmetryPointId(toPoint)) {
         recommendedPath.push({
+          pointId: getHighSymmetryPointId(toPoint),
           label: toPoint.label,
           coords: toPoint.coords,
           npoints: pointsPerSegment,
@@ -790,14 +920,49 @@ export function BrillouinZoneViewer({
     return result;
   }, [path]);
 
+  const conventionDescription = isRhombohedral
+    ? (effectiveRhombohedralConvention === "bilbao_hex"
+      ? "Bilbao/CDML HEX labels"
+      : "Setyawan-Curtarolo primitive labels")
+    : "Setyawan-Curtarolo convention";
+
+  const detectedRhombohedralSettingDescription = latticeData.rhombohedralSetting === "hexagonal"
+    ? "hexagonal (triple-cell)"
+    : "rhombohedral primitive";
+
   return (
     <div className="bz-viewer">
       <div className="bz-viewer-header">
         <h4>Brillouin Zone - {bzData.name}</h4>
         <div className="bz-viewer-info">
-          <span>Click points to build k-path (Setyawan-Curtarolo convention)</span>
+          <span>Click points to build k-path ({conventionDescription})</span>
         </div>
       </div>
+
+      {isRhombohedral && (
+        <div className="bz-convention-panel">
+          <div className="phonon-unit-toggle bz-convention-toggle" role="group" aria-label="Rhombohedral convention">
+            <button
+              type="button"
+              className={`phonon-unit-btn ${effectiveRhombohedralConvention === "sc_primitive" ? "active" : ""}`}
+              onClick={() => setRhombohedralConvention("sc_primitive")}
+            >
+              hR Primitive (SC)
+            </button>
+            <button
+              type="button"
+              className={`phonon-unit-btn ${effectiveRhombohedralConvention === "bilbao_hex" ? "active" : ""}`}
+              onClick={() => setRhombohedralConvention("bilbao_hex")}
+            >
+              hR HEX (Bilbao/CDML)
+            </button>
+          </div>
+          <p className="bz-convention-note">
+            Detected input setting: {detectedRhombohedralSettingDescription}. Coordinates stay in canonical primitive reciprocal basis for export.
+          </p>
+          {pathRemapNotice && <p className="bz-convention-warning">{pathRemapNotice}</p>}
+        </div>
+      )}
 
       <div className="bz-viewer-canvas">
         <Canvas style={{ background: "#1a1a2e" }}>
@@ -845,9 +1010,9 @@ export function BrillouinZoneViewer({
         <div className="bz-points-grid">
           {bzData.points.map((point) => (
             <div
-              key={point.label}
+              key={getHighSymmetryPointId(point)}
               className={`bz-point-item ${
-                path.some((p) => p.label === point.label) ? "in-path" : ""
+                path.some((p) => getPathPointId(p) === getHighSymmetryPointId(point)) ? "in-path" : ""
               }`}
               onClick={() => handlePointClick(point)}
             >

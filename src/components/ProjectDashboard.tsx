@@ -5,12 +5,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
-import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary, SavedStructureData } from "../lib/types";
+import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "../lib/saveSizeMode";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { useTheme } from "../lib/ThemeContext";
 import { EditProjectDialog } from "./EditProjectDialog";
 
@@ -1022,10 +1023,21 @@ export function ProjectDashboard({
     return calculations
       .filter((calc) => isOptimizationCalculation(calc))
       .map((calc) => {
-        const structure = calc.parameters?.optimized_structure;
+        const storedOptimized = isSavedStructureData(calc.parameters?.optimized_structure)
+          ? calc.parameters.optimized_structure
+          : null;
+        const storedSource = isSavedStructureData(calc.parameters?.source_structure)
+          ? calc.parameters.source_structure
+          : null;
+        const parsedStructure = extractOptimizedStructure(
+          calc.result?.raw_output || "",
+          storedOptimized || storedSource,
+        );
+        const structure = parsedStructure || storedOptimized;
         if (!structure || !Array.isArray(structure.atoms) || structure.atoms.length === 0) {
           return null;
         }
+        const derivedSummary = summarizeCell(structure);
 
         const mode = getOptimizationMode(calc);
         const completedAt = calc.completed_at;
@@ -1039,7 +1051,7 @@ export function ProjectDashboard({
           mode,
           completedAt,
           structure,
-          cellSummary: calc.parameters?.optimized_cell_summary ?? null,
+          cellSummary: derivedSummary ?? calc.parameters?.optimized_cell_summary ?? null,
         } as OptimizedStructureOption;
       })
       .filter((opt): opt is OptimizedStructureOption => opt !== null);
@@ -2705,17 +2717,27 @@ export function ProjectDashboard({
             <h3>Optimizations</h3>
             <div className="calculations-list">
               {optimizationCalculations.map((calc) => {
-                const summary = calc.parameters?.optimized_cell_summary as SavedCellSummary | undefined;
-                const optimizedStructure = calc.parameters?.optimized_structure as SavedStructureData | undefined;
+                const storedOptimizedStructure = isSavedStructureData(calc.parameters?.optimized_structure)
+                  ? calc.parameters.optimized_structure
+                  : null;
+                const storedSourceStructure = isSavedStructureData(calc.parameters?.source_structure)
+                  ? calc.parameters.source_structure
+                  : null;
+                const parsedOptimizedStructure = extractOptimizedStructure(
+                  calc.result?.raw_output || "",
+                  storedOptimizedStructure || storedSourceStructure,
+                );
+                const optimizedStructure = parsedOptimizedStructure || storedOptimizedStructure;
+                const summary = (optimizedStructure ? summarizeCell(optimizedStructure) : null)
+                  || (calc.parameters?.optimized_cell_summary as SavedCellSummary | null)
+                  || null;
                 const optimizedCell = asCellMatrix(optimizedStructure?.cell_parameters);
                 const units = summary?.units || optimizedStructure?.cell_units || "angstrom";
                 const supportsConventionalTransform =
                   primitiveLatticeKind === "cubic_f" ||
                   primitiveLatticeKind === "cubic_i" ||
                   primitiveLatticeKind === "cubic_p";
-                let displaySummary: SavedCellSummary | null = summary
-                  ? { ...summary }
-                  : null;
+                let displaySummary: SavedCellSummary | null = summary ? { ...summary } : null;
                 let cellBasisLabel = supportsConventionalTransform
                   ? "Primitive (QE)"
                   : "Stored (QE output)";
@@ -2846,7 +2868,7 @@ export function ProjectDashboard({
                           </div>
                           <div className="detail-item">
                             <label>Atoms</label>
-                            <span>{calc.parameters?.optimized_structure?.atoms?.length || "N/A"}</span>
+                            <span>{optimizedStructure?.atoms?.length || "N/A"}</span>
                           </div>
                           {electronConvLabel && (
                             <div className="detail-item">
