@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
+pub mod hpc;
 pub mod process_manager;
 pub mod projects;
 pub mod qe;
@@ -44,6 +45,12 @@ pub struct AppState {
     pub mpi_defaults: Mutex<Option<config::MpiDefaultsConfig>>,
     /// Global project save-size mode
     pub save_size_mode: Mutex<config::SaveSizeMode>,
+    /// Local or HPC execution mode
+    pub execution_mode: Mutex<hpc::profile::ExecutionMode>,
+    /// Saved HPC profiles
+    pub hpc_profiles: Mutex<Vec<hpc::profile::HpcProfile>>,
+    /// Active HPC profile ID
+    pub active_hpc_profile_id: Mutex<Option<String>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -58,6 +65,9 @@ impl Default for AppState {
             execution_prefix: Mutex::new(None),
             mpi_defaults: Mutex::new(None),
             save_size_mode: Mutex::new(config::SaveSizeMode::Large),
+            execution_mode: Mutex::new(hpc::profile::ExecutionMode::Local),
+            hpc_profiles: Mutex::new(Vec::new()),
+            active_hpc_profile_id: Mutex::new(None),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
         }
@@ -93,6 +103,226 @@ fn normalize_optional_path(path: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn normalize_hpc_text(input: &str, field: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Err(format!("{} is required", field))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn shell_single_quote_local(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{}'", escaped)
+}
+
+fn build_hpc_launcher_command(profile: &hpc::profile::HpcProfile) -> String {
+    let mut command = match profile.launcher {
+        hpc::profile::HpcLauncher::Srun => "srun".to_string(),
+        hpc::profile::HpcLauncher::Mpirun => "mpirun -np \"${SLURM_NTASKS:-1}\"".to_string(),
+    };
+
+    if let Some(extra) = profile
+        .launcher_extra_args
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.push(' ');
+        command.push_str(extra);
+    }
+
+    command
+}
+
+fn build_hpc_qe_input_command(
+    profile: &hpc::profile::HpcProfile,
+    executable: &str,
+    extra_args: Option<&str>,
+    input_file: &str,
+    output_file: &str,
+) -> String {
+    let mut command = format!(
+        "{} \"$QE_BIN/{}\"",
+        build_hpc_launcher_command(profile),
+        executable
+    );
+    if let Some(args) = extra_args
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        command.push(' ');
+        command.push_str(args);
+    }
+    command.push_str(&format!(" -in {} > {} 2>&1", input_file, output_file));
+    command
+}
+
+fn normalize_cli_dash_text(input: &str) -> String {
+    input
+        .replace('\u{2014}', "--")
+        .replace('\u{2013}', "-")
+        .replace('\u{2010}', "-")
+        .replace('\u{2011}', "-")
+        .replace('\u{2012}', "-")
+        .replace('\u{2212}', "-")
+        .replace('\u{FE63}', "-")
+        .replace('\u{FF0D}', "-")
+}
+
+fn sanitize_hpc_profile(
+    mut profile: hpc::profile::HpcProfile,
+) -> Result<hpc::profile::HpcProfile, String> {
+    profile.name = normalize_hpc_text(&profile.name, "Profile name")?;
+    profile.host = normalize_hpc_text(&profile.host, "SSH host")?;
+    profile.username = normalize_hpc_text(&profile.username, "SSH username")?;
+    profile.remote_qe_bin_dir = normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
+    profile.remote_pseudo_dir =
+        normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
+    profile.remote_workspace_root =
+        normalize_hpc_text(&profile.remote_workspace_root, "Remote workspace root")?;
+    profile.remote_project_root =
+        normalize_hpc_text(&profile.remote_project_root, "Remote project root")?;
+    profile.launcher_extra_args = sanitize_optional_hpc_cli_field(profile.launcher_extra_args);
+    if profile.port == 0 {
+        profile.port = 22;
+    }
+    if profile.id.trim().is_empty() {
+        profile.id = uuid::Uuid::new_v4().to_string();
+        profile.created_at = now_iso();
+    }
+    profile.updated_at = now_iso();
+    if profile.cluster.trim().is_empty() {
+        profile.cluster = hpc::profile::default_cluster();
+    }
+    profile.default_cpu_resources = sanitize_hpc_resource_defaults(
+        profile.default_cpu_resources,
+        hpc::profile::ResourceType::Cpu,
+    );
+    profile.default_gpu_resources = sanitize_hpc_resource_defaults(
+        profile.default_gpu_resources,
+        hpc::profile::ResourceType::Gpu,
+    );
+    Ok(profile)
+}
+
+fn sanitize_optional_hpc_field(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn sanitize_optional_hpc_cli_field(value: Option<String>) -> Option<String> {
+    sanitize_optional_hpc_field(value).map(|value| normalize_cli_dash_text(&value))
+}
+
+fn sanitize_hpc_resource_defaults(
+    mut resources: hpc::profile::SlurmResourceRequest,
+    resource_type: hpc::profile::ResourceType,
+) -> hpc::profile::SlurmResourceRequest {
+    resources.resource_type = resource_type.clone();
+    resources.partition = sanitize_optional_hpc_field(resources.partition);
+    resources.walltime = sanitize_optional_hpc_field(resources.walltime);
+    resources.qos = sanitize_optional_hpc_field(resources.qos);
+    resources.account = sanitize_optional_hpc_field(resources.account);
+    resources.constraint = sanitize_optional_hpc_field(resources.constraint);
+    resources.module_preamble = sanitize_optional_hpc_cli_field(resources.module_preamble);
+    resources.additional_sbatch = resources
+        .additional_sbatch
+        .into_iter()
+        .map(|line| normalize_cli_dash_text(line.trim()))
+        .filter(|line| !line.is_empty())
+        .collect();
+    resources.nodes = resources.nodes.map(|value| value.max(1));
+    resources.ntasks = resources.ntasks.map(|value| value.max(1));
+    resources.cpus_per_task = resources.cpus_per_task.map(|value| value.max(1));
+    resources.memory_gb = resources.memory_gb.map(|value| value.max(1));
+    resources.gpus = resources.gpus.map(|value| value.max(1));
+
+    if resources.partition.is_none() {
+        resources.partition = Some("short".to_string());
+    }
+    if resources.walltime.is_none() {
+        resources.walltime = Some("02:00:00".to_string());
+    }
+
+    if matches!(resource_type, hpc::profile::ResourceType::Gpu) {
+        if resources.gpus.is_none() {
+            resources.gpus = Some(1);
+        }
+        if resources.nodes.is_none() {
+            resources.nodes = Some(1);
+        }
+    } else {
+        resources.gpus = Some(0);
+    }
+
+    resources
+}
+
+fn resolve_hpc_profile_from_state(
+    state: &AppState,
+    profile_id: Option<String>,
+) -> Result<hpc::profile::HpcProfile, String> {
+    let profiles = state.hpc_profiles.lock().unwrap();
+    if profiles.is_empty() {
+        return Err(
+            "No HPC profiles are configured. Configure Andromeda in Settings first.".to_string(),
+        );
+    }
+
+    let requested_id = profile_id.and_then(|raw| {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    if let Some(profile_id) = requested_id {
+        return profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .ok_or_else(|| format!("HPC profile not found: {}", profile_id));
+    }
+
+    if let Some(active_id) = state.active_hpc_profile_id.lock().unwrap().clone() {
+        if let Some(profile) = profiles.iter().find(|profile| profile.id == active_id) {
+            return Ok(profile.clone());
+        }
+    }
+
+    profiles
+        .first()
+        .cloned()
+        .ok_or_else(|| "No HPC profile is available".to_string())
+}
+
+fn effective_execution_mode(
+    state: &AppState,
+    target: Option<&hpc::profile::ExecutionTarget>,
+) -> hpc::profile::ExecutionMode {
+    if let Some(target) = target {
+        return target.mode;
+    }
+    *state.execution_mode.lock().unwrap()
 }
 
 fn parse_execution_prefix_tokens(prefix: Option<&str>) -> Option<Vec<String>> {
@@ -518,6 +748,537 @@ fn set_save_size_mode(
 #[tauri::command]
 fn get_save_size_mode(state: State<AppState>) -> config::SaveSizeMode {
     *state.save_size_mode.lock().unwrap()
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HpcConnectionTestResult {
+    success: bool,
+    message: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HpcScriptPreviewResult {
+    script: String,
+    sbatch_preview: String,
+    validation: hpc::profile::ResourceValidation,
+}
+
+/// Sets the global execution mode (local or HPC).
+#[tauri::command]
+fn set_execution_mode(
+    app: AppHandle,
+    mode: hpc::profile::ExecutionMode,
+    state: State<AppState>,
+) -> Result<(), String> {
+    *state.execution_mode.lock().unwrap() = mode;
+    config::update_execution_mode(&app, mode)
+}
+
+/// Gets the current global execution mode.
+#[tauri::command]
+fn get_execution_mode(state: State<AppState>) -> hpc::profile::ExecutionMode {
+    *state.execution_mode.lock().unwrap()
+}
+
+/// Lists configured HPC profiles.
+#[tauri::command]
+fn hpc_list_profiles(state: State<AppState>) -> Vec<hpc::profile::HpcProfile> {
+    state.hpc_profiles.lock().unwrap().clone()
+}
+
+/// Saves or updates an HPC profile and optional credential secret.
+#[tauri::command]
+fn hpc_save_profile(
+    app: AppHandle,
+    profile: hpc::profile::HpcProfile,
+    credential: Option<String>,
+    persist_credential: Option<bool>,
+    state: State<AppState>,
+) -> Result<hpc::profile::HpcProfile, String> {
+    let persist = persist_credential.unwrap_or(false);
+    let mut profile = sanitize_hpc_profile(profile)?;
+    profile.credential_persisted = persist;
+
+    if let Some(secret) = credential.as_ref() {
+        let trimmed = secret.trim().to_string();
+        if !trimmed.is_empty() {
+            hpc::credentials::set_session_secret(&profile.id, trimmed.clone());
+            if persist {
+                hpc::credentials::save_persisted_secret(
+                    &profile.id,
+                    &profile.username,
+                    &profile.host,
+                    &trimmed,
+                )?;
+            }
+        }
+    } else if !persist {
+        hpc::credentials::clear_session_secret(&profile.id);
+        let _ =
+            hpc::credentials::delete_persisted_secret(&profile.id, &profile.username, &profile.host);
+    }
+
+    let mut profiles = state.hpc_profiles.lock().unwrap();
+    let mut active_id = state.active_hpc_profile_id.lock().unwrap();
+    if let Some(existing) = profiles.iter_mut().find(|entry| entry.id == profile.id) {
+        profile.created_at = existing.created_at.clone();
+        *existing = profile.clone();
+    } else {
+        if profile.created_at.trim().is_empty() {
+            profile.created_at = now_iso();
+        }
+        profiles.push(profile.clone());
+    }
+
+    if active_id.is_none() {
+        *active_id = Some(profile.id.clone());
+    }
+
+    config::update_hpc_profiles(&app, profiles.clone(), active_id.clone())?;
+    Ok(profile)
+}
+
+/// Updates only default Slurm resources for an existing HPC profile.
+#[tauri::command]
+fn hpc_update_profile_defaults(
+    app: AppHandle,
+    profile_id: String,
+    resource_mode: Option<hpc::profile::HpcResourceMode>,
+    launcher: Option<hpc::profile::HpcLauncher>,
+    launcher_extra_args: Option<String>,
+    default_cpu_resources: hpc::profile::SlurmResourceRequest,
+    default_gpu_resources: hpc::profile::SlurmResourceRequest,
+    state: State<AppState>,
+) -> Result<hpc::profile::HpcProfile, String> {
+    let normalized_profile_id = profile_id.trim();
+    if normalized_profile_id.is_empty() {
+        return Err("HPC profile ID is required".to_string());
+    }
+
+    let mut profiles = state.hpc_profiles.lock().unwrap();
+    let mut active_id = state.active_hpc_profile_id.lock().unwrap();
+
+    let profile = profiles
+        .iter_mut()
+        .find(|entry| entry.id == normalized_profile_id)
+        .ok_or_else(|| format!("HPC profile not found: {}", normalized_profile_id))?;
+
+    if let Some(mode) = resource_mode {
+        profile.resource_mode = mode;
+    }
+    if let Some(launcher_value) = launcher {
+        profile.launcher = launcher_value;
+    }
+    profile.launcher_extra_args = sanitize_optional_hpc_cli_field(launcher_extra_args);
+    profile.default_cpu_resources = sanitize_hpc_resource_defaults(
+        default_cpu_resources,
+        hpc::profile::ResourceType::Cpu,
+    );
+    profile.default_gpu_resources = sanitize_hpc_resource_defaults(
+        default_gpu_resources,
+        hpc::profile::ResourceType::Gpu,
+    );
+    profile.updated_at = now_iso();
+    let updated_profile = profile.clone();
+
+    if active_id.is_none() {
+        *active_id = Some(updated_profile.id.clone());
+    }
+
+    config::update_hpc_profiles(&app, profiles.clone(), active_id.clone())?;
+    Ok(updated_profile)
+}
+
+/// Deletes an HPC profile and any stored credentials.
+#[tauri::command]
+fn hpc_delete_profile(
+    app: AppHandle,
+    profile_id: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let mut profiles = state.hpc_profiles.lock().unwrap();
+    let mut active_id = state.active_hpc_profile_id.lock().unwrap();
+
+    let index = profiles
+        .iter()
+        .position(|entry| entry.id == profile_id)
+        .ok_or_else(|| format!("HPC profile not found: {}", profile_id))?;
+    let removed = profiles.remove(index);
+
+    hpc::credentials::clear_session_secret(&removed.id);
+    let _ =
+        hpc::credentials::delete_persisted_secret(&removed.id, &removed.username, &removed.host);
+
+    if active_id.as_ref() == Some(&profile_id) {
+        *active_id = profiles.first().map(|entry| entry.id.clone());
+    }
+
+    config::update_hpc_profiles(&app, profiles.clone(), active_id.clone())?;
+    Ok(())
+}
+
+/// Sets the active HPC profile ID.
+#[tauri::command]
+fn hpc_set_active_profile(
+    app: AppHandle,
+    profile_id: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let profiles = state.hpc_profiles.lock().unwrap();
+    if !profiles.iter().any(|profile| profile.id == profile_id) {
+        return Err(format!("HPC profile not found: {}", profile_id));
+    }
+    drop(profiles);
+    *state.active_hpc_profile_id.lock().unwrap() = Some(profile_id.clone());
+    config::update_hpc_profiles(
+        &app,
+        state.hpc_profiles.lock().unwrap().clone(),
+        Some(profile_id),
+    )
+}
+
+/// Gets the active HPC profile ID.
+#[tauri::command]
+fn hpc_get_active_profile_id(state: State<AppState>) -> Option<String> {
+    state.active_hpc_profile_id.lock().unwrap().clone()
+}
+
+/// Tests SSH connection for the selected HPC profile.
+#[tauri::command]
+async fn hpc_test_connection(
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<HpcConnectionTestResult, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let output = hpc::ssh::run_ssh_command(
+        &profile,
+        secret.as_deref(),
+        "echo QCORTADO_HPC_CONNECTION_OK",
+    )
+    .await;
+
+    match output {
+        Ok(result) => Ok(HpcConnectionTestResult {
+            success: result.contains("QCORTADO_HPC_CONNECTION_OK"),
+            message: result.trim().to_string(),
+        }),
+        Err(err) => Ok(HpcConnectionTestResult {
+            success: false,
+            message: err,
+        }),
+    }
+}
+
+/// Validates SSH, scheduler tools, QE binary path, and remote workspace write access.
+#[tauri::command]
+async fn hpc_validate_environment(
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<hpc::profile::HpcEnvironmentValidation, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let mut messages: Vec<String> = Vec::new();
+
+    let reachable = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), "echo reachable")
+        .await
+        .map(|value| value.contains("reachable"))
+        .unwrap_or(false);
+    if !reachable {
+        messages.push(
+            "Unable to connect to cluster via SSH. Verify VPN/campus network and credentials."
+                .to_string(),
+        );
+    }
+
+    let check_cmd = |tool: &str| format!("command -v {} >/dev/null 2>&1 && echo ok || echo missing", tool);
+
+    let sbatch_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sbatch"))
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
+    if !sbatch_available {
+        messages.push("sbatch not available in remote shell PATH".to_string());
+    }
+
+    let squeue_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("squeue"))
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
+    if !squeue_available {
+        messages.push("squeue not available in remote shell PATH".to_string());
+    }
+
+    let sacct_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sacct"))
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
+    if !sacct_available {
+        messages.push("sacct not available in remote shell PATH".to_string());
+    }
+
+    let qe_pw_available = hpc::ssh::run_ssh_command(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "test -x {}/pw.x && echo ok || echo missing",
+            profile.remote_qe_bin_dir.trim_end_matches('/')
+        ),
+    )
+    .await
+    .map(|value| value.contains("ok"))
+    .unwrap_or(false);
+    if !qe_pw_available {
+        messages.push(format!(
+            "pw.x not found/executable at {}",
+            profile.remote_qe_bin_dir
+        ));
+    }
+
+    let probe_file = format!(
+        "{}/.qcortado_probe_{}",
+        profile.remote_workspace_root.trim_end_matches('/'),
+        uuid::Uuid::new_v4()
+    );
+    let workspace_writable = hpc::ssh::run_ssh_command(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "mkdir -p {} && touch {} && rm -f {} && echo ok || echo missing",
+            profile.remote_workspace_root.trim_end_matches('/'),
+            probe_file,
+            probe_file
+        ),
+    )
+    .await
+    .map(|value| value.contains("ok"))
+    .unwrap_or(false);
+    if !workspace_writable {
+        messages.push(format!(
+            "Workspace is not writable: {}",
+            profile.remote_workspace_root
+        ));
+    }
+
+    Ok(hpc::profile::HpcEnvironmentValidation {
+        reachable,
+        sbatch_available,
+        squeue_available,
+        sacct_available,
+        qe_pw_available,
+        workspace_writable,
+        messages,
+    })
+}
+
+/// Lists pseudopotential files (`*.UPF`/`*.upf`) from the configured remote pseudo directory.
+#[tauri::command]
+async fn hpc_list_remote_pseudopotentials(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let list_cmd = format!(
+        "dir={dir}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+for file in \"$dir\"/*.UPF \"$dir\"/*.upf; do \
+  if [ -f \"$file\" ]; then basename \"$file\"; fi; \
+done | LC_ALL=C sort -u",
+        dir = shell_single_quote_local(&remote_pseudo_dir)
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &list_cmd).await?;
+    let mut pseudos: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!("Remote pseudopotential directory not found: {}", path));
+        }
+        if seen.insert(trimmed.to_string()) {
+            pseudos.push(trimmed.to_string());
+        }
+    }
+
+    pseudos.sort();
+    Ok(pseudos)
+}
+
+/// Loads remote SSSP JSON data from the configured remote pseudo directory.
+#[tauri::command]
+async fn hpc_load_remote_sssp_data(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, SSSPElementData>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let load_cmd = format!(
+        "dir={dir}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+sssp_file=$(find \"$dir\" -maxdepth 1 -type f \\( -name 'SSSP*.json' -o -name 'sssp*.json' \\) | LC_ALL=C sort | head -n 1); \
+if [ -z \"$sssp_file\" ]; then \
+  echo \"__QCORTADO_SSSP_NOT_FOUND__\"; \
+  exit 0; \
+fi; \
+echo \"__QCORTADO_SSSP_FILE__:$sssp_file\"; \
+cat \"$sssp_file\"",
+        dir = shell_single_quote_local(&remote_pseudo_dir)
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &load_cmd).await?;
+    let mut json_lines = Vec::new();
+    let mut sssp_file: Option<String> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            json_lines.push(line.to_string());
+            continue;
+        }
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!("Remote pseudopotential directory not found: {}", path));
+        }
+        if trimmed == "__QCORTADO_SSSP_NOT_FOUND__" {
+            return Err("No SSSP JSON file found in remote pseudo directory".to_string());
+        }
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_SSSP_FILE__:") {
+            sssp_file = Some(path.to_string());
+            continue;
+        }
+        json_lines.push(line.to_string());
+    }
+
+    let json_content = json_lines.join("\n");
+    if json_content.trim().is_empty() {
+        return Err(match sssp_file {
+            Some(path) => format!("Remote SSSP file is empty: {}", path),
+            None => "No SSSP JSON data returned from remote pseudo directory".to_string(),
+        });
+    }
+
+    serde_json::from_str::<std::collections::HashMap<String, SSSPElementData>>(&json_content)
+        .map_err(|e| {
+            if let Some(path) = sssp_file.as_deref() {
+                format!("Failed to parse remote SSSP JSON ({}): {}", path, e)
+            } else {
+                format!("Failed to parse remote SSSP JSON: {}", e)
+            }
+        })
+}
+
+/// Generates a preview Slurm script for the active profile/resources.
+#[tauri::command]
+fn hpc_preview_slurm_script(
+    profile_id: Option<String>,
+    task_kind: String,
+    command_lines: Vec<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: State<AppState>,
+) -> Result<HpcScriptPreviewResult, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let commands = if command_lines.is_empty() {
+        vec!["echo \"Add commands for this task in wizard settings\"".to_string()]
+    } else {
+        command_lines
+    };
+    let script = hpc::slurm::build_slurm_script(
+        &profile,
+        &format!("qcortado-{}", task_kind.trim().to_ascii_lowercase()),
+        &commands,
+        resources,
+    );
+    Ok(HpcScriptPreviewResult {
+        script: script.script,
+        sbatch_preview: script.sbatch_preview,
+        validation: script.validation,
+    })
+}
+
+/// Opens a read-only HPC activity popout window.
+#[tauri::command]
+fn hpc_open_activity_window(app: AppHandle) -> Result<(), String> {
+    let existing = app.get_webview_window("hpc-activity");
+    if let Some(window) = existing {
+        window
+            .set_focus()
+            .map_err(|e| format!("Failed to focus activity window: {}", e))?;
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "hpc-activity",
+        tauri::WebviewUrl::App("index.html?hpc_activity=1".into()),
+    )
+    .title("QCortado Cluster Activity")
+    .inner_size(760.0, 520.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("Failed to open activity window: {}", e))?;
+    Ok(())
 }
 
 /// Checks if QE is configured and which executables are available.
@@ -2463,6 +3224,103 @@ async fn run_phonon_calculation(
     })
 }
 
+fn extract_fermi_energy_from_text(output: &str) -> Option<f64> {
+    for line in output.lines() {
+        if line.contains("the Fermi energy is") {
+            if let Some(idx) = line.find("the Fermi energy is") {
+                let rest = &line[idx + 19..];
+                if let Some(ev_idx) = rest.find("ev") {
+                    if let Ok(ef) = rest[..ev_idx].trim().parse::<f64>() {
+                        return Some(ef);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn run_hpc_bundle_task(
+    app: AppHandle,
+    pm: ProcessManager,
+    task_id: &str,
+    task_kind: &str,
+    task_label: &str,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    working_dir: &str,
+    command_lines: Vec<String>,
+    mut bundle_files: Vec<(String, String)>,
+    bundle_copies: Vec<(PathBuf, String)>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<hpc::runner::HpcBatchResult, String> {
+    let local_sync_dir = PathBuf::from(working_dir);
+    prepare_working_directory(&local_sync_dir, false)?;
+
+    let bundle_dir = hpc::sync::create_local_bundle_dir(task_id)?;
+    let script = hpc::slurm::build_slurm_script(
+        &profile,
+        &format!("qcortado-{}", task_kind),
+        &command_lines,
+        resources,
+    );
+
+    if !script.validation.warnings.is_empty() {
+        for warning in &script.validation.warnings {
+            let line = format!("HPC_WARNING|{}", warning);
+            let _ = app.emit(&format!("task-output:{}", task_id), &line);
+            pm.append_output(task_id, line).await;
+        }
+    }
+    if !script.validation.errors.is_empty() {
+        return Err(script.validation.errors.join(" "));
+    }
+
+    bundle_files.push(("run.sbatch".to_string(), script.script.clone()));
+
+    for (source_path, relative_dest) in &bundle_copies {
+        hpc::sync::copy_path_into_bundle(&bundle_dir, source_path, relative_dest)?;
+    }
+
+    for (path, content) in &bundle_files {
+        hpc::sync::write_bundle_text_file(&bundle_dir, path, content)?;
+    }
+
+    let run_result = hpc::runner::run_batch_task(
+        app,
+        pm,
+        hpc::runner::HpcBatchRequest {
+            task_id: task_id.to_string(),
+            task_kind: task_kind.to_string(),
+            task_label: task_label.to_string(),
+            profile,
+            secret,
+            slurm_script: script.script.clone(),
+            sbatch_preview: script.sbatch_preview,
+            bundle_dir: bundle_dir.clone(),
+            local_sync_dir,
+            cancel_flag,
+        },
+    )
+    .await;
+
+    let _ = std::fs::remove_dir_all(&bundle_dir);
+    run_result
+}
+
+fn resolve_hpc_execution(
+    state: &AppState,
+    execution_target: Option<&hpc::profile::ExecutionTarget>,
+) -> Option<hpc::profile::HpcExecutionTarget> {
+    if effective_execution_mode(state, execution_target) != hpc::profile::ExecutionMode::Hpc {
+        return None;
+    }
+    execution_target
+        .and_then(|target| target.hpc.clone())
+        .or_else(|| Some(hpc::profile::HpcExecutionTarget::default()))
+}
+
 // ============================================================================
 // Background Task Commands (Process Manager)
 // ============================================================================
@@ -2474,6 +3332,7 @@ async fn start_scf_calculation(
     calculation: QECalculation,
     working_dir: String,
     mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -2485,14 +3344,54 @@ async fn start_scf_calculation(
         );
     }
 
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("scf".to_string(), label).await;
+
+    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+        tokio::spawn(async move {
+            let result = run_scf_hpc_background(
+                app_handle.clone(),
+                &tid,
+                calculation,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(qe_result) => {
+                    let json = serde_json::to_value(&qe_result).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
-
-    let pm = state.process_manager.clone();
-    let (task_id, cancel_flag) = pm.register("scf".to_string(), label).await;
 
     // We need to drop the Mutex guard from register before spawning
     let tid = task_id.clone();
@@ -2526,6 +3425,60 @@ async fn start_scf_calculation(
     });
 
     Ok(task_id)
+}
+
+async fn run_scf_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    calculation: QECalculation,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<QEResult, String> {
+    let mut remote_calculation = calculation;
+    remote_calculation.pseudo_dir = profile.remote_pseudo_dir.clone();
+    let input = generate_pw_input(&remote_calculation);
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        build_hpc_qe_input_command(&profile, "pw.x", None, "pw.in", "pw.out"),
+    ];
+
+    let _hpc_result = run_hpc_bundle_task(
+        app,
+        pm.clone(),
+        task_id,
+        "scf",
+        "SCF",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        vec![("pw.in".to_string(), input)],
+        Vec::new(),
+        cancel_flag,
+    )
+    .await?;
+
+    let work_path = PathBuf::from(&working_dir);
+    let pw_out_path = work_path.join("pw.out");
+    let slurm_out_path = work_path.join("slurm.out");
+    let output_text = if pw_out_path.exists() {
+        std::fs::read_to_string(&pw_out_path)
+            .map_err(|e| format!("Failed to read {}: {}", pw_out_path.display(), e))?
+    } else if slurm_out_path.exists() {
+        std::fs::read_to_string(&slurm_out_path)
+            .map_err(|e| format!("Failed to read {}: {}", slurm_out_path.display(), e))?
+    } else {
+        return Err("HPC run completed but no output file was downloaded.".to_string());
+    };
+
+    Ok(parse_pw_output(&output_text))
 }
 
 async fn run_scf_background(
@@ -2635,6 +3588,7 @@ async fn start_bands_calculation(
     config: BandsCalculationConfig,
     working_dir: String,
     mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -2645,14 +3599,55 @@ async fn start_bands_calculation(
         );
     }
 
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("bands".to_string(), label).await;
+
+    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_bands_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(band_data) => {
+                    let json = serde_json::to_value(&band_data).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
-
-    let pm = state.process_manager.clone();
-    let (task_id, cancel_flag) = pm.register("bands".to_string(), label).await;
 
     let tid = task_id.clone();
     let app_handle = app.clone();
@@ -2685,6 +3680,182 @@ async fn start_bands_calculation(
     });
 
     Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_bands_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: BandsCalculationConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<BandData, String> {
+    let mut bands_calc = config.base_calculation.clone();
+    bands_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    bands_calc.calculation = qe::CalculationType::Bands;
+    if bands_calc.verbosity.is_none() {
+        bands_calc.verbosity = Some("high".to_string());
+    }
+    let band_path: Vec<qe::BandPathPoint> = config
+        .k_path
+        .iter()
+        .map(|point| qe::BandPathPoint {
+            k: point.coords,
+            npoints: point.npoints,
+            label: Some(point.label.clone()),
+        })
+        .collect();
+    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+
+    let mut nscf_input = generate_pw_input(&bands_calc);
+    if let Some(nbnd) = config.nbnd {
+        nscf_input = insert_system_namelist_line(&nscf_input, &format!("nbnd = {},", nbnd))?;
+    }
+
+    let bands_x_options = config.bands_x.as_ref();
+    let bands_filband = bands_x_options
+        .and_then(|opts| opts.filband.as_deref())
+        .map(|raw| sanitize_output_filename(raw, "bands.dat"))
+        .unwrap_or_else(|| "bands.dat".to_string());
+    let bands_lsym = bands_x_options.and_then(|opts| opts.lsym).unwrap_or(true);
+    let bands_no_overlap = bands_x_options
+        .and_then(|opts| opts.no_overlap)
+        .unwrap_or(true);
+    let bands_x_config = BandsXConfig {
+        prefix: bands_calc.prefix.clone(),
+        outdir: bands_calc.outdir.clone(),
+        filband: bands_filband.clone(),
+        lsym: bands_lsym,
+        no_overlap: bands_no_overlap,
+    };
+    let bands_x_input = generate_bands_x_input(&bands_x_config);
+
+    let projections_enabled = config
+        .projections
+        .as_ref()
+        .map(|entry| entry.enabled)
+        .unwrap_or(false);
+    let projection_options = config.projections.as_ref();
+    let projection_file = projection_options
+        .and_then(|opts| opts.filproj.as_deref())
+        .map(|raw| sanitize_output_filename(raw, "bands.projwfc.dat"))
+        .unwrap_or_else(|| "bands.projwfc.dat".to_string());
+    let projwfc_config = ProjwfcConfig {
+        prefix: bands_calc.prefix.clone(),
+        outdir: bands_calc.outdir.clone(),
+        filproj: projection_file,
+        lsym: projection_options
+            .and_then(|opts| opts.lsym)
+            .unwrap_or(false),
+        diag_basis: projection_options
+            .and_then(|opts| opts.diag_basis)
+            .unwrap_or(false),
+        pawproj: projection_options
+            .and_then(|opts| opts.pawproj)
+            .unwrap_or(false),
+    };
+    let projwfc_input = generate_projwfc_input(&projwfc_config);
+
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let mut commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        build_hpc_qe_input_command(&profile, "pw.x", None, "bands.in", "bands.out"),
+        build_hpc_qe_input_command(&profile, "bands.x", None, "bands_pp.in", "bands_pp.out"),
+    ];
+    if projections_enabled {
+        let projwfc_cmd =
+            build_hpc_qe_input_command(&profile, "projwfc.x", None, "projwfc.in", "projwfc.out");
+        commands.push(format!(
+            "if ! {}; then echo \"WARNING: projwfc.x failed\"; fi",
+            projwfc_cmd
+        ));
+    }
+
+    let mut bundle_files = vec![
+        ("bands.in".to_string(), nscf_input),
+        ("bands_pp.in".to_string(), bands_x_input),
+    ];
+    if projections_enabled {
+        bundle_files.push(("projwfc.in".to_string(), projwfc_input));
+    }
+
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+        if !scf_tmp_dir.exists() {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    }
+
+    let _hpc_result = run_hpc_bundle_task(
+        app,
+        pm,
+        task_id,
+        "bands",
+        "Bands",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        bundle_files,
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+
+    let work_path = PathBuf::from(&working_dir);
+    let bands_out_text = std::fs::read_to_string(work_path.join("bands.out"))
+        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+    let fermi_energy = extract_fermi_energy_from_text(&bands_out_text).unwrap_or(0.0);
+
+    let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
+    let gnu_file = work_path.join(&gnu_file_name);
+    if !gnu_file.exists() {
+        return Err(format!(
+            "{} not found after HPC bands run.",
+            gnu_file_name
+        ));
+    }
+    let mut band_data = read_bands_gnu_file(&gnu_file, fermi_energy)
+        .map_err(|e| format!("Failed to parse band data: {}", e))?;
+    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+
+    if projections_enabled {
+        let projection_text = {
+            let filproj_path = work_path.join(&projwfc_config.filproj);
+            if filproj_path.exists() {
+                std::fs::read_to_string(&filproj_path).unwrap_or_default()
+            } else {
+                std::fs::read_to_string(work_path.join("projwfc.out")).unwrap_or_default()
+            }
+        };
+        if !projection_text.trim().is_empty() {
+            if let Ok(projections) = parse_projwfc_projection_groups(
+                &projection_text,
+                band_data.n_bands,
+                band_data.n_kpoints,
+            ) {
+                band_data.projections = Some(projections);
+            }
+        }
+    }
+
+    Ok(band_data)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3186,6 +4357,7 @@ async fn start_dos_calculation(
     config: ElectronicDosCalculationConfig,
     working_dir: String,
     mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -3196,14 +4368,55 @@ async fn start_dos_calculation(
         );
     }
 
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("dos".to_string(), label).await;
+
+    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_dos_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(dos_data) => {
+                    let json = serde_json::to_value(&dos_data).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
-
-    let pm = state.process_manager.clone();
-    let (task_id, cancel_flag) = pm.register("dos".to_string(), label).await;
 
     let tid = task_id.clone();
     let app_handle = app.clone();
@@ -3236,6 +4449,138 @@ async fn start_dos_calculation(
     });
 
     Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_dos_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: ElectronicDosCalculationConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<ElectronicDosData, String> {
+    let mut nscf_calc = config.base_calculation.clone();
+    nscf_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.verbosity = Some("high".to_string());
+    nscf_calc.kpoints = qe::KPoints::Automatic {
+        grid: config.k_grid,
+        offset: [0, 0, 0],
+    };
+    if nscf_calc.system.degauss.is_none() {
+        nscf_calc.system.degauss = config.degauss;
+    }
+    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe::Occupations::Smearing;
+        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        if nscf_calc.system.degauss.is_none() {
+            nscf_calc.system.degauss = Some(0.02);
+        }
+    }
+
+    let nscf_input = generate_pw_input(&nscf_calc);
+    let dos_calc = DosCalculation {
+        prefix: nscf_calc.prefix.clone(),
+        outdir: nscf_calc.outdir.clone(),
+        fildos: "dos.dat".to_string(),
+        degauss: config.degauss.or(nscf_calc.system.degauss),
+        emin: config.emin,
+        emax: config.emax,
+        delta_e: config.delta_e,
+    };
+    let dos_input = generate_dos_input(&dos_calc);
+
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+        if !scf_tmp_dir.exists() {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    }
+
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        build_hpc_qe_input_command(&profile, "pw.x", None, "nscf.in", "nscf.out"),
+        build_hpc_qe_input_command(&profile, "dos.x", None, "dos.in", "dos.out"),
+    ];
+    let _hpc_result = run_hpc_bundle_task(
+        app,
+        pm,
+        task_id,
+        "dos",
+        "Electronic DOS",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        vec![
+            ("nscf.in".to_string(), nscf_input),
+            ("dos.in".to_string(), dos_input),
+        ],
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+
+    let work_path = PathBuf::from(&working_dir);
+    let dos_file = work_path.join(&dos_calc.fildos);
+    if !dos_file.exists() {
+        return Err(format!("DOS file not found after HPC run: {}", dos_file.display()));
+    }
+    let dos_content = std::fs::read_to_string(&dos_file)
+        .map_err(|e| format!("Failed to read DOS file {}: {}", dos_file.display(), e))?;
+    let (energies, dos_values) = parse_dos_file(&dos_content)
+        .ok_or_else(|| format!("Failed to parse DOS data from {}", dos_file.display()))?;
+    if energies.is_empty() || dos_values.is_empty() {
+        return Err("Parsed DOS output is empty".to_string());
+    }
+    let e_min = energies
+        .iter()
+        .fold(f64::INFINITY, |current, value| current.min(*value));
+    let e_max = energies
+        .iter()
+        .fold(f64::NEG_INFINITY, |current, value| current.max(*value));
+    let max_dos = dos_values
+        .iter()
+        .fold(f64::NEG_INFINITY, |current, value| current.max(*value));
+    let fermi_energy = std::fs::read_to_string(work_path.join("nscf.out"))
+        .ok()
+        .and_then(|content| extract_fermi_energy_from_text(&content));
+
+    Ok(ElectronicDosData {
+        energies,
+        dos: dos_values,
+        fermi_energy,
+        energy_range: [e_min, e_max],
+        max_dos: if max_dos.is_finite() {
+            max_dos.max(0.0)
+        } else {
+            0.0
+        },
+        points: dos_content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with('#')
+            })
+            .count(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3533,6 +4878,7 @@ async fn start_fermi_surface_calculation(
     config: FermiSurfaceCalculationConfig,
     working_dir: String,
     mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -3543,14 +4889,55 @@ async fn start_fermi_surface_calculation(
         );
     }
 
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("fermi_surface".to_string(), label).await;
+
+    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_fermi_surface_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(fermi_data) => {
+                    let json = serde_json::to_value(&fermi_data).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
-
-    let pm = state.process_manager.clone();
-    let (task_id, cancel_flag) = pm.register("fermi_surface".to_string(), label).await;
 
     let tid = task_id.clone();
     let app_handle = app.clone();
@@ -3583,6 +4970,121 @@ async fn start_fermi_surface_calculation(
     });
 
     Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fermi_surface_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: FermiSurfaceCalculationConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<FermiSurfaceData, String> {
+    let mut fermi_calc = config.base_calculation.clone();
+    fermi_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    if fermi_calc.verbosity.is_none() {
+        fermi_calc.verbosity = Some("high".to_string());
+    }
+    let k_offset = config
+        .k_offset
+        .unwrap_or([0, 0, 0])
+        .map(|value| u32::from(value > 0));
+    fermi_calc.kpoints = qe::KPoints::Automatic {
+        grid: config.k_grid,
+        offset: k_offset,
+    };
+    if fermi_calc.system.degauss.is_none() {
+        fermi_calc.system.degauss = Some(0.02);
+    }
+
+    let mut fermi_input = generate_pw_input(&fermi_calc);
+    if let Some(nbnd) = config.nbnd {
+        fermi_input = insert_system_namelist_line(&fermi_input, &format!("nbnd = {},", nbnd))?;
+    }
+
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+        if !scf_tmp_dir.exists() {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    }
+
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        build_hpc_qe_input_command(
+            &profile,
+            "fermi_velocity.x",
+            Some("-npool 1"),
+            "fermi_velocity.in",
+            "fermi_velocity.out",
+        ),
+    ];
+    let _hpc_result = run_hpc_bundle_task(
+        app,
+        pm,
+        task_id,
+        "fermi_surface",
+        "Fermi Surface",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        vec![("fermi_velocity.in".to_string(), fermi_input)],
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+
+    let work_path = PathBuf::from(&working_dir);
+    let fermi_output = std::fs::read_to_string(work_path.join("fermi_velocity.out"))
+        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+    let fermi_energy = extract_fermi_energy_from_text(&fermi_output);
+    let frmsf_files = collect_frmsf_files(&work_path)?;
+    if frmsf_files.is_empty() {
+        return Err("No .frmsf files were generated by HPC run.".to_string());
+    }
+    let primary_file = frmsf_files
+        .iter()
+        .find(|file| {
+            let lower = file.file_name.to_ascii_lowercase();
+            lower.ends_with("/vfermi.frmsf")
+                || lower == "vfermi.frmsf"
+                || lower.ends_with("_vfermi.frmsf")
+        })
+        .or_else(|| {
+            frmsf_files.iter().find(|file| {
+                let lower = file.file_name.to_ascii_lowercase();
+                lower.ends_with("/vfermi1.frmsf")
+                    || lower == "vfermi1.frmsf"
+                    || lower.ends_with("_vfermi1.frmsf")
+            })
+        })
+        .map(|file| file.file_name.clone())
+        .unwrap_or_else(|| frmsf_files[0].file_name.clone());
+
+    Ok(FermiSurfaceData {
+        k_grid: config.k_grid,
+        fermi_energy,
+        primary_file,
+        frmsf_files,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3810,6 +5312,7 @@ async fn start_phonon_calculation(
     config: PhononPipelineConfig,
     working_dir: String,
     mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -3820,14 +5323,55 @@ async fn start_phonon_calculation(
         );
     }
 
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("phonon".to_string(), label).await;
+
+    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_phonon_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(phonon_result) => {
+                    let json = serde_json::to_value(&phonon_result).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
     let bin_dir = {
         let guard = state.qe_bin_dir.lock().unwrap();
         guard.as_ref().ok_or("QE path not configured")?.clone()
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
-
-    let pm = state.process_manager.clone();
-    let (task_id, cancel_flag) = pm.register("phonon".to_string(), label).await;
 
     let tid = task_id.clone();
     let app_handle = app.clone();
@@ -3860,6 +5404,208 @@ async fn start_phonon_calculation(
     });
 
     Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_phonon_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: PhononPipelineConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<PhononResult, String> {
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+        if !scf_tmp_dir.exists() {
+            return Err(format!(
+                "SCF calculation tmp directory not found: {}",
+                scf_tmp_dir.display()
+            ));
+        }
+        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    }
+
+    let q2r_calc = Q2RCalculation {
+        fildyn: config.phonon.fildyn.clone(),
+        flfrc: "force_constants".to_string(),
+        zasr: config.phonon.asr.clone(),
+    };
+    let q2r_input = generate_q2r_input(&q2r_calc);
+
+    let q_path_with_points = config.q_path.as_ref().map(|q_path| {
+        q_path
+            .iter()
+            .enumerate()
+            .map(|(idx, point)| QPathPoint {
+                label: point.label.clone(),
+                coords: point.coords,
+                npoints: if idx < q_path.len() - 1 {
+                    point.npoints
+                } else {
+                    0
+                },
+            })
+            .collect::<Vec<QPathPoint>>()
+    });
+    let matdyn_dos_input = if config.calculate_dos {
+        let dos_grid = config.dos_grid.unwrap_or([20, 20, 20]);
+        let dos_delta_e = config.dos_delta_e.unwrap_or(1.0);
+        let matdyn_dos_calc = MatdynCalculation {
+            flfrc: "force_constants".to_string(),
+            asr: config.phonon.asr.clone(),
+            dos: true,
+            fldos: Some("phonon_dos".to_string()),
+            nk: Some(dos_grid),
+            delta_e: Some(dos_delta_e),
+            q_path: None,
+            flfrq: None,
+        };
+        Some(generate_matdyn_dos_input(&matdyn_dos_calc))
+    } else {
+        None
+    };
+    let matdyn_bands_input = if config.calculate_dispersion {
+        if let Some(q_path) = q_path_with_points.as_ref() {
+            let matdyn_bands_calc = MatdynCalculation {
+                flfrc: "force_constants".to_string(),
+                asr: config.phonon.asr.clone(),
+                dos: false,
+                fldos: None,
+                nk: None,
+                delta_e: None,
+                q_path: Some(q_path.clone()),
+                flfrq: Some("phonon_freq".to_string()),
+            };
+            Some(generate_matdyn_bands_input(&matdyn_bands_calc))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let mut commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        build_hpc_qe_input_command(&profile, "ph.x", None, "ph.in", "ph.out"),
+        build_hpc_qe_input_command(&profile, "q2r.x", None, "q2r.in", "q2r.out"),
+    ];
+    if config.calculate_dos {
+        let matdyn_dos_cmd = build_hpc_qe_input_command(
+            &profile,
+            "matdyn.x",
+            None,
+            "matdyn_dos.in",
+            "matdyn_dos.out",
+        );
+        commands.push(format!(
+            "if ! {}; then echo \"WARNING: matdyn.x DOS failed\"; fi",
+            matdyn_dos_cmd
+        ));
+    }
+    if config.calculate_dispersion && matdyn_bands_input.is_some() {
+        let matdyn_bands_cmd = build_hpc_qe_input_command(
+            &profile,
+            "matdyn.x",
+            None,
+            "matdyn_bands.in",
+            "matdyn_bands.out",
+        );
+        commands.push(format!(
+            "if ! {}; then echo \"WARNING: matdyn.x dispersion failed\"; fi",
+            matdyn_bands_cmd
+        ));
+    }
+
+    let mut bundle_files = vec![
+        ("ph.in".to_string(), generate_ph_input(&config.phonon)),
+        ("q2r.in".to_string(), q2r_input),
+    ];
+    if let Some(input) = matdyn_dos_input {
+        bundle_files.push(("matdyn_dos.in".to_string(), input));
+    }
+    if let Some(input) = matdyn_bands_input {
+        bundle_files.push(("matdyn_bands.in".to_string(), input));
+    }
+
+    let _hpc_result = run_hpc_bundle_task(
+        app,
+        pm,
+        task_id,
+        "phonon",
+        "Phonon",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        bundle_files,
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+
+    let work_path = PathBuf::from(&working_dir);
+    ensure_phonon_restart_inputs(&work_path)?;
+
+    let ph_output = std::fs::read_to_string(work_path.join("ph.out"))
+        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+    let (converged, n_qpoints) = parse_ph_output(&ph_output);
+    if !converged {
+        return Err("ph.x did not converge successfully".to_string());
+    }
+
+    let dos_data = {
+        let dos_file = work_path.join("phonon_dos");
+        if dos_file.exists() {
+            read_phonon_dos_file(&dos_file).ok()
+        } else {
+            None
+        }
+    };
+
+    let mut dispersion_data = {
+        let freq_gp_file = work_path.join("phonon_freq.gp");
+        let freq_file = work_path.join("phonon_freq");
+        let source = if freq_gp_file.exists() {
+            Some(freq_gp_file)
+        } else if freq_file.exists() {
+            Some(freq_file)
+        } else {
+            None
+        };
+        if let Some(source_file) = source {
+            read_phonon_dispersion_file(&source_file).ok()
+        } else {
+            None
+        }
+    };
+
+    if let (Some(ref mut disp), Some(q_path)) = (dispersion_data.as_mut(), q_path_with_points.as_ref()) {
+        add_phonon_symmetry_markers(disp, q_path);
+    }
+
+    let n_modes = dispersion_data.as_ref().map(|value| value.n_modes).unwrap_or(0);
+
+    Ok(PhononResult {
+        converged: true,
+        n_qpoints,
+        n_modes,
+        dos_data,
+        dispersion_data,
+        raw_output: ph_output,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4469,6 +6215,9 @@ pub fn run() {
             let mut execution_prefix: Option<String> = None;
             let mut mpi_defaults: Option<config::MpiDefaultsConfig> = None;
             let mut save_size_mode = config::SaveSizeMode::Large;
+            let mut execution_mode = hpc::profile::ExecutionMode::Local;
+            let mut hpc_profiles: Vec<hpc::profile::HpcProfile> = Vec::new();
+            let mut active_hpc_profile_id: Option<String> = None;
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
                     if let Some(path) = cfg.qe_bin_dir {
@@ -4487,6 +6236,9 @@ pub fn run() {
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
                     mpi_defaults = normalize_mpi_defaults(cfg.mpi_defaults);
                     save_size_mode = cfg.save_size_mode;
+                    execution_mode = cfg.execution_mode;
+                    hpc_profiles = cfg.hpc_profiles;
+                    active_hpc_profile_id = cfg.active_hpc_profile_id;
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to load config: {}", e);
@@ -4500,6 +6252,9 @@ pub fn run() {
                 execution_prefix: Mutex::new(execution_prefix),
                 mpi_defaults: Mutex::new(mpi_defaults),
                 save_size_mode: Mutex::new(save_size_mode),
+                execution_mode: Mutex::new(execution_mode),
+                hpc_profiles: Mutex::new(hpc_profiles),
+                active_hpc_profile_id: Mutex::new(active_hpc_profile_id),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
             });
@@ -4507,6 +6262,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Only guard close on the main application window.
+            // Auxiliary windows (e.g. HPC activity popout) should close independently.
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle().clone();
                 let pm = app.state::<AppState>().process_manager.clone();
@@ -4534,6 +6294,20 @@ pub fn run() {
             get_mpi_defaults,
             set_save_size_mode,
             get_save_size_mode,
+            set_execution_mode,
+            get_execution_mode,
+            hpc_list_profiles,
+            hpc_save_profile,
+            hpc_update_profile_defaults,
+            hpc_delete_profile,
+            hpc_set_active_profile,
+            hpc_get_active_profile_id,
+            hpc_test_connection,
+            hpc_validate_environment,
+            hpc_list_remote_pseudopotentials,
+            hpc_load_remote_sssp_data,
+            hpc_preview_slurm_script,
+            hpc_open_activity_window,
             clear_temp_storage,
             launch_fermi_surface_viewer,
             check_qe_executables,

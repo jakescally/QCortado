@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "./optimizedStructure";
+import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
@@ -18,6 +19,7 @@ export interface TaskState {
   output: string[];
   result: any | null;
   error: string | null;
+  hpc: HpcTaskMeta;
 }
 
 interface TaskSummary {
@@ -26,6 +28,11 @@ interface TaskSummary {
   label: string;
   started_at: string;
   status: TaskStatus;
+  backend?: string | null;
+  remote_job_id?: string | null;
+  scheduler_state?: string | null;
+  remote_node?: string | null;
+  remote_workdir?: string | null;
 }
 
 interface TaskInfo {
@@ -36,6 +43,11 @@ interface TaskInfo {
   status: TaskStatus;
   result: any | null;
   error: string | null;
+  backend?: string | null;
+  remote_job_id?: string | null;
+  scheduler_state?: string | null;
+  remote_node?: string | null;
+  remote_workdir?: string | null;
 }
 
 interface QueueSaveSpec {
@@ -127,6 +139,16 @@ function normalizeTaskType(taskType: string): TaskType {
     return taskType;
   }
   return "scf";
+}
+
+function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcTaskMeta {
+  return {
+    backend: info.backend ?? null,
+    remote_job_id: info.remote_job_id ?? null,
+    scheduler_state: info.scheduler_state ?? null,
+    remote_node: info.remote_node ?? null,
+    remote_workdir: info.remote_workdir ?? null,
+  };
 }
 
 function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: string, parameters: Record<string, any>) {
@@ -307,7 +329,11 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
   // Sync with backend on mount (handles app reload)
   useEffect(() => {
     void syncWithBackend();
+    const intervalId = window.setInterval(() => {
+      void syncWithBackend();
+    }, 2000);
     return () => {
+      window.clearInterval(intervalId);
       for (const fns of unlistenRefs.current.values()) {
         for (const fn of fns) fn();
       }
@@ -316,6 +342,52 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
 
   const subscribeToTask = useCallback((taskId: string, taskType: TaskType) => {
     const fns: UnlistenFn[] = [];
+    const refreshTaskSnapshot = async () => {
+      try {
+        const [info, output] = await Promise.all([
+          invoke<TaskInfo>("get_task_info", { taskId }).catch(() => null),
+          invoke<string[]>("get_task_output", { taskId }).catch(() => null),
+        ]);
+        if (!output) return;
+
+        setTasks((prev) => {
+          const task = prev.get(taskId);
+          if (!task) return prev;
+
+          let nextProgress = defaultProgressState("Starting...");
+          for (const line of output) {
+            nextProgress = progressReducer(taskType, line, nextProgress);
+          }
+
+          const nextStatus = info?.status ?? task.status;
+          if (nextStatus !== "running") {
+            nextProgress = {
+              status: nextStatus === "completed" ? "complete" : "error",
+              percent: nextStatus === "completed" ? 100 : nextProgress.percent,
+              phase: nextStatus === "completed"
+                ? "Complete"
+                : nextStatus === "cancelled"
+                  ? "Cancelled"
+                  : "Failed",
+            };
+          }
+
+          const next = new Map(prev);
+          next.set(taskId, {
+            ...task,
+            status: nextStatus,
+            output,
+            progress: nextProgress,
+            result: info?.result ?? task.result,
+            error: info?.error ?? task.error,
+            hpc: info ? taskInfoToHpcMeta(info) : task.hpc,
+          });
+          return next;
+        });
+      } catch (e) {
+        console.error("Failed to refresh task snapshot:", e);
+      }
+    };
 
     listen<string>(`task-output:${taskId}`, (event) => {
       setTasks((prev) => {
@@ -343,6 +415,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             ...task,
             status: "completed",
             result: info.result,
+            hpc: taskInfoToHpcMeta(info),
             progress: {
               status: "complete",
               percent: 100,
@@ -351,6 +424,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           });
           return next;
         });
+        void refreshTaskSnapshot();
       } catch (e) {
         console.error("Failed to get task info on completion:", e);
       }
@@ -376,6 +450,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           });
           return next;
         });
+        void refreshTaskSnapshot();
       }
     }).then((fn) => fns.push(fn));
 
@@ -403,6 +478,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         output: [],
         result: null,
         error: null,
+        hpc: {},
       };
 
       setTasks((prev) => {
@@ -554,11 +630,12 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           output,
           result: info.result,
           error: info.error,
+          hpc: taskInfoToHpcMeta(info),
         });
         return next;
       });
 
-      if (info.status === "running") {
+      if (info.status === "running" && !unlistenRefs.current.has(taskId)) {
         subscribeToTask(taskId, taskType);
       }
     } catch (e) {
@@ -574,22 +651,46 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           await reconnectToTask(summary.task_id);
         } else {
           const info = await invoke<TaskInfo>("get_task_info", { taskId: summary.task_id });
+          const output = await invoke<string[]>("get_task_output", { taskId: summary.task_id })
+            .catch(() => []);
+          const taskType = normalizeTaskType(summary.task_type);
+          let progress = defaultProgressState("Starting...");
+          for (const line of output) {
+            progress = progressReducer(taskType, line, progress);
+          }
+          if (info.status === "completed") {
+            progress = {
+              status: "complete",
+              percent: 100,
+              phase: "Complete",
+            };
+          } else if (info.status === "cancelled") {
+            progress = {
+              status: "error",
+              percent: progress.percent,
+              phase: "Cancelled",
+            };
+          } else {
+            progress = {
+              status: "error",
+              percent: progress.percent,
+              phase: "Failed",
+            };
+          }
+
           setTasks((prev) => {
             const next = new Map(prev);
             next.set(summary.task_id, {
               taskId: summary.task_id,
-              taskType: normalizeTaskType(summary.task_type),
+              taskType,
               label: summary.label,
               startedAt: summary.started_at,
               status: info.status,
-              progress: {
-                status: info.status === "completed" ? "complete" : "error",
-                percent: info.status === "completed" ? 100 : null,
-                phase: info.status === "completed" ? "Complete" : "Failed",
-              },
-              output: [],
+              progress,
+              output,
               result: info.result,
               error: info.error,
+              hpc: taskInfoToHpcMeta(info),
             });
             return next;
           });
@@ -672,6 +773,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             output,
             result: info.result,
             error: info.error,
+            hpc: taskInfoToHpcMeta(info),
           };
 
           setTasks((prev) => {
@@ -701,6 +803,13 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     const nowIso = new Date().toISOString();
     const taskResult = task.result;
     const parameters = augmentQueuedParameters(item.taskType, spec.parameters || {}, taskResult);
+    if (task.hpc.backend === "hpc") {
+      parameters.execution_backend = "hpc";
+      parameters.remote_job_id = task.hpc.remote_job_id ?? null;
+      parameters.scheduler_state = task.hpc.scheduler_state ?? null;
+      parameters.remote_node = task.hpc.remote_node ?? null;
+      parameters.remote_workdir = task.hpc.remote_workdir ?? null;
+    }
     const resultPayload = buildQueuedResult(item.taskType, taskResult, outputText, parameters);
 
     await invoke("save_calculation", {

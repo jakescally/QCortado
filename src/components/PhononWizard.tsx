@@ -1,8 +1,13 @@
 // Phonon Calculation Wizard - Calculate phonon DOS and dispersion
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { CrystalData } from "../lib/types";
+import {
+  CrystalData,
+  ExecutionMode,
+  HpcProfile,
+  SlurmResourceRequest,
+} from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
@@ -23,6 +28,12 @@ import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
 } from "../lib/brillouinZoneData";
+import {
+  buildExecutionTarget,
+  buildHpcQeInputCommandLine,
+  defaultResourcesForProfile,
+} from "../lib/hpcConfig";
+import { HpcRunSettings } from "./HpcRunSettings";
 
 function Tooltip({ text }: { text: string }) {
   return (
@@ -298,6 +309,8 @@ interface PhononWizardProps {
   onBack: () => void;
   onViewPhonons: (phononData: PhononViewerData, viewMode: "bands" | "dos") => void;
   qePath: string;
+  executionMode?: ExecutionMode;
+  activeHpcProfile?: HpcProfile | null;
   projectId: string;
   cifId: string;
   crystalData: CrystalData;
@@ -322,6 +335,8 @@ export function PhononWizard({
   onBack,
   onViewPhonons,
   qePath: _qePath,
+  executionMode = "local",
+  activeHpcProfile = null,
   projectId,
   cifId: _cifId,
   crystalData,
@@ -329,6 +344,7 @@ export function PhononWizard({
   reconnectTaskId,
 }: PhononWizardProps) {
   const taskContext = useTaskContext();
+  const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
@@ -421,7 +437,7 @@ export function PhononWizard({
 
   // Step 5: Results
   const [phononResult, setPhononResult] = useState<PhononResult | null>(null);
-  const [showOutput, setShowOutput] = useState(false);
+  const [showOutput, setShowOutput] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
   const [calcStartTime, setCalcStartTime] = useState<string>("");
 
@@ -430,6 +446,29 @@ export function PhononWizard({
   const [mpiProcs, setMpiProcs] = useState(1);
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
+  const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
+    defaultResourcesForProfile(activeHpcProfile),
+  );
+  const hpcCommandLines = useMemo(() => {
+    const lines = [
+      "cd \"$SLURM_SUBMIT_DIR\"",
+      "QE_BIN=\"$HOME/qe/bin\"",
+      buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out"),
+    ];
+    if (calculateDos) {
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_dos.in", "matdyn_dos.out"));
+    }
+    if (calculateDispersion) {
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_bands.in", "matdyn_bands.out"));
+    }
+    return lines;
+  }, [activeHpcProfile, calculateDos, calculateDispersion]);
+
+  useEffect(() => {
+    if (!isHpcMode) return;
+    setHpcResources(defaultResourcesForProfile(activeHpcProfile));
+  }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
   // Load MPI info
   useEffect(() => {
@@ -517,11 +556,16 @@ export function PhononWizard({
   useEffect(() => {
     if (!activeTaskId) return;
     const task = taskContext.getTask(activeTaskId);
-    if (!task || task.status !== "running") return;
+    if (!task) return;
 
     setOutput(task.output.join("\n") + "\n");
     setProgress(task.progress);
-  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.output.length]);
+    setIsRunning(task.status === "running");
+  }, [
+    activeTaskId,
+    taskContext.getTask(activeTaskId ?? "")?.output.length,
+    taskContext.getTask(activeTaskId ?? "")?.status,
+  ]);
 
   // Handle Q-path changes from the BZ viewer
   const handleQPathChange = useCallback((newPath: KPathPoint[]) => {
@@ -715,7 +759,13 @@ export function PhononWizard({
     const taskParams = {
       config: phononConfig,
       workingDir: PHONON_WORK_DIR,
-      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      executionTarget: buildExecutionTarget(
+        executionMode,
+        activeHpcProfile?.id ?? null,
+        isHpcMode ? hpcResources : null,
+        false,
+      ),
     };
     const pathString = shouldCalculateDispersion ? qPath.map((point) => point.label).join(" -> ") : "";
     const saveParameters = {
@@ -1745,47 +1795,62 @@ export function PhononWizard({
           )}
         </div>
 
-        <div className="option-section mpi-section config-section collapsible">
-          <h4 onClick={() => toggleSection("mpi")} className="section-header">
-            <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
-            Parallelization
-            <Tooltip text="Controls process-level parallel execution. More MPI processes often reduce wall time, but scaling depends on system size and workload balance." />
-          </h4>
-          {expandedSections.mpi && (
-            <div className="option-params">
-              {mpiAvailable ? (
-                <div className="mpi-toggle">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={mpiEnabled}
-                      onChange={(e) => setMpiEnabled(e.target.checked)}
-                    />
-                    Enable MPI ({cpuCount} cores available)
-                  </label>
-                  {mpiEnabled && (
-                    <div className="mpi-procs">
-                      <label>
-                        Number of processes:
-                        <input
-                          type="number"
-                          min={1}
-                          max={cpuCount}
-                          value={mpiProcs}
-                          onChange={(e) => setMpiProcs(parseInt(e.target.value) || 1)}
-                        />
-                      </label>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="mpi-unavailable">
-                  MPI not available. Running in serial mode.
-                </p>
-              )}
-            </div>
-          )}
-        </div>
+        {isHpcMode ? (
+          <HpcRunSettings
+            profileId={activeHpcProfile?.id ?? null}
+            profileName={activeHpcProfile?.name ?? "Andromeda"}
+            taskKind="phonon"
+            commandLines={hpcCommandLines}
+            resources={hpcResources}
+            resourceMode={activeHpcProfile?.resource_mode ?? "both"}
+            defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
+            defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+            onResourcesChange={setHpcResources}
+            disabled={isRunning}
+          />
+        ) : (
+          <div className="option-section mpi-section config-section collapsible">
+            <h4 onClick={() => toggleSection("mpi")} className="section-header">
+              <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
+              Parallelization
+              <Tooltip text="Controls process-level parallel execution. More MPI processes often reduce wall time, but scaling depends on system size and workload balance." />
+            </h4>
+            {expandedSections.mpi && (
+              <div className="option-params">
+                {mpiAvailable ? (
+                  <div className="mpi-toggle">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={mpiEnabled}
+                        onChange={(e) => setMpiEnabled(e.target.checked)}
+                      />
+                      Enable MPI ({cpuCount} cores available)
+                    </label>
+                    {mpiEnabled && (
+                      <div className="mpi-procs">
+                        <label>
+                          Number of processes:
+                          <input
+                            type="number"
+                            min={1}
+                            max={cpuCount}
+                            value={mpiProcs}
+                            onChange={(e) => setMpiProcs(parseInt(e.target.value, 10) || 1)}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mpi-unavailable">
+                    MPI not available. Running in serial mode.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && <div className="error-message">{error}</div>}
 
@@ -1805,7 +1870,7 @@ export function PhononWizard({
             disabled={!canRun || hasExternalRunningTask}
             onClick={runCalculation}
           >
-            Run Calculation
+            {isHpcMode ? "Submit Phonon to Andromeda" : "Run Calculation"}
           </button>
         </div>
       </div>
@@ -1821,38 +1886,53 @@ export function PhononWizard({
     const totalQPoints = phononMeta?.totalQPoints;
 
     return (
-      <div className="wizard-step run-step">
-        <h3>{isRunning ? "Running Phonon Calculation" : "Phonon Output"}</h3>
-        <p className="step-description">
-          This may take a while depending on system size and q-grid density.
-        </p>
+      <div className="wizard-step run-step run-step-focused">
+        <div className="run-step-headline run-step-headline-with-subtitle">
+          <div>
+            <h3>{isRunning ? "Running Phonon Calculation" : "Phonon Output"}</h3>
+            <p className="run-step-subtitle">
+              This may take a while depending on system size and q-grid density.
+            </p>
+          </div>
+          <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
+            {isRunning ? "Live output" : error ? "Run failed" : "Output"}
+          </span>
+        </div>
 
-        <ProgressBar
-          status={progress.status}
-          percent={progress.percent}
-          phase={progress.phase}
-          detail={progress.detail}
-        />
-        <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
-        <EstimatedRemainingTime
-          startedAt={calcStartTime}
-          isRunning={isRunning}
-          completedUnits={completedQPoints}
-          totalUnits={totalQPoints}
-          label="ETA (q-points)"
-        />
-
-        <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
-          {output || "Starting calculation..."}
-        </pre>
+        <div className="run-status-rail">
+          <ProgressBar
+            status={progress.status}
+            percent={progress.percent}
+            phase={progress.phase}
+            detail={progress.detail}
+            compact
+          />
+          <div className="run-status-meta">
+            <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+            <EstimatedRemainingTime
+              startedAt={calcStartTime}
+              isRunning={isRunning}
+              completedUnits={completedQPoints}
+              totalUnits={totalQPoints}
+              label="ETA (q-points)"
+            />
+          </div>
+        </div>
 
         {error && (
-          <div className="error-actions">
-            <button className="secondary-button" onClick={() => setStep("options")}>
-              Back to Post-Processing
-            </button>
-          </div>
+          <>
+            <div className="run-inline-error">{error}</div>
+            <div className="run-error-actions">
+              <button className="secondary-button" onClick={() => setStep("options")}>
+                Back to Post-Processing
+              </button>
+            </div>
+          </>
         )}
+
+        <pre ref={outputRef} className="calculation-output run-output-log" onScroll={handleOutputScroll}>
+          {output || "Starting calculation..."}
+        </pre>
       </div>
     );
   };
@@ -1968,7 +2048,7 @@ export function PhononWizard({
   };
 
   return (
-    <div className="phonon-wizard">
+    <div className={`phonon-wizard wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back

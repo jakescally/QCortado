@@ -7,6 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+use crate::hpc::profile::{ExecutionMode, HpcProfile};
+
 /// Controls how much calculation scratch data is persisted in project history.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -42,6 +44,15 @@ pub struct AppConfig {
     /// Global save-size mode for persisted project artifacts.
     #[serde(default)]
     pub save_size_mode: SaveSizeMode,
+    /// Current execution mode.
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    /// Stored HPC profiles (metadata only).
+    #[serde(default)]
+    pub hpc_profiles: Vec<HpcProfile>,
+    /// Active HPC profile ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_hpc_profile_id: Option<String>,
 }
 
 /// Gets the config file path
@@ -121,5 +132,24 @@ pub fn update_mpi_defaults(
 pub fn update_save_size_mode(app: &AppHandle, mode: SaveSizeMode) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.save_size_mode = mode;
+    save_config(app, &config)
+}
+
+/// Updates execution mode and saves.
+pub fn update_execution_mode(app: &AppHandle, mode: ExecutionMode) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.execution_mode = mode;
+    save_config(app, &config)
+}
+
+/// Updates all HPC profiles and active profile ID, then saves.
+pub fn update_hpc_profiles(
+    app: &AppHandle,
+    profiles: Vec<HpcProfile>,
+    active_hpc_profile_id: Option<String>,
+) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.hpc_profiles = profiles;
+    config.active_hpc_profile_id = active_hpc_profile_id;
     save_config(app, &config)
 }

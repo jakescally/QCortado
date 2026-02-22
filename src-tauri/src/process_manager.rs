@@ -20,6 +20,16 @@ pub struct TaskInfo {
     pub status: TaskStatus,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workdir: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -29,6 +39,16 @@ pub struct TaskSummary {
     pub label: String,
     pub started_at: String,
     pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_workdir: Option<String>,
 }
 
 pub struct RunningTask {
@@ -42,6 +62,11 @@ pub struct RunningTask {
     pub error: Option<String>,
     pub child_id: Option<u32>,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub backend: Option<String>,
+    pub remote_job_id: Option<String>,
+    pub scheduler_state: Option<String>,
+    pub remote_node: Option<String>,
+    pub remote_workdir: Option<String>,
 }
 
 /// Thread-safe process manager. Clone is cheap (shared Arc).
@@ -75,6 +100,11 @@ impl ProcessManager {
             error: None,
             child_id: None,
             cancel_flag: cancel_flag.clone(),
+            backend: Some("local".to_string()),
+            remote_job_id: None,
+            scheduler_state: None,
+            remote_node: None,
+            remote_workdir: None,
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
@@ -126,6 +156,11 @@ impl ProcessManager {
             status: t.status.clone(),
             result: t.result.clone(),
             error: t.error.clone(),
+            backend: t.backend.clone(),
+            remote_job_id: t.remote_job_id.clone(),
+            scheduler_state: t.scheduler_state.clone(),
+            remote_node: t.remote_node.clone(),
+            remote_workdir: t.remote_workdir.clone(),
         })
     }
 
@@ -139,6 +174,11 @@ impl ProcessManager {
                 label: t.label.clone(),
                 started_at: t.started_at.clone(),
                 status: t.status.clone(),
+                backend: t.backend.clone(),
+                remote_job_id: t.remote_job_id.clone(),
+                scheduler_state: t.scheduler_state.clone(),
+                remote_node: t.remote_node.clone(),
+                remote_workdir: t.remote_workdir.clone(),
             })
             .collect()
     }
@@ -186,6 +226,41 @@ impl ProcessManager {
                 }
                 task.status = TaskStatus::Cancelled;
             }
+        }
+    }
+
+    pub async fn set_task_backend(&self, task_id: &str, backend: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.backend = backend;
+        }
+    }
+
+    pub async fn set_remote_job_id(&self, task_id: &str, remote_job_id: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.remote_job_id = remote_job_id;
+        }
+    }
+
+    pub async fn set_scheduler_state(&self, task_id: &str, scheduler_state: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.scheduler_state = scheduler_state;
+        }
+    }
+
+    pub async fn set_remote_node(&self, task_id: &str, remote_node: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.remote_node = remote_node;
+        }
+    }
+
+    pub async fn set_remote_workdir(&self, task_id: &str, remote_workdir: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.remote_workdir = remote_workdir;
         }
     }
 }

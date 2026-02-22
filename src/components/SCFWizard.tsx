@@ -7,11 +7,14 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import {
   CrystalData,
   ELEMENT_MASSES,
+  ExecutionMode,
+  HpcProfile,
   OptimizedStructureOption,
   QePositionUnit,
   SavedCellSummary,
   SavedStructureData,
   SCFPreset,
+  SlurmResourceRequest,
 } from "../lib/types";
 import { parseCIF } from "../lib/cifParser";
 import { UnitCellViewer } from "./UnitCellViewer";
@@ -27,6 +30,14 @@ import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import {
+  buildExecutionTarget,
+  buildHpcQeInputCommandLine,
+  defaultResourcesForProfile,
+  loadRemoteSsspData,
+  listRemotePseudopotentials,
+} from "../lib/hpcConfig";
+import { HpcRunSettings } from "./HpcRunSettings";
 
 // Tooltip component for help icons
 function Tooltip({ text }: { text: string }) {
@@ -49,6 +60,8 @@ interface InitialCifData {
 interface SCFWizardProps {
   onBack: () => void;
   qePath: string;
+  executionMode?: ExecutionMode;
+  activeHpcProfile?: HpcProfile | null;
   /** Pre-loaded CIF data from project dashboard */
   initialCif?: InitialCifData;
   initialPreset?: SCFPreset;
@@ -144,6 +157,8 @@ interface ScfTaskPlan {
 export function SCFWizard({
   onBack,
   qePath,
+  executionMode = "local",
+  activeHpcProfile = null,
   initialCif,
   initialPreset,
   presetLock,
@@ -151,6 +166,7 @@ export function SCFWizard({
   reconnectTaskId,
 }: SCFWizardProps) {
   const taskContext = useTaskContext();
+  const isHpcMode = executionMode === "hpc";
   // Track background task for this wizard
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -503,6 +519,7 @@ export function SCFWizard({
   const [result, setResult] = useState<any>(null);
   const [pseudoDir, setPseudoDir] = useState<string>("");
   const [pseudoError, setPseudoError] = useState<string | null>(null);
+  const [isPseudoLoading, setIsPseudoLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -525,26 +542,70 @@ export function SCFWizard({
   const [mpiProcs, setMpiProcs] = useState(1);
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
+  const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
+    defaultResourcesForProfile(activeHpcProfile),
+  );
+
+  useEffect(() => {
+    if (!isHpcMode) return;
+    setHpcResources(defaultResourcesForProfile(activeHpcProfile));
+  }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
+
+  const hpcCommandLines = useMemo(
+    () => [
+      "cd \"$SLURM_SUBMIT_DIR\"",
+      "QE_BIN=\"$HOME/qe/bin\"",
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "pw.in", "pw.out"),
+    ],
+    [activeHpcProfile],
+  );
 
   // Load available pseudopotentials and SSSP data
   useEffect(() => {
+    let cancelled = false;
     async function loadPseudos() {
-      try {
-        // Compute pseudo directory from QE path
-        const computedPseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-        setPseudoDir(computedPseudoDir);
+      if (!cancelled) {
+        setIsPseudoLoading(true);
+      }
+      const fallbackPseudoDir = qePath ? qePath.replace(/\/bin\/?$/, "/pseudo") : "";
+      const configuredPseudoDir = isHpcMode
+        ? (activeHpcProfile?.remote_pseudo_dir || "")
+        : fallbackPseudoDir;
+      setPseudoDir(configuredPseudoDir);
 
-        const pseudos = await invoke<string[]>("list_pseudopotentials", {
-          pseudoDir: computedPseudoDir,
-        });
+      if (!isHpcMode && !qePath) {
+        setPseudopotentials([]);
+        setSsspData(null);
+        setSsspMissing(true);
+        setPseudoError("Local pseudopotential directory is not configured.");
+        return;
+      }
+
+      try {
+        if (isHpcMode && !configuredPseudoDir.trim()) {
+          setPseudopotentials([]);
+          setSsspData(null);
+          setSsspMissing(true);
+          setPseudoError("Remote pseudopotential directory is not configured in the active HPC profile.");
+          return;
+        }
+
+        const pseudos = isHpcMode
+          ? await listRemotePseudopotentials(configuredPseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<string[]>("list_pseudopotentials", { pseudoDir: fallbackPseudoDir });
         setPseudopotentials(pseudos);
         setPseudoError(null);
 
         // Try to load SSSP data
         try {
-          const sssp = await invoke<Record<string, SSSPElementData>>("load_sssp_data", {
-            pseudoDir: computedPseudoDir,
-          });
+          const sssp = isHpcMode
+            ? await loadRemoteSsspData<Record<string, SSSPElementData>>(
+              configuredPseudoDir,
+              activeHpcProfile?.id ?? null,
+            )
+            : await invoke<Record<string, SSSPElementData>>("load_sssp_data", {
+              pseudoDir: fallbackPseudoDir,
+            });
           setSsspData(sssp);
           setSsspMissing(false);
         } catch {
@@ -555,10 +616,17 @@ export function SCFWizard({
         console.error("Failed to load pseudopotentials:", e);
         setPseudoError(String(e));
         setPseudopotentials([]);
+      } finally {
+        if (!cancelled) {
+          setIsPseudoLoading(false);
+        }
       }
     }
     loadPseudos();
-  }, [qePath]);
+    return () => {
+      cancelled = true;
+    };
+  }, [qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
 
   // Auto-scroll output only if user is at the bottom
   useEffect(() => {
@@ -828,11 +896,22 @@ export function SCFWizard({
     }
 
     // Build the calculation configuration with all options
+    const pseudoDir = isHpcMode
+      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      : qePath.replace("/bin", "/pseudo");
+    if (!pseudoDir.trim()) {
+      throw new Error(
+        isHpcMode
+          ? "Remote pseudopotential directory is not configured for the active HPC profile."
+          : "Local pseudopotential directory is not configured.",
+      );
+    }
+
     const calculation: any = {
       calculation: config.calculation,
       prefix: "qcortado_scf",
       outdir: "./tmp",
-      pseudo_dir: qePath.replace("/bin", "/pseudo"),
+      pseudo_dir: pseudoDir,
       verbosity: config.verbosity,
       tprnfor: config.tprnfor,
       tstress: config.tstress,
@@ -870,7 +949,13 @@ export function SCFWizard({
       taskParams: {
         calculation,
         workingDir: WORK_DIR,
-        mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+        mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+        executionTarget: buildExecutionTarget(
+          executionMode,
+          activeHpcProfile?.id ?? null,
+          isHpcMode ? hpcResources : null,
+          false,
+        ),
       },
       sourceStructure,
       sourceDescriptor,
@@ -1505,6 +1590,12 @@ export function SCFWizard({
                       <span className="pseudo-count"> ({pseudopotentials.length} files)</span>
                     )}
                   </p>
+                  {isPseudoLoading && (
+                    <p className="pseudo-querying">
+                      <span className="pseudo-querying-spinner" />
+                      Querying pseudopotentials{isHpcMode ? " on cluster" : ""}...
+                    </p>
+                  )}
                   {pseudoError && (
                     <div className="pseudo-error">{pseudoError}</div>
                   )}
@@ -1513,11 +1604,16 @@ export function SCFWizard({
                       const matchingPseudos = pseudopotentials.filter((p) =>
                         pseudoMatchesElement(p, el)
                       );
+                      const selectedValue = selectedPseudos[el] || "";
+                      const dropdownOptions = selectedValue && !matchingPseudos.includes(selectedValue)
+                        ? [selectedValue, ...matchingPseudos]
+                        : matchingPseudos;
                       return (
                         <div key={el} className="pseudo-row">
                           <label>{el}</label>
                           <select
-                            value={selectedPseudos[el] || ""}
+                            value={selectedValue}
+                            disabled={isPseudoLoading}
                             onChange={(e) =>
                               setSelectedPseudos((prev) => ({
                                 ...prev,
@@ -1526,11 +1622,11 @@ export function SCFWizard({
                             }
                           >
                             <option value="">
-                              {matchingPseudos.length === 0
+                              {dropdownOptions.length === 0
                                 ? `No ${el} pseudopotentials found`
                                 : "Select..."}
                             </option>
-                            {matchingPseudos.map((p) => (
+                            {dropdownOptions.map((p) => (
                               <option key={p} value={p}>
                                 {p}
                               </option>
@@ -2212,58 +2308,72 @@ export function SCFWizard({
                   )}
                 </section>
 
-                {/* MPI Parallelization */}
-                <section className="config-section">
-                  <h3>
-                    Parallelization
-                    <Tooltip text="MPI (Message Passing Interface) allows running calculations in parallel across multiple CPU cores, significantly speeding up large calculations. Your Quantum ESPRESSO installation must be compiled with MPI support for this to work." />
-                  </h3>
+                {isHpcMode ? (
+                  <HpcRunSettings
+                    profileId={activeHpcProfile?.id ?? null}
+                    profileName={activeHpcProfile?.name ?? "Andromeda"}
+                    taskKind="scf"
+                    commandLines={hpcCommandLines}
+                    resources={hpcResources}
+                    resourceMode={activeHpcProfile?.resource_mode ?? "both"}
+                    defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
+                    defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+                    onResourcesChange={setHpcResources}
+                    disabled={isRunning}
+                  />
+                ) : (
+                  <section className="config-section">
+                    <h3>
+                      Parallelization
+                      <Tooltip text="MPI (Message Passing Interface) allows running calculations in parallel across multiple CPU cores, significantly speeding up large calculations. Your Quantum ESPRESSO installation must be compiled with MPI support for this to work." />
+                    </h3>
 
-                  <div className="mpi-toggle-row">
-                    <label className="toggle-label">
-                      <input
-                        type="checkbox"
-                        checked={mpiEnabled}
-                        onChange={(e) => setMpiEnabled(e.target.checked)}
-                        disabled={!mpiAvailable}
-                      />
-                      <span>Enable MPI parallel execution</span>
-                    </label>
-                    {!mpiAvailable && (
-                      <span className="mpi-unavailable">
-                        (mpirun not found on system)
-                      </span>
-                    )}
-                  </div>
+                    <div className="mpi-toggle-row">
+                      <label className="toggle-label">
+                        <input
+                          type="checkbox"
+                          checked={mpiEnabled}
+                          onChange={(e) => setMpiEnabled(e.target.checked)}
+                          disabled={!mpiAvailable}
+                        />
+                        <span>Enable MPI parallel execution</span>
+                      </label>
+                      {!mpiAvailable && (
+                        <span className="mpi-unavailable">
+                          (mpirun not found on system)
+                        </span>
+                      )}
+                    </div>
 
-                  {mpiEnabled && (
-                    <div className="mpi-settings">
-                      <div className="param-row">
-                        <label>
-                          Number of processes
-                          <Tooltip text="Number of parallel MPI processes to use. More processes can speed up large calculations but have overhead for small systems. Using too many processes for a small system may actually slow things down." />
-                        </label>
-                        <div className="mpi-input-group">
-                          <input
-                            type="number"
-                            min={1}
-                            max={cpuCount}
-                            value={mpiProcs}
-                            onChange={(e) => setMpiProcs(Math.max(1, Math.min(cpuCount, parseInt(e.target.value) || 1)))}
-                          />
-                          <span className="mpi-core-info">
-                            of {cpuCount} available cores
-                          </span>
+                    {mpiEnabled && (
+                      <div className="mpi-settings">
+                        <div className="param-row">
+                          <label>
+                            Number of processes
+                            <Tooltip text="Number of parallel MPI processes to use. More processes can speed up large calculations but have overhead for small systems. Using too many processes for a small system may actually slow things down." />
+                          </label>
+                          <div className="mpi-input-group">
+                            <input
+                              type="number"
+                              min={1}
+                              max={cpuCount}
+                              value={mpiProcs}
+                              onChange={(e) => setMpiProcs(Math.max(1, Math.min(cpuCount, parseInt(e.target.value) || 1)))}
+                            />
+                            <span className="mpi-core-info">
+                              of {cpuCount} available cores
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="mpi-warning">
+                          <strong>Note:</strong> MPI only works if Quantum ESPRESSO was compiled with MPI support.
+                          If the calculation fails, try disabling MPI or check your QE installation.
                         </div>
                       </div>
-
-                      <div className="mpi-warning">
-                        <strong>Note:</strong> MPI only works if Quantum ESPRESSO was compiled with MPI support.
-                        If the calculation fails, try disabling MPI or check your QE installation.
-                      </div>
-                    </div>
-                  )}
-                </section>
+                    )}
+                  </section>
+                )}
 
                 <div className="run-btn-group">
                   {projectContext && (
@@ -2280,7 +2390,9 @@ export function SCFWizard({
                     onClick={handleRun}
                     disabled={!canRun() || hasExternalRunningTask}
                   >
-                    {mpiEnabled && mpiProcs > 1
+                    {isHpcMode
+                      ? "Submit SCF to Andromeda"
+                      : mpiEnabled && mpiProcs > 1
                       ? `Run SCF Calculation (${mpiProcs} cores)`
                       : "Run SCF Calculation"}
                   </button>
@@ -2297,14 +2409,19 @@ export function SCFWizard({
         )}
 
         {(step === "run" || step === "results") && (
-          <div className="run-step">
-            <ProgressBar
-              status={progress.status}
-              percent={progress.percent}
-              phase={progress.phase}
-              detail={progress.detail}
-            />
-            <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+          <div className="run-step run-step-focused scf-run-step">
+            <div className="run-status-rail scf-run-status">
+              <ProgressBar
+                status={progress.status}
+                percent={progress.percent}
+                phase={progress.phase}
+                detail={progress.detail}
+                compact
+              />
+              <div className="run-status-meta">
+                <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+              </div>
+            </div>
             <div className="run-layout">
               <div className="output-panel">
                 <h3>{isRunning ? "Running..." : "Output"}</h3>

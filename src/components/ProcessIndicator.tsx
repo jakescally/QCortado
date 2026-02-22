@@ -110,6 +110,12 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
         <div className="process-indicator-header">
           <span className="process-indicator-type">{typeLabel}</span>
           <span className="process-indicator-label">{task.label}</span>
+          {task.hpc.backend === "hpc" && task.hpc.remote_job_id && (
+            <span className="process-indicator-queue">
+              Job {task.hpc.remote_job_id}
+              {task.hpc.scheduler_state ? ` (${task.hpc.scheduler_state})` : ""}
+            </span>
+          )}
           {queueSummary.total > 0 && queueSummary.activeIndex !== null && (
             <span className="process-indicator-queue">
               {queueSummary.activeIndex} of {queueSummary.total} in queue

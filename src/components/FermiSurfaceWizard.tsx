@@ -1,6 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { CrystalData, ELEMENT_MASSES } from "../lib/types";
+import {
+  CrystalData,
+  ELEMENT_MASSES,
+  ExecutionMode,
+  HpcProfile,
+  SlurmResourceRequest,
+} from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { ProgressBar } from "./ProgressBar";
@@ -8,6 +14,13 @@ import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import {
+  buildExecutionTarget,
+  buildHpcQeInputCommandLine,
+  defaultResourcesForProfile,
+  listRemotePseudopotentials,
+} from "../lib/hpcConfig";
+import { HpcRunSettings } from "./HpcRunSettings";
 
 interface CalculationRun {
   id: string;
@@ -26,6 +39,8 @@ interface CalculationRun {
 interface FermiSurfaceWizardProps {
   onBack: () => void;
   qePath: string;
+  executionMode?: ExecutionMode;
+  activeHpcProfile?: HpcProfile | null;
   projectId: string;
   cifId: string;
   crystalData: CrystalData;
@@ -172,6 +187,8 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
 export function FermiSurfaceWizard({
   onBack,
   qePath,
+  executionMode = "local",
+  activeHpcProfile = null,
   projectId,
   cifId,
   crystalData,
@@ -179,6 +196,7 @@ export function FermiSurfaceWizard({
   reconnectTaskId,
 }: FermiSurfaceWizardProps) {
   const taskContext = useTaskContext();
+  const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
@@ -221,15 +239,37 @@ export function FermiSurfaceWizard({
   const [calcStartTime, setCalcStartTime] = useState<string>("");
   const [fermiData, setFermiData] = useState<FermiSurfaceData | null>(null);
   const [scfFermiEnergy, setScfFermiEnergy] = useState<number | null>(null);
-  const [showOutput, setShowOutput] = useState(false);
+  const [showOutput, setShowOutput] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
 
   const [mpiEnabled, setMpiEnabled] = useState(false);
   const [mpiProcs, setMpiProcs] = useState(1);
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
+  const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
+    defaultResourcesForProfile(activeHpcProfile),
+  );
 
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+  const hpcCommandLines = useMemo(
+    () => [
+      "cd \"$SLURM_SUBMIT_DIR\"",
+      "QE_BIN=\"$HOME/qe/bin\"",
+      buildHpcQeInputCommandLine(
+        activeHpcProfile,
+        "fermi_velocity.x",
+        "fermi_velocity.in",
+        "fermi_velocity.out",
+        "-npool 1",
+      ),
+    ],
+    [activeHpcProfile],
+  );
+
+  useEffect(() => {
+    if (!isHpcMode) return;
+    setHpcResources(defaultResourcesForProfile(activeHpcProfile));
+  }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
   const handleOutputScroll = () => {
     const el = outputRef.current;
@@ -313,8 +353,12 @@ export function FermiSurfaceWizard({
         setMpiEnabled(available ? defaults.enabled : false);
         setMpiProcs(defaults.nprocs);
 
-        const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-        const pseudos = await invoke<string[]>("list_pseudopotentials", { pseudoDir });
+        const pseudoDir = isHpcMode
+          ? (activeHpcProfile?.remote_pseudo_dir || "")
+          : qePath.replace(/\/bin\/?$/, "/pseudo");
+        const pseudos = isHpcMode
+          ? await listRemotePseudopotentials(pseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<string[]>("list_pseudopotentials", { pseudoDir });
         const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
         const selected: Record<string, string> = {};
         for (const el of elements) {
@@ -328,7 +372,7 @@ export function FermiSurfaceWizard({
     }
 
     void init();
-  }, [crystalData, qePath]);
+  }, [crystalData, qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
 
   useEffect(() => {
     const el = outputRef.current;
@@ -362,11 +406,17 @@ export function FermiSurfaceWizard({
   useEffect(() => {
     if (!activeTaskId) return;
     const task = taskContext.getTask(activeTaskId);
-    if (!task || task.status !== "running") return;
+    if (!task) return;
 
     setOutput(task.output.join("\n") + (task.output.length > 0 ? "\n" : ""));
     setProgress(task.progress);
-  }, [activeTaskId, taskContext, taskContext.getTask(activeTaskId ?? "")?.output.length]);
+    setIsRunning(task.status === "running");
+  }, [
+    activeTaskId,
+    taskContext,
+    taskContext.getTask(activeTaskId ?? "")?.output.length,
+    taskContext.getTask(activeTaskId ?? "")?.status,
+  ]);
 
   function buildTaskPlan(): FermiSurfaceTaskPlan {
     if (!selectedScf) {
@@ -412,7 +462,16 @@ export function FermiSurfaceWizard({
       resolvedPseudos[element] = resolvedPseudo;
     }
 
-    const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+    const pseudoDir = isHpcMode
+      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      : qePath.replace(/\/bin\/?$/, "/pseudo");
+    if (!pseudoDir.trim()) {
+      throw new Error(
+        isHpcMode
+          ? "Remote pseudopotential directory is not configured for the active HPC profile."
+          : "Local pseudopotential directory is not configured.",
+      );
+    }
     const prefix = scfParams.prefix || "qcortado_scf";
 
     const ecutwfcValue = Number(scfParams.ecutwfc);
@@ -521,7 +580,13 @@ export function FermiSurfaceWizard({
         scf_calc_id: selectedScf.id,
       },
       workingDir: FERMI_WORK_DIR,
-      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      executionTarget: buildExecutionTarget(
+        executionMode,
+        activeHpcProfile?.id ?? null,
+        isHpcMode ? hpcResources : null,
+        false,
+      ),
     };
 
     const saveParameters = {
@@ -1019,47 +1084,62 @@ export function FermiSurfaceWizard({
           </div>
         </div>
 
-        <div className="option-section mpi-section config-section collapsible">
-          <h4 onClick={() => toggleSection("mpi")} className="section-header">
-            <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
-            Parallelization
-            <Tooltip text="Process-level MPI controls for `fermi_velocity.x` (`npool` is fixed to 1 per tutorial guidance)." />
-          </h4>
-          {expandedSections.mpi && (
-            <div className="option-params">
-              {mpiAvailable ? (
-                <div className="mpi-toggle">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={mpiEnabled}
-                      onChange={(e) => setMpiEnabled(e.target.checked)}
-                    />
-                    Enable MPI ({cpuCount} cores available)
-                  </label>
-                  {mpiEnabled && (
-                    <div className="mpi-procs">
-                      <label>
-                        Number of processes:
-                        <input
-                          type="number"
-                          min={1}
-                          max={cpuCount}
-                          value={mpiProcs}
-                          onChange={(e) => setMpiProcs(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                        />
-                      </label>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="mpi-unavailable">
-                  MPI not available. Running in serial mode.
-                </p>
-              )}
-            </div>
-          )}
-        </div>
+        {isHpcMode ? (
+          <HpcRunSettings
+            profileId={activeHpcProfile?.id ?? null}
+            profileName={activeHpcProfile?.name ?? "Andromeda"}
+            taskKind="fermi_surface"
+            commandLines={hpcCommandLines}
+            resources={hpcResources}
+            resourceMode={activeHpcProfile?.resource_mode ?? "both"}
+            defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
+            defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+            onResourcesChange={setHpcResources}
+            disabled={isRunning}
+          />
+        ) : (
+          <div className="option-section mpi-section config-section collapsible">
+            <h4 onClick={() => toggleSection("mpi")} className="section-header">
+              <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
+              Parallelization
+              <Tooltip text="Process-level MPI controls for `fermi_velocity.x` (`npool` is fixed to 1 per tutorial guidance)." />
+            </h4>
+            {expandedSections.mpi && (
+              <div className="option-params">
+                {mpiAvailable ? (
+                  <div className="mpi-toggle">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={mpiEnabled}
+                        onChange={(e) => setMpiEnabled(e.target.checked)}
+                      />
+                      Enable MPI ({cpuCount} cores available)
+                    </label>
+                    {mpiEnabled && (
+                      <div className="mpi-procs">
+                        <label>
+                          Number of processes:
+                          <input
+                            type="number"
+                            min={1}
+                            max={cpuCount}
+                            value={mpiProcs}
+                            onChange={(e) => setMpiProcs(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mpi-unavailable">
+                    MPI not available. Running in serial mode.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && <div className="error-message">{error}</div>}
 
@@ -1071,7 +1151,7 @@ export function FermiSurfaceWizard({
             Queue Task
           </button>
           <button className="primary-button" onClick={() => void runCalculation()} disabled={!canRun || hasExternalRunningTask}>
-            Run Calculation
+            {isHpcMode ? "Submit Fermi Surface to Andromeda" : "Run Calculation"}
           </button>
         </div>
       </div>
@@ -1079,28 +1159,41 @@ export function FermiSurfaceWizard({
   };
 
   const renderRunStep = () => (
-    <div className="wizard-step run-step">
-      <h3>{isRunning ? "Running Fermi-Surface Generation" : "Fermi-Surface Output"}</h3>
+    <div className="wizard-step run-step run-step-focused">
+      <div className="run-step-headline">
+        <h3>{isRunning ? "Running Fermi-Surface Generation" : "Fermi-Surface Output"}</h3>
+        <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
+          {isRunning ? "Live output" : error ? "Run failed" : "Output"}
+        </span>
+      </div>
 
-      <ProgressBar
-        status={progress.status}
-        percent={progress.percent}
-        phase={progress.phase}
-        detail={progress.detail}
-      />
-      <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
-
-      <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
-        {output || "Starting calculation..."}
-      </pre>
+      <div className="run-status-rail">
+        <ProgressBar
+          status={progress.status}
+          percent={progress.percent}
+          phase={progress.phase}
+          detail={progress.detail}
+          compact
+        />
+        <div className="run-status-meta">
+          <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+        </div>
+      </div>
 
       {error && (
-        <div className="error-actions">
-          <button className="secondary-button" onClick={() => setStep("parameters")}>
-            Back to Parameters
-          </button>
-        </div>
+        <>
+          <div className="run-inline-error">{error}</div>
+          <div className="run-error-actions">
+            <button className="secondary-button" onClick={() => setStep("parameters")}>
+              Back to Parameters
+            </button>
+          </div>
+        </>
       )}
+
+      <pre ref={outputRef} className="calculation-output run-output-log" onScroll={handleOutputScroll}>
+        {output || "Starting calculation..."}
+      </pre>
     </div>
   );
 
@@ -1190,7 +1283,7 @@ export function FermiSurfaceWizard({
   };
 
   return (
-    <div className="electronic-dos-wizard fermi-surface-wizard">
+    <div className={`electronic-dos-wizard fermi-surface-wizard wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back

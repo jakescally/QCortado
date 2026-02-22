@@ -75,6 +75,71 @@ export interface CrystalData {
 
 export type SCFPreset = "standard" | "phonon" | "relax";
 
+export type ExecutionMode = "local" | "hpc";
+export type HpcAuthMethod = "ssh_key" | "password";
+export type HpcResourceType = "cpu" | "gpu";
+export type HpcResourceMode = "cpu_only" | "gpu_only" | "both";
+export type HpcLauncher = "srun" | "mpirun";
+
+export interface SlurmResourceRequest {
+  resource_type: HpcResourceType;
+  partition?: string | null;
+  walltime?: string | null;
+  nodes?: number | null;
+  ntasks?: number | null;
+  cpus_per_task?: number | null;
+  memory_gb?: number | null;
+  gpus?: number | null;
+  qos?: string | null;
+  account?: string | null;
+  constraint?: string | null;
+  module_preamble?: string | null;
+  additional_sbatch?: string[];
+}
+
+export interface HpcProfile {
+  id: string;
+  name: string;
+  cluster: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: HpcAuthMethod;
+  ssh_key_path?: string | null;
+  remote_qe_bin_dir: string;
+  remote_pseudo_dir: string;
+  remote_workspace_root: string;
+  remote_project_root: string;
+  resource_mode: HpcResourceMode;
+  launcher: HpcLauncher;
+  launcher_extra_args?: string | null;
+  default_cpu_resources: SlurmResourceRequest;
+  default_gpu_resources: SlurmResourceRequest;
+  credential_persisted: boolean;
+  warning_acknowledged: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HpcExecutionTarget {
+  profile_id?: string | null;
+  resources?: SlurmResourceRequest | null;
+  interactive_debug?: boolean;
+}
+
+export interface ExecutionTarget {
+  mode: ExecutionMode;
+  hpc?: HpcExecutionTarget | null;
+}
+
+export interface HpcTaskMeta {
+  backend?: string | null;
+  remote_job_id?: string | null;
+  scheduler_state?: string | null;
+  remote_node?: string | null;
+  remote_workdir?: string | null;
+}
+
 export type QePositionUnit = "alat" | "bohr" | "angstrom" | "crystal";
 
 export interface SavedStructureAtom {

@@ -32,6 +32,17 @@ const SCF_DONE_MARKERS = [
   "End of BFGS Geometry Optimization",
 ];
 
+const HPC_TERMINAL_ERROR_STATES = new Set([
+  "FAILED",
+  "CANCELLED",
+  "TIMEOUT",
+  "OUT_OF_MEMORY",
+  "NODE_FAIL",
+  "PREEMPTED",
+  "BOOT_FAIL",
+  "DEADLINE",
+]);
+
 function updateWithDetail(state: ProgressState, detail?: string): ProgressState {
   if (!detail) return state;
   return { ...state, detail };
@@ -236,6 +247,78 @@ export function updatePhononProgress(line: string, state: ProgressState): Progre
   return attachMeta(next);
 }
 
+function updateHpcProgress(line: string, state: ProgressState): ProgressState | null {
+  if (line.startsWith("HPC_STAGE|")) {
+    const [, stageRaw, infoRaw] = line.split("|", 3);
+    const stage = (stageRaw || "").trim();
+    const info = (infoRaw || "").trim();
+    const nextBase: ProgressState = {
+      ...state,
+      status: "running",
+      detail: info.length > 0 ? info : state.detail,
+    };
+
+    if (stage === "Connecting") {
+      return { ...nextBase, phase: "Connecting to cluster", percent: Math.max(state.percent ?? 0, 2) };
+    }
+    if (stage === "Uploading") {
+      return { ...nextBase, phase: "Uploading input bundle", percent: Math.max(state.percent ?? 0, 12) };
+    }
+    if (stage === "Submitting") {
+      return { ...nextBase, phase: "Submitting Slurm job", percent: Math.max(state.percent ?? 0, 22) };
+    }
+    if (stage === "Submitted") {
+      return { ...nextBase, phase: "Submitted to scheduler", percent: Math.max(state.percent ?? 0, 28) };
+    }
+    if (stage === "Collecting") {
+      return { ...nextBase, phase: "Collecting remote artifacts", percent: Math.max(state.percent ?? 0, 93) };
+    }
+    if (stage === "Saved") {
+      return { ...nextBase, phase: "Saved", percent: Math.max(state.percent ?? 0, 99) };
+    }
+    return nextBase;
+  }
+
+  if (line.startsWith("HPC_SCHED|")) {
+    const [, stateRaw, nodeRaw] = line.split("|", 3);
+    const schedulerState = (stateRaw || "UNKNOWN").trim().toUpperCase();
+    const node = (nodeRaw || "").trim();
+    const detail = node.length > 0 ? `Node ${node}` : undefined;
+    const nextBase: ProgressState = {
+      ...state,
+      status: "running",
+      detail: detail || state.detail,
+    };
+
+    if (schedulerState === "PENDING") {
+      return { ...nextBase, phase: "Scheduler: Pending", percent: Math.max(state.percent ?? 0, 35) };
+    }
+    if (schedulerState === "RUNNING") {
+      return { ...nextBase, phase: "Scheduler: Running", percent: Math.max(state.percent ?? 0, 72) };
+    }
+    if (schedulerState === "COMPLETING") {
+      return { ...nextBase, phase: "Scheduler: Completing", percent: Math.max(state.percent ?? 0, 90) };
+    }
+    if (schedulerState === "COMPLETED") {
+      return { ...nextBase, phase: "Scheduler: Completed", percent: 100, status: "complete" };
+    }
+    if (HPC_TERMINAL_ERROR_STATES.has(schedulerState)) {
+      return { ...nextBase, phase: `Scheduler: ${schedulerState}`, status: "error" };
+    }
+    return { ...nextBase, phase: `Scheduler: ${schedulerState}` };
+  }
+
+  if (line.startsWith("HPC_WARNING|")) {
+    const [, message] = line.split("|", 2);
+    return {
+      ...state,
+      detail: message?.trim() || state.detail,
+    };
+  }
+
+  return null;
+}
+
 type ProgressKind = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
 
 export function progressReducer(
@@ -243,6 +326,11 @@ export function progressReducer(
   line: string,
   state: ProgressState,
 ): ProgressState {
+  const hpcProgress = updateHpcProgress(line, state);
+  if (hpcProgress) {
+    return hpcProgress;
+  }
+
   switch (kind) {
     case "scf":
       return updateScfProgress(line, state);

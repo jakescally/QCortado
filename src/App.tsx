@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -16,12 +16,36 @@ import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard"
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
+import { HpcActivityPanel } from "./components/HpcActivityPanel";
+import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
-import { CrystalData, SCFPreset, OptimizedStructureOption } from "./lib/types";
+import {
+  CrystalData,
+  SCFPreset,
+  OptimizedStructureOption,
+  ExecutionMode,
+  HpcLauncher,
+  HpcProfile,
+  HpcResourceMode,
+  SlurmResourceRequest,
+} from "./lib/types";
+import {
+  defaultCpuResources,
+  defaultGpuResources,
+  deleteHpcProfile,
+  getActiveHpcProfileId,
+  listHpcProfiles,
+  loadExecutionMode,
+  normalizeCliDashText,
+  openHpcActivityWindow,
+  saveExecutionMode,
+  setActiveHpcProfile,
+  updateHpcProfileDefaults,
+} from "./lib/hpcConfig";
 
 interface ProjectSummary {
   id: string;
@@ -114,6 +138,27 @@ type PhononViewMode = "bands" | "dos";
 type PhononFrequencyUnit = "cm-1" | "thz";
 type PhononBandFocus = "full" | "acoustic" | "optical";
 const CM1_TO_THZ = 0.0299792458;
+
+function normalizePositiveIntInput(input: string, fallback: number): number {
+  const parsed = Number.parseInt(input, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function cloneResourceDefaults(
+  resourceType: "cpu" | "gpu",
+  resources?: SlurmResourceRequest | null,
+): SlurmResourceRequest {
+  const fallback = resourceType === "gpu" ? defaultGpuResources() : defaultCpuResources();
+  const merged = resources ? { ...fallback, ...resources } : fallback;
+  return {
+    ...merged,
+    resource_type: resourceType,
+    additional_sbatch: [...(merged.additional_sbatch || [])],
+  };
+}
 
 function toBandDataFromPhononDispersion(phononDispersion: any): BandData {
   return {
@@ -236,7 +281,25 @@ function AppInner() {
   const [lastNonQueueView, setLastNonQueueView] = useState<AppView>("home");
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<"general" | "hpc">("general");
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
+  const [hpcProfiles, setHpcProfiles] = useState<HpcProfile[]>([]);
+  const [activeHpcProfileId, setActiveHpcProfileId] = useState<string | null>(null);
+  const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
+  const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
+  const [hpcStatus, setHpcStatus] = useState<string | null>(null);
+  const [hpcDefaultCpuDraft, setHpcDefaultCpuDraft] = useState<SlurmResourceRequest>(
+    defaultCpuResources(),
+  );
+  const [hpcDefaultGpuDraft, setHpcDefaultGpuDraft] = useState<SlurmResourceRequest>(
+    defaultGpuResources(),
+  );
+  const [hpcResourceModeDraft, setHpcResourceModeDraft] = useState<HpcResourceMode>("both");
+  const [hpcLauncherDraft, setHpcLauncherDraft] = useState<HpcLauncher>("srun");
+  const [hpcLauncherExtraArgsDraft, setHpcLauncherExtraArgsDraft] = useState("");
+  const [isSavingHpcDefaults, setIsSavingHpcDefaults] = useState(false);
+  const [hpcDefaultsStatus, setHpcDefaultsStatus] = useState<string | null>(null);
   const [executionPrefixInput, setExecutionPrefixInput] = useState("");
   const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
   const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
@@ -286,6 +349,33 @@ function AppInner() {
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
   const [phononBandsUnit, setPhononBandsUnit] = useState<PhononFrequencyUnit>("cm-1");
   const [phononBandFocus, setPhononBandFocus] = useState<PhononBandFocus>("full");
+  const isHpcActivityPopout = new URLSearchParams(window.location.search).get("hpc_activity") === "1";
+  const activeHpcProfile = useMemo(
+    () => hpcProfiles.find((profile) => profile.id === activeHpcProfileId) ?? null,
+    [hpcProfiles, activeHpcProfileId],
+  );
+  const editingHpcProfile = useMemo(
+    () => hpcProfiles.find((profile) => profile.id === editingHpcProfileId) ?? null,
+    [hpcProfiles, editingHpcProfileId],
+  );
+
+  useEffect(() => {
+    if (!activeHpcProfile) {
+      setHpcDefaultCpuDraft(defaultCpuResources());
+      setHpcDefaultGpuDraft(defaultGpuResources());
+      setHpcResourceModeDraft("both");
+      setHpcLauncherDraft("srun");
+      setHpcLauncherExtraArgsDraft("");
+      setHpcDefaultsStatus(null);
+      return;
+    }
+    setHpcDefaultCpuDraft(cloneResourceDefaults("cpu", activeHpcProfile.default_cpu_resources));
+    setHpcDefaultGpuDraft(cloneResourceDefaults("gpu", activeHpcProfile.default_gpu_resources));
+    setHpcResourceModeDraft(activeHpcProfile.resource_mode ?? "both");
+    setHpcLauncherDraft(activeHpcProfile.launcher ?? "srun");
+    setHpcLauncherExtraArgsDraft(activeHpcProfile.launcher_extra_args || "");
+    setHpcDefaultsStatus(null);
+  }, [activeHpcProfile?.id, activeHpcProfile?.updated_at]);
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -293,6 +383,7 @@ function AppInner() {
     loadProjectCount();
     void loadFermiSurferPath();
     void loadExecutionPrefix();
+    void loadHpcExecutionSettings();
     void loadGlobalMpiSettings();
     void loadGlobalSaveSizeSetting();
   }, []);
@@ -317,6 +408,18 @@ function AppInner() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (showHpcSetupWizard) {
+      setShowSettingsMenu(false);
+    }
+  }, [showHpcSetupWizard]);
+
+  useEffect(() => {
+    if (executionMode !== "hpc" && settingsPage === "hpc") {
+      setSettingsPage("general");
+    }
+  }, [executionMode, settingsPage]);
 
   async function loadProjectCount() {
     try {
@@ -482,6 +585,96 @@ function AppInner() {
       setPrefixStatus("Failed to save");
     } finally {
       setIsSavingExecutionPrefix(false);
+    }
+  }
+
+  async function loadHpcExecutionSettings() {
+    try {
+      const [mode, profiles, activeProfileId] = await Promise.all([
+        loadExecutionMode(),
+        listHpcProfiles(),
+        getActiveHpcProfileId(),
+      ]);
+      setExecutionMode(mode);
+      setHpcProfiles(profiles);
+      setActiveHpcProfileId(activeProfileId);
+    } catch (e) {
+      console.error("Failed to load HPC settings:", e);
+      setExecutionMode("local");
+      setHpcProfiles([]);
+      setActiveHpcProfileId(null);
+    }
+  }
+
+  async function handleExecutionModeChange(mode: ExecutionMode) {
+    setHpcStatus(null);
+    try {
+      await saveExecutionMode(mode);
+      setExecutionMode(mode);
+      if (mode === "hpc" && hpcProfiles.length === 0) {
+        setShowHpcSetupWizard(true);
+      }
+      setHpcStatus("Execution mode saved.");
+    } catch (e) {
+      console.error("Failed to save execution mode:", e);
+      setHpcStatus(`Failed to save execution mode: ${e}`);
+    }
+  }
+
+  async function handleSelectHpcProfile(profileId: string) {
+    setHpcStatus(null);
+    try {
+      await setActiveHpcProfile(profileId);
+      setActiveHpcProfileId(profileId);
+      setHpcStatus("Active profile updated.");
+    } catch (e) {
+      console.error("Failed to set active HPC profile:", e);
+      setHpcStatus(`Failed to set active profile: ${e}`);
+    }
+  }
+
+  async function handleDeleteHpcProfile(profileId: string) {
+    setHpcStatus(null);
+    try {
+      await deleteHpcProfile(profileId);
+      await loadHpcExecutionSettings();
+      setHpcStatus("Profile deleted.");
+    } catch (e) {
+      console.error("Failed to delete HPC profile:", e);
+      setHpcStatus(`Failed to delete profile: ${e}`);
+    }
+  }
+
+  async function saveHpcDefaultRunSettings() {
+    if (!activeHpcProfile) {
+      setHpcDefaultsStatus("Select an active profile first.");
+      return;
+    }
+
+    setIsSavingHpcDefaults(true);
+    setHpcDefaultsStatus(null);
+    try {
+      const saved = await updateHpcProfileDefaults(
+        activeHpcProfile.id,
+        cloneResourceDefaults("cpu", hpcDefaultCpuDraft),
+        cloneResourceDefaults("gpu", hpcDefaultGpuDraft),
+        hpcResourceModeDraft,
+        hpcLauncherDraft,
+        hpcLauncherExtraArgsDraft.trim() || null,
+      );
+      setHpcProfiles((prev) => prev.map((profile) => (profile.id === saved.id ? saved : profile)));
+      setHpcDefaultCpuDraft(cloneResourceDefaults("cpu", saved.default_cpu_resources));
+      setHpcDefaultGpuDraft(cloneResourceDefaults("gpu", saved.default_gpu_resources));
+      setHpcResourceModeDraft(saved.resource_mode ?? "both");
+      setHpcLauncherDraft(saved.launcher ?? "srun");
+      setHpcLauncherExtraArgsDraft(saved.launcher_extra_args || "");
+      setHpcDefaultsStatus("Saved");
+      setHpcStatus("HPC defaults saved.");
+    } catch (e) {
+      console.error("Failed to save HPC defaults:", e);
+      setHpcDefaultsStatus(`Failed to save defaults: ${e}`);
+    } finally {
+      setIsSavingHpcDefaults(false);
     }
   }
 
@@ -714,6 +907,9 @@ function AppInner() {
     setCurrentView(destination);
   }
 
+  const hpcCpuAdditionalSbatchText = (hpcDefaultCpuDraft.additional_sbatch || []).join("\n");
+  const hpcGpuAdditionalSbatchText = (hpcDefaultGpuDraft.additional_sbatch || []).join("\n");
+
   async function handleConfirmClose() {
     setShowCloseConfirm(false);
     await invoke("shutdown_and_close");
@@ -759,6 +955,36 @@ function AppInner() {
     </div>
   );
 
+  const clusterActivityLauncher = executionMode === "hpc" ? (
+    <div className="floating-activity">
+      <button
+        className="floating-activity-btn"
+        onClick={() => {
+          setShowQueueMenu(false);
+          setShowSettingsMenu(false);
+          void openHpcActivityWindow();
+        }}
+        title="Open cluster activity console"
+        aria-label="Open cluster activity console"
+      >
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path
+            d="M4 6.5h16a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 16V8A1.5 1.5 0 0 1 4 6.5Z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          />
+          <path
+            d="m7.5 10.5 2.5 2-2.5 2M12.5 14.5h3.5"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+    </div>
+  ) : null;
+
   const settingsLauncher = (
     <div className="floating-settings" ref={settingsMenuRef}>
       <button
@@ -787,7 +1013,549 @@ function AppInner() {
                 &times;
               </button>
             </div>
+            <div className="settings-page-nav">
+              <button
+                className={`settings-page-tab ${settingsPage === "general" ? "active" : ""}`}
+                onClick={() => setSettingsPage("general")}
+              >
+                General
+              </button>
+              <button
+                className={`settings-page-tab ${settingsPage === "hpc" ? "active" : ""}`}
+                onClick={() => setSettingsPage("hpc")}
+                disabled={executionMode !== "hpc"}
+              >
+                HPC
+              </button>
+            </div>
             <div className="settings-window-content">
+              <div className="settings-menu-section">
+                <label className="settings-menu-label" htmlFor="execution-mode-select">
+                  Execution Mode
+                </label>
+                <select
+                  id="execution-mode-select"
+                  className="settings-menu-input"
+                  value={executionMode}
+                  onChange={(event) => {
+                    const nextMode = event.target.value === "hpc" ? "hpc" : "local";
+                    void handleExecutionModeChange(nextMode);
+                  }}
+                >
+                  <option value="local">Local</option>
+                  <option value="hpc">HPC (Andromeda)</option>
+                </select>
+                <p className="settings-menu-hint">
+                  HPC target host: <code>andromeda.bc.edu</code>. Access usually requires BC network or VPN.
+                </p>
+                {executionMode === "hpc" && settingsPage === "hpc" && (
+                  <>
+                    <label className="settings-menu-label" htmlFor="hpc-profile-select">
+                      Active HPC Profile
+                    </label>
+                    <select
+                      id="hpc-profile-select"
+                      className="settings-menu-input"
+                      value={activeHpcProfileId ?? ""}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value) {
+                          void handleSelectHpcProfile(value);
+                        }
+                      }}
+                    >
+                      {hpcProfiles.length === 0 ? (
+                        <option value="">No HPC profile configured</option>
+                      ) : (
+                        hpcProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name} ({profile.username}@{profile.host})
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <div className="settings-hpc-actions">
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => {
+                          setEditingHpcProfileId(null);
+                          setShowHpcSetupWizard(true);
+                        }}
+                      >
+                        New HPC Profile
+                      </button>
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => {
+                          setEditingHpcProfileId(activeHpcProfileId);
+                          setShowHpcSetupWizard(true);
+                        }}
+                        disabled={!activeHpcProfile}
+                      >
+                        Edit Active Profile
+                      </button>
+                      {activeHpcProfileId && (
+                        <button
+                          className="settings-menu-item warning"
+                          onClick={() => void handleDeleteHpcProfile(activeHpcProfileId)}
+                        >
+                          Delete Active Profile
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+                {executionMode === "hpc" && settingsPage === "general" && (
+                  <button
+                    className="settings-menu-item"
+                    onClick={() => setSettingsPage("hpc")}
+                  >
+                    Open HPC Settings
+                  </button>
+                )}
+                {settingsPage === "hpc" && hpcStatus && <div className="settings-menu-status">{hpcStatus}</div>}
+              </div>
+
+              {executionMode === "hpc" && settingsPage === "hpc" && activeHpcProfile && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <div className="settings-menu-section">
+                    <label className="settings-menu-label">HPC Default Run Settings</label>
+                    <p className="settings-menu-hint">
+                      These values prefill the HPC run block in all calculation wizards. They remain editable per run.
+                    </p>
+                    <div className="settings-hpc-launcher-grid">
+                      <label>
+                        Supported Resource Types
+                        <select
+                          value={hpcResourceModeDraft}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            const mode = value === "cpu_only" || value === "gpu_only" ? value : "both";
+                            setHpcResourceModeDraft(mode);
+                            setHpcDefaultsStatus(null);
+                          }}
+                        >
+                          <option value="both">CPU + GPU</option>
+                          <option value="cpu_only">CPU only</option>
+                          <option value="gpu_only">GPU only</option>
+                        </select>
+                      </label>
+                      <label>
+                        MPI Launcher
+                        <select
+                          value={hpcLauncherDraft}
+                          onChange={(event) => {
+                            const launcher = event.target.value === "mpirun" ? "mpirun" : "srun";
+                            setHpcLauncherDraft(launcher);
+                            setHpcDefaultsStatus(null);
+                          }}
+                        >
+                          <option value="srun">srun</option>
+                          <option value="mpirun">mpirun</option>
+                        </select>
+                      </label>
+                      <label>
+                        Launcher Extra Args
+                        <input
+                          value={hpcLauncherExtraArgsDraft}
+                          onChange={(event) => {
+                            setHpcLauncherExtraArgsDraft(normalizeCliDashText(event.target.value));
+                            setHpcDefaultsStatus(null);
+                          }}
+                          placeholder="e.g. --bind-to none"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
+                        />
+                      </label>
+                    </div>
+                    <p className="settings-menu-hint">
+                      Launcher controls execution inside the allocated Slurm job; it does not change resource requests.
+                    </p>
+
+                    <div className="settings-hpc-defaults-grid">
+                      <div className="settings-hpc-default-card">
+                        <h4>CPU Defaults</h4>
+                        <div className="hpc-grid">
+                          <label>
+                            Partition
+                            <input
+                              value={hpcDefaultCpuDraft.partition || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  partition: event.target.value,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder="short"
+                            />
+                          </label>
+                          <label>
+                            Walltime (HH:MM:SS)
+                            <input
+                              value={hpcDefaultCpuDraft.walltime || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  walltime: event.target.value,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder="02:00:00"
+                            />
+                          </label>
+                          <label>
+                            Nodes
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultCpuDraft.nodes ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  nodes: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Tasks
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultCpuDraft.ntasks ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  ntasks: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            CPUs / Task
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultCpuDraft.cpus_per_task ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  cpus_per_task: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Memory (GB)
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultCpuDraft.memory_gb ?? 16}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  memory_gb: normalizePositiveIntInput(event.target.value, 16),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <div className="hpc-advanced-grid">
+                          <label>
+                            QoS
+                            <input
+                              value={hpcDefaultCpuDraft.qos || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  qos: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Account
+                            <input
+                              value={hpcDefaultCpuDraft.account || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  account: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Constraint
+                            <input
+                              value={hpcDefaultCpuDraft.constraint || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  constraint: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label className="hpc-advanced-wide">
+                            Module / Preamble
+                            <textarea
+                              rows={3}
+                              value={hpcDefaultCpuDraft.module_preamble || ""}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  module_preamble: normalizeCliDashText(event.target.value) || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder={"module purge\nmodule load qe"}
+                              autoCorrect="off"
+                              autoCapitalize="off"
+                              spellCheck={false}
+                            />
+                          </label>
+                          <label className="hpc-advanced-wide">
+                            Extra SBATCH Lines
+                            <textarea
+                              rows={3}
+                              value={hpcCpuAdditionalSbatchText}
+                              onChange={(event) => {
+                                const parsed = normalizeCliDashText(event.target.value)
+                                  .split(/\r?\n/)
+                                  .map((line) => line.trim())
+                                  .filter((line) => line.length > 0);
+                                setHpcDefaultCpuDraft((prev) => ({
+                                  ...prev,
+                                  additional_sbatch: parsed,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder={"--mail-type=END\n--mail-user=you@example.edu"}
+                              autoCorrect="off"
+                              autoCapitalize="off"
+                              spellCheck={false}
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      <div className="settings-hpc-default-card">
+                        <h4>GPU Defaults</h4>
+                        <div className="hpc-grid">
+                          <label>
+                            Partition
+                            <input
+                              value={hpcDefaultGpuDraft.partition || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  partition: event.target.value,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder="short"
+                            />
+                          </label>
+                          <label>
+                            Walltime (HH:MM:SS)
+                            <input
+                              value={hpcDefaultGpuDraft.walltime || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  walltime: event.target.value,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder="02:00:00"
+                            />
+                          </label>
+                          <label>
+                            Nodes
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultGpuDraft.nodes ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  nodes: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Tasks
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultGpuDraft.ntasks ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  ntasks: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            CPUs / Task
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultGpuDraft.cpus_per_task ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  cpus_per_task: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Memory (GB)
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultGpuDraft.memory_gb ?? 32}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  memory_gb: normalizePositiveIntInput(event.target.value, 32),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            GPUs
+                            <input
+                              type="number"
+                              min={1}
+                              value={hpcDefaultGpuDraft.gpus ?? 1}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  gpus: normalizePositiveIntInput(event.target.value, 1),
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <div className="hpc-advanced-grid">
+                          <label>
+                            QoS
+                            <input
+                              value={hpcDefaultGpuDraft.qos || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  qos: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Account
+                            <input
+                              value={hpcDefaultGpuDraft.account || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  account: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label>
+                            Constraint
+                            <input
+                              value={hpcDefaultGpuDraft.constraint || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  constraint: event.target.value || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                            />
+                          </label>
+                          <label className="hpc-advanced-wide">
+                            Module / Preamble
+                            <textarea
+                              rows={3}
+                              value={hpcDefaultGpuDraft.module_preamble || ""}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  module_preamble: normalizeCliDashText(event.target.value) || null,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder={"module purge\nmodule load qe"}
+                              autoCorrect="off"
+                              autoCapitalize="off"
+                              spellCheck={false}
+                            />
+                          </label>
+                          <label className="hpc-advanced-wide">
+                            Extra SBATCH Lines
+                            <textarea
+                              rows={3}
+                              value={hpcGpuAdditionalSbatchText}
+                              onChange={(event) => {
+                                const parsed = normalizeCliDashText(event.target.value)
+                                  .split(/\r?\n/)
+                                  .map((line) => line.trim())
+                                  .filter((line) => line.length > 0);
+                                setHpcDefaultGpuDraft((prev) => ({
+                                  ...prev,
+                                  additional_sbatch: parsed,
+                                }));
+                                setHpcDefaultsStatus(null);
+                              }}
+                              placeholder={"--mail-type=END\n--mail-user=you@example.edu"}
+                              autoCorrect="off"
+                              autoCapitalize="off"
+                              spellCheck={false}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => void saveHpcDefaultRunSettings()}
+                      disabled={isSavingHpcDefaults}
+                    >
+                      {isSavingHpcDefaults ? "Saving..." : "Save HPC Default Run Settings"}
+                    </button>
+                    {hpcDefaultsStatus && <div className="settings-menu-status">{hpcDefaultsStatus}</div>}
+                  </div>
+                </>
+              )}
+
+              {settingsPage === "general" && (
+                <>
+              <div className="settings-menu-divider" />
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
                   MPI Command Path
@@ -956,6 +1724,8 @@ function AppInner() {
                   </button>
                 </>
               )}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1033,12 +1803,34 @@ function AppInner() {
   const appChrome = (
     <>
       {queueLauncher}
+      {clusterActivityLauncher}
       {settingsLauncher}
       {processIndicator}
       {closeConfirmModal}
       {deleteProjectModal}
+      <HpcSetupWizard
+        isOpen={showHpcSetupWizard}
+        initialProfile={editingHpcProfile}
+        onClose={() => {
+          setShowHpcSetupWizard(false);
+          setEditingHpcProfileId(null);
+        }}
+        onSaved={(profile) => {
+          setEditingHpcProfileId(profile.id);
+          setHpcStatus("HPC profile saved.");
+          void loadHpcExecutionSettings();
+        }}
+      />
     </>
   );
+
+  if (isHpcActivityPopout) {
+    return (
+      <div className="hpc-activity-standalone-shell">
+        <HpcActivityPanel standalone />
+      </div>
+    );
+  }
 
   if (currentView === "task-queue") {
     return (
@@ -1049,11 +1841,13 @@ function AppInner() {
     );
   }
 
-  if (currentView === "bands-wizard" && qePath && (bandsContext || reconnectTaskId)) {
+  if (currentView === "bands-wizard" && (qePath || executionMode === "hpc") && (bandsContext || reconnectTaskId)) {
     return (
       <>
         <BandStructureWizard
-          qePath={qePath}
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
           onViewBands={(bandData, fermiEnergy) => {
             setViewBandsData({ bandData, fermiEnergy });
             setCurrentView("bands-viewer");
@@ -1104,11 +1898,13 @@ function AppInner() {
     );
   }
 
-  if (currentView === "dos-wizard" && qePath && (dosContext || reconnectTaskId)) {
+  if (currentView === "dos-wizard" && (qePath || executionMode === "hpc") && (dosContext || reconnectTaskId)) {
     return (
       <>
         <ElectronicDOSWizard
-          qePath={qePath}
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
           onViewDos={(dosData, fermiEnergy) => {
             setViewDosData({ dosData, fermiEnergy });
             setCurrentView("dos-viewer");
@@ -1160,11 +1956,13 @@ function AppInner() {
     );
   }
 
-  if (currentView === "fermi-surface-wizard" && qePath && (fermiSurfaceContext || reconnectTaskId)) {
+  if (currentView === "fermi-surface-wizard" && (qePath || executionMode === "hpc") && (fermiSurfaceContext || reconnectTaskId)) {
     return (
       <>
         <FermiSurfaceWizard
-          qePath={qePath}
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
           onBack={() => {
             setCurrentView("project-dashboard");
             setFermiSurfaceContext(null);
@@ -1181,11 +1979,13 @@ function AppInner() {
     );
   }
 
-  if (currentView === "phonon-wizard" && qePath && (phononsContext || reconnectTaskId)) {
+  if (currentView === "phonon-wizard" && (qePath || executionMode === "hpc") && (phononsContext || reconnectTaskId)) {
     return (
       <>
         <PhononWizard
-          qePath={qePath}
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({
               data: phononData,
@@ -1338,11 +2138,13 @@ function AppInner() {
     );
   }
 
-  if (currentView === "scf-wizard" && qePath) {
+  if (currentView === "scf-wizard" && (qePath || executionMode === "hpc")) {
     return (
       <>
         <SCFWizard
-          qePath={qePath}
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
           onBack={() => {
             if (scfContext) {
               setCurrentView("project-dashboard");
@@ -1574,7 +2376,7 @@ function AppInner() {
           )}
         </section>
 
-        {qePath && (
+        {(qePath || executionMode === "hpc") && (
           <>
             <section className="actions-section">
               <h2>Projects</h2>

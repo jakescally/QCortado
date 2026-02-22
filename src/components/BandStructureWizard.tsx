@@ -2,7 +2,13 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { CrystalData, ELEMENT_MASSES } from "../lib/types";
+import {
+  CrystalData,
+  ELEMENT_MASSES,
+  ExecutionMode,
+  HpcProfile,
+  SlurmResourceRequest,
+} from "../lib/types";
 import { BandData } from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import { Vec3 } from "../lib/reciprocalLattice";
@@ -29,6 +35,13 @@ import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import {
+  buildExecutionTarget,
+  buildHpcQeInputCommandLine,
+  defaultResourcesForProfile,
+  listRemotePseudopotentials,
+} from "../lib/hpcConfig";
+import { HpcRunSettings } from "./HpcRunSettings";
 
 interface CalculationRun {
   id: string;
@@ -302,6 +315,8 @@ interface BandStructureWizardProps {
   onBack: () => void;
   onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
   qePath: string;
+  executionMode?: ExecutionMode;
+  activeHpcProfile?: HpcProfile | null;
   projectId: string;
   cifId: string;
   crystalData: CrystalData;
@@ -323,6 +338,8 @@ export function BandStructureWizard({
   onBack,
   onViewBands,
   qePath,
+  executionMode = "local",
+  activeHpcProfile = null,
   projectId,
   cifId: _cifId,
   crystalData,
@@ -330,6 +347,7 @@ export function BandStructureWizard({
   reconnectTaskId,
 }: BandStructureWizardProps) {
   const taskContext = useTaskContext();
+  const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
@@ -405,7 +423,7 @@ export function BandStructureWizard({
   // Store SCF Fermi energy separately to ensure it persists
   const [scfFermiEnergy, setScfFermiEnergy] = useState<number | null>(null);
   // Show calculation output in results
-  const [showOutput, setShowOutput] = useState(false);
+  const [showOutput, setShowOutput] = useState(true);
   // Track if calculation was saved
   const [isSaved, setIsSaved] = useState(false);
   // Track calculation timing
@@ -416,12 +434,20 @@ export function BandStructureWizard({
   const [mpiProcs, setMpiProcs] = useState(1);
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
+  const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
+    defaultResourcesForProfile(activeHpcProfile),
+  );
 
   // Pseudopotentials (pseudopotentials list used internally for auto-selection)
   const [, setPseudopotentials] = useState<string[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isHpcMode) return;
+    setHpcResources(defaultResourcesForProfile(activeHpcProfile));
+  }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
   // Helper functions
   function getBaseElement(symbol: string): string {
@@ -497,8 +523,12 @@ export function BandStructureWizard({
         setMpiProcs(defaults.nprocs);
 
         // Load pseudopotentials
-        const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
-        const pseudos = await invoke<string[]>("list_pseudopotentials", { pseudoDir });
+        const pseudoDir = isHpcMode
+          ? (activeHpcProfile?.remote_pseudo_dir || "")
+          : qePath.replace(/\/bin\/?$/, "/pseudo");
+        const pseudos = isHpcMode
+          ? await listRemotePseudopotentials(pseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<string[]>("list_pseudopotentials", { pseudoDir });
         setPseudopotentials(pseudos);
 
         // Auto-select pseudopotentials for elements in the structure
@@ -516,7 +546,7 @@ export function BandStructureWizard({
       }
     }
     init();
-  }, [qePath, crystalData]);
+  }, [qePath, crystalData, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
 
   useEffect(() => {
     let cancelled = false;
@@ -576,11 +606,16 @@ export function BandStructureWizard({
   useEffect(() => {
     if (!activeTaskId) return;
     const task = taskContext.getTask(activeTaskId);
-    if (!task || task.status !== "running") return;
+    if (!task) return;
 
     setOutput(task.output.join("\n") + "\n");
     setProgress(task.progress);
-  }, [activeTaskId, taskContext.getTask(activeTaskId ?? "")?.output.length]);
+    setIsRunning(task.status === "running");
+  }, [
+    activeTaskId,
+    taskContext.getTask(activeTaskId ?? "")?.output.length,
+    taskContext.getTask(activeTaskId ?? "")?.status,
+  ]);
 
   // Handle k-path changes from the BZ viewer
   const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
@@ -611,6 +646,18 @@ export function BandStructureWizard({
       MAX_POINTS_PER_SEGMENT,
     )
     : pointsPerSegment;
+  const hpcCommandLines = useMemo(() => {
+    const lines = [
+      "cd \"$SLURM_SUBMIT_DIR\"",
+      "QE_BIN=\"$HOME/qe/bin\"",
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out"),
+    ];
+    if (enableProjections) {
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "projwfc.x", "projwfc.in", "projwfc.out"));
+    }
+    return lines;
+  }, [activeHpcProfile, enableProjections]);
 
   useEffect(() => {
     setTotalKPointsInput(String(totalKPointsTarget));
@@ -691,7 +738,16 @@ export function BandStructureWizard({
     // Use the same prefix as the source SCF so we can read its .save directory
     // SCFWizard uses "qcortado_scf" as the prefix
     const scfPrefix = scfParams.prefix || "qcortado_scf";
-    const pseudoDir = qePath.replace(/\/bin\/?$/, "/pseudo");
+    const pseudoDir = isHpcMode
+      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      : qePath.replace(/\/bin\/?$/, "/pseudo");
+    if (!pseudoDir.trim()) {
+      throw new Error(
+        isHpcMode
+          ? "Remote pseudopotential directory is not configured for the active HPC profile."
+          : "Local pseudopotential directory is not configured.",
+      );
+    }
 
     const ecutwfcValue = Number(scfParams.ecutwfc);
     const ecutwfc = Number.isFinite(ecutwfcValue) && ecutwfcValue > 0 ? ecutwfcValue : 40;
@@ -850,7 +906,13 @@ export function BandStructureWizard({
         },
       },
       workingDir: BANDS_WORK_DIR,
-      mpiConfig: mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      executionTarget: buildExecutionTarget(
+        executionMode,
+        activeHpcProfile?.id ?? null,
+        isHpcMode ? hpcResources : null,
+        false,
+      ),
     };
 
     const pathString = kPath.map((point) => point.label).join(" → ");
@@ -1572,47 +1634,62 @@ export function BandStructureWizard({
           )}
         </div>
 
-        <div className="option-section mpi-section config-section collapsible">
-          <h4 onClick={() => toggleSection("mpi")} className="section-header">
-            <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
-            Parallelization
-            <Tooltip text="Process-level MPI controls for the NSCF stage." />
-          </h4>
-          {expandedSections.mpi && (
-            <div className="option-params">
-              {mpiAvailable ? (
-                <div className="mpi-toggle">
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={mpiEnabled}
-                      onChange={(e) => setMpiEnabled(e.target.checked)}
-                    />
-                    Enable MPI ({cpuCount} cores available)
-                  </label>
-                  {mpiEnabled && (
-                    <div className="mpi-procs">
-                      <label>
-                        Number of processes:
-                        <input
-                          type="number"
-                          min={1}
-                          max={cpuCount}
-                          value={mpiProcs}
-                          onChange={(e) => setMpiProcs(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                        />
-                      </label>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className="mpi-unavailable">
-                  MPI not available. Running in serial mode.
-                </p>
-              )}
-            </div>
-          )}
-        </div>
+        {isHpcMode ? (
+          <HpcRunSettings
+            profileId={activeHpcProfile?.id ?? null}
+            profileName={activeHpcProfile?.name ?? "Andromeda"}
+            taskKind="bands"
+            commandLines={hpcCommandLines}
+            resources={hpcResources}
+            resourceMode={activeHpcProfile?.resource_mode ?? "both"}
+            defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
+            defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+            onResourcesChange={setHpcResources}
+            disabled={isRunning}
+          />
+        ) : (
+          <div className="option-section mpi-section config-section collapsible">
+            <h4 onClick={() => toggleSection("mpi")} className="section-header">
+              <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
+              Parallelization
+              <Tooltip text="Process-level MPI controls for the NSCF stage." />
+            </h4>
+            {expandedSections.mpi && (
+              <div className="option-params">
+                {mpiAvailable ? (
+                  <div className="mpi-toggle">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={mpiEnabled}
+                        onChange={(e) => setMpiEnabled(e.target.checked)}
+                      />
+                      Enable MPI ({cpuCount} cores available)
+                    </label>
+                    {mpiEnabled && (
+                      <div className="mpi-procs">
+                        <label>
+                          Number of processes:
+                          <input
+                            type="number"
+                            min={1}
+                            max={cpuCount}
+                            value={mpiProcs}
+                            onChange={(e) => setMpiProcs(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mpi-unavailable">
+                    MPI not available. Running in serial mode.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="calculation-summary">
           <h4>Summary</h4>
@@ -1648,7 +1725,7 @@ export function BandStructureWizard({
             Queue Task
           </button>
           <button className="primary-button" onClick={runCalculation} disabled={!canRun || hasExternalRunningTask}>
-            Run Calculation
+            {isHpcMode ? "Submit Bands to Andromeda" : "Run Calculation"}
           </button>
         </div>
       </div>
@@ -1658,28 +1735,41 @@ export function BandStructureWizard({
   // Step 4: Running
   const renderRunStep = () => {
     return (
-      <div className="wizard-step run-step">
-        <h3>{isRunning ? "Running Band Structure Calculation" : "Band Structure Output"}</h3>
+      <div className="wizard-step run-step run-step-focused">
+        <div className="run-step-headline">
+          <h3>{isRunning ? "Running Band Structure Calculation" : "Band Structure Output"}</h3>
+          <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
+            {isRunning ? "Live output" : error ? "Run failed" : "Output"}
+          </span>
+        </div>
 
-        <ProgressBar
-          status={progress.status}
-          percent={progress.percent}
-          phase={progress.phase}
-          detail={progress.detail}
-        />
-        <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
-
-        <pre ref={outputRef} className="calculation-output" onScroll={handleOutputScroll}>
-          {output || "Starting calculation..."}
-        </pre>
+        <div className="run-status-rail">
+          <ProgressBar
+            status={progress.status}
+            percent={progress.percent}
+            phase={progress.phase}
+            detail={progress.detail}
+            compact
+          />
+          <div className="run-status-meta">
+            <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+          </div>
+        </div>
 
         {error && (
-          <div className="error-actions">
-            <button className="secondary-button" onClick={() => setStep("parameters")}>
-              Back to Parameters
-            </button>
-          </div>
+          <>
+            <div className="run-inline-error">{error}</div>
+            <div className="run-error-actions">
+              <button className="secondary-button" onClick={() => setStep("parameters")}>
+                Back to Parameters
+              </button>
+            </div>
+          </>
         )}
+
+        <pre ref={outputRef} className="calculation-output run-output-log" onScroll={handleOutputScroll}>
+          {output || "Starting calculation..."}
+        </pre>
       </div>
     );
   };
@@ -1780,7 +1870,7 @@ export function BandStructureWizard({
   };
 
   return (
-    <div className="band-structure-wizard">
+    <div className={`band-structure-wizard wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
