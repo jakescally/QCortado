@@ -649,6 +649,16 @@ export function FermiSurfaceWizard({
       const result = finalTask.result as FermiSurfaceData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      const hpcSaveParams = finalTask.hpc.backend === "hpc"
+        ? {
+          execution_backend: "hpc",
+          remote_job_id: finalTask.hpc.remote_job_id ?? null,
+          scheduler_state: finalTask.hpc.scheduler_state ?? null,
+          remote_node: finalTask.hpc.remote_node ?? null,
+          remote_workdir: finalTask.hpc.remote_workdir ?? null,
+          remote_project_path: finalTask.hpc.remote_project_path ?? null,
+        }
+        : {};
       setFermiData(result);
       setStep("results");
       setProgress((prev) => ({
@@ -673,6 +683,7 @@ export function FermiSurfaceWizard({
               frmsf_files: frmsfFiles,
               primary_frmsf_file: result.primary_file,
               total_frmsf_bytes: totalFrmsfBytes,
+              ...hpcSaveParams,
             },
             result: {
               converged: true,

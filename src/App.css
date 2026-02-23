@@ -3418,6 +3418,12 @@ html[data-theme="dark"] {
   font-weight: 500;
 }
 
+.calc-tag-hpc {
+  background: #e9d8fd;
+  color: #553c9a;
+  border: 1px solid #d6bcfa;
+}
+
 .calculation-details {
   padding: 1rem 1.25rem;
   background: #f7fafc;
@@ -3542,6 +3548,12 @@ html[data-theme="dark"] {
   .calc-tag-geometry {
     background: #744210;
     color: #feebc8;
+  }
+
+  .calc-tag-hpc {
+    background: #553c9a;
+    color: #efe4ff;
+    border: 1px solid #6b46c1;
   }
 
   .calculation-details {

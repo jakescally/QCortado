@@ -1388,6 +1388,14 @@ export function SCFWizard({
     inputContent: string,
     sourceStructure: SavedStructureData,
     sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string },
+    hpcMeta?: {
+      backend?: string | null;
+      remote_job_id?: string | null;
+      scheduler_state?: string | null;
+      remote_node?: string | null;
+      remote_workdir?: string | null;
+      remote_project_path?: string | null;
+    },
   ) {
     const isOptimization = config.calculation === "relax" || config.calculation === "vcrelax";
     const usesOptimizedSource = sourceDescriptor.type === "optimization";
@@ -1399,6 +1407,7 @@ export function SCFWizard({
       ? extractOptimizedStructure(calcResult?.raw_output || "", sourceStructure)
       : null;
     const optimizedCellSummary = optimizedStructure ? summarizeCell(optimizedStructure) : null;
+    const isRemoteRun = hpcMeta?.backend === "hpc";
 
     return {
       calc_type: isOptimization ? "optimization" : "scf",
@@ -1435,6 +1444,16 @@ export function SCFWizard({
         optimization_mode: isOptimization ? config.calculation : null,
         optimized_structure: optimizedStructure,
         optimized_cell_summary: optimizedCellSummary,
+        ...(isRemoteRun
+          ? {
+            execution_backend: "hpc",
+            remote_job_id: hpcMeta?.remote_job_id ?? null,
+            scheduler_state: hpcMeta?.scheduler_state ?? null,
+            remote_node: hpcMeta?.remote_node ?? null,
+            remote_workdir: hpcMeta?.remote_workdir ?? null,
+            remote_project_path: hpcMeta?.remote_project_path ?? null,
+          }
+          : {}),
       },
       result: calcResult,
       started_at: startedAt,
@@ -1476,6 +1495,7 @@ export function SCFWizard({
         generatedInput,
         runSourceStructure || currentSourceStructure!,
         currentSourceDescriptor,
+        activeTask?.hpc,
       )
     : null;
 

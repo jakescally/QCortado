@@ -30,6 +30,8 @@ pub struct TaskInfo {
     pub remote_node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_workdir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_project_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -49,6 +51,8 @@ pub struct TaskSummary {
     pub remote_node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_workdir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_project_path: Option<String>,
 }
 
 pub struct RunningTask {
@@ -67,6 +71,7 @@ pub struct RunningTask {
     pub scheduler_state: Option<String>,
     pub remote_node: Option<String>,
     pub remote_workdir: Option<String>,
+    pub remote_project_path: Option<String>,
 }
 
 /// Thread-safe process manager. Clone is cheap (shared Arc).
@@ -105,6 +110,7 @@ impl ProcessManager {
             scheduler_state: None,
             remote_node: None,
             remote_workdir: None,
+            remote_project_path: None,
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
@@ -161,6 +167,7 @@ impl ProcessManager {
             scheduler_state: t.scheduler_state.clone(),
             remote_node: t.remote_node.clone(),
             remote_workdir: t.remote_workdir.clone(),
+            remote_project_path: t.remote_project_path.clone(),
         })
     }
 
@@ -179,6 +186,7 @@ impl ProcessManager {
                 scheduler_state: t.scheduler_state.clone(),
                 remote_node: t.remote_node.clone(),
                 remote_workdir: t.remote_workdir.clone(),
+                remote_project_path: t.remote_project_path.clone(),
             })
             .collect()
     }
@@ -261,6 +269,13 @@ impl ProcessManager {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
             task.remote_workdir = remote_workdir;
+        }
+    }
+
+    pub async fn set_remote_project_path(&self, task_id: &str, remote_project_path: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.remote_project_path = remote_project_path;
         }
     }
 }

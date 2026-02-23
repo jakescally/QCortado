@@ -868,6 +868,16 @@ export function PhononWizard({
       const result = finalTask.result as PhononResult;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      const hpcSaveParams = finalTask.hpc.backend === "hpc"
+        ? {
+          execution_backend: "hpc",
+          remote_job_id: finalTask.hpc.remote_job_id ?? null,
+          scheduler_state: finalTask.hpc.scheduler_state ?? null,
+          remote_node: finalTask.hpc.remote_node ?? null,
+          remote_workdir: finalTask.hpc.remote_workdir ?? null,
+          remote_project_path: finalTask.hpc.remote_project_path ?? null,
+        }
+        : {};
       setPhononResult(result);
       setStep("results");
       setProgress((prev) => ({
@@ -888,6 +898,7 @@ export function PhononWizard({
               ...plan.saveParameters,
               n_qpoints: result.n_qpoints,
               n_modes: result.n_modes,
+              ...hpcSaveParams,
             },
             result: {
               converged: result.converged,

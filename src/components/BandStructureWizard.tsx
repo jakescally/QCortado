@@ -994,6 +994,16 @@ export function BandStructureWizard({
       const result = finalTask.result as BandData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      const hpcSaveParams = finalTask.hpc.backend === "hpc"
+        ? {
+          execution_backend: "hpc",
+          remote_job_id: finalTask.hpc.remote_job_id ?? null,
+          scheduler_state: finalTask.hpc.scheduler_state ?? null,
+          remote_node: finalTask.hpc.remote_node ?? null,
+          remote_workdir: finalTask.hpc.remote_workdir ?? null,
+          remote_project_path: finalTask.hpc.remote_project_path ?? null,
+        }
+        : {};
       setBandData(result);
       setStep("results");
       setProgress((prev) => ({
@@ -1014,6 +1024,7 @@ export function BandStructureWizard({
               ...plan.saveParameters,
               total_k_points: result.n_kpoints,
               n_bands: result.n_bands,
+              ...hpcSaveParams,
             },
             result: {
               converged: true,

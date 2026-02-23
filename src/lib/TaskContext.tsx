@@ -33,6 +33,7 @@ interface TaskSummary {
   scheduler_state?: string | null;
   remote_node?: string | null;
   remote_workdir?: string | null;
+  remote_project_path?: string | null;
 }
 
 interface TaskInfo {
@@ -48,6 +49,7 @@ interface TaskInfo {
   scheduler_state?: string | null;
   remote_node?: string | null;
   remote_workdir?: string | null;
+  remote_project_path?: string | null;
 }
 
 interface QueueSaveSpec {
@@ -148,6 +150,7 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     scheduler_state: info.scheduler_state ?? null,
     remote_node: info.remote_node ?? null,
     remote_workdir: info.remote_workdir ?? null,
+    remote_project_path: info.remote_project_path ?? null,
   };
 }
 
@@ -809,6 +812,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       parameters.scheduler_state = task.hpc.scheduler_state ?? null;
       parameters.remote_node = task.hpc.remote_node ?? null;
       parameters.remote_workdir = task.hpc.remote_workdir ?? null;
+      parameters.remote_project_path = task.hpc.remote_project_path ?? null;
     }
     const resultPayload = buildQueuedResult(item.taskType, taskResult, outputText, parameters);
 

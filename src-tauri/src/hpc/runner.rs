@@ -37,6 +37,8 @@ pub struct HpcBatchResult {
     pub remote_job_id: String,
     pub remote_workdir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_node: Option<String>,
     pub terminal_state: String,
     pub sbatch_preview: String,
@@ -281,6 +283,24 @@ pub async fn run_batch_task(
     .await?;
     let workspace_root = workspace_root.trim_end_matches('/').to_string();
     let remote_workdir = format!("{}/{}", workspace_root, bundle_name);
+    let remote_project_root = resolve_remote_path(
+        &request.profile,
+        request.secret.as_deref(),
+        request.profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await
+    .ok()
+    .map(|value| value.trim_end_matches('/').to_string())
+    .filter(|value| !value.is_empty());
+    let planned_remote_project_path = remote_project_root.as_ref().map(|root| {
+        format!(
+            "{}/{}/{}",
+            root.trim_end_matches('/'),
+            request.task_kind,
+            request.task_id
+        )
+    });
+    let mut archived_remote_project_path: Option<String> = None;
 
     pm.set_task_backend(task_id(&request), Some("hpc".to_string()))
         .await;
@@ -451,6 +471,56 @@ pub async fn run_batch_task(
     };
     let terminal_state = normalize_scheduler_state(&terminal_snapshot.state);
 
+    if let Some(remote_project_path) = planned_remote_project_path.as_ref() {
+        emit_task_line(
+            &app,
+            &pm,
+            task_id(&request),
+            format!("HPC_STAGE|Archiving|{}", remote_project_path),
+        )
+        .await;
+
+        let archive_cmd = format!(
+            "mkdir -p {dest} && if [ -d {src} ]; then cp -a {src}/. {dest}/; fi",
+            src = shell_single_quote(&remote_workdir),
+            dest = shell_single_quote(remote_project_path)
+        );
+        match run_ssh_command(&request.profile, request.secret.as_deref(), &archive_cmd).await {
+            Ok(_) => {
+                archived_remote_project_path = Some(remote_project_path.clone());
+                pm.set_remote_project_path(task_id(&request), Some(remote_project_path.clone()))
+                    .await;
+                emit_task_line(
+                    &app,
+                    &pm,
+                    task_id(&request),
+                    format!("HPC_STAGE|Archived|{}", remote_project_path),
+                )
+                .await;
+            }
+            Err(err) => {
+                emit_task_line(
+                    &app,
+                    &pm,
+                    task_id(&request),
+                    format!(
+                        "HPC_WARNING|Failed to archive run under remote project root ({}): {}",
+                        remote_project_path, err
+                    ),
+                )
+                .await;
+            }
+        }
+    } else {
+        emit_task_line(
+            &app,
+            &pm,
+            task_id(&request),
+            "HPC_WARNING|Remote project root unavailable; skipping remote archive copy".to_string(),
+        )
+        .await;
+    }
+
     if terminal_state == "COMPLETED" {
         emit_task_line(
             &app,
@@ -536,6 +606,7 @@ pub async fn run_batch_task(
         task_label: request.task_label,
         remote_job_id: job_id,
         remote_workdir,
+        remote_project_path: archived_remote_project_path,
         remote_node: terminal_snapshot.node,
         terminal_state,
         sbatch_preview: request.sbatch_preview,

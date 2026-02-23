@@ -111,6 +111,20 @@ const DELETE_CONFIRM_TEXT = "DELETE";
 const SOC_PRIORITY_BOOST = 250;
 const PINNED_TAG = "pinned";
 
+function isHpcCalculation(calc: CalculationRun): boolean {
+  const params = calc.parameters || {};
+  const backend = String(params.execution_backend || "").trim().toLowerCase();
+  if (backend === "hpc") {
+    return true;
+  }
+  return Boolean(params.remote_job_id || params.remote_workdir || params.remote_project_path);
+}
+
+function getCalcTagClass(tag: { label: string; type: string }): string {
+  const isHpcTag = tag.label.trim().toUpperCase() === "HPC";
+  return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}`;
+}
+
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
@@ -180,6 +194,10 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
     pushTag("vdW", "feature");
   }
 
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
   return tags;
 }
 
@@ -213,6 +231,10 @@ function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcT
   const energyConv = formatThreshold(params.etot_conv_thr);
   if (energyConv) {
     tags.push({ label: `E ${energyConv}`, type: "info" });
+  }
+
+  if (isHpcCalculation(calc)) {
+    tags.push({ label: "HPC", type: "feature" });
   }
 
   return tags;
@@ -258,6 +280,10 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
     pushTag("Proj", "feature");
   }
 
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
   return tags;
 }
 
@@ -291,6 +317,10 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
   }
   if (params.vdw_corr && params.vdw_corr !== "none") {
     pushTag("vdW", "feature");
+  }
+
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
   }
 
   return tags;
@@ -329,6 +359,10 @@ function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info
     pushTag("vdW", "feature");
   }
 
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
   return tags;
 }
 
@@ -352,6 +386,10 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
 
   if (params.calculate_dispersion) {
     tags.push({ label: "Dispersion", type: "feature" });
+  }
+
+  if (isHpcCalculation(calc)) {
+    tags.push({ label: "HPC", type: "feature" });
   }
 
   return tags;
@@ -2043,7 +2081,7 @@ export function ProjectDashboard({
                         )}
                         <div className="calc-tags">
                           {getCalculationTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
@@ -2158,7 +2196,7 @@ export function ProjectDashboard({
                         )}
                         <div className="calc-tags">
                           {getBandsTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
@@ -2284,7 +2322,7 @@ export function ProjectDashboard({
                         <span className="calc-type">DOS</span>
                         <div className="calc-tags">
                           {getDosTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
@@ -2434,7 +2472,7 @@ export function ProjectDashboard({
                         <span className="calc-type">FERMI</span>
                         <div className="calc-tags">
                           {getFermiSurfaceTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
@@ -2591,7 +2629,7 @@ export function ProjectDashboard({
                         )}
                         <div className="calc-tags">
                           {getPhononTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
@@ -2815,7 +2853,7 @@ export function ProjectDashboard({
                         )}
                         <div className="calc-tags">
                           {getOptimizationTags(calc).map((tag, i) => (
-                            <span key={i} className={`calc-tag calc-tag-${tag.type}`}>
+                            <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
                           ))}
