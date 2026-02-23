@@ -32,6 +32,13 @@ export interface HpcScriptPreviewResult {
   };
 }
 
+export interface HpcUtilizationSample {
+  captured_at: string;
+  source: string;
+  node?: string | null;
+  output: string;
+}
+
 export function normalizeCliDashText(input: string): string {
   return input
     .replace(/\u2014/g, "--")
@@ -230,6 +237,18 @@ export async function previewSlurmScript(
 
 export async function openHpcActivityWindow(): Promise<void> {
   await invoke("hpc_open_activity_window");
+}
+
+export async function sampleHpcUtilization(
+  profileId?: string | null,
+  remoteJobId?: string | null,
+  remoteNode?: string | null,
+): Promise<HpcUtilizationSample> {
+  return invoke<HpcUtilizationSample>("hpc_sample_utilization", {
+    profileId: profileId ?? null,
+    remoteJobId: remoteJobId ?? null,
+    remoteNode: remoteNode ?? null,
+  });
 }
 
 export function buildExecutionTarget(

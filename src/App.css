@@ -876,6 +876,10 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   align-items: stretch;
 }
 
+.run-layout-hpc-telemetry {
+  grid-template-columns: minmax(0, 2fr) minmax(360px, 1.4fr);
+}
+
 .output-panel {
   background: #1a202c;
   border-radius: 10px;
@@ -924,6 +928,69 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   font-size: 0.95rem;
 }
 
+.telemetry-panel {
+  background: #0f172a;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0.45rem;
+}
+
+.telemetry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.telemetry-header h3 {
+  margin: 0;
+  color: #cbd5e0;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.telemetry-meta {
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.telemetry-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.telemetry-output {
+  flex: 1;
+  margin: 0;
+  min-height: clamp(340px, 58vh, 840px);
+  padding: 0.6rem 0.7rem;
+  background: #020617;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  color: #e2e8f0;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow: auto;
+  white-space: pre;
+  word-break: normal;
+}
+
+.telemetry-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 0.74rem;
+}
+
 .result-grid {
   display: flex;
   flex-direction: column;
@@ -968,6 +1035,7 @@ html[data-theme="dark"] .pseudo-querying-spinner {
     grid-template-columns: 1fr;
   }
 
+  .telemetry-panel,
   .results-panel {
     order: -1;
   }
