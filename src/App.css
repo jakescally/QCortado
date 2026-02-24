@@ -3127,33 +3127,50 @@ html[data-theme="dark"] {
   display: block;
   width: 100%;
   padding: 0.75rem 1rem;
-  background: none;
-  border: none;
+  background: #ffffff;
+  border: 1px solid #d2dae6;
   text-align: left;
   font-size: 0.9rem;
-  color: #4a5568;
+  color: #2d3748;
   cursor: pointer;
-  transition: background 0.15s ease;
+  box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .settings-menu-item:hover {
   background: #f7fafc;
+  border-color: #a0aec0;
+  color: #1a202c;
+}
+
+.settings-menu-item:active:not(:disabled) {
+  background: #edf2f7;
+  border-color: #94a3b8;
+}
+
+.settings-menu-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(66, 153, 225, 0.2);
 }
 
 .settings-menu-item.danger {
-  color: #e53e3e;
+  color: #c53030;
+  border-color: #feb2b2;
 }
 
 .settings-menu-item.danger:hover {
   background: #fed7d7;
+  border-color: #fc8181;
 }
 
 .settings-menu-item.warning {
   color: #9c4221;
+  border-color: #fbd38d;
 }
 
 .settings-menu-item.warning:hover {
   background: #feebc8;
+  border-color: #f6ad55;
 }
 
 @media (max-width: 720px) {
@@ -3738,10 +3755,24 @@ html[data-theme="dark"] {
 
   .settings-menu-item {
     color: #e2e8f0;
+    background: #1a202c;
+    border-color: #4a5568;
+    box-shadow: none;
   }
 
   .settings-menu-item:hover {
     background: #4a5568;
+    border-color: #718096;
+    color: #f7fafc;
+  }
+
+  .settings-menu-item:active:not(:disabled) {
+    background: #2d3748;
+    border-color: #90cdf4;
+  }
+
+  .settings-menu-item:focus-visible {
+    box-shadow: 0 0 0 3px rgba(99, 179, 237, 0.3);
   }
 
   .queue-page-container {
@@ -3787,18 +3818,22 @@ html[data-theme="dark"] {
 
   .settings-menu-item.danger {
     color: #fc8181;
+    border-color: #742a2a;
   }
 
   .settings-menu-item.danger:hover {
     background: #742a2a;
+    border-color: #fc8181;
   }
 
   .settings-menu-item.warning {
     color: #f6ad55;
+    border-color: #744210;
   }
 
   .settings-menu-item.warning:hover {
     background: #744210;
+    border-color: #f6ad55;
   }
 
   .delete-warning p {

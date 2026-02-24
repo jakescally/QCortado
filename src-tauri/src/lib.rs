@@ -772,6 +772,77 @@ struct HpcUtilizationSample {
     output: String,
 }
 
+const HPC_PRESET_BUNDLE_KIND: &str = "qcortado_hpc_presets";
+const HPC_PRESET_BUNDLE_VERSION: u32 = 1;
+const IMPORTED_HPC_USERNAME_PLACEHOLDER: &str = "CHANGE_ME";
+
+fn default_hpc_preset_bundle_kind() -> String {
+    HPC_PRESET_BUNDLE_KIND.to_string()
+}
+
+fn default_hpc_preset_bundle_port() -> u16 {
+    22
+}
+
+fn normalize_hpc_profile_lookup_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HpcPresetBundleProfile {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default = "hpc::profile::default_cluster")]
+    cluster: String,
+    #[serde(default = "default_hpc_preset_bundle_port")]
+    port: u16,
+    host: String,
+    remote_qe_bin_dir: String,
+    remote_pseudo_dir: String,
+    remote_workspace_root: String,
+    remote_project_root: String,
+    #[serde(default)]
+    resource_mode: hpc::profile::HpcResourceMode,
+    #[serde(default)]
+    launcher: hpc::profile::HpcLauncher,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher_extra_args: Option<String>,
+    #[serde(default = "hpc::profile::default_cpu_resources")]
+    default_cpu_resources: hpc::profile::SlurmResourceRequest,
+    #[serde(default = "hpc::profile::default_gpu_resources")]
+    default_gpu_resources: hpc::profile::SlurmResourceRequest,
+    #[serde(default)]
+    warning_acknowledged: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HpcPresetBundle {
+    #[serde(default = "default_hpc_preset_bundle_kind")]
+    kind: String,
+    version: u32,
+    exported_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_profile_id: Option<String>,
+    #[serde(default)]
+    profiles: Vec<HpcPresetBundleProfile>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HpcPresetBundleExportResult {
+    bundle_path: String,
+    profile_count: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HpcPresetBundleImportResult {
+    imported_profile_count: usize,
+    updated_profile_count: usize,
+    created_profile_count: usize,
+    profiles_requiring_username: Vec<String>,
+    active_profile_id: Option<String>,
+}
+
 /// Sets the global execution mode (local or HPC).
 #[tauri::command]
 fn set_execution_mode(
@@ -793,6 +864,254 @@ fn get_execution_mode(state: State<AppState>) -> hpc::profile::ExecutionMode {
 #[tauri::command]
 fn hpc_list_profiles(state: State<AppState>) -> Vec<hpc::profile::HpcProfile> {
     state.hpc_profiles.lock().unwrap().clone()
+}
+
+/// Exports non-sensitive HPC presets/defaults for sharing across environments.
+#[tauri::command]
+fn hpc_export_preset_bundle(
+    destination_path: String,
+    state: State<AppState>,
+) -> Result<HpcPresetBundleExportResult, String> {
+    let normalized_destination_path = destination_path.trim();
+    if normalized_destination_path.is_empty() {
+        return Err("Destination path is required".to_string());
+    }
+
+    let profiles = state.hpc_profiles.lock().unwrap().clone();
+    if profiles.is_empty() {
+        return Err("No HPC profiles are configured to export.".to_string());
+    }
+    let active_profile_id = state.active_hpc_profile_id.lock().unwrap().clone();
+
+    let bundle = HpcPresetBundle {
+        kind: default_hpc_preset_bundle_kind(),
+        version: HPC_PRESET_BUNDLE_VERSION,
+        exported_at: now_iso(),
+        active_profile_id,
+        profiles: profiles
+            .into_iter()
+            .map(|profile| HpcPresetBundleProfile {
+                id: profile.id,
+                name: profile.name,
+                cluster: profile.cluster,
+                port: profile.port,
+                host: profile.host,
+                remote_qe_bin_dir: profile.remote_qe_bin_dir,
+                remote_pseudo_dir: profile.remote_pseudo_dir,
+                remote_workspace_root: profile.remote_workspace_root,
+                remote_project_root: profile.remote_project_root,
+                resource_mode: profile.resource_mode,
+                launcher: profile.launcher,
+                launcher_extra_args: profile.launcher_extra_args,
+                default_cpu_resources: profile.default_cpu_resources,
+                default_gpu_resources: profile.default_gpu_resources,
+                warning_acknowledged: profile.warning_acknowledged,
+            })
+            .collect(),
+    };
+
+    let bundle_json = serde_json::to_string_pretty(&bundle)
+        .map_err(|e| format!("Failed to serialize HPC preset bundle: {}", e))?;
+    let bundle_path = PathBuf::from(normalized_destination_path);
+
+    if let Some(parent) = bundle_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create bundle directory {}: {}", parent.display(), e))?;
+        }
+    }
+
+    std::fs::write(&bundle_path, bundle_json)
+        .map_err(|e| format!("Failed to write bundle file {}: {}", bundle_path.display(), e))?;
+
+    Ok(HpcPresetBundleExportResult {
+        bundle_path: bundle_path.display().to_string(),
+        profile_count: bundle.profiles.len(),
+    })
+}
+
+/// Imports non-sensitive HPC presets/defaults and merges them into local profiles.
+#[tauri::command]
+fn hpc_import_preset_bundle(
+    app: AppHandle,
+    bundle_path: String,
+    state: State<AppState>,
+) -> Result<HpcPresetBundleImportResult, String> {
+    let normalized_bundle_path = bundle_path.trim();
+    if normalized_bundle_path.is_empty() {
+        return Err("Bundle path is required".to_string());
+    }
+
+    let bundle_content = std::fs::read_to_string(normalized_bundle_path)
+        .map_err(|e| format!("Failed to read bundle file {}: {}", normalized_bundle_path, e))?;
+    let bundle: HpcPresetBundle = serde_json::from_str(&bundle_content)
+        .map_err(|e| format!("Failed to parse bundle file: {}", e))?;
+
+    if bundle.kind != HPC_PRESET_BUNDLE_KIND {
+        return Err(format!(
+            "Unsupported HPC preset bundle kind '{}'.",
+            bundle.kind
+        ));
+    }
+    if bundle.version != HPC_PRESET_BUNDLE_VERSION {
+        return Err(format!(
+            "Unsupported HPC preset bundle version {}. Expected {}.",
+            bundle.version, HPC_PRESET_BUNDLE_VERSION
+        ));
+    }
+    if bundle.profiles.is_empty() {
+        return Err("Bundle does not contain any HPC profiles.".to_string());
+    }
+
+    let imported_profile_count = bundle.profiles.len();
+    let imported_active_profile_id = bundle
+        .active_profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let mut resolved_active_profile_id: Option<String> = None;
+    let mut profiles_requiring_username: Vec<String> = Vec::new();
+    let mut updated_profile_count = 0usize;
+    let mut created_profile_count = 0usize;
+
+    let mut profiles = state.hpc_profiles.lock().unwrap();
+    let mut active_profile_id = state.active_hpc_profile_id.lock().unwrap();
+    let mut used_profile_ids: HashSet<String> = profiles.iter().map(|profile| profile.id.clone()).collect();
+
+    for imported_profile in bundle.profiles {
+        let imported_profile_id = imported_profile.id.trim().to_string();
+        let imported_cluster_lookup = if imported_profile.cluster.trim().is_empty() {
+            normalize_hpc_profile_lookup_value(&hpc::profile::default_cluster())
+        } else {
+            normalize_hpc_profile_lookup_value(&imported_profile.cluster)
+        };
+        let imported_name_lookup = normalize_hpc_profile_lookup_value(&imported_profile.name);
+        let imported_host_lookup = normalize_hpc_profile_lookup_value(&imported_profile.host);
+
+        let matching_index = if !imported_profile_id.is_empty() {
+            profiles
+                .iter()
+                .position(|profile| profile.id == imported_profile_id)
+        } else {
+            None
+        }
+        .or_else(|| {
+            if imported_name_lookup.is_empty() || imported_host_lookup.is_empty() {
+                return None;
+            }
+            profiles.iter().position(|profile| {
+                normalize_hpc_profile_lookup_value(&profile.name) == imported_name_lookup
+                    && normalize_hpc_profile_lookup_value(&profile.host) == imported_host_lookup
+                    && normalize_hpc_profile_lookup_value(&profile.cluster) == imported_cluster_lookup
+            })
+        });
+
+        if let Some(index) = matching_index {
+            let existing_profile = profiles[index].clone();
+            let mut merged_profile = hpc::profile::HpcProfile {
+                id: existing_profile.id.clone(),
+                name: imported_profile.name,
+                cluster: imported_profile.cluster,
+                port: imported_profile.port,
+                host: imported_profile.host,
+                username: existing_profile.username.clone(),
+                auth_method: existing_profile.auth_method.clone(),
+                ssh_key_path: existing_profile.ssh_key_path.clone(),
+                remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+                remote_pseudo_dir: imported_profile.remote_pseudo_dir,
+                remote_workspace_root: imported_profile.remote_workspace_root,
+                remote_project_root: imported_profile.remote_project_root,
+                resource_mode: imported_profile.resource_mode,
+                launcher: imported_profile.launcher,
+                launcher_extra_args: imported_profile.launcher_extra_args,
+                default_cpu_resources: imported_profile.default_cpu_resources,
+                default_gpu_resources: imported_profile.default_gpu_resources,
+                credential_persisted: existing_profile.credential_persisted,
+                warning_acknowledged: imported_profile.warning_acknowledged,
+                created_at: existing_profile.created_at.clone(),
+                updated_at: existing_profile.updated_at.clone(),
+            };
+            merged_profile = sanitize_hpc_profile(merged_profile)?;
+            merged_profile.credential_persisted = existing_profile.credential_persisted;
+            profiles[index] = merged_profile.clone();
+            updated_profile_count += 1;
+
+            if imported_active_profile_id.as_deref() == Some(imported_profile_id.as_str()) {
+                resolved_active_profile_id = Some(merged_profile.id.clone());
+            }
+            continue;
+        }
+
+        let mut next_profile_id = if !imported_profile_id.is_empty() {
+            imported_profile_id.clone()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        while used_profile_ids.contains(&next_profile_id) {
+            next_profile_id = uuid::Uuid::new_v4().to_string();
+        }
+        used_profile_ids.insert(next_profile_id.clone());
+
+        let mut imported_entry = hpc::profile::HpcProfile {
+            id: next_profile_id,
+            name: imported_profile.name,
+            cluster: imported_profile.cluster,
+            port: imported_profile.port,
+            host: imported_profile.host,
+            username: IMPORTED_HPC_USERNAME_PLACEHOLDER.to_string(),
+            auth_method: hpc::profile::HpcAuthMethod::SshKey,
+            ssh_key_path: None,
+            remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+            remote_pseudo_dir: imported_profile.remote_pseudo_dir,
+            remote_workspace_root: imported_profile.remote_workspace_root,
+            remote_project_root: imported_profile.remote_project_root,
+            resource_mode: imported_profile.resource_mode,
+            launcher: imported_profile.launcher,
+            launcher_extra_args: imported_profile.launcher_extra_args,
+            default_cpu_resources: imported_profile.default_cpu_resources,
+            default_gpu_resources: imported_profile.default_gpu_resources,
+            credential_persisted: false,
+            warning_acknowledged: imported_profile.warning_acknowledged,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        };
+        imported_entry = sanitize_hpc_profile(imported_entry)?;
+        imported_entry.credential_persisted = false;
+        profiles_requiring_username.push(imported_entry.name.clone());
+        created_profile_count += 1;
+
+        if imported_active_profile_id.as_deref() == Some(imported_profile_id.as_str()) {
+            resolved_active_profile_id = Some(imported_entry.id.clone());
+        }
+
+        profiles.push(imported_entry);
+    }
+
+    if let Some(active_id_from_bundle) = imported_active_profile_id {
+        if let Some(mapped_active_profile_id) = resolved_active_profile_id {
+            *active_profile_id = Some(mapped_active_profile_id);
+        } else if profiles
+            .iter()
+            .any(|profile| profile.id == active_id_from_bundle)
+        {
+            *active_profile_id = Some(active_id_from_bundle);
+        }
+    }
+
+    if active_profile_id.is_none() {
+        *active_profile_id = profiles.first().map(|profile| profile.id.clone());
+    }
+
+    config::update_hpc_profiles(&app, profiles.clone(), active_profile_id.clone())?;
+
+    Ok(HpcPresetBundleImportResult {
+        imported_profile_count,
+        updated_profile_count,
+        created_profile_count,
+        profiles_requiring_username,
+        active_profile_id: active_profile_id.clone(),
+    })
 }
 
 /// Saves or updates an HPC profile and optional credential secret.
@@ -6440,6 +6759,8 @@ pub fn run() {
             set_execution_mode,
             get_execution_mode,
             hpc_list_profiles,
+            hpc_export_preset_bundle,
+            hpc_import_preset_bundle,
             hpc_save_profile,
             hpc_update_profile_defaults,
             hpc_delete_profile,

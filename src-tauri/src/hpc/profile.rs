@@ -217,8 +217,8 @@ pub fn default_gpu_resources() -> SlurmResourceRequest {
         partition: Some("short".to_string()),
         walltime: Some("02:00:00".to_string()),
         nodes: Some(1),
-        ntasks: Some(4),
-        cpus_per_task: Some(1),
+        ntasks: Some(1),
+        cpus_per_task: Some(8),
         memory_gb: Some(32),
         gpus: Some(1),
         qos: None,
@@ -269,6 +269,8 @@ pub fn andromeda_partition_limit_seconds(partition: &str) -> Option<u64> {
 
 pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> ResourceValidation {
     let mut validation = ResourceValidation::default();
+    let ntasks = resources.ntasks.unwrap_or(1);
+    let cpus_per_task = resources.cpus_per_task.unwrap_or(1);
 
     let partition = resources
         .partition
@@ -299,16 +301,26 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
             validation
                 .errors
                 .push("GPU jobs must request at least one GPU (--gres=gpu:N).".to_string());
+        } else if ntasks > gpus {
+            validation.warnings.push(format!(
+                "GPU oversubscription risk: tasks ({}) exceed requested GPUs ({}). Prefer one MPI rank per GPU.",
+                ntasks, gpus
+            ));
         }
         if resources.nodes.unwrap_or(1) != 1 {
             validation
                 .warnings
                 .push("Andromeda GPU examples default to one node; verify multi-node GPU usage.".to_string());
         }
+
+        if cpus_per_task < 4 {
+            validation.warnings.push(
+                "GPU runs with CPUs/task below 4 can bottleneck host-side work; start with 8-16 CPUs/task."
+                    .to_string(),
+            );
+        }
     }
 
-    let ntasks = resources.ntasks.unwrap_or(1);
-    let cpus_per_task = resources.cpus_per_task.unwrap_or(1);
     let total_cpu = ntasks.saturating_mul(cpus_per_task);
     let mem = resources.memory_gb.unwrap_or(0);
     if total_cpu > 16 {

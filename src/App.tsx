@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
 import { BandStructureWizard } from "./components/BandStructureWizard";
@@ -37,7 +37,9 @@ import {
   defaultCpuResources,
   defaultGpuResources,
   deleteHpcProfile,
+  exportHpcPresetBundle,
   getActiveHpcProfileId,
+  importHpcPresetBundle,
   listHpcProfiles,
   loadExecutionMode,
   normalizeCliDashText,
@@ -289,6 +291,8 @@ function AppInner() {
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
   const [hpcStatus, setHpcStatus] = useState<string | null>(null);
+  const [isExportingHpcPresetBundle, setIsExportingHpcPresetBundle] = useState(false);
+  const [isImportingHpcPresetBundle, setIsImportingHpcPresetBundle] = useState(false);
   const [hpcDefaultCpuDraft, setHpcDefaultCpuDraft] = useState<SlurmResourceRequest>(
     defaultCpuResources(),
   );
@@ -642,6 +646,69 @@ function AppInner() {
     } catch (e) {
       console.error("Failed to delete HPC profile:", e);
       setHpcStatus(`Failed to delete profile: ${e}`);
+    }
+  }
+
+  async function handleExportHpcPresetBundle() {
+    if (hpcProfiles.length === 0) {
+      setHpcStatus("No HPC profiles to export.");
+      return;
+    }
+
+    setIsExportingHpcPresetBundle(true);
+    setHpcStatus(null);
+    try {
+      const destinationPath = await save({
+        title: "Export HPC Presets + Defaults",
+        defaultPath: `qcortado-hpc-presets-${new Date().toISOString().slice(0, 10)}.qchpc`,
+        filters: [{ name: "QCortado HPC Preset Bundle", extensions: ["qchpc", "json"] }],
+      });
+      if (!destinationPath) {
+        return;
+      }
+
+      const result = await exportHpcPresetBundle(destinationPath);
+      setHpcStatus(
+        `Exported ${result.profile_count} profile preset(s) to ${result.bundle_path}. Usernames and credentials were excluded.`,
+      );
+    } catch (e) {
+      console.error("Failed to export HPC preset bundle:", e);
+      setHpcStatus(`Failed to export presets: ${e}`);
+    } finally {
+      setIsExportingHpcPresetBundle(false);
+    }
+  }
+
+  async function handleImportHpcPresetBundle() {
+    setIsImportingHpcPresetBundle(true);
+    setHpcStatus(null);
+    try {
+      const selectedPath = await open({
+        title: "Import HPC Presets + Defaults",
+        directory: false,
+        multiple: false,
+        filters: [{ name: "QCortado HPC Preset Bundle", extensions: ["qchpc", "json"] }],
+      });
+      if (!selectedPath || Array.isArray(selectedPath)) {
+        return;
+      }
+
+      const result = await importHpcPresetBundle(selectedPath);
+      await loadHpcExecutionSettings();
+
+      const summary = `Imported ${result.imported_profile_count} profile preset(s): ${result.updated_profile_count} updated, ${result.created_profile_count} created.`;
+      if (result.profiles_requiring_username.length > 0) {
+        setHpcStatus(
+          `${summary} Set usernames before connecting for: ${result.profiles_requiring_username.join(", ")}.`,
+        );
+      } else {
+        setHpcStatus(summary);
+      }
+    } catch (e) {
+      console.error("Failed to import HPC preset bundle:", e);
+      setHpcStatus(`Failed to import presets: ${e}`);
+    } finally {
+      setIsImportingHpcPresetBundle(false);
     }
   }
 
@@ -1102,6 +1169,20 @@ function AppInner() {
                           Delete Active Profile
                         </button>
                       )}
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => void handleExportHpcPresetBundle()}
+                        disabled={isExportingHpcPresetBundle || isImportingHpcPresetBundle || hpcProfiles.length === 0}
+                      >
+                        {isExportingHpcPresetBundle ? "Exporting..." : "Export Presets + Defaults"}
+                      </button>
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => void handleImportHpcPresetBundle()}
+                        disabled={isImportingHpcPresetBundle || isExportingHpcPresetBundle}
+                      >
+                        {isImportingHpcPresetBundle ? "Importing..." : "Import Presets + Defaults"}
+                      </button>
                     </div>
                   </>
                 )}

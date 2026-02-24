@@ -39,6 +39,19 @@ export interface HpcUtilizationSample {
   output: string;
 }
 
+export interface HpcPresetBundleExportResult {
+  bundle_path: string;
+  profile_count: number;
+}
+
+export interface HpcPresetBundleImportResult {
+  imported_profile_count: number;
+  updated_profile_count: number;
+  created_profile_count: number;
+  profiles_requiring_username: string[];
+  active_profile_id?: string | null;
+}
+
 export function normalizeCliDashText(input: string): string {
   return input
     .replace(/\u2014/g, "--")
@@ -65,8 +78,8 @@ export function defaultGpuResources(): SlurmResourceRequest {
     partition: "short",
     walltime: "02:00:00",
     nodes: 1,
-    ntasks: 4,
-    cpus_per_task: 1,
+    ntasks: 1,
+    cpus_per_task: 8,
     memory_gb: 32,
     gpus: 1,
     additional_sbatch: [],
@@ -187,6 +200,20 @@ export async function updateHpcProfileDefaults(
 
 export async function deleteHpcProfile(profileId: string): Promise<void> {
   await invoke("hpc_delete_profile", { profileId });
+}
+
+export async function exportHpcPresetBundle(
+  destinationPath: string,
+): Promise<HpcPresetBundleExportResult> {
+  return invoke<HpcPresetBundleExportResult>("hpc_export_preset_bundle", {
+    destinationPath,
+  });
+}
+
+export async function importHpcPresetBundle(bundlePath: string): Promise<HpcPresetBundleImportResult> {
+  return invoke<HpcPresetBundleImportResult>("hpc_import_preset_bundle", {
+    bundlePath,
+  });
 }
 
 export async function testHpcConnection(profileId?: string | null): Promise<HpcConnectionTestResult> {

@@ -67,6 +67,11 @@ export function HpcRunSettings({
       : resourceMode === "gpu_only"
         ? "GPU-only profile"
         : null;
+  const gpuCount = Math.max(1, resources.gpus || 1);
+  const taskCount = Math.max(1, resources.ntasks || 1);
+  const gpuOversubscriptionWarning = resources.resource_type === "gpu" && taskCount > gpuCount
+    ? `Tasks (${taskCount}) exceed GPUs (${gpuCount}). This can oversubscribe GPUs and hurt QE performance.`
+    : null;
 
   const commandLinesKey = useMemo(() => commandLines.join("\n"), [commandLines]);
 
@@ -164,6 +169,11 @@ export function HpcRunSettings({
         <p className="hpc-run-settings-hint">
           {resourceModeLabel}. Change this in HPC profile settings if needed.
         </p>
+      )}
+      {gpuOversubscriptionWarning && (
+        <div className="hpc-script-warnings">
+          <p>{gpuOversubscriptionWarning}</p>
+        </div>
       )}
 
       <div className="hpc-grid">
