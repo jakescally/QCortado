@@ -30,3 +30,6 @@ spglib-sys = "1.16.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[patch.crates-io]
+spglib-sys = { path = "vendor/spglib-sys" }
