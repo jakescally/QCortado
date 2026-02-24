@@ -1743,6 +1743,227 @@ fn hpc_open_activity_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Downloads artifacts for an existing HPC task into its local sync directory.
+#[tauri::command]
+async fn hpc_download_task_artifacts(
+    app: AppHandle,
+    task_id: String,
+    full: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<hpc::runner::HpcArtifactSyncReport, String> {
+    let context = state
+        .process_manager
+        .get_hpc_transfer_context(&task_id)
+        .await
+        .ok_or_else(|| format!("Task not found: {}", task_id))?;
+
+    if context.backend.as_deref() != Some("hpc") {
+        return Err("Artifact download is only available for HPC tasks.".to_string());
+    }
+    if full.unwrap_or(true) && matches!(context.status, process_manager::TaskStatus::Running) {
+        return Err("Task is still running. Wait for completion before full download.".to_string());
+    }
+
+    let remote_workdir = context
+        .remote_workdir
+        .ok_or_else(|| "Task does not have a remote working directory recorded.".to_string())?;
+    let local_sync_dir = context
+        .local_sync_dir
+        .ok_or_else(|| "Task does not have a local sync directory recorded.".to_string())?;
+    let profile = resolve_hpc_profile_from_state(&state, context.hpc_profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let mode = if full.unwrap_or(true) {
+        hpc::runner::ArtifactSyncMode::Full
+    } else {
+        hpc::runner::ArtifactSyncMode::Minimal
+    };
+
+    let collect_line = format!(
+        "HPC_STAGE|Collecting|{} ({})",
+        remote_workdir,
+        mode.label()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &collect_line);
+    state
+        .process_manager
+        .append_output(&task_id, collect_line)
+        .await;
+
+    let report = hpc::runner::sync_remote_artifacts(
+        &app,
+        &state.process_manager,
+        hpc::runner::HpcArtifactSyncRequest {
+            task_id: context.task_id,
+            task_kind: context.task_type,
+            profile,
+            secret,
+            remote_workdir,
+            local_sync_dir: PathBuf::from(local_sync_dir),
+            mode,
+        },
+    )
+    .await?;
+    let remote_storage_bytes = report.downloaded_bytes.saturating_add(report.skipped_bytes);
+    state
+        .process_manager
+        .set_remote_storage_bytes(&task_id, Some(remote_storage_bytes))
+        .await;
+
+    let saved_line = format!(
+        "HPC_STAGE|Saved|{} sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+        report.mode,
+        report.downloaded_files,
+        report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+        report.skipped_files,
+        remote_storage_bytes as f64 / (1024.0 * 1024.0),
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &saved_line);
+    state.process_manager.append_output(&task_id, saved_line).await;
+
+    Ok(report)
+}
+
+/// Downloads artifacts for a saved HPC calculation entry.
+#[tauri::command]
+async fn hpc_download_calculation_artifacts(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+    profile_id: Option<String>,
+    full: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<hpc::runner::HpcArtifactSyncReport, String> {
+    let project = projects::get_project(app.clone(), project_id.clone())?;
+    let calculation = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found in project: {}", calc_id))?;
+
+    let parameters = calculation
+        .parameters
+        .as_object()
+        .ok_or_else(|| "Calculation parameters are unavailable.".to_string())?;
+
+    let backend = parameters
+        .get("execution_backend")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if backend != "hpc"
+        && parameters
+            .get("remote_workdir")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err("This calculation does not have HPC artifact metadata.".to_string());
+    }
+
+    let remote_workdir = parameters
+        .get("remote_workdir")
+        .or_else(|| parameters.get("remote_project_path"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "No remote working directory is stored for this calculation.".to_string())?;
+
+    let saved_profile_id = parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let resolved_profile_id = profile_id.or(saved_profile_id);
+    let profile = resolve_hpc_profile_from_state(&state, resolved_profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let local_sync_dir = projects::get_projects_dir(&app)?
+        .join(&project_id)
+        .join("calculations")
+        .join(&calc_id)
+        .join("tmp");
+    std::fs::create_dir_all(&local_sync_dir).map_err(|e| {
+        format!(
+            "Failed to create local calculation directory {}: {}",
+            local_sync_dir.display(),
+            e
+        )
+    })?;
+
+    let mode = if full.unwrap_or(true) {
+        hpc::runner::ArtifactSyncMode::Full
+    } else {
+        hpc::runner::ArtifactSyncMode::Minimal
+    };
+
+    let connecting_line = format!("HPC_STAGE|Connecting|{}", profile.host);
+    let _ = app.emit(&format!("task-output:{}", calc_id), &connecting_line);
+    state
+        .process_manager
+        .append_output(&calc_id, connecting_line)
+        .await;
+
+    let collecting_line = format!(
+        "HPC_STAGE|Collecting|{} ({})",
+        remote_workdir,
+        mode.label()
+    );
+    let _ = app.emit(&format!("task-output:{}", calc_id), &collecting_line);
+    state
+        .process_manager
+        .append_output(&calc_id, collecting_line)
+        .await;
+
+    let report = hpc::runner::sync_remote_artifacts(
+        &app,
+        &state.process_manager,
+        hpc::runner::HpcArtifactSyncRequest {
+            task_id: calc_id.clone(),
+            task_kind: calculation.calc_type.clone(),
+            profile,
+            secret,
+            remote_workdir,
+            local_sync_dir,
+            mode,
+        },
+    )
+    .await?;
+
+    let remote_storage_bytes = report.downloaded_bytes.saturating_add(report.skipped_bytes);
+    projects::refresh_calculation_artifact_metadata(
+        &app,
+        &project_id,
+        &calc_id,
+        Some(remote_storage_bytes),
+        Some(report.mode.as_str()),
+    )?;
+
+    let saved_line = format!(
+        "HPC_STAGE|Saved|{} sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+        report.mode,
+        report.downloaded_files,
+        report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+        report.skipped_files,
+        remote_storage_bytes as f64 / (1024.0 * 1024.0),
+    );
+    let _ = app.emit(&format!("task-output:{}", calc_id), &saved_line);
+    state.process_manager.append_output(&calc_id, saved_line).await;
+
+    Ok(report)
+}
+
 /// Checks if QE is configured and which executables are available.
 #[tauri::command]
 fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
@@ -2255,6 +2476,140 @@ fn sanitize_output_filename(raw: &str, fallback: &str) -> String {
     }
 }
 
+fn missing_scf_tmp_error(path: &Path) -> String {
+    format!(
+        "SCF calculation tmp directory not found: {}. If this SCF ran on HPC with minimal sync, open Cluster Activity and use 'Download Full'.",
+        path.display()
+    )
+}
+
+#[derive(Debug, Default)]
+struct HpcScfDependencyStage {
+    local_bundle_copy: Option<PathBuf>,
+    remote_hydration_commands: Vec<String>,
+}
+
+fn contains_qe_save_directory(root: &Path, max_depth: usize) -> bool {
+    if !root.exists() || !root.is_dir() {
+        return false;
+    }
+
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    while let Some((current, depth)) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".save") {
+                return true;
+            }
+
+            if depth < max_depth {
+                stack.push((entry.path(), depth + 1));
+            }
+        }
+    }
+
+    false
+}
+
+fn source_calc_remote_dependency_path(calc: &projects::CalculationRun) -> Option<String> {
+    let params = calc.parameters.as_object()?;
+    params
+        .get("remote_project_path")
+        .or_else(|| params.get("remote_workdir"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn build_remote_scf_hydration_commands(remote_scf_dir: &str) -> Vec<String> {
+    vec![
+        format!("SOURCE_SCF_DIR={}", shell_single_quote_local(remote_scf_dir)),
+        "echo \"HPC_STAGE|HydratingDependency|$SOURCE_SCF_DIR\"".to_string(),
+        "if [ ! -d \"$SOURCE_SCF_DIR\" ]; then echo \"[QCortado] ERROR: Source SCF dependency directory not found on remote: $SOURCE_SCF_DIR\"; exit 30; fi".to_string(),
+        "if [ ! -d \"$SOURCE_SCF_DIR/tmp\" ]; then echo \"[QCortado] ERROR: Source SCF tmp directory not found on remote: $SOURCE_SCF_DIR/tmp\"; exit 31; fi".to_string(),
+        "mkdir -p ./tmp".to_string(),
+        "cp -a \"$SOURCE_SCF_DIR/tmp/.\" ./tmp/".to_string(),
+        "if [ -z \"$(find ./tmp -maxdepth 2 -type d -name '*.save' -print -quit)\" ]; then echo \"[QCortado] ERROR: No QE .save directory found after SCF dependency hydrate\"; exit 32; fi".to_string(),
+    ]
+}
+
+fn resolve_hpc_scf_dependency_stage(
+    app: &AppHandle,
+    project_id: Option<&str>,
+    scf_calc_id: Option<&str>,
+) -> Result<HpcScfDependencyStage, String> {
+    let project_id = project_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let scf_calc_id = scf_calc_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let (project_id, scf_calc_id) = match (project_id, scf_calc_id) {
+        (Some(project_id), Some(scf_calc_id)) => (project_id, scf_calc_id),
+        _ => return Ok(HpcScfDependencyStage::default()),
+    };
+
+    let projects_dir = projects::get_projects_dir(app)?;
+    let scf_tmp_dir = projects_dir
+        .join(project_id)
+        .join("calculations")
+        .join(scf_calc_id)
+        .join("tmp");
+    let local_has_save_payload =
+        scf_tmp_dir.exists() && contains_qe_save_directory(&scf_tmp_dir, 2);
+
+    let project = projects::get_project(app.clone(), project_id.to_string())?;
+    let source_calc = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == scf_calc_id)
+        .ok_or_else(|| {
+            format!(
+                "Source SCF calculation {} not found in project {}.",
+                scf_calc_id, project_id
+            )
+        })?;
+
+    if let Some(remote_source) = source_calc_remote_dependency_path(source_calc) {
+        return Ok(HpcScfDependencyStage {
+            local_bundle_copy: None,
+            remote_hydration_commands: build_remote_scf_hydration_commands(&remote_source),
+        });
+    }
+
+    if local_has_save_payload {
+        return Ok(HpcScfDependencyStage {
+            local_bundle_copy: Some(scf_tmp_dir),
+            remote_hydration_commands: Vec::new(),
+        });
+    }
+
+    if scf_tmp_dir.exists() {
+        return Err(format!(
+            "SCF dependency {} is missing required .save data locally and has no remote archive path metadata. Download the full SCF bundle or rerun SCF on HPC.",
+            scf_calc_id
+        ));
+    }
+
+    Err(missing_scf_tmp_error(&scf_tmp_dir))
+}
+
 fn insert_system_namelist_line(input: &str, line_to_insert: &str) -> Result<String, String> {
     let mut output = String::with_capacity(input.len() + line_to_insert.len() + 16);
     let mut in_system = false;
@@ -2633,10 +2988,7 @@ async fn run_bands_calculation(
                 );
             }
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -3158,10 +3510,7 @@ async fn run_phonon_calculation(
             projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
             let _ = app.emit("qe-output-line", "SCF data copied successfully.");
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -3720,6 +4069,13 @@ async fn run_hpc_bundle_task(
     let local_sync_dir = PathBuf::from(working_dir);
     prepare_working_directory(&local_sync_dir, false)?;
 
+    pm.set_hpc_profile_id(task_id, Some(profile.id.clone())).await;
+    pm.set_local_sync_dir(
+        task_id,
+        Some(local_sync_dir.to_string_lossy().to_string()),
+    )
+    .await;
+
     let bundle_dir = hpc::sync::create_local_bundle_dir(task_id)?;
     let script = hpc::slurm::build_slurm_script(
         &profile,
@@ -4222,13 +4578,30 @@ async fn run_bands_hpc_background(
     };
     let projwfc_input = generate_projwfc_input(&projwfc_config);
 
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
     let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
-    let mut commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        build_hpc_qe_input_command(&profile, "pw.x", None, "bands.in", "bands.out"),
-        build_hpc_qe_input_command(&profile, "bands.x", None, "bands_pp.in", "bands_pp.out"),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_qe_input_command(
+        &profile,
+        "pw.x",
+        None,
+        "bands.in",
+        "bands.out",
+    ));
+    commands.push(build_hpc_qe_input_command(
+        &profile,
+        "bands.x",
+        None,
+        "bands_pp.in",
+        "bands_pp.out",
+    ));
     if projections_enabled {
         let projwfc_cmd =
             build_hpc_qe_input_command(&profile, "projwfc.x", None, "projwfc.in", "projwfc.out");
@@ -4247,20 +4620,8 @@ async fn run_bands_hpc_background(
     }
 
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
-    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
-        let projects_dir = projects::get_projects_dir(&app)?;
-        let scf_tmp_dir = projects_dir
-            .join(project_id)
-            .join("calculations")
-            .join(scf_calc_id)
-            .join("tmp");
-        if !scf_tmp_dir.exists() {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
-        }
-        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
     let _hpc_result = run_hpc_bundle_task(
@@ -4386,10 +4747,7 @@ async fn run_bands_background(
                 emit_line!("WARNING: .save not found in working dir after copy!".to_string());
             }
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -4956,30 +5314,27 @@ async fn run_dos_hpc_background(
     };
     let dos_input = generate_dos_input(&dos_calc);
 
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
-    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
-        let projects_dir = projects::get_projects_dir(&app)?;
-        let scf_tmp_dir = projects_dir
-            .join(project_id)
-            .join("calculations")
-            .join(scf_calc_id)
-            .join("tmp");
-        if !scf_tmp_dir.exists() {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
-        }
-        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
     let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
-    let commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        build_hpc_qe_input_command(&profile, "pw.x", None, "nscf.in", "nscf.out"),
-        build_hpc_qe_input_command(&profile, "dos.x", None, "dos.in", "dos.out"),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_qe_input_command(
+        &profile, "pw.x", None, "nscf.in", "nscf.out",
+    ));
+    commands.push(build_hpc_qe_input_command(
+        &profile, "dos.x", None, "dos.in", "dos.out",
+    ));
     let _hpc_result = run_hpc_bundle_task(
         app,
         pm,
@@ -5094,10 +5449,7 @@ async fn run_dos_background(
             projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
             emit_line!("SCF data copied successfully.".to_string());
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -5468,35 +5820,28 @@ async fn run_fermi_surface_hpc_background(
         fermi_input = insert_system_namelist_line(&fermi_input, &format!("nbnd = {},", nbnd))?;
     }
 
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
-    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
-        let projects_dir = projects::get_projects_dir(&app)?;
-        let scf_tmp_dir = projects_dir
-            .join(project_id)
-            .join("calculations")
-            .join(scf_calc_id)
-            .join("tmp");
-        if !scf_tmp_dir.exists() {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
-        }
-        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
     let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
-    let commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        build_hpc_qe_input_command(
-            &profile,
-            "fermi_velocity.x",
-            Some("-npool 1"),
-            "fermi_velocity.in",
-            "fermi_velocity.out",
-        ),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_qe_input_command(
+        &profile,
+        "fermi_velocity.x",
+        Some("-npool 1"),
+        "fermi_velocity.in",
+        "fermi_velocity.out",
+    ));
     let _hpc_result = run_hpc_bundle_task(
         app,
         pm,
@@ -5598,10 +5943,7 @@ async fn run_fermi_surface_background(
             projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
             emit_line!("SCF data copied successfully.".to_string());
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -5880,21 +6222,15 @@ async fn run_phonon_hpc_background(
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<PhononResult, String> {
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
-    if let (Some(project_id), Some(scf_calc_id)) = (&config.project_id, &config.scf_calc_id) {
-        let projects_dir = projects::get_projects_dir(&app)?;
-        let scf_tmp_dir = projects_dir
-            .join(project_id)
-            .join("calculations")
-            .join(scf_calc_id)
-            .join("tmp");
-        if !scf_tmp_dir.exists() {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
-        }
-        bundle_copies.push((scf_tmp_dir, ".".to_string()));
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy.clone() {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
     let q2r_calc = Q2RCalculation {
@@ -5957,12 +6293,15 @@ async fn run_phonon_hpc_background(
     };
 
     let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
-    let mut commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        build_hpc_qe_input_command(&profile, "ph.x", None, "ph.in", "ph.out"),
-        build_hpc_qe_input_command(&profile, "q2r.x", None, "q2r.in", "q2r.out"),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_qe_input_command(
+        &profile, "ph.x", None, "ph.in", "ph.out",
+    ));
+    commands.push(build_hpc_qe_input_command(
+        &profile, "q2r.x", None, "q2r.in", "q2r.out",
+    ));
     if config.calculate_dos {
         let matdyn_dos_cmd = build_hpc_qe_input_command(
             &profile,
@@ -6122,10 +6461,7 @@ async fn run_phonon_background(
             projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
             emit_line!("SCF data copied successfully.".to_string());
         } else {
-            return Err(format!(
-                "SCF calculation tmp directory not found: {}",
-                scf_tmp_dir.display()
-            ));
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
         }
     }
 
@@ -6773,6 +7109,8 @@ pub fn run() {
             hpc_load_remote_sssp_data,
             hpc_preview_slurm_script,
             hpc_open_activity_window,
+            hpc_download_task_artifacts,
+            hpc_download_calculation_artifacts,
             clear_temp_storage,
             launch_fermi_surface_viewer,
             check_qe_executables,

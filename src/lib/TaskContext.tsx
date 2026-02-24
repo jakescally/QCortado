@@ -34,6 +34,7 @@ interface TaskSummary {
   remote_node?: string | null;
   remote_workdir?: string | null;
   remote_project_path?: string | null;
+  remote_storage_bytes?: number | null;
 }
 
 interface TaskInfo {
@@ -50,6 +51,7 @@ interface TaskInfo {
   remote_node?: string | null;
   remote_workdir?: string | null;
   remote_project_path?: string | null;
+  remote_storage_bytes?: number | null;
 }
 
 interface QueueSaveSpec {
@@ -151,6 +153,7 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     remote_node: info.remote_node ?? null,
     remote_workdir: info.remote_workdir ?? null,
     remote_project_path: info.remote_project_path ?? null,
+    remote_storage_bytes: info.remote_storage_bytes ?? null,
   };
 }
 
@@ -813,6 +816,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       parameters.remote_node = task.hpc.remote_node ?? null;
       parameters.remote_workdir = task.hpc.remote_workdir ?? null;
       parameters.remote_project_path = task.hpc.remote_project_path ?? null;
+      parameters.remote_storage_bytes = task.hpc.remote_storage_bytes ?? null;
     }
     const resultPayload = buildQueuedResult(item.taskType, taskResult, outputText, parameters);
 

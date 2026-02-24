@@ -17,8 +17,11 @@ import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
+  downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
   listRemotePseudopotentials,
+  sampleHpcUtilization,
+  saveExecutionMode,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
 
@@ -30,14 +33,44 @@ interface CalculationRun {
     converged: boolean;
     total_energy: number | null;
     fermi_energy: number | null;
+    raw_output?: string | null;
   } | null;
   started_at: string;
   completed_at: string | null;
   tags?: string[];
 }
 
+function isHpcCalculation(calc: CalculationRun): boolean {
+  const params = calc.parameters || {};
+  const backend = String(params.execution_backend || "").trim().toLowerCase();
+  if (backend === "hpc") {
+    return true;
+  }
+  if (params.remote_job_id || params.remote_workdir || params.remote_project_path) {
+    return true;
+  }
+  const rawOutput = typeof calc.result?.raw_output === "string" ? calc.result.raw_output : "";
+  return rawOutput.includes("HPC_STAGE|") || rawOutput.includes("HPC_CMD|");
+}
+
+function hasFullScfBundle(calc: CalculationRun, downloadedIds: Set<string>): boolean {
+  if (downloadedIds.has(calc.id)) return true;
+  const params = calc.parameters || {};
+  if (params.artifacts_downloaded_full === true) return true;
+  const mode = String(params.artifact_sync_mode || "").trim().toLowerCase();
+  return mode === "full";
+}
+
+function getScfProfileId(calc: CalculationRun): string | null {
+  const value = calc.parameters?.hpc_profile_id;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 interface FermiSurfaceWizardProps {
   onBack: () => void;
+  onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
   qePath: string;
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
@@ -91,7 +124,10 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(precision)} ${units[unitIdx]}`;
 }
 
-function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
+function getCalculationTags(
+  calc: CalculationRun,
+  downloadedIds?: Set<string>,
+): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
   const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {
@@ -121,6 +157,13 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: "info"
   }
   if (params.vdw_corr && params.vdw_corr !== "none") {
     pushTag("vdW", "feature");
+  }
+
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+    if (hasFullScfBundle(calc, downloadedIds ?? new Set<string>())) {
+      pushTag("Downloaded", "feature");
+    }
   }
 
   return tags;
@@ -186,6 +229,7 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
 
 export function FermiSurfaceWizard({
   onBack,
+  onExecutionModeChange,
   qePath,
   executionMode = "local",
   activeHpcProfile = null,
@@ -198,6 +242,7 @@ export function FermiSurfaceWizard({
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
@@ -206,6 +251,9 @@ export function FermiSurfaceWizard({
   const [error, setError] = useState<string | null>(null);
 
   const [selectedScf, setSelectedScf] = useState<CalculationRun | null>(null);
+  const [downloadedDependencyScfIds, setDownloadedDependencyScfIds] = useState<Set<string>>(new Set());
+  const [isResolvingDependency, setIsResolvingDependency] = useState(false);
+  const [dependencyStatus, setDependencyStatus] = useState<string | null>(null);
   const [scfSortMode, setScfSortMode] = useState<ScfSortMode>(() => getStoredSortMode());
   const handleScfSortModeChange = useCallback((mode: ScfSortMode) => {
     setScfSortMode(mode);
@@ -249,6 +297,13 @@ export function FermiSurfaceWizard({
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
     defaultResourcesForProfile(activeHpcProfile),
   );
+  const [hpcTelemetryOutput, setHpcTelemetryOutput] = useState<string>(
+    "Waiting for remote job allocation...",
+  );
+  const [hpcTelemetrySource, setHpcTelemetrySource] = useState<string>("pending");
+  const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
+  const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
+  const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
 
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
   const hpcCommandLines = useMemo(
@@ -336,9 +391,73 @@ export function FermiSurfaceWizard({
 
   const selectSourceScf = useCallback((scf: CalculationRun) => {
     setSelectedScf(scf);
+    setDependencyStatus(null);
     setScfFermiEnergy(scf.result?.fermi_energy ?? null);
     applyScfDefaults(scf);
   }, [applyScfDefaults]);
+
+  const selectedScfDependencyBlocked = useMemo(() => {
+    if (isHpcMode || !selectedScf) return false;
+    if (!isHpcCalculation(selectedScf)) return false;
+    return !hasFullScfBundle(selectedScf, downloadedDependencyScfIds);
+  }, [isHpcMode, selectedScf, downloadedDependencyScfIds]);
+
+  async function handleSwitchToHpcMode() {
+    setIsResolvingDependency(true);
+    setDependencyStatus("Switching execution mode to HPC...");
+    setError(null);
+    try {
+      if (onExecutionModeChange) {
+        await onExecutionModeChange("hpc");
+      } else {
+        await saveExecutionMode("hpc");
+      }
+      setDependencyStatus("Execution mode switched to HPC. Review HPC settings and submit remotely.");
+    } catch (e) {
+      setError(`Failed to switch execution mode: ${e}`);
+      setDependencyStatus(null);
+    } finally {
+      setIsResolvingDependency(false);
+    }
+  }
+
+  async function handleDownloadDependencyBundle() {
+    if (!selectedScf) return;
+    setIsResolvingDependency(true);
+    setDependencyStatus("Downloading full SCF bundle from remote...");
+    setError(null);
+    try {
+      const report = await downloadHpcCalculationArtifacts(
+        projectId,
+        selectedScf.id,
+        getScfProfileId(selectedScf),
+        true,
+      );
+      setDownloadedDependencyScfIds((prev) => {
+        const next = new Set(prev);
+        next.add(selectedScf.id);
+        return next;
+      });
+      setSelectedScf((prev) => {
+        if (!prev || prev.id !== selectedScf.id) return prev;
+        return {
+          ...prev,
+          parameters: {
+            ...(prev.parameters || {}),
+            artifacts_downloaded_full: true,
+            artifact_sync_mode: "full",
+            remote_storage_bytes: report.downloaded_bytes + report.skipped_bytes,
+          },
+        };
+      });
+      setDependencyStatus("Full SCF bundle downloaded. Local run is now available.");
+    } catch (e) {
+      setError(`Failed to download full SCF bundle: ${e}`);
+      setDependencyStatus(null);
+    } finally {
+      setIsResolvingDependency(false);
+    }
+  }
 
   useEffect(() => {
     async function init() {
@@ -379,6 +498,82 @@ export function FermiSurfaceWizard({
     if (!el || !followOutputRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [output]);
+
+  useEffect(() => {
+    if (!isHpcMode || step !== "run") {
+      return;
+    }
+
+    const taskIsRunning = isRunning || activeTask?.status === "running";
+    if (!taskIsRunning) {
+      return;
+    }
+
+    const profileId = activeHpcProfile?.id ?? null;
+    if (!profileId) {
+      setHpcTelemetryError("No active HPC profile selected.");
+      setHpcTelemetrySource("unavailable");
+      return;
+    }
+
+    if (activeTask?.hpc?.backend && activeTask.hpc.backend !== "hpc") {
+      return;
+    }
+
+    const remoteJobId = activeTask?.hpc?.remote_job_id?.trim() || "";
+    const remoteNode = activeTask?.hpc?.remote_node?.trim() || "";
+    if (!remoteJobId) {
+      setHpcTelemetryLoading(false);
+      setHpcTelemetryError(null);
+      setHpcTelemetrySource("pending");
+      setHpcTelemetryOutput("Waiting for remote job allocation...");
+      return;
+    }
+
+    let cancelled = false;
+    let timeoutId: number | null = null;
+
+    const pollTelemetry = async () => {
+      if (cancelled) return;
+      setHpcTelemetryLoading(true);
+      try {
+        const sample = await sampleHpcUtilization(profileId, remoteJobId, remoteNode || null);
+        if (cancelled) return;
+        setHpcTelemetryOutput(sample.output || "No telemetry output received from remote host.");
+        setHpcTelemetrySource(sample.source || "unknown");
+        setHpcTelemetryUpdatedAt(sample.captured_at || new Date().toISOString());
+        setHpcTelemetryError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setHpcTelemetrySource("error");
+        setHpcTelemetryError(String(e));
+      } finally {
+        if (cancelled) return;
+        setHpcTelemetryLoading(false);
+        timeoutId = window.setTimeout(() => {
+          void pollTelemetry();
+        }, 5000);
+      }
+    };
+
+    void pollTelemetry();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [
+    isHpcMode,
+    step,
+    isRunning,
+    activeTask?.status,
+    activeTask?.hpc?.backend,
+    activeTask?.hpc?.remote_job_id,
+    activeTask?.hpc?.remote_node,
+    activeHpcProfile?.id,
+  ]);
 
   useEffect(() => {
     if (!activeTaskId) return;
@@ -620,6 +815,10 @@ export function FermiSurfaceWizard({
   }
 
   async function runCalculation() {
+    if (selectedScfDependencyBlocked) {
+      setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
+      return;
+    }
     if (hasExternalRunningTask) {
       setError("Another task is currently running. Queue this task or wait for completion.");
       return;
@@ -635,6 +834,13 @@ export function FermiSurfaceWizard({
     const startTime = new Date().toISOString();
     setCalcStartTime(startTime);
     setStep("run");
+    if (isHpcMode) {
+      setHpcTelemetryOutput("Waiting for remote job allocation...");
+      setHpcTelemetrySource("pending");
+      setHpcTelemetryError(null);
+      setHpcTelemetryUpdatedAt(null);
+      setHpcTelemetryLoading(false);
+    }
 
     try {
       const plan = buildTaskPlan();
@@ -649,14 +855,16 @@ export function FermiSurfaceWizard({
       const result = finalTask.result as FermiSurfaceData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
-      const hpcSaveParams = finalTask.hpc.backend === "hpc"
+      const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")
         ? {
           execution_backend: "hpc",
+          hpc_profile_id: activeHpcProfile?.id ?? null,
           remote_job_id: finalTask.hpc.remote_job_id ?? null,
           scheduler_state: finalTask.hpc.scheduler_state ?? null,
           remote_node: finalTask.hpc.remote_node ?? null,
           remote_workdir: finalTask.hpc.remote_workdir ?? null,
           remote_project_path: finalTask.hpc.remote_project_path ?? null,
+          remote_storage_bytes: finalTask.hpc.remote_storage_bytes ?? null,
         }
         : {};
       setFermiData(result);
@@ -721,6 +929,10 @@ export function FermiSurfaceWizard({
   }
 
   function queueCalculation() {
+    if (selectedScfDependencyBlocked) {
+      setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
+      return;
+    }
     try {
       const plan = buildTaskPlan();
       setError(null);
@@ -806,8 +1018,11 @@ export function FermiSurfaceWizard({
                 )}
               </div>
               <div className="calc-tags">
-                {getCalculationTags(scf).map((tag, i) => (
-                  <span key={`${tag.label}-${i}`} className={`calc-tag calc-tag-${tag.type}`}>
+                {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
+                  <span
+                    key={`${tag.label}-${i}`}
+                    className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
+                  >
                     {tag.label}
                   </span>
                 ))}
@@ -1095,6 +1310,30 @@ export function FermiSurfaceWizard({
           </div>
         </div>
 
+        {selectedScfDependencyBlocked && (
+          <div className="warning-banner">
+            <strong>Remote SCF dependency detected.</strong>{" "}
+            This source SCF was run on HPC, and local Fermi-surface requires a full local SCF bundle.
+            <div className="run-error-actions">
+              <button
+                className="secondary-button"
+                onClick={() => void handleSwitchToHpcMode()}
+                disabled={isResolvingDependency}
+              >
+                Switch to HPC Mode
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => void handleDownloadDependencyBundle()}
+                disabled={isResolvingDependency}
+              >
+                {isResolvingDependency ? "Downloading..." : "Download Full Bundle"}
+              </button>
+            </div>
+            {dependencyStatus && <div className="param-hint">{dependencyStatus}</div>}
+          </div>
+        )}
+
         {isHpcMode ? (
           <HpcRunSettings
             profileId={activeHpcProfile?.id ?? null}
@@ -1158,10 +1397,18 @@ export function FermiSurfaceWizard({
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button className="secondary-button" onClick={() => void queueCalculation()} disabled={!canRun}>
+          <button
+            className="secondary-button"
+            onClick={() => void queueCalculation()}
+            disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
+          >
             Queue Task
           </button>
-          <button className="primary-button" onClick={() => void runCalculation()} disabled={!canRun || hasExternalRunningTask}>
+          <button
+            className="primary-button"
+            onClick={() => void runCalculation()}
+            disabled={!canRun || hasExternalRunningTask || selectedScfDependencyBlocked || isResolvingDependency}
+          >
             {isHpcMode ? "Submit Fermi Surface to Andromeda" : "Run Calculation"}
           </button>
         </div>
@@ -1202,9 +1449,36 @@ export function FermiSurfaceWizard({
         </>
       )}
 
-      <pre ref={outputRef} className="calculation-output run-output-log" onScroll={handleOutputScroll}>
-        {output || "Starting calculation..."}
-      </pre>
+      <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
+        <div className="output-panel">
+          <h3>{isRunning ? "Running..." : "Output"}</h3>
+          <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
+            {output || "Starting calculation..."}
+          </pre>
+        </div>
+
+        {isHpcMode && (
+          <div className="telemetry-panel">
+            <div className="telemetry-header">
+              <h3>Remote Utilization</h3>
+              <span className="telemetry-meta">
+                {hpcTelemetryLoading
+                  ? "Refreshing..."
+                  : hpcTelemetryUpdatedAt
+                  ? `Updated ${new Date(hpcTelemetryUpdatedAt).toLocaleTimeString()}`
+                  : "Waiting for first sample..."}
+              </span>
+            </div>
+            <div className="telemetry-meta-row">
+              <span>Job: {activeTask?.hpc?.remote_job_id || "pending allocation"}</span>
+              <span>Node: {activeTask?.hpc?.remote_node || "pending"}</span>
+              <span>Source: {hpcTelemetrySource}</span>
+            </div>
+            <pre className="telemetry-output">{hpcTelemetryOutput}</pre>
+            {hpcTelemetryError && <p className="telemetry-error">{hpcTelemetryError}</p>}
+          </div>
+        )}
+      </div>
     </div>
   );
 

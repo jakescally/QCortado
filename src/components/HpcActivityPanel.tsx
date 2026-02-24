@@ -66,6 +66,9 @@ function filterReadableOutput(lines: string[]): string[] {
       rendered.push(`[warning] ${line.slice("HPC_WARNING|".length)}`);
       continue;
     }
+    if (line.startsWith("HPC_TRANSFER|")) {
+      continue;
+    }
     rendered.push(line);
   }
   return rendered;

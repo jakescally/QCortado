@@ -32,6 +32,8 @@ pub struct TaskInfo {
     pub remote_workdir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_storage_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -53,6 +55,8 @@ pub struct TaskSummary {
     pub remote_workdir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_project_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_storage_bytes: Option<u64>,
 }
 
 pub struct RunningTask {
@@ -72,6 +76,20 @@ pub struct RunningTask {
     pub remote_node: Option<String>,
     pub remote_workdir: Option<String>,
     pub remote_project_path: Option<String>,
+    pub remote_storage_bytes: Option<u64>,
+    pub hpc_profile_id: Option<String>,
+    pub local_sync_dir: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HpcTransferContext {
+    pub task_id: String,
+    pub task_type: String,
+    pub status: TaskStatus,
+    pub backend: Option<String>,
+    pub remote_workdir: Option<String>,
+    pub hpc_profile_id: Option<String>,
+    pub local_sync_dir: Option<String>,
 }
 
 /// Thread-safe process manager. Clone is cheap (shared Arc).
@@ -111,6 +129,9 @@ impl ProcessManager {
             remote_node: None,
             remote_workdir: None,
             remote_project_path: None,
+            remote_storage_bytes: None,
+            hpc_profile_id: None,
+            local_sync_dir: None,
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
@@ -168,6 +189,7 @@ impl ProcessManager {
             remote_node: t.remote_node.clone(),
             remote_workdir: t.remote_workdir.clone(),
             remote_project_path: t.remote_project_path.clone(),
+            remote_storage_bytes: t.remote_storage_bytes,
         })
     }
 
@@ -187,6 +209,7 @@ impl ProcessManager {
                 remote_node: t.remote_node.clone(),
                 remote_workdir: t.remote_workdir.clone(),
                 remote_project_path: t.remote_project_path.clone(),
+                remote_storage_bytes: t.remote_storage_bytes,
             })
             .collect()
     }
@@ -277,6 +300,40 @@ impl ProcessManager {
         if let Some(task) = tasks.get_mut(task_id) {
             task.remote_project_path = remote_project_path;
         }
+    }
+
+    pub async fn set_remote_storage_bytes(&self, task_id: &str, remote_storage_bytes: Option<u64>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.remote_storage_bytes = remote_storage_bytes;
+        }
+    }
+
+    pub async fn set_hpc_profile_id(&self, task_id: &str, hpc_profile_id: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.hpc_profile_id = hpc_profile_id;
+        }
+    }
+
+    pub async fn set_local_sync_dir(&self, task_id: &str, local_sync_dir: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.local_sync_dir = local_sync_dir;
+        }
+    }
+
+    pub async fn get_hpc_transfer_context(&self, task_id: &str) -> Option<HpcTransferContext> {
+        let tasks = self.tasks.lock().await;
+        tasks.get(task_id).map(|task| HpcTransferContext {
+            task_id: task.task_id.clone(),
+            task_type: task.task_type.clone(),
+            status: task.status.clone(),
+            backend: task.backend.clone(),
+            remote_workdir: task.remote_workdir.clone(),
+            hpc_profile_id: task.hpc_profile_id.clone(),
+            local_sync_dir: task.local_sync_dir.clone(),
+        })
     }
 }
 

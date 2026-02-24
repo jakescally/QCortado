@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
@@ -13,7 +13,7 @@ use super::slurm::{
     SchedulerSnapshot, is_terminal_state, normalize_scheduler_state, parse_sacct_snapshot,
     parse_sbatch_job_id, parse_squeue_snapshot,
 };
-use super::ssh::{download_directory_contents, run_ssh_command, upload_directory};
+use super::ssh::{download_file, run_ssh_command, upload_directory};
 
 #[derive(Debug, Clone)]
 pub struct HpcBatchRequest {
@@ -45,6 +45,47 @@ pub struct HpcBatchResult {
     pub slurm_script: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactSyncMode {
+    Minimal,
+    Full,
+}
+
+impl ArtifactSyncMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct HpcArtifactSyncReport {
+    pub mode: String,
+    pub downloaded_files: usize,
+    pub downloaded_bytes: u64,
+    pub skipped_files: usize,
+    pub skipped_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HpcArtifactSyncRequest {
+    pub task_id: String,
+    pub task_kind: String,
+    pub profile: HpcProfile,
+    pub secret: Option<String>,
+    pub remote_workdir: String,
+    pub local_sync_dir: PathBuf,
+    pub mode: ArtifactSyncMode,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteFileEntry {
+    rel_path: String,
+    size_bytes: u64,
+}
+
 fn shell_single_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -60,6 +101,350 @@ fn emit_task_event_line(app: &AppHandle, task_id: &str, line: &str) {
 async fn emit_task_line(app: &AppHandle, pm: &ProcessManager, task_id: &str, line: String) {
     emit_task_event_line(app, task_id, &line);
     pm.append_output(task_id, line).await;
+}
+
+fn normalize_rel_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches("./");
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => return None,
+        }
+    }
+    Some(trimmed.to_string())
+}
+
+fn parse_remote_manifest(output: &str) -> Vec<RemoteFileEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (raw_rel, raw_size) = line.split_once('\t')?;
+            let rel_path = normalize_rel_path(raw_rel)?;
+            let size_bytes = raw_size.trim().parse::<u64>().unwrap_or(0);
+            Some(RemoteFileEntry {
+                rel_path,
+                size_bytes,
+            })
+        })
+        .collect()
+}
+
+fn is_heavy_scratch_path(rel_path: &str) -> bool {
+    let lower_path = rel_path.to_ascii_lowercase();
+    let path = Path::new(rel_path);
+    for component in path.components() {
+        let Component::Normal(segment) = component else {
+            continue;
+        };
+        let lower = segment.to_string_lossy().to_ascii_lowercase();
+        if lower == "tmp"
+            || lower.starts_with("_ph")
+            || lower.ends_with(".save")
+            || lower == "save"
+            || lower == "wfc"
+        {
+            return true;
+        }
+    }
+    lower_path.ends_with(".wfc")
+        || lower_path.ends_with(".wfc1")
+        || lower_path.ends_with(".igk")
+        || lower_path.ends_with(".hub")
+        || lower_path.ends_with(".mix")
+        || lower_path.ends_with(".rho")
+}
+
+fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
+    if is_heavy_scratch_path(&entry.rel_path) {
+        return false;
+    }
+
+    let lower_rel = entry.rel_path.to_ascii_lowercase();
+    let file_name = Path::new(&lower_rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let is_top_level = !lower_rel.contains('/');
+
+    if matches!(
+        file_name,
+        "run.sbatch"
+            | "slurm.out"
+            | "slurm.err"
+            | "pw.in"
+            | "pw.out"
+            | "bands.in"
+            | "bands.out"
+            | "bands_pp.in"
+            | "bands_pp.out"
+            | "projwfc.in"
+            | "projwfc.out"
+            | "nscf.in"
+            | "nscf.out"
+            | "dos.in"
+            | "dos.out"
+            | "fermi_velocity.in"
+            | "fermi_velocity.out"
+            | "ph.in"
+            | "ph.out"
+            | "q2r.in"
+            | "q2r.out"
+            | "matdyn_dos.in"
+            | "matdyn_dos.out"
+            | "matdyn_bands.in"
+            | "matdyn_bands.out"
+            | "phonon_dos"
+            | "phonon_freq"
+            | "phonon_freq.gp"
+            | "force_constants"
+    ) {
+        return true;
+    }
+
+    if lower_rel.ends_with(".frmsf")
+        || lower_rel.ends_with(".bxsf")
+        || lower_rel.ends_with(".gnu")
+        || lower_rel.ends_with(".json")
+        || lower_rel.ends_with(".txt")
+        || lower_rel.ends_with(".log")
+    {
+        return true;
+    }
+
+    if lower_rel.ends_with(".in") || lower_rel.ends_with(".out") || lower_rel.ends_with(".err") {
+        return true;
+    }
+
+    if lower_rel.ends_with(".dat") {
+        return entry.size_bytes <= 256 * 1024 * 1024;
+    }
+
+    if task_kind == "phonon" && (file_name.starts_with("dyn") || file_name.starts_with("matdyn")) {
+        return entry.size_bytes <= 256 * 1024 * 1024;
+    }
+
+    if is_top_level {
+        return entry.size_bytes <= 64 * 1024 * 1024;
+    }
+
+    false
+}
+
+async fn list_remote_files(
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+) -> Result<Vec<RemoteFileEntry>, String> {
+    let manifest_cmd = format!(
+        "cd {} && find . -type f -printf '%P\\t%s\\n'",
+        shell_single_quote(remote_workdir)
+    );
+    let manifest_output = run_ssh_command(profile, secret, &manifest_cmd).await?;
+    Ok(parse_remote_manifest(&manifest_output))
+}
+
+pub async fn sync_remote_artifacts(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    request: HpcArtifactSyncRequest,
+) -> Result<HpcArtifactSyncReport, String> {
+    std::fs::create_dir_all(&request.local_sync_dir).map_err(|e| {
+        format!(
+            "Failed to create local sync directory {}: {}",
+            request.local_sync_dir.display(),
+            e
+        )
+    })?;
+
+    let mut report = HpcArtifactSyncReport {
+        mode: request.mode.label().to_string(),
+        ..HpcArtifactSyncReport::default()
+    };
+
+    match request.mode {
+        ArtifactSyncMode::Full => {
+            let remote_files = list_remote_files(
+                &request.profile,
+                request.secret.as_deref(),
+                &request.remote_workdir,
+            )
+            .await?;
+            let total_files = remote_files.len();
+            let total_bytes = remote_files
+                .iter()
+                .fold(0u64, |sum, entry| sum.saturating_add(entry.size_bytes));
+
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!("HPC_TRANSFER|start|full|{}|{}", total_files, total_bytes),
+            )
+            .await;
+
+            let mut processed_files: usize = 0;
+            let mut failures: Vec<String> = Vec::new();
+            let mut last_emit = Instant::now();
+
+            for entry in remote_files {
+                let remote_file = format!(
+                    "{}/{}",
+                    request.remote_workdir.trim_end_matches('/'),
+                    entry.rel_path
+                );
+                let local_file = request.local_sync_dir.join(&entry.rel_path);
+                match download_file(
+                    &request.profile,
+                    request.secret.as_deref(),
+                    &remote_file,
+                    &local_file,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        report.downloaded_files += 1;
+                        report.downloaded_bytes =
+                            report.downloaded_bytes.saturating_add(entry.size_bytes);
+                    }
+                    Err(err) => {
+                        report.skipped_files += 1;
+                        report.skipped_bytes =
+                            report.skipped_bytes.saturating_add(entry.size_bytes);
+                        failures.push(format!("{} ({})", entry.rel_path, err));
+                    }
+                }
+                processed_files += 1;
+
+                let should_emit = processed_files == total_files
+                    || processed_files % 16 == 0
+                    || last_emit.elapsed() >= Duration::from_millis(900);
+                if should_emit {
+                    emit_task_line(
+                        app,
+                        pm,
+                        &request.task_id,
+                        format!(
+                            "HPC_TRANSFER|progress|full|{}|{}|{}|{}|{}",
+                            processed_files,
+                            total_files,
+                            report.downloaded_bytes,
+                            total_bytes,
+                            report.skipped_files
+                        ),
+                    )
+                    .await;
+                    last_emit = Instant::now();
+                }
+            }
+
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!(
+                    "HPC_TRANSFER|done|full|{}|{}|{}|{}|{}",
+                    report.downloaded_files,
+                    total_files,
+                    report.downloaded_bytes,
+                    total_bytes,
+                    report.skipped_files
+                ),
+            )
+            .await;
+
+            if !failures.is_empty() {
+                let preview = failures
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                emit_task_line(
+                    app,
+                    pm,
+                    &request.task_id,
+                    format!(
+                        "HPC_WARNING|Some files failed during full download ({}).",
+                        preview
+                    ),
+                )
+                .await;
+            }
+            Ok(report)
+        }
+        ArtifactSyncMode::Minimal => {
+            let remote_files = list_remote_files(
+                &request.profile,
+                request.secret.as_deref(),
+                &request.remote_workdir,
+            )
+            .await?;
+            let mut candidates: Vec<RemoteFileEntry> = Vec::new();
+            for entry in remote_files {
+                if should_download_minimal(&request.task_kind, &entry) {
+                    candidates.push(entry);
+                } else {
+                    report.skipped_files += 1;
+                    report.skipped_bytes = report.skipped_bytes.saturating_add(entry.size_bytes);
+                }
+            }
+
+            let mut failures: Vec<String> = Vec::new();
+            for entry in candidates {
+                let remote_file = format!(
+                    "{}/{}",
+                    request.remote_workdir.trim_end_matches('/'),
+                    entry.rel_path
+                );
+                let local_file = request.local_sync_dir.join(&entry.rel_path);
+                match download_file(
+                    &request.profile,
+                    request.secret.as_deref(),
+                    &remote_file,
+                    &local_file,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        report.downloaded_files += 1;
+                        report.downloaded_bytes =
+                            report.downloaded_bytes.saturating_add(entry.size_bytes);
+                    }
+                    Err(err) => {
+                        report.skipped_files += 1;
+                        report.skipped_bytes =
+                            report.skipped_bytes.saturating_add(entry.size_bytes);
+                        failures.push(format!("{} ({})", entry.rel_path, err));
+                    }
+                }
+            }
+
+            if !failures.is_empty() {
+                let preview = failures
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                emit_task_line(
+                    app,
+                    pm,
+                    &request.task_id,
+                    format!(
+                        "HPC_WARNING|Some artifacts were not downloaded during minimal sync ({}).",
+                        preview
+                    ),
+                )
+                .await;
+            }
+
+            Ok(report)
+        }
+    }
 }
 
 async fn update_scheduler_snapshot(
@@ -526,21 +911,47 @@ pub async fn run_batch_task(
             &app,
             &pm,
             task_id(&request),
-            format!("HPC_STAGE|Collecting|{}", remote_workdir),
+            format!("HPC_STAGE|Collecting|{} (minimal)", remote_workdir),
         )
         .await;
-        download_directory_contents(
-            &request.profile,
-            request.secret.as_deref(),
-            &remote_workdir,
-            &request.local_sync_dir,
+        let sync_report = sync_remote_artifacts(
+            &app,
+            &pm,
+            HpcArtifactSyncRequest {
+                task_id: request.task_id.clone(),
+                task_kind: request.task_kind.clone(),
+                profile: request.profile.clone(),
+                secret: request.secret.clone(),
+                remote_workdir: remote_workdir.clone(),
+                local_sync_dir: request.local_sync_dir.clone(),
+                mode: ArtifactSyncMode::Minimal,
+            },
         )
         .await?;
+        let remote_storage_bytes = sync_report
+            .downloaded_bytes
+            .saturating_add(sync_report.skipped_bytes);
+        pm.set_remote_storage_bytes(task_id(&request), Some(remote_storage_bytes))
+            .await;
         emit_task_line(
             &app,
             &pm,
             task_id(&request),
-            "HPC_STAGE|Saved|Local sync complete".to_string(),
+            format!(
+                "HPC_STAGE|Saved|Minimal sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+                sync_report.downloaded_files,
+                sync_report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                sync_report.skipped_files,
+                remote_storage_bytes as f64 / (1024.0 * 1024.0),
+            ),
+        )
+        .await;
+        emit_task_line(
+            &app,
+            &pm,
+            task_id(&request),
+            "HPC_WARNING|Large scratch artifacts remain remote. Use 'Download full bundle' if needed."
+                .to_string(),
         )
         .await;
     } else {
@@ -586,11 +997,18 @@ pub async fn run_batch_task(
         )
         .await;
 
-        let _ = download_directory_contents(
-            &request.profile,
-            request.secret.as_deref(),
-            &remote_workdir,
-            &request.local_sync_dir,
+        let _ = sync_remote_artifacts(
+            &app,
+            &pm,
+            HpcArtifactSyncRequest {
+                task_id: request.task_id.clone(),
+                task_kind: request.task_kind.clone(),
+                profile: request.profile.clone(),
+                secret: request.secret.clone(),
+                remote_workdir: remote_workdir.clone(),
+                local_sync_dir: request.local_sync_dir.clone(),
+                mode: ArtifactSyncMode::Minimal,
+            },
         )
         .await;
 

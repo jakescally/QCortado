@@ -1364,6 +1364,82 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     Ok(project)
 }
 
+/// Refreshes local storage size for a saved calculation and persists artifact sync metadata.
+pub fn refresh_calculation_artifact_metadata(
+    app: &AppHandle,
+    project_id: &str,
+    calc_id: &str,
+    remote_storage_bytes: Option<u64>,
+    sync_mode: Option<&str>,
+) -> Result<u64, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let calc_dir = project_dir.join("calculations").join(calc_id);
+    let local_storage_bytes = calculate_directory_size(&calc_dir)?;
+
+    let project_json_path = project_dir.join("project.json");
+    let content = fs::read_to_string(&project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    let calculation = project
+        .cif_variants
+        .iter_mut()
+        .flat_map(|variant| variant.calculations.iter_mut())
+        .find(|calc| calc.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    calculation.storage_bytes = Some(local_storage_bytes);
+
+    if let Some(parameters) = calculation.parameters.as_object_mut() {
+        parameters.insert(
+            "local_storage_bytes".to_string(),
+            serde_json::json!(local_storage_bytes),
+        );
+        if let Some(remote_bytes) = remote_storage_bytes {
+            parameters.insert(
+                "remote_storage_bytes".to_string(),
+                serde_json::json!(remote_bytes),
+            );
+        }
+        if let Some(mode) = sync_mode
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            parameters.insert("artifact_sync_mode".to_string(), serde_json::json!(mode));
+            if mode.eq_ignore_ascii_case("full") {
+                parameters.insert("artifacts_downloaded_full".to_string(), serde_json::json!(true));
+            }
+        }
+        parameters.insert(
+            "artifact_synced_at".to_string(),
+            serde_json::json!(now_iso()),
+        );
+    }
+
+    let updated_calculation = calculation.clone();
+
+    let project_json = serde_json::to_string_pretty(&project)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(&project_json_path, project_json)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    let calc_json_path = calc_dir.join("calc.json");
+    if calc_json_path.exists() {
+        let calc_json = serde_json::to_string_pretty(&updated_calculation)
+            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+        fs::write(&calc_json_path, calc_json)
+            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
+    }
+
+    Ok(local_storage_bytes)
+}
+
 /// Updates a project's editable metadata fields.
 #[tauri::command]
 pub fn update_project_metadata(

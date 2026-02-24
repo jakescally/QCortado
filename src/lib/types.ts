@@ -139,6 +139,7 @@ export interface HpcTaskMeta {
   remote_node?: string | null;
   remote_workdir?: string | null;
   remote_project_path?: string | null;
+  remote_storage_bytes?: number | null;
 }
 
 export type QePositionUnit = "alat" | "bohr" | "angstrom" | "crystal";

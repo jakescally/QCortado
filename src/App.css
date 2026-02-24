@@ -865,6 +865,7 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   flex-direction: column;
   height: 100%;
   gap: 1rem;
+  --run-output-height: clamp(280px, 56vh, 760px);
 }
 
 .run-layout {
@@ -899,9 +900,11 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 }
 
 .output-text {
-  flex: 1;
+  flex: 0 0 auto;
   margin: 0;
-  min-height: clamp(340px, 58vh, 840px);
+  height: var(--run-output-height);
+  min-height: var(--run-output-height);
+  max-height: var(--run-output-height);
   padding: 0.6rem 0.7rem;
   background: #0f172a;
   border: 1px solid #334155;
@@ -3173,6 +3176,24 @@ html[data-theme="dark"] {
   border-color: #f6ad55;
 }
 
+.settings-menu-item.saved {
+  color: #2f855a;
+  border-color: #68d391;
+  background: #f0fff4;
+  font-weight: 600;
+}
+
+.settings-menu-item.saved:hover {
+  color: #276749;
+  border-color: #48bb78;
+  background: #e6ffed;
+}
+
+.settings-menu-item.saved:active:not(:disabled) {
+  background: #c6f6d5;
+  border-color: #38a169;
+}
+
 @media (max-width: 720px) {
   .settings-window-overlay {
     align-items: stretch;
@@ -3509,6 +3530,12 @@ html[data-theme="dark"] {
   border: 1px solid #d6bcfa;
 }
 
+.calc-tag-downloaded {
+  background: #d6f5f0;
+  color: #0f766e;
+  border: 1px solid #9ae6d8;
+}
+
 .calculation-details {
   padding: 1rem 1.25rem;
   background: #f7fafc;
@@ -3639,6 +3666,12 @@ html[data-theme="dark"] {
     background: #553c9a;
     color: #efe4ff;
     border: 1px solid #6b46c1;
+  }
+
+  .calc-tag-downloaded {
+    background: #115e59;
+    color: #ccfbf1;
+    border: 1px solid #0f766e;
   }
 
   .calculation-details {
@@ -3834,6 +3867,23 @@ html[data-theme="dark"] {
   .settings-menu-item.warning:hover {
     background: #744210;
     border-color: #f6ad55;
+  }
+
+  .settings-menu-item.saved {
+    color: #9ae6b4;
+    border-color: #2f855a;
+    background: #1c4532;
+  }
+
+  .settings-menu-item.saved:hover {
+    color: #c6f6d5;
+    border-color: #38a169;
+    background: #22543d;
+  }
+
+  .settings-menu-item.saved:active:not(:disabled) {
+    background: #2f855a;
+    border-color: #68d391;
   }
 
   .delete-warning p {
@@ -4605,8 +4655,73 @@ html[data-theme="dark"] {
   padding-top: 1rem;
   border-top: 1px solid #e2e8f0;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.calc-download-progress {
+  flex: 1 1 260px;
+  min-width: 220px;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #dbeafe;
+  border-radius: 6px;
+  background: #f8fbff;
+  margin-right: auto;
+}
+
+.calc-download-progress-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+  color: #1e40af;
+  font-weight: 600;
+}
+
+.calc-download-progress-bar {
+  width: 100%;
+  height: 8px;
+  margin-top: 0.4rem;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.calc-download-progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+  transition: width 0.2s ease;
+}
+
+.calc-download-progress-fill.indeterminate {
+  width: 35%;
+  animation: calc-download-progress-pulse 1.1s ease-in-out infinite;
+}
+
+.calc-download-progress-fill.error {
+  background: linear-gradient(90deg, #ef4444, #b91c1c);
+}
+
+.calc-download-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+  font-size: 0.7rem;
+  color: #475569;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+@keyframes calc-download-progress-pulse {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
 }
 
 .delete-calc-btn {
@@ -4625,10 +4740,72 @@ html[data-theme="dark"] {
   color: white;
 }
 
+.download-calc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 116px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  background: transparent;
+  border: 1px solid #2563eb;
+  color: #2563eb;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.download-calc-btn:hover {
+  background: #2563eb;
+  color: white;
+}
+
+.download-calc-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.download-calc-btn.downloaded {
+  border-color: #94a3b8;
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.download-calc-btn.downloaded:hover {
+  border-color: #94a3b8;
+  color: #64748b;
+  background: #f1f5f9;
+}
+
 /* Dark mode */
 html[data-theme="dark"] {
   .calc-actions {
     border-top-color: #4a5568;
+  }
+
+  .calc-download-progress {
+    border-color: #1d4ed8;
+    background: #0f172a;
+  }
+
+  .calc-download-progress-row {
+    color: #93c5fd;
+  }
+
+  .calc-download-progress-bar {
+    background: #1f2937;
+  }
+
+  .calc-download-progress-fill {
+    background: linear-gradient(90deg, #60a5fa, #2563eb);
+  }
+
+  .calc-download-progress-fill.error {
+    background: linear-gradient(90deg, #f87171, #ef4444);
+  }
+
+  .calc-download-progress-meta {
+    color: #cbd5e1;
   }
 
   .delete-calc-btn {
@@ -4639,6 +4816,28 @@ html[data-theme="dark"] {
   .delete-calc-btn:hover {
     background: #fc8181;
     color: #1a202c;
+  }
+
+  .download-calc-btn {
+    border-color: #60a5fa;
+    color: #93c5fd;
+  }
+
+  .download-calc-btn:hover {
+    background: #60a5fa;
+    color: #0f172a;
+  }
+
+  .download-calc-btn.downloaded {
+    border-color: #475569;
+    color: #94a3b8;
+    background: #1f2937;
+  }
+
+  .download-calc-btn.downloaded:hover {
+    border-color: #475569;
+    color: #94a3b8;
+    background: #1f2937;
   }
 }
 
@@ -4942,6 +5141,30 @@ html[data-theme="dark"] .scf-option .calc-tag-info {
 html[data-theme="dark"] .scf-option .calc-tag-feature {
   background: #1e3a5f;
   color: #89b4fa;
+}
+
+.scf-option .calc-tag-hpc {
+  background: #e9d8fd;
+  color: #553c9a;
+  border: 1px solid #d6bcfa;
+}
+
+.scf-option .calc-tag-downloaded {
+  background: #d6f5f0;
+  color: #0f766e;
+  border: 1px solid #9ae6d8;
+}
+
+html[data-theme="dark"] .scf-option .calc-tag-hpc {
+  background: #553c9a;
+  color: #efe4ff;
+  border: 1px solid #6b46c1;
+}
+
+html[data-theme="dark"] .scf-option .calc-tag-downloaded {
+  background: #115e59;
+  color: #ccfbf1;
+  border: 1px solid #0f766e;
 }
 
 .scf-option .calc-tag-special {
@@ -5763,8 +5986,9 @@ html[data-theme="dark"] .progress-indicator .success-icon {
   border: 1px solid #334155;
   padding: 0.72rem 0.8rem;
   border-radius: 10px;
-  min-height: clamp(340px, 60vh, 900px);
-  max-height: none;
+  height: var(--run-output-height);
+  min-height: var(--run-output-height);
+  max-height: var(--run-output-height);
   overflow: auto;
   font-family: "SF Mono", Monaco, Consolas, monospace;
   font-size: 0.76rem;
@@ -5773,7 +5997,7 @@ html[data-theme="dark"] .progress-indicator .success-icon {
   margin: 0;
   white-space: pre;
   word-break: normal;
-  flex: 1;
+  flex: 0 0 auto;
   min-width: 0;
 }
 
@@ -6001,6 +6225,10 @@ html[data-theme="dark"] .progress-bar-detail {
 }
 
 @media (max-width: 900px) {
+  .run-step {
+    --run-output-height: clamp(220px, 52vh, 520px);
+  }
+
   .run-status-rail {
     grid-template-columns: 1fr;
   }
@@ -6009,9 +6237,6 @@ html[data-theme="dark"] .progress-bar-detail {
     justify-content: flex-start;
   }
 
-  .run-step .calculation-output {
-    min-height: clamp(280px, 56vh, 700px);
-  }
 }
 
 /* Output section in results */
@@ -8421,6 +8646,12 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   background: #f8fafc;
 }
 
+.hpc-activity-refresh:disabled,
+.hpc-activity-popout:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .hpc-activity-popout {
   margin-left: 0;
 }
@@ -8488,6 +8719,81 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   background: #f8fbff;
   border-radius: 999px;
   padding: 0.14rem 0.42rem;
+}
+
+.hpc-activity-transfer {
+  border-bottom: 1px solid #edf2f7;
+  background: #f8fbff;
+  padding: 0.38rem 0.7rem 0.48rem;
+  display: grid;
+  gap: 0.26rem;
+}
+
+.hpc-activity-transfer-row,
+.hpc-activity-transfer-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.74rem;
+  color: #1f2937;
+}
+
+.hpc-activity-transfer-meta {
+  color: #475569;
+  font-size: 0.7rem;
+}
+
+.hpc-activity-transfer-bar {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: #dbeafe;
+  overflow: hidden;
+}
+
+.hpc-activity-transfer-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #1d4ed8);
+  transition: width 0.25s ease;
+}
+
+.hpc-activity-transfer-fill.indeterminate {
+  width: 42%;
+  animation: hpc-transfer-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes hpc-transfer-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+
+.hpc-activity-sync-note,
+.hpc-activity-sync-error {
+  margin: 0;
+  padding: 0.28rem 0.7rem;
+  font-size: 0.74rem;
+  line-height: 1.3;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.hpc-activity-sync-note {
+  color: #1e3a8a;
+  background: #eff6ff;
+}
+
+.hpc-activity-sync-error {
+  color: #7f1d1d;
+  background: #fef2f2;
 }
 
 .hpc-activity-foot {
@@ -8707,6 +9013,11 @@ html[data-theme="dark"] .hpc-activity-popout:hover {
   background: #334155;
 }
 
+html[data-theme="dark"] .hpc-activity-refresh:disabled,
+html[data-theme="dark"] .hpc-activity-popout:disabled {
+  opacity: 0.55;
+}
+
 html[data-theme="dark"] .hpc-activity-task-item {
   background: #1f2937;
   border-color: #475569;
@@ -8720,6 +9031,39 @@ html[data-theme="dark"] .hpc-activity-task-item.active {
 html[data-theme="dark"] .hpc-activity-meta > span {
   border-color: #475569;
   background: #1e293b;
+}
+
+html[data-theme="dark"] .hpc-activity-transfer {
+  background: #111d32;
+  border-color: #334155;
+}
+
+html[data-theme="dark"] .hpc-activity-transfer-row {
+  color: #dbeafe;
+}
+
+html[data-theme="dark"] .hpc-activity-transfer-meta {
+  color: #94a3b8;
+}
+
+html[data-theme="dark"] .hpc-activity-transfer-bar {
+  background: #1e293b;
+}
+
+html[data-theme="dark"] .hpc-activity-transfer-fill {
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+}
+
+html[data-theme="dark"] .hpc-activity-sync-note {
+  color: #bfdbfe;
+  background: #1e3a8a;
+  border-color: #334155;
+}
+
+html[data-theme="dark"] .hpc-activity-sync-error {
+  color: #fecaca;
+  background: #7f1d1d;
+  border-color: #334155;
 }
 
 html[data-theme="dark"] .hpc-activity-foot {

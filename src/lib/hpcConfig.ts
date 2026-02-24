@@ -39,6 +39,14 @@ export interface HpcUtilizationSample {
   output: string;
 }
 
+export interface HpcArtifactSyncReport {
+  mode: string;
+  downloaded_files: number;
+  downloaded_bytes: number;
+  skipped_files: number;
+  skipped_bytes: number;
+}
+
 export interface HpcPresetBundleExportResult {
   bundle_path: string;
   profile_count: number;
@@ -275,6 +283,30 @@ export async function sampleHpcUtilization(
     profileId: profileId ?? null,
     remoteJobId: remoteJobId ?? null,
     remoteNode: remoteNode ?? null,
+  });
+}
+
+export async function downloadHpcTaskArtifacts(
+  taskId: string,
+  full = true,
+): Promise<HpcArtifactSyncReport> {
+  return invoke<HpcArtifactSyncReport>("hpc_download_task_artifacts", {
+    taskId,
+    full,
+  });
+}
+
+export async function downloadHpcCalculationArtifacts(
+  projectId: string,
+  calcId: string,
+  profileId?: string | null,
+  full = true,
+): Promise<HpcArtifactSyncReport> {
+  return invoke<HpcArtifactSyncReport>("hpc_download_calculation_artifacts", {
+    projectId,
+    calcId,
+    profileId: profileId ?? null,
+    full,
   });
 }
 

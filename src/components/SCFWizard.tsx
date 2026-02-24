@@ -1486,6 +1486,7 @@ export function SCFWizard({
       remote_node?: string | null;
       remote_workdir?: string | null;
       remote_project_path?: string | null;
+      remote_storage_bytes?: number | null;
     },
   ) {
     const isOptimization = config.calculation === "relax" || config.calculation === "vcrelax";
@@ -1498,7 +1499,7 @@ export function SCFWizard({
       ? extractOptimizedStructure(calcResult?.raw_output || "", sourceStructure)
       : null;
     const optimizedCellSummary = optimizedStructure ? summarizeCell(optimizedStructure) : null;
-    const isRemoteRun = hpcMeta?.backend === "hpc";
+    const isRemoteRun = isHpcMode || hpcMeta?.backend === "hpc";
 
     return {
       calc_type: isOptimization ? "optimization" : "scf",
@@ -1538,11 +1539,13 @@ export function SCFWizard({
         ...(isRemoteRun
           ? {
             execution_backend: "hpc",
+            hpc_profile_id: activeHpcProfile?.id ?? null,
             remote_job_id: hpcMeta?.remote_job_id ?? null,
             scheduler_state: hpcMeta?.scheduler_state ?? null,
             remote_node: hpcMeta?.remote_node ?? null,
             remote_workdir: hpcMeta?.remote_workdir ?? null,
             remote_project_path: hpcMeta?.remote_project_path ?? null,
+            remote_storage_bytes: hpcMeta?.remote_storage_bytes ?? null,
           }
           : {}),
       },

@@ -303,6 +303,7 @@ function AppInner() {
   const [hpcLauncherDraft, setHpcLauncherDraft] = useState<HpcLauncher>("srun");
   const [hpcLauncherExtraArgsDraft, setHpcLauncherExtraArgsDraft] = useState("");
   const [isSavingHpcDefaults, setIsSavingHpcDefaults] = useState(false);
+  const [hpcDefaultsSaved, setHpcDefaultsSaved] = useState(false);
   const [hpcDefaultsStatus, setHpcDefaultsStatus] = useState<string | null>(null);
   const [executionPrefixInput, setExecutionPrefixInput] = useState("");
   const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
@@ -370,7 +371,7 @@ function AppInner() {
       setHpcResourceModeDraft("both");
       setHpcLauncherDraft("srun");
       setHpcLauncherExtraArgsDraft("");
-      setHpcDefaultsStatus(null);
+      clearHpcDefaultsSaveFeedback();
       return;
     }
     setHpcDefaultCpuDraft(cloneResourceDefaults("cpu", activeHpcProfile.default_cpu_resources));
@@ -378,8 +379,13 @@ function AppInner() {
     setHpcResourceModeDraft(activeHpcProfile.resource_mode ?? "both");
     setHpcLauncherDraft(activeHpcProfile.launcher ?? "srun");
     setHpcLauncherExtraArgsDraft(activeHpcProfile.launcher_extra_args || "");
-    setHpcDefaultsStatus(null);
+    clearHpcDefaultsSaveFeedback();
   }, [activeHpcProfile?.id, activeHpcProfile?.updated_at]);
+
+  function clearHpcDefaultsSaveFeedback() {
+    setHpcDefaultsSaved(false);
+    setHpcDefaultsStatus(null);
+  }
 
   // Check for existing QE configuration on startup
   useEffect(() => {
@@ -719,7 +725,7 @@ function AppInner() {
     }
 
     setIsSavingHpcDefaults(true);
-    setHpcDefaultsStatus(null);
+    clearHpcDefaultsSaveFeedback();
     try {
       const saved = await updateHpcProfileDefaults(
         activeHpcProfile.id,
@@ -735,10 +741,11 @@ function AppInner() {
       setHpcResourceModeDraft(saved.resource_mode ?? "both");
       setHpcLauncherDraft(saved.launcher ?? "srun");
       setHpcLauncherExtraArgsDraft(saved.launcher_extra_args || "");
-      setHpcDefaultsStatus("Saved");
-      setHpcStatus("HPC defaults saved.");
+      setHpcDefaultsSaved(true);
+      setHpcDefaultsStatus(null);
     } catch (e) {
       console.error("Failed to save HPC defaults:", e);
+      setHpcDefaultsSaved(false);
       setHpcDefaultsStatus(`Failed to save defaults: ${e}`);
     } finally {
       setIsSavingHpcDefaults(false);
@@ -1214,7 +1221,7 @@ function AppInner() {
                             const value = event.target.value;
                             const mode = value === "cpu_only" || value === "gpu_only" ? value : "both";
                             setHpcResourceModeDraft(mode);
-                            setHpcDefaultsStatus(null);
+                            clearHpcDefaultsSaveFeedback();
                           }}
                         >
                           <option value="both">CPU + GPU</option>
@@ -1229,7 +1236,7 @@ function AppInner() {
                           onChange={(event) => {
                             const launcher = event.target.value === "mpirun" ? "mpirun" : "srun";
                             setHpcLauncherDraft(launcher);
-                            setHpcDefaultsStatus(null);
+                            clearHpcDefaultsSaveFeedback();
                           }}
                         >
                           <option value="srun">srun</option>
@@ -1242,7 +1249,7 @@ function AppInner() {
                           value={hpcLauncherExtraArgsDraft}
                           onChange={(event) => {
                             setHpcLauncherExtraArgsDraft(normalizeCliDashText(event.target.value));
-                            setHpcDefaultsStatus(null);
+                            clearHpcDefaultsSaveFeedback();
                           }}
                           placeholder="e.g. --bind-to none"
                           autoCorrect="off"
@@ -1268,7 +1275,7 @@ function AppInner() {
                                   ...prev,
                                   partition: event.target.value,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder="short"
                             />
@@ -1282,7 +1289,7 @@ function AppInner() {
                                   ...prev,
                                   walltime: event.target.value,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder="02:00:00"
                             />
@@ -1298,7 +1305,7 @@ function AppInner() {
                                   ...prev,
                                   nodes: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1313,7 +1320,7 @@ function AppInner() {
                                   ...prev,
                                   ntasks: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1328,7 +1335,7 @@ function AppInner() {
                                   ...prev,
                                   cpus_per_task: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1343,7 +1350,7 @@ function AppInner() {
                                   ...prev,
                                   memory_gb: normalizePositiveIntInput(event.target.value, 16),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1358,7 +1365,7 @@ function AppInner() {
                                   ...prev,
                                   qos: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1371,7 +1378,7 @@ function AppInner() {
                                   ...prev,
                                   account: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1384,7 +1391,7 @@ function AppInner() {
                                   ...prev,
                                   constraint: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1398,7 +1405,7 @@ function AppInner() {
                                   ...prev,
                                   module_preamble: normalizeCliDashText(event.target.value) || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder={"module purge\nmodule load qe"}
                               autoCorrect="off"
@@ -1420,7 +1427,7 @@ function AppInner() {
                                   ...prev,
                                   additional_sbatch: parsed,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder={"--mail-type=END\n--mail-user=you@example.edu"}
                               autoCorrect="off"
@@ -1443,7 +1450,7 @@ function AppInner() {
                                   ...prev,
                                   partition: event.target.value,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder="short"
                             />
@@ -1457,7 +1464,7 @@ function AppInner() {
                                   ...prev,
                                   walltime: event.target.value,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder="02:00:00"
                             />
@@ -1473,7 +1480,7 @@ function AppInner() {
                                   ...prev,
                                   nodes: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1488,7 +1495,7 @@ function AppInner() {
                                   ...prev,
                                   ntasks: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1503,7 +1510,7 @@ function AppInner() {
                                   ...prev,
                                   cpus_per_task: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1518,7 +1525,7 @@ function AppInner() {
                                   ...prev,
                                   memory_gb: normalizePositiveIntInput(event.target.value, 32),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1533,7 +1540,7 @@ function AppInner() {
                                   ...prev,
                                   gpus: normalizePositiveIntInput(event.target.value, 1),
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1548,7 +1555,7 @@ function AppInner() {
                                   ...prev,
                                   qos: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1561,7 +1568,7 @@ function AppInner() {
                                   ...prev,
                                   account: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1574,7 +1581,7 @@ function AppInner() {
                                   ...prev,
                                   constraint: event.target.value || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                             />
                           </label>
@@ -1588,7 +1595,7 @@ function AppInner() {
                                   ...prev,
                                   module_preamble: normalizeCliDashText(event.target.value) || null,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder={"module purge\nmodule load qe"}
                               autoCorrect="off"
@@ -1610,7 +1617,7 @@ function AppInner() {
                                   ...prev,
                                   additional_sbatch: parsed,
                                 }));
-                                setHpcDefaultsStatus(null);
+                                clearHpcDefaultsSaveFeedback();
                               }}
                               placeholder={"--mail-type=END\n--mail-user=you@example.edu"}
                               autoCorrect="off"
@@ -1623,11 +1630,15 @@ function AppInner() {
                     </div>
 
                     <button
-                      className="settings-menu-item"
+                      className={`settings-menu-item ${hpcDefaultsSaved ? "saved" : ""}`.trim()}
                       onClick={() => void saveHpcDefaultRunSettings()}
                       disabled={isSavingHpcDefaults}
                     >
-                      {isSavingHpcDefaults ? "Saving..." : "Save HPC Default Run Settings"}
+                      {isSavingHpcDefaults
+                        ? "Saving..."
+                        : hpcDefaultsSaved
+                          ? "✓ Saved"
+                          : "Save HPC Default Run Settings"}
                     </button>
                     {hpcDefaultsStatus && <div className="settings-menu-status">{hpcDefaultsStatus}</div>}
                   </div>
@@ -1928,6 +1939,7 @@ function AppInner() {
         <BandStructureWizard
           qePath={qePath || ""}
           executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
           onViewBands={(bandData, fermiEnergy) => {
             setViewBandsData({ bandData, fermiEnergy });
@@ -1985,6 +1997,7 @@ function AppInner() {
         <ElectronicDOSWizard
           qePath={qePath || ""}
           executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
           onViewDos={(dosData, fermiEnergy) => {
             setViewDosData({ dosData, fermiEnergy });
@@ -2043,6 +2056,7 @@ function AppInner() {
         <FermiSurfaceWizard
           qePath={qePath || ""}
           executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
           onBack={() => {
             setCurrentView("project-dashboard");
@@ -2066,6 +2080,7 @@ function AppInner() {
         <PhononWizard
           qePath={qePath || ""}
           executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({

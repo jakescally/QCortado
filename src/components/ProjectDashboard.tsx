@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
@@ -12,6 +13,7 @@ import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "../lib/saveSizeMode";
 import { isPhononReadyScf } from "../lib/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
+import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
 import { useTheme } from "../lib/ThemeContext";
 import { EditProjectDialog } from "./EditProjectDialog";
 
@@ -90,6 +92,17 @@ interface CalculationRuntimeDisplay {
   seconds: number;
 }
 
+type HpcDownloadPhase = "connecting" | "collecting" | "downloading" | "saved" | "error";
+
+interface HpcDownloadProgress {
+  phase: HpcDownloadPhase;
+  processedFiles: number;
+  totalFiles: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  skippedFiles: number;
+}
+
 interface DisplayCellMetrics {
   a: number;
   b: number;
@@ -117,12 +130,48 @@ function isHpcCalculation(calc: CalculationRun): boolean {
   if (backend === "hpc") {
     return true;
   }
-  return Boolean(params.remote_job_id || params.remote_workdir || params.remote_project_path);
+  if (params.remote_job_id || params.remote_workdir || params.remote_project_path) {
+    return true;
+  }
+  const rawOutput = typeof calc.result?.raw_output === "string" ? calc.result.raw_output : "";
+  return rawOutput.includes("HPC_STAGE|") || rawOutput.includes("HPC_CMD|");
 }
 
 function getCalcTagClass(tag: { label: string; type: string }): string {
-  const isHpcTag = tag.label.trim().toUpperCase() === "HPC";
-  return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}`;
+  const normalizedLabel = tag.label.trim().toUpperCase();
+  const isHpcTag = normalizedLabel === "HPC";
+  const isDownloadedTag = normalizedLabel === "DOWNLOADED";
+  return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}${isDownloadedTag ? " calc-tag-downloaded" : ""}`;
+}
+
+function asNonNegativeInteger(value: unknown): number | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+  return Math.floor(numeric);
+}
+
+function getLocalStorageBytes(calc: CalculationRun): number | null {
+  const fromStorageField = asNonNegativeInteger(calc.storage_bytes);
+  if (fromStorageField != null) return fromStorageField;
+  return asNonNegativeInteger(calc.parameters?.local_storage_bytes);
+}
+
+function getRemoteStorageBytes(calc: CalculationRun): number | null {
+  const params = calc.parameters || {};
+  const explicitRemote = asNonNegativeInteger(params.remote_storage_bytes);
+  if (explicitRemote != null) return explicitRemote;
+  const fallbackRemote = asNonNegativeInteger(params.remote_artifact_bytes ?? params.remote_total_bytes);
+  if (fallbackRemote != null) return fallbackRemote;
+  const fermiPayloadBytes = asNonNegativeInteger(params.total_frmsf_bytes ?? params.total_bxsf_bytes);
+  if (fermiPayloadBytes != null) return fermiPayloadBytes;
+  return null;
+}
+
+function isHpcArtifactsDownloaded(calc: CalculationRun): boolean {
+  const params = calc.parameters || {};
+  if (params.artifacts_downloaded_full === true) return true;
+  const syncMode = String(params.artifact_sync_mode || "").trim().toLowerCase();
+  return syncMode === "full";
 }
 
 // Helper to generate calculation feature tags from parameters
@@ -196,6 +245,9 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
 
   if (isHpcCalculation(calc)) {
     pushTag("HPC", "feature");
+    if (isHpcArtifactsDownloaded(calc)) {
+      pushTag("Downloaded", "feature");
+    }
   }
 
   return tags;
@@ -420,6 +472,39 @@ function formatThreshold(value: unknown): string | null {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return null;
   return numeric < 0.001 ? numeric.toExponential(1) : numeric.toString();
+}
+
+function parsePositiveInt(value: string | undefined): number {
+  const parsed = Number(value ?? "");
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Math.floor(parsed);
+}
+
+function defaultHpcDownloadProgress(phase: HpcDownloadPhase): HpcDownloadProgress {
+  return {
+    phase,
+    processedFiles: 0,
+    totalFiles: 0,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    skippedFiles: 0,
+  };
+}
+
+function getHpcDownloadPercent(progress: HpcDownloadProgress): number | null {
+  if (progress.totalBytes > 0) {
+    return Math.min(
+      100,
+      Math.max(0, Math.round((progress.downloadedBytes / progress.totalBytes) * 100)),
+    );
+  }
+  if (progress.totalFiles > 0) {
+    return Math.min(
+      100,
+      Math.max(0, Math.round((progress.processedFiles / progress.totalFiles) * 100)),
+    );
+  }
+  return null;
 }
 
 function parseQeTimeToken(token: string): number | null {
@@ -715,6 +800,8 @@ export function ProjectDashboard({
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [isRefreshingProject, setIsRefreshingProject] = useState(false);
   const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
+  const [downloadingCalcId, setDownloadingCalcId] = useState<string | null>(null);
+  const [downloadProgressByCalcId, setDownloadProgressByCalcId] = useState<Record<string, HpcDownloadProgress>>({});
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -831,6 +918,29 @@ export function ProjectDashboard({
     }
     const precision = value >= 10 || unitIdx === 0 ? 0 : 1;
     return `${value.toFixed(precision)} ${units[unitIdx]}`;
+  }
+
+  function renderStorageDetailItems(calc: CalculationRun) {
+    const localBytes = getLocalStorageBytes(calc);
+    const remoteBytes = getRemoteStorageBytes(calc);
+    if (localBytes == null && remoteBytes == null) return null;
+
+    return (
+      <>
+        {localBytes != null && (
+          <div className="detail-item">
+            <label>Local Size</label>
+            <span>{formatBytes(localBytes)}</span>
+          </div>
+        )}
+        {remoteBytes != null && (
+          <div className="detail-item">
+            <label>Remote Size</label>
+            <span>{formatBytes(remoteBytes)}</span>
+          </div>
+        )}
+      </>
+    );
   }
 
   async function clearTempStorage() {
@@ -1157,6 +1267,231 @@ export function ProjectDashboard({
     } finally {
       setLaunchingFermiCalcId((current) => (current === calc.id ? null : current));
     }
+  }
+
+  async function handleDownloadHpcArtifacts(calc: CalculationRun) {
+    if (!isHpcCalculation(calc)) return;
+    setDownloadingCalcId(calc.id);
+    setError(null);
+    setInfoMessage(null);
+    setDownloadProgressByCalcId((prev) => ({
+      ...prev,
+      [calc.id]: defaultHpcDownloadProgress("connecting"),
+    }));
+    let unlisten: UnlistenFn | null = null;
+    let downloadCompleted = false;
+    try {
+      unlisten = await listen<string>(`task-output:${calc.id}`, (event) => {
+        const line = String(event.payload || "");
+        if (line.startsWith("HPC_STAGE|Connecting|")) {
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("connecting")),
+              phase: "connecting",
+            },
+          }));
+          return;
+        }
+        if (line.startsWith("HPC_STAGE|Collecting|")) {
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("collecting")),
+              phase: "collecting",
+            },
+          }));
+          return;
+        }
+        if (line.startsWith("HPC_TRANSFER|start|")) {
+          const parts = line.split("|");
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("downloading")),
+              phase: "downloading",
+              totalFiles: parsePositiveInt(parts[3]),
+              totalBytes: parsePositiveInt(parts[4]),
+            },
+          }));
+          return;
+        }
+        if (line.startsWith("HPC_TRANSFER|progress|")) {
+          const parts = line.split("|");
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("downloading")),
+              phase: "downloading",
+              processedFiles: parsePositiveInt(parts[3]),
+              totalFiles: parsePositiveInt(parts[4]),
+              downloadedBytes: parsePositiveInt(parts[5]),
+              totalBytes: parsePositiveInt(parts[6]),
+              skippedFiles: parsePositiveInt(parts[7]),
+            },
+          }));
+          return;
+        }
+        if (line.startsWith("HPC_TRANSFER|done|")) {
+          const parts = line.split("|");
+          const downloadedFiles = parsePositiveInt(parts[3]);
+          const totalFiles = parsePositiveInt(parts[4]);
+          const skippedFiles = parsePositiveInt(parts[7]);
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("downloading")),
+              phase: "downloading",
+              processedFiles:
+                downloadedFiles + skippedFiles > 0
+                  ? downloadedFiles + skippedFiles
+                  : totalFiles,
+              totalFiles,
+              downloadedBytes: parsePositiveInt(parts[5]),
+              totalBytes: parsePositiveInt(parts[6]),
+              skippedFiles,
+            },
+          }));
+          return;
+        }
+        if (line.startsWith("HPC_STAGE|Saved|")) {
+          setDownloadProgressByCalcId((prev) => ({
+            ...prev,
+            [calc.id]: {
+              ...(prev[calc.id] ?? defaultHpcDownloadProgress("saved")),
+              phase: "saved",
+            },
+          }));
+        }
+      });
+
+      const report = await downloadHpcCalculationArtifacts(projectId, calc.id, null, true);
+      const remoteStorageBytes = report.downloaded_bytes + report.skipped_bytes;
+      setDownloadProgressByCalcId((prev) => {
+        const current = prev[calc.id] ?? defaultHpcDownloadProgress("saved");
+        return {
+          ...prev,
+          [calc.id]: {
+            ...current,
+            phase: "saved",
+            processedFiles:
+              current.totalFiles > 0 ? current.totalFiles : report.downloaded_files + report.skipped_files,
+            totalFiles:
+              current.totalFiles > 0 ? current.totalFiles : report.downloaded_files + report.skipped_files,
+            downloadedBytes: report.downloaded_bytes,
+            totalBytes:
+              current.totalBytes > 0 ? current.totalBytes : report.downloaded_bytes + report.skipped_bytes,
+            skippedFiles: report.skipped_files,
+          },
+        };
+      });
+      const skippedSuffix = report.skipped_files > 0 ? ` (${report.skipped_files} skipped)` : "";
+      setInfoMessage(
+        `Downloaded ${report.downloaded_files} files (${formatBytes(report.downloaded_bytes)})${skippedSuffix}.`,
+      );
+      setProject((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          cif_variants: prev.cif_variants.map((variant) => ({
+            ...variant,
+            calculations: variant.calculations.map((entry) => {
+              if (entry.id !== calc.id) return entry;
+              const nextParams = {
+                ...(entry.parameters || {}),
+                artifacts_downloaded_full: true,
+                artifact_sync_mode: "full",
+                artifact_synced_at: new Date().toISOString(),
+                remote_storage_bytes: remoteStorageBytes,
+              };
+              return {
+                ...entry,
+                parameters: nextParams,
+              };
+            }),
+          })),
+        };
+      });
+      downloadCompleted = true;
+      await loadProject({ showLoading: false, refreshSelectedCif: false });
+    } catch (e) {
+      console.error("Failed to download HPC artifacts:", e);
+      setDownloadProgressByCalcId((prev) => ({
+        ...prev,
+        [calc.id]: {
+          ...(prev[calc.id] ?? defaultHpcDownloadProgress("error")),
+          phase: "error",
+        },
+      }));
+      setError(`Failed to download HPC artifacts: ${e}`);
+    } finally {
+      if (unlisten) {
+        unlisten();
+      }
+      if (downloadCompleted) {
+        setDownloadProgressByCalcId((prev) => {
+          if (!(calc.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[calc.id];
+          return next;
+        });
+      }
+      setDownloadingCalcId((current) => (current === calc.id ? null : current));
+    }
+  }
+
+  function renderHpcDownloadProgress(calc: CalculationRun) {
+    const progress = downloadProgressByCalcId[calc.id];
+    if (!progress) return null;
+
+    const percent = getHpcDownloadPercent(progress);
+    const statusLabel =
+      progress.phase === "connecting"
+        ? "Connecting..."
+        : progress.phase === "collecting"
+          ? "Collecting..."
+          : progress.phase === "downloading"
+            ? "Downloading..."
+            : progress.phase === "saved"
+              ? "Saved"
+              : "Failed";
+
+    return (
+      <div className="calc-download-progress">
+        <div className="calc-download-progress-row">
+          <span>{statusLabel}</span>
+          <span>{percent == null ? "..." : `${percent}%`}</span>
+        </div>
+        <div className="calc-download-progress-bar">
+          <div
+            className={`calc-download-progress-fill ${percent == null ? "indeterminate" : ""} ${progress.phase === "error" ? "error" : ""}`}
+            style={percent == null ? undefined : { width: `${percent}%` }}
+          />
+        </div>
+        <div className="calc-download-progress-meta">
+          <span>{`${progress.processedFiles}/${progress.totalFiles || "?"} files`}</span>
+          <span>{`${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}`}</span>
+        </div>
+      </div>
+    );
+  }
+
+  function renderHpcDownloadButton(calc: CalculationRun) {
+    if (!isHpcCalculation(calc)) return null;
+    const isDownloading = downloadingCalcId === calc.id;
+    const isDownloaded = isHpcArtifactsDownloaded(calc) && !isDownloading;
+    return (
+      <button
+        className={`download-calc-btn${isDownloaded ? " downloaded" : ""}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleDownloadHpcArtifacts(calc);
+        }}
+        disabled={isDownloading || isDownloaded}
+      >
+        {isDownloading ? "Downloading..." : isDownloaded ? "Downloaded" : "Download Full"}
+      </button>
+    );
   }
 
   function handleRunPhonons() {
@@ -2148,12 +2483,15 @@ export function ProjectDashboard({
                               <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         <div className="detail-item parameters">
                           <label>Parameters</label>
                           <pre>{JSON.stringify(calc.parameters, null, 2)}</pre>
                         </div>
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
@@ -2267,8 +2605,10 @@ export function ProjectDashboard({
                               <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
                           {calc.result?.band_data && (
                             <button
                               className="view-bands-btn"
@@ -2280,6 +2620,7 @@ export function ProjectDashboard({
                               View Bands
                             </button>
                           )}
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
@@ -2405,8 +2746,10 @@ export function ProjectDashboard({
                               <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
                           {dosData && (
                             <button
                               className="view-dos-btn"
@@ -2418,6 +2761,7 @@ export function ProjectDashboard({
                               View DOS
                             </button>
                           )}
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
@@ -2555,6 +2899,7 @@ export function ProjectDashboard({
                               <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         {surfaceFiles.length > 0 && (
                           <div className="detail-item parameters">
@@ -2563,6 +2908,7 @@ export function ProjectDashboard({
                           </div>
                         )}
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
                           <button
                             className="view-fermi-btn"
                             onClick={(e) => {
@@ -2573,6 +2919,7 @@ export function ProjectDashboard({
                           >
                             {launchingFermiCalcId === calc.id ? "Launching..." : "View Fermi Surface"}
                           </button>
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
@@ -2706,8 +3053,10 @@ export function ProjectDashboard({
                               <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
                           {hasDispersion && (
                             <button
                               className="view-phonon-btn"
@@ -2730,6 +3079,7 @@ export function ProjectDashboard({
                               View DOS
                             </button>
                           )}
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
@@ -2962,8 +3312,11 @@ export function ProjectDashboard({
                               <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
+                          {renderStorageDetailItems(calc)}
                         </div>
                         <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
+                          {renderHpcDownloadButton(calc)}
                           <button
                             className="delete-calc-btn"
                             onClick={(e) => {
