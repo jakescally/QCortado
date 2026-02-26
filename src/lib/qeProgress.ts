@@ -300,7 +300,7 @@ function updateHpcProgress(line: string, state: ProgressState): ProgressState | 
       return { ...nextBase, phase: "Scheduler: Completing", percent: Math.max(state.percent ?? 0, 90) };
     }
     if (schedulerState === "COMPLETED") {
-      return { ...nextBase, phase: "Scheduler: Completed", percent: 100, status: "complete" };
+      return { ...nextBase, phase: "Scheduler: Completed", percent: Math.max(state.percent ?? 0, 92) };
     }
     if (HPC_TERMINAL_ERROR_STATES.has(schedulerState)) {
       return { ...nextBase, phase: `Scheduler: ${schedulerState}`, status: "error" };

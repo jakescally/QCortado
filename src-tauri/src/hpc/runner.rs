@@ -14,6 +14,7 @@ use super::slurm::{
     parse_squeue_snapshot, SchedulerSnapshot,
 };
 use super::ssh::{download_file, run_ssh_command, upload_directory};
+const LIVE_LINECOUNT_MARKER: &str = "__QCORTADO_INTERNAL_LINECOUNT__=";
 
 #[derive(Debug, Clone)]
 pub struct HpcBatchRequest {
@@ -568,7 +569,33 @@ fn collect_live_output_files(slurm_script: &str) -> Vec<String> {
     files
 }
 
-async fn stream_remote_file_tail_incremental(
+fn build_incremental_read_command(
+    remote_workdir: &str,
+    file_name: &str,
+    last_line_count: usize,
+) -> String {
+    format!(
+        "cd {} && if [ -f {} ]; then awk 'NR > {} {{print}} END {{print \"{}\" NR}}' {}; fi",
+        shell_single_quote(remote_workdir),
+        shell_single_quote(file_name),
+        last_line_count,
+        LIVE_LINECOUNT_MARKER,
+        shell_single_quote(file_name)
+    )
+}
+
+fn parse_incremental_read_output(output: &str) -> Option<(Vec<String>, usize)> {
+    let mut lines: Vec<String> = output.lines().map(|line| line.to_string()).collect();
+    let marker_line = lines.pop()?;
+    let total_lines = marker_line
+        .strip_prefix(LIVE_LINECOUNT_MARKER)?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+    Some((lines, total_lines))
+}
+
+async fn stream_remote_file_incremental(
     app: &AppHandle,
     pm: &ProcessManager,
     task_id: &str,
@@ -576,33 +603,42 @@ async fn stream_remote_file_tail_incremental(
     secret: Option<&str>,
     remote_workdir: &str,
     file_name: &str,
-    max_lines: usize,
-    last_lines: &mut Vec<String>,
+    last_line_count: &mut usize,
     already_announced: bool,
 ) -> bool {
-    let cmd = format!(
-        "cd {} && if [ -f {} ]; then tail -n {} {}; fi",
-        shell_single_quote(remote_workdir),
-        shell_single_quote(file_name),
-        max_lines.max(1),
-        shell_single_quote(file_name)
-    );
-    let Ok(tail_output) = run_ssh_command(profile, secret, &cmd).await else {
+    let read_cmd = build_incremental_read_command(remote_workdir, file_name, *last_line_count);
+    let Ok(read_output) = run_ssh_command(profile, secret, &read_cmd).await else {
         return already_announced;
     };
 
-    let next_lines: Vec<String> = tail_output.lines().map(|line| line.to_string()).collect();
+    let Some((mut lines_to_emit, mut total_lines)) = parse_incremental_read_output(&read_output) else {
+        return already_announced;
+    };
+
     let mut announced = already_announced;
 
-    let lines_to_emit: Vec<String> = if next_lines.len() >= last_lines.len() {
-        next_lines
-            .iter()
-            .skip(last_lines.len())
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        next_lines.clone()
-    };
+    if total_lines < *last_line_count {
+        emit_task_line(
+            app,
+            pm,
+            task_id,
+            format!(
+                "HPC_WARNING|Detected log rotation/truncation for {}. Restarting live stream from beginning.",
+                file_name
+            ),
+        )
+        .await;
+
+        let reset_cmd = build_incremental_read_command(remote_workdir, file_name, 0);
+        let Ok(reset_output) = run_ssh_command(profile, secret, &reset_cmd).await else {
+            return announced;
+        };
+        let Some((reset_lines, reset_total)) = parse_incremental_read_output(&reset_output) else {
+            return announced;
+        };
+        lines_to_emit = reset_lines;
+        total_lines = reset_total;
+    }
 
     if !lines_to_emit.is_empty() {
         if file_name != "slurm.out" && !announced {
@@ -620,7 +656,7 @@ async fn stream_remote_file_tail_incremental(
         }
     }
 
-    *last_lines = next_lines;
+    *last_line_count = total_lines;
     announced
 }
 
@@ -764,7 +800,7 @@ pub async fn run_batch_task(
 
     let mut last_scheduler_state: Option<String> = None;
     let live_output_files = collect_live_output_files(&request.slurm_script);
-    let mut live_tail_history: HashMap<String, Vec<String>> = HashMap::new();
+    let mut live_line_counts: HashMap<String, usize> = HashMap::new();
     let mut announced_live_files: HashSet<String> = HashSet::new();
 
     let terminal_snapshot = loop {
@@ -775,11 +811,11 @@ pub async fn run_batch_task(
         }
 
         for file_name in &live_output_files {
-            let previous_lines = live_tail_history
+            let previous_line_count = live_line_counts
                 .entry(file_name.clone())
-                .or_insert_with(Vec::new);
+                .or_insert(0);
             let announced = announced_live_files.contains(file_name);
-            let updated_announced = stream_remote_file_tail_incremental(
+            let updated_announced = stream_remote_file_incremental(
                 &app,
                 &pm,
                 task_id(&request),
@@ -787,8 +823,7 @@ pub async fn run_batch_task(
                 request.secret.as_deref(),
                 &remote_workdir,
                 file_name,
-                500,
-                previous_lines,
+                previous_line_count,
                 announced,
             )
             .await;
@@ -1022,4 +1057,30 @@ pub async fn run_batch_task(
 
 fn task_id(request: &HpcBatchRequest) -> &str {
     request.task_id.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_incremental_read_output, LIVE_LINECOUNT_MARKER};
+
+    #[test]
+    fn parses_incremental_payload_with_lines() {
+        let payload = format!("line-1\nline-2\n{}42\n", LIVE_LINECOUNT_MARKER);
+        let parsed = parse_incremental_read_output(&payload).expect("expected marker payload");
+        assert_eq!(parsed.0, vec!["line-1".to_string(), "line-2".to_string()]);
+        assert_eq!(parsed.1, 42);
+    }
+
+    #[test]
+    fn parses_incremental_payload_for_empty_file() {
+        let payload = format!("{}0\n", LIVE_LINECOUNT_MARKER);
+        let parsed = parse_incremental_read_output(&payload).expect("expected marker payload");
+        assert!(parsed.0.is_empty());
+        assert_eq!(parsed.1, 0);
+    }
+
+    #[test]
+    fn rejects_payload_without_marker() {
+        assert!(parse_incremental_read_output("line-1\nline-2\n").is_none());
+    }
 }
