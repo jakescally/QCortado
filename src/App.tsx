@@ -406,9 +406,9 @@ function AppInner() {
     void loadGlobalSaveSizeSetting();
   }, []);
 
-  // Listen for close confirmation events from backend
+  // Listen for explicit quit confirmation events from backend
   useEffect(() => {
-    const unlisten = listen("confirm-close", () => {
+    const unlisten = listen("confirm-quit", () => {
       setShowCloseConfirm(true);
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -1082,23 +1082,28 @@ function AppInner() {
   const hpcCpuAdditionalSbatchText = (hpcDefaultCpuDraft.additional_sbatch || []).join("\n");
   const hpcGpuAdditionalSbatchText = (hpcDefaultGpuDraft.additional_sbatch || []).join("\n");
 
-  async function handleConfirmClose() {
-    setShowCloseConfirm(false);
-    await invoke("shutdown_and_close");
+  async function handleConfirmQuit() {
+    try {
+      setShowCloseConfirm(false);
+      await invoke("shutdown_and_close");
+    } catch (e) {
+      setShowCloseConfirm(true);
+      setError(`Quit failed: ${e}`);
+    }
   }
 
-  // Render the close confirmation modal overlay
+  // Render the quit confirmation modal overlay
   const closeConfirmModal = showCloseConfirm ? (
     <div className="close-confirm-overlay" onClick={() => setShowCloseConfirm(false)}>
       <div className="close-confirm-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Calculations Still Running</h3>
+        <h3>Quit QCortado?</h3>
         <p>
-          One or more calculations are still running. Closing the app will terminate them. Are you sure?
+          Quit will cancel running jobs and clear pending queue.
         </p>
         <div className="close-confirm-actions">
           <button onClick={() => setShowCloseConfirm(false)}>Cancel</button>
-          <button className="close-confirm-danger" onClick={handleConfirmClose}>
-            Close Anyway
+          <button className="close-confirm-danger" onClick={handleConfirmQuit}>
+            Quit Anyway
           </button>
         </div>
       </div>
@@ -1115,13 +1120,13 @@ function AppInner() {
           setShowSettingsMenu(false);
           setShowQueueMenu((prev) => !prev);
         }}
-        title="Task queue menu"
+        title={executionMode === "hpc" ? "Task manager menu" : "Task queue menu"}
       >
         ☰
       </button>
       {showQueueMenu && (
         <div className="floating-queue-menu">
-          <button onClick={navigateToQueue}>View Queue</button>
+          <button onClick={navigateToQueue}>{executionMode === "hpc" ? "View Task Manager" : "View Queue"}</button>
         </div>
       )}
     </div>
@@ -2158,7 +2163,7 @@ function AppInner() {
   if (currentView === "task-queue") {
     return (
       <>
-        <TaskQueuePage onBack={returnFromQueue} />
+        <TaskQueuePage onBack={returnFromQueue} executionMode={executionMode} />
         {appChrome}
       </>
     );

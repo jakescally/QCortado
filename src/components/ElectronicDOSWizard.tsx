@@ -199,6 +199,7 @@ export function ElectronicDOSWizard({
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
+  const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
 
@@ -693,8 +694,8 @@ export function ElectronicDOSWizard({
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
     }
-    if (hasExternalRunningTask) {
-      setError("Another task is currently running. Queue this task or wait for completion.");
+    if (hasBlockingExternalTask) {
+      setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
     }
     setIsRunning(true);
@@ -775,7 +776,7 @@ export function ElectronicDOSWizard({
             output_content: outputContent,
             tags: [],
           },
-          workingDir: DOS_WORK_DIR,
+          workingDir: finalTask.hpc.local_sync_dir ?? DOS_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
@@ -797,6 +798,10 @@ export function ElectronicDOSWizard({
   }
 
   function queueCalculation() {
+    if (isHpcMode) {
+      setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
     if (selectedScfDependencyBlocked) {
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
@@ -1113,17 +1118,19 @@ export function ElectronicDOSWizard({
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button
-            className="secondary-button"
-            onClick={() => void queueCalculation()}
-            disabled={selectedScfDependencyBlocked || isResolvingDependency}
-          >
-            Queue Task
-          </button>
+          {!isHpcMode && (
+            <button
+              className="secondary-button"
+              onClick={() => void queueCalculation()}
+              disabled={selectedScfDependencyBlocked || isResolvingDependency}
+            >
+              Queue Task
+            </button>
+          )}
           <button
             className="primary-button"
             onClick={() => void runCalculation()}
-            disabled={hasExternalRunningTask || selectedScfDependencyBlocked || isResolvingDependency}
+            disabled={hasBlockingExternalTask || selectedScfDependencyBlocked || isResolvingDependency}
           >
             {isHpcMode ? "Submit DOS to Andromeda" : "Run Calculation"}
           </button>

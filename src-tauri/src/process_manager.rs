@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -34,6 +35,8 @@ pub struct TaskInfo {
     pub remote_project_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_storage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sync_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,6 +60,8 @@ pub struct TaskSummary {
     pub remote_project_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_storage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_sync_dir: Option<String>,
 }
 
 pub struct RunningTask {
@@ -92,16 +97,25 @@ pub struct HpcTransferContext {
     pub local_sync_dir: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunningHpcJobContext {
+    pub task_id: String,
+    pub remote_job_id: Option<String>,
+    pub hpc_profile_id: Option<String>,
+}
+
 /// Thread-safe process manager. Clone is cheap (shared Arc).
 #[derive(Clone)]
 pub struct ProcessManager {
     tasks: Arc<Mutex<HashMap<String, RunningTask>>>,
+    running_count: Arc<AtomicUsize>,
 }
 
 impl ProcessManager {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            running_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -135,12 +149,16 @@ impl ProcessManager {
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
+        self.running_count.fetch_add(1, Ordering::SeqCst);
         (task_id, cancel_flag)
     }
 
     pub async fn has_running_tasks(&self) -> bool {
-        let tasks = self.tasks.lock().await;
-        tasks.values().any(|t| t.status == TaskStatus::Running)
+        self.has_running_tasks_now()
+    }
+
+    pub fn has_running_tasks_now(&self) -> bool {
+        self.running_count.load(Ordering::SeqCst) > 0
     }
 
     pub async fn append_output(&self, task_id: &str, line: String) {
@@ -160,6 +178,9 @@ impl ProcessManager {
     pub async fn complete(&self, task_id: &str, result: serde_json::Value) {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
+            if task.status == TaskStatus::Running {
+                self.running_count.fetch_sub(1, Ordering::SeqCst);
+            }
             task.status = TaskStatus::Completed;
             task.result = Some(result);
         }
@@ -168,6 +189,9 @@ impl ProcessManager {
     pub async fn fail(&self, task_id: &str, error: String) {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
+            if task.status == TaskStatus::Running {
+                self.running_count.fetch_sub(1, Ordering::SeqCst);
+            }
             task.status = TaskStatus::Failed;
             task.error = Some(error);
         }
@@ -190,6 +214,7 @@ impl ProcessManager {
             remote_workdir: t.remote_workdir.clone(),
             remote_project_path: t.remote_project_path.clone(),
             remote_storage_bytes: t.remote_storage_bytes,
+            local_sync_dir: t.local_sync_dir.clone(),
         })
     }
 
@@ -210,6 +235,7 @@ impl ProcessManager {
                 remote_workdir: t.remote_workdir.clone(),
                 remote_project_path: t.remote_project_path.clone(),
                 remote_storage_bytes: t.remote_storage_bytes,
+                local_sync_dir: t.local_sync_dir.clone(),
             })
             .collect()
     }
@@ -236,6 +262,7 @@ impl ProcessManager {
             kill_process(pid);
         }
 
+        self.running_count.fetch_sub(1, Ordering::SeqCst);
         task.status = TaskStatus::Cancelled;
         task.error = Some("Cancelled by user".to_string());
         Ok(())
@@ -243,7 +270,11 @@ impl ProcessManager {
 
     pub async fn remove(&self, task_id: &str) {
         let mut tasks = self.tasks.lock().await;
-        tasks.remove(task_id);
+        if let Some(task) = tasks.remove(task_id) {
+            if task.status == TaskStatus::Running {
+                self.running_count.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
     }
 
     pub async fn kill_all(&self) {
@@ -255,6 +286,7 @@ impl ProcessManager {
                 if let Some(pid) = task.child_id {
                     kill_process(pid);
                 }
+                self.running_count.fetch_sub(1, Ordering::SeqCst);
                 task.status = TaskStatus::Cancelled;
             }
         }
@@ -339,6 +371,22 @@ impl ProcessManager {
             local_sync_dir: task.local_sync_dir.clone(),
         })
     }
+
+    pub async fn list_running_hpc_jobs(&self) -> Vec<RunningHpcJobContext> {
+        let tasks = self.tasks.lock().await;
+        tasks
+            .values()
+            .filter(|task| {
+                task.status == TaskStatus::Running
+                    && matches!(task.backend.as_deref(), Some("hpc"))
+            })
+            .map(|task| RunningHpcJobContext {
+                task_id: task.task_id.clone(),
+                remote_job_id: task.remote_job_id.clone(),
+                hpc_profile_id: task.hpc_profile_id.clone(),
+            })
+            .collect()
+    }
 }
 
 fn kill_process(pid: u32) {
@@ -349,10 +397,25 @@ fn kill_process(pid: u32) {
             libc::kill(-(pid as i32), libc::SIGTERM);
             // Also kill the process directly as fallback
             libc::kill(pid as i32, libc::SIGTERM);
+            // Escalate immediately to hard kill in case the process ignores SIGTERM.
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args([
+                "/PID",
+                &pid.to_string(),
+                "/T", // terminate the full child tree
+                "/F", // force terminate
+            ])
+            .status();
     }
 }

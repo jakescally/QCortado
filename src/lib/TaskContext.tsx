@@ -35,6 +35,7 @@ interface TaskSummary {
   remote_workdir?: string | null;
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
+  local_sync_dir?: string | null;
 }
 
 interface TaskInfo {
@@ -52,6 +53,7 @@ interface TaskInfo {
   remote_workdir?: string | null;
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
+  local_sync_dir?: string | null;
 }
 
 interface QueueSaveSpec {
@@ -138,6 +140,11 @@ function isBusyError(error: unknown): boolean {
   return text.includes("already running");
 }
 
+function isHpcStartParams(params: Record<string, any>): boolean {
+  const mode = String(params?.executionTarget?.mode || "").toLowerCase();
+  return mode === "hpc";
+}
+
 function normalizeTaskType(taskType: string): TaskType {
   if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon") {
     return taskType;
@@ -154,6 +161,7 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     remote_workdir: info.remote_workdir ?? null,
     remote_project_path: info.remote_project_path ?? null,
     remote_storage_bytes: info.remote_storage_bytes ?? null,
+    local_sync_dir: info.local_sync_dir ?? null,
   };
 }
 
@@ -833,7 +841,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         output_content: outputText,
         tags: spec.tags ?? [],
       },
-      workingDir: spec.workingDir ?? item.params.workingDir ?? null,
+      workingDir: task.hpc.local_sync_dir ?? spec.workingDir ?? item.params.workingDir ?? null,
     });
   }, []);
 
@@ -968,6 +976,24 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     }
   }, [saveQueuedTaskResult, startTaskInternal, waitForTaskCompletion]);
 
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    void listen("app-resumed", () => {
+      void syncWithBackend();
+      window.setTimeout(() => {
+        void processQueue();
+      }, 0);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [processQueue]);
+
   const waitForQueueTaskStart = useCallback(async (queueItemId: string): Promise<string> => {
     const startMs = Date.now();
     const maxWaitMs = 30_000;
@@ -1023,13 +1049,16 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       label: string,
       saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
+      if (isHpcStartParams(params)) {
+        return startTaskInternal(type, params, label);
+      }
       const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);
       window.setTimeout(() => {
         void processQueue();
       }, 0);
       return waitForQueueTaskStart(queueItemId);
     },
-    [enqueueTaskInternal, processQueue, waitForQueueTaskStart],
+    [enqueueTaskInternal, processQueue, startTaskInternal, waitForQueueTaskStart],
   );
 
   const hasQueuedItems = queueItems.some((item) => item.status === "queued");

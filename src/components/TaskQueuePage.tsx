@@ -1,8 +1,11 @@
 import { useMemo } from "react";
 import { QueueItem, useTaskContext } from "../lib/TaskContext";
+import { ExecutionMode } from "../lib/types";
+import { HpcActivityPanel } from "./HpcActivityPanel";
 
 interface TaskQueuePageProps {
   onBack: () => void;
+  executionMode: ExecutionMode;
 }
 
 function formatDate(iso: string | null): string {
@@ -33,7 +36,7 @@ function statusLabel(item: QueueItem): string {
   }
 }
 
-export function TaskQueuePage({ onBack }: TaskQueuePageProps) {
+export function TaskQueuePage({ onBack, executionMode }: TaskQueuePageProps) {
   const {
     queueItems,
     moveQueueItem,
@@ -59,6 +62,20 @@ export function TaskQueuePage({ onBack }: TaskQueuePageProps) {
     () => queueItems.filter((item) => item.status === "queued").map((item) => item.id),
     [queueItems],
   );
+
+  if (executionMode === "hpc") {
+    return (
+      <div className="queue-page-container">
+        <div className="queue-page-header">
+          <button className="back-button" onClick={onBack}>
+            ← Back
+          </button>
+          <h2>Task Manager</h2>
+        </div>
+        <HpcActivityPanel />
+      </div>
+    );
+  }
 
   return (
     <div className="queue-page-container">
@@ -154,4 +171,3 @@ export function TaskQueuePage({ onBack }: TaskQueuePageProps) {
     </div>
   );
 }
-

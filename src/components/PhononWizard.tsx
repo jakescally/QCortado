@@ -390,6 +390,7 @@ export function PhononWizard({
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
+  const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
   // Wizard state
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -1022,8 +1023,8 @@ export function PhononWizard({
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
     }
-    if (hasExternalRunningTask) {
-      setError("Another task is currently running. Queue this task or wait for completion.");
+    if (hasBlockingExternalTask) {
+      setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
     }
     let plan: PhononTaskPlan;
@@ -1120,7 +1121,7 @@ export function PhononWizard({
             input_content: "",
             output_content: outputContent,
           },
-          workingDir: PHONON_WORK_DIR,
+          workingDir: finalTask.hpc.local_sync_dir ?? PHONON_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
@@ -1142,6 +1143,10 @@ export function PhononWizard({
   };
 
   const queueCalculation = async () => {
+    if (isHpcMode) {
+      setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
     if (selectedScfDependencyBlocked) {
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
@@ -2109,16 +2114,18 @@ export function PhononWizard({
           <button className="secondary-button" onClick={() => setStep("qgrid")}>
             Back
           </button>
-          <button
-            className="secondary-button"
-            disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
-            onClick={queueCalculation}
-          >
-            Queue Task
-          </button>
+          {!isHpcMode && (
+            <button
+              className="secondary-button"
+              disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
+              onClick={queueCalculation}
+            >
+              Queue Task
+            </button>
+          )}
           <button
             className="primary-button"
-            disabled={!canRun || hasExternalRunningTask || selectedScfDependencyBlocked || isResolvingDependency}
+            disabled={!canRun || hasBlockingExternalTask || selectedScfDependencyBlocked || isResolvingDependency}
             onClick={runCalculation}
           >
             {isHpcMode ? "Submit Phonon to Andromeda" : "Run Calculation"}

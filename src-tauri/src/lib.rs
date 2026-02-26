@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -55,6 +56,10 @@ pub struct AppState {
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
     pub process_manager: ProcessManager,
+    /// Allows a programmatic exit to pass through ExitRequested interception.
+    pub allow_exit: AtomicBool,
+    /// Tracks whether a full shutdown workflow is currently in progress.
+    pub exit_in_progress: AtomicBool,
 }
 
 impl Default for AppState {
@@ -70,6 +75,8 @@ impl Default for AppState {
             active_hpc_profile_id: Mutex::new(None),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
+            allow_exit: AtomicBool::new(false),
+            exit_in_progress: AtomicBool::new(false),
         }
     }
 }
@@ -552,13 +559,17 @@ fn tokio_command_with_prefix(
                 tokio::process::Command::new(resolve_command_path(OsStr::new(&tokens[0])));
             cmd.args(tokens.iter().skip(1));
             cmd.arg(&resolved_program);
+            cmd.kill_on_drop(true);
             return cmd;
         };
         command.args(tokens.iter().skip(1));
+        command.kill_on_drop(true);
         return command;
     }
 
-    tokio::process::Command::new(resolved_program)
+    let mut command = tokio::process::Command::new(resolved_program);
+    command.kill_on_drop(true);
+    command
 }
 
 fn std_command_with_prefix(
@@ -4513,8 +4524,12 @@ async fn run_hpc_bundle_task(
     mut bundle_files: Vec<(String, String)>,
     bundle_copies: Vec<(PathBuf, String)>,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<hpc::runner::HpcBatchResult, String> {
-    let local_sync_dir = PathBuf::from(working_dir);
+) -> Result<PathBuf, String> {
+    // Keep a task-scoped local sync directory to prevent collisions across
+    // concurrent HPC submissions from the same wizard.
+    let local_sync_dir = PathBuf::from(working_dir)
+        .join("hpc_tasks")
+        .join(task_id);
     prepare_working_directory(&local_sync_dir, false)?;
 
     pm.set_hpc_profile_id(task_id, Some(profile.id.clone()))
@@ -4563,14 +4578,14 @@ async fn run_hpc_bundle_task(
             slurm_script: script.script.clone(),
             sbatch_preview: script.sbatch_preview,
             bundle_dir: bundle_dir.clone(),
-            local_sync_dir,
+            local_sync_dir: local_sync_dir.clone(),
             cancel_flag,
         },
     )
     .await;
 
     let _ = std::fs::remove_dir_all(&bundle_dir);
-    run_result
+    run_result.map(|_| local_sync_dir)
 }
 
 fn resolve_hpc_execution(
@@ -4600,8 +4615,10 @@ async fn start_scf_calculation(
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Reject if a task is already running
-    if state.process_manager.has_running_tasks().await {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    // Local runs remain serialized. HPC submissions can run concurrently.
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
         return Err(
             "A calculation is already running. Please wait for it to complete or cancel it."
                 .to_string(),
@@ -4611,7 +4628,7 @@ async fn start_scf_calculation(
     let pm = state.process_manager.clone();
     let (task_id, cancel_flag) = pm.register("scf".to_string(), label).await;
 
-    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+    if let Some(hpc_target) = hpc_target {
         let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
         let secret = hpc::credentials::resolve_secret(
             &profile.id,
@@ -4712,7 +4729,7 @@ async fn run_scf_hpc_background(
         build_hpc_qe_input_command(&profile, "pw.x", None, "pw.in", "pw.out"),
     ];
 
-    let _hpc_result = run_hpc_bundle_task(
+    let work_path = run_hpc_bundle_task(
         app,
         pm.clone(),
         task_id,
@@ -4729,7 +4746,6 @@ async fn run_scf_hpc_background(
     )
     .await?;
 
-    let work_path = PathBuf::from(&working_dir);
     let pw_out_path = work_path.join("pw.out");
     let slurm_out_path = work_path.join("slurm.out");
     let output_text = if pw_out_path.exists() {
@@ -4856,7 +4872,9 @@ async fn start_bands_calculation(
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    if state.process_manager.has_running_tasks().await {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
         return Err(
             "A calculation is already running. Please wait for it to complete or cancel it."
                 .to_string(),
@@ -4866,7 +4884,7 @@ async fn start_bands_calculation(
     let pm = state.process_manager.clone();
     let (task_id, cancel_flag) = pm.register("bands".to_string(), label).await;
 
-    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+    if let Some(hpc_target) = hpc_target {
         let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
         let secret = hpc::credentials::resolve_secret(
             &profile.id,
@@ -5070,7 +5088,7 @@ async fn run_bands_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
-    let _hpc_result = run_hpc_bundle_task(
+    let work_path = run_hpc_bundle_task(
         app,
         pm,
         task_id,
@@ -5087,7 +5105,6 @@ async fn run_bands_hpc_background(
     )
     .await?;
 
-    let work_path = PathBuf::from(&working_dir);
     let bands_out_text =
         std::fs::read_to_string(work_path.join("bands.out")).unwrap_or_else(|_| {
             std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
@@ -5626,7 +5643,9 @@ async fn start_dos_calculation(
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    if state.process_manager.has_running_tasks().await {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
         return Err(
             "A calculation is already running. Please wait for it to complete or cancel it."
                 .to_string(),
@@ -5636,7 +5655,7 @@ async fn start_dos_calculation(
     let pm = state.process_manager.clone();
     let (task_id, cancel_flag) = pm.register("dos".to_string(), label).await;
 
-    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+    if let Some(hpc_target) = hpc_target {
         let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
         let secret = hpc::credentials::resolve_secret(
             &profile.id,
@@ -5780,7 +5799,7 @@ async fn run_dos_hpc_background(
     commands.push(build_hpc_qe_input_command(
         &profile, "dos.x", None, "dos.in", "dos.out",
     ));
-    let _hpc_result = run_hpc_bundle_task(
+    let work_path = run_hpc_bundle_task(
         app,
         pm,
         task_id,
@@ -5800,7 +5819,6 @@ async fn run_dos_hpc_background(
     )
     .await?;
 
-    let work_path = PathBuf::from(&working_dir);
     let dos_file = work_path.join(&dos_calc.fildos);
     if !dos_file.exists() {
         return Err(format!(
@@ -6144,7 +6162,9 @@ async fn start_fermi_surface_calculation(
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    if state.process_manager.has_running_tasks().await {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
         return Err(
             "A calculation is already running. Please wait for it to complete or cancel it."
                 .to_string(),
@@ -6154,7 +6174,7 @@ async fn start_fermi_surface_calculation(
     let pm = state.process_manager.clone();
     let (task_id, cancel_flag) = pm.register("fermi_surface".to_string(), label).await;
 
-    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+    if let Some(hpc_target) = hpc_target {
         let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
         let secret = hpc::credentials::resolve_secret(
             &profile.id,
@@ -6290,7 +6310,7 @@ async fn run_fermi_surface_hpc_background(
         "fermi_velocity.in",
         "fermi_velocity.out",
     ));
-    let _hpc_result = run_hpc_bundle_task(
+    let work_path = run_hpc_bundle_task(
         app,
         pm,
         task_id,
@@ -6307,7 +6327,6 @@ async fn run_fermi_surface_hpc_background(
     )
     .await?;
 
-    let work_path = PathBuf::from(&working_dir);
     let fermi_output = std::fs::read_to_string(work_path.join("fermi_velocity.out"))
         .unwrap_or_else(|_| {
             std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
@@ -6570,7 +6589,9 @@ async fn start_phonon_calculation(
     label: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    if state.process_manager.has_running_tasks().await {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
         return Err(
             "A calculation is already running. Please wait for it to complete or cancel it."
                 .to_string(),
@@ -6580,7 +6601,7 @@ async fn start_phonon_calculation(
     let pm = state.process_manager.clone();
     let (task_id, cancel_flag) = pm.register("phonon".to_string(), label).await;
 
-    if let Some(hpc_target) = resolve_hpc_execution(&state, execution_target.as_ref()) {
+    if let Some(hpc_target) = hpc_target {
         let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
         let secret = hpc::credentials::resolve_secret(
             &profile.id,
@@ -6791,7 +6812,7 @@ async fn run_phonon_hpc_background(
         bundle_files.push(("matdyn_bands.in".to_string(), input));
     }
 
-    let _hpc_result = run_hpc_bundle_task(
+    let work_path = run_hpc_bundle_task(
         app,
         pm,
         task_id,
@@ -6808,7 +6829,6 @@ async fn run_phonon_hpc_background(
     )
     .await?;
 
-    let work_path = PathBuf::from(&working_dir);
     ensure_phonon_restart_inputs(&work_path)?;
 
     let ph_output = std::fs::read_to_string(work_path.join("ph.out")).unwrap_or_else(|_| {
@@ -7438,12 +7458,269 @@ async fn dismiss_task(task_id: String, state: State<'_, AppState>) -> Result<(),
     Ok(())
 }
 
+async fn cancel_running_hpc_jobs_for_quit(state: &AppState) -> Result<(), String> {
+    let running_hpc_jobs = state.process_manager.list_running_hpc_jobs().await;
+    if running_hpc_jobs.is_empty() {
+        return Ok(());
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for job in running_hpc_jobs {
+        let Some(remote_job_id) = job
+            .remote_job_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(profile_id) = job
+            .hpc_profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            errors.push(format!(
+                "Task {} has remote job {} but no HPC profile context.",
+                job.task_id, remote_job_id
+            ));
+            continue;
+        };
+
+        let profile = match resolve_hpc_profile_from_state(state, Some(profile_id.to_string())) {
+            Ok(profile) => profile,
+            Err(e) => {
+                errors.push(format!(
+                    "Task {} (job {}) profile lookup failed: {}",
+                    job.task_id, remote_job_id, e
+                ));
+                continue;
+            }
+        };
+        let secret = match hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        ) {
+            Ok(secret) => secret,
+            Err(e) => {
+                errors.push(format!(
+                    "Task {} (job {}) credentials failed: {}",
+                    job.task_id, remote_job_id, e
+                ));
+                continue;
+            }
+        };
+
+        let cancel_cmd = format!("scancel {}", shell_single_quote_local(remote_job_id));
+        if let Err(e) = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &cancel_cmd).await {
+            errors.push(format!(
+                "Task {} (job {}, profile {}) cancellation failed: {}",
+                job.task_id, remote_job_id, profile.id, e
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Could not safely quit because some remote jobs were not cancelled:\n{}",
+            errors.join("\n")
+        ))
+    }
+}
+
 #[tauri::command]
 async fn shutdown_and_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.exit_in_progress.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    if let Err(e) = cancel_running_hpc_jobs_for_quit(state.inner()).await {
+        state.exit_in_progress.store(false, Ordering::SeqCst);
+        return Err(e);
+    }
+
     state.process_manager.kill_all().await;
     // Give processes a moment to die
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    state.allow_exit.store(true, Ordering::SeqCst);
     app.exit(0);
+    Ok(())
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn request_app_quit(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.allow_exit.load(Ordering::SeqCst) || state.exit_in_progress.load(Ordering::SeqCst) {
+        return;
+    }
+
+    if state.process_manager.has_running_tasks_now() {
+        show_main_window(app);
+        let _ = app.emit("confirm-quit", ());
+    } else {
+        state.allow_exit.store(true, Ordering::SeqCst);
+        state.exit_in_progress.store(true, Ordering::SeqCst);
+        app.exit(0);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn setup_macos_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let pkg_info = app.package_info();
+    let config = app.config();
+    let about_metadata = AboutMetadata {
+        name: Some(pkg_info.name.clone()),
+        version: Some(pkg_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let quit_label = format!("Quit {}", pkg_info.name);
+    let quit_item = MenuItem::with_id(app, "app-quit-request", quit_label, true, Some("Cmd+Q"))
+        .map_err(|e| format!("Failed to create custom macOS Quit item: {}", e))?;
+
+    let app_menu = Submenu::with_items(
+        app,
+        pkg_info.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about_metadata))
+                .map_err(|e| format!("Failed to create About menu item: {}", e))?,
+            &PredefinedMenuItem::separator(app)
+                .map_err(|e| format!("Failed to create separator: {}", e))?,
+            &PredefinedMenuItem::services(app, None)
+                .map_err(|e| format!("Failed to create Services menu item: {}", e))?,
+            &PredefinedMenuItem::separator(app)
+                .map_err(|e| format!("Failed to create separator: {}", e))?,
+            &PredefinedMenuItem::hide(app, None)
+                .map_err(|e| format!("Failed to create Hide menu item: {}", e))?,
+            &PredefinedMenuItem::hide_others(app, None)
+                .map_err(|e| format!("Failed to create Hide Others menu item: {}", e))?,
+            &PredefinedMenuItem::separator(app)
+                .map_err(|e| format!("Failed to create separator: {}", e))?,
+            &quit_item,
+        ],
+    )
+    .map_err(|e| format!("Failed to create app menu: {}", e))?;
+
+    let file_menu = Submenu::with_items(
+        app,
+        "File",
+        true,
+        &[&PredefinedMenuItem::close_window(app, None)
+            .map_err(|e| format!("Failed to create Close Window menu item: {}", e))?],
+    )
+    .map_err(|e| format!("Failed to create File menu: {}", e))?;
+
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)
+                .map_err(|e| format!("Failed to create Undo menu item: {}", e))?,
+            &PredefinedMenuItem::redo(app, None)
+                .map_err(|e| format!("Failed to create Redo menu item: {}", e))?,
+            &PredefinedMenuItem::separator(app)
+                .map_err(|e| format!("Failed to create separator: {}", e))?,
+            &PredefinedMenuItem::cut(app, None)
+                .map_err(|e| format!("Failed to create Cut menu item: {}", e))?,
+            &PredefinedMenuItem::copy(app, None)
+                .map_err(|e| format!("Failed to create Copy menu item: {}", e))?,
+            &PredefinedMenuItem::paste(app, None)
+                .map_err(|e| format!("Failed to create Paste menu item: {}", e))?,
+            &PredefinedMenuItem::select_all(app, None)
+                .map_err(|e| format!("Failed to create Select All menu item: {}", e))?,
+        ],
+    )
+    .map_err(|e| format!("Failed to create Edit menu: {}", e))?;
+
+    let view_menu = Submenu::with_items(
+        app,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app, None)
+            .map_err(|e| format!("Failed to create Fullscreen menu item: {}", e))?],
+    )
+    .map_err(|e| format!("Failed to create View menu: {}", e))?;
+
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)
+                .map_err(|e| format!("Failed to create Minimize menu item: {}", e))?,
+            &PredefinedMenuItem::maximize(app, None)
+                .map_err(|e| format!("Failed to create Maximize menu item: {}", e))?,
+            &PredefinedMenuItem::separator(app)
+                .map_err(|e| format!("Failed to create separator: {}", e))?,
+            &PredefinedMenuItem::close_window(app, None)
+                .map_err(|e| format!("Failed to create Close Window menu item: {}", e))?,
+        ],
+    )
+    .map_err(|e| format!("Failed to create Window menu: {}", e))?;
+
+    let menu = Menu::with_items(
+        app,
+        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
+    )
+    .map_err(|e| format!("Failed to create macOS app menu: {}", e))?;
+
+    app.set_menu(menu)
+        .map_err(|e| format!("Failed to install macOS app menu: {}", e))?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn setup_windows_tray(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let open_item = MenuItem::with_id(app, "tray-open", "Open QCortado", true, None::<&str>)
+        .map_err(|e| format!("Failed to create tray Open item: {}", e))?;
+    let quit_item = MenuItem::with_id(app, "tray-quit", "Quit QCortado", true, None::<&str>)
+        .map_err(|e| format!("Failed to create tray Quit item: {}", e))?;
+    let menu = Menu::with_items(app, &[&open_item, &quit_item])
+        .map_err(|e| format!("Failed to create tray menu: {}", e))?;
+
+    let mut tray_builder = TrayIconBuilder::with_id("qcortado-main")
+        .tooltip("QCortado")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-open" => {
+                show_main_window(app);
+            }
+            "tray-quit" => {
+                request_app_quit(app);
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray_builder = tray_builder.icon(icon);
+    }
+
+    tray_builder
+        .build(app)
+        .map_err(|e| format!("Failed to initialize Windows tray icon: {}", e))?;
+
     Ok(())
 }
 
@@ -7453,7 +7730,7 @@ async fn shutdown_and_close(app: AppHandle, state: State<'_, AppState>) -> Resul
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -7512,31 +7789,46 @@ pub fn run() {
                 active_hpc_profile_id: Mutex::new(active_hpc_profile_id),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
+                allow_exit: AtomicBool::new(false),
+                exit_in_progress: AtomicBool::new(false),
             });
+
+            #[cfg(target_os = "windows")]
+            {
+                setup_windows_tray(&app.handle())?;
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                setup_macos_menu(&app.handle())?;
+            }
 
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Only guard close on the main application window.
-            // Auxiliary windows (e.g. HPC activity popout) should close independently.
+            // Keep the app process alive when users click X on the main window.
             if window.label() != "main" {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle().clone();
-                let pm = app.state::<AppState>().process_manager.clone();
-                let window_clone = window.clone();
-                // Check if tasks are running; if so, prevent close and ask user
+                let app = window.app_handle();
+                let state = app.state::<AppState>();
+                if state.allow_exit.load(Ordering::SeqCst) {
+                    return;
+                }
                 api.prevent_close();
-                tauri::async_runtime::spawn(async move {
-                    if pm.has_running_tasks().await {
-                        let _ = window_clone.emit("confirm-close", ());
-                    } else {
-                        // No running tasks, just close
-                        let _ = window_clone.destroy();
-                    }
-                });
+                let _ = window.hide();
             }
+        })
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            #[cfg(target_os = "macos")]
+            "app-quit-request" => {
+                request_app_quit(app);
+            }
+            "quit" => {
+                request_app_quit(app);
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             set_qe_path,
@@ -7621,7 +7913,34 @@ pub fn run() {
             projects::get_cif_content,
             projects::get_saved_phonon_data,
             projects::recover_phonon_calculation,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        ]);
+
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            let state = app_handle.state::<AppState>();
+            if state.allow_exit.load(Ordering::SeqCst) {
+                return;
+            }
+
+            api.prevent_exit();
+            request_app_quit(app_handle);
+        }
+        tauri::RunEvent::Resumed => {
+            let _ = app_handle.emit("app-resumed", ());
+        }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            if !has_visible_windows {
+                show_main_window(app_handle);
+            }
+        }
+        _ => {}
+    });
 }

@@ -246,6 +246,7 @@ export function FermiSurfaceWizard({
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
+  const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
 
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -819,8 +820,8 @@ export function FermiSurfaceWizard({
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
     }
-    if (hasExternalRunningTask) {
-      setError("Another task is currently running. Queue this task or wait for completion.");
+    if (hasBlockingExternalTask) {
+      setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
     }
 
@@ -907,7 +908,7 @@ export function FermiSurfaceWizard({
             output_content: outputContent,
             tags: [],
           },
-          workingDir: FERMI_WORK_DIR,
+          workingDir: finalTask.hpc.local_sync_dir ?? FERMI_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
@@ -929,6 +930,10 @@ export function FermiSurfaceWizard({
   }
 
   function queueCalculation() {
+    if (isHpcMode) {
+      setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
     if (selectedScfDependencyBlocked) {
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
@@ -1397,17 +1402,19 @@ export function FermiSurfaceWizard({
           <button className="secondary-button" onClick={() => setStep("source")}>
             Back
           </button>
-          <button
-            className="secondary-button"
-            onClick={() => void queueCalculation()}
-            disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
-          >
-            Queue Task
-          </button>
+          {!isHpcMode && (
+            <button
+              className="secondary-button"
+              onClick={() => void queueCalculation()}
+              disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
+            >
+              Queue Task
+            </button>
+          )}
           <button
             className="primary-button"
             onClick={() => void runCalculation()}
-            disabled={!canRun || hasExternalRunningTask || selectedScfDependencyBlocked || isResolvingDependency}
+            disabled={!canRun || hasBlockingExternalTask || selectedScfDependencyBlocked || isResolvingDependency}
           >
             {isHpcMode ? "Submit Fermi Surface to Andromeda" : "Run Calculation"}
           </button>

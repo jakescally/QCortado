@@ -173,6 +173,7 @@ export function SCFWizard({
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
+  const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
   // If we have initial CIF data, skip to configure step
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : (initialCif ? "configure" : "import"));
   const [crystalData, setCrystalData] = useState<CrystalData | null>(initialCif?.crystalData || null);
@@ -1048,8 +1049,8 @@ export function SCFWizard({
 
   async function handleRun() {
     if (!crystalData || !canRun()) return;
-    if (hasExternalRunningTask) {
-      setError("Another task is currently running. Queue this task or wait for completion.");
+    if (hasBlockingExternalTask) {
+      setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
     }
 
@@ -1093,7 +1094,7 @@ export function SCFWizard({
         sourceDescriptor,
       );
       const queueCalcType: "scf" | "optimization" = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
-      const runSaveSpec = projectContext
+      const runSaveSpec = projectContext && !isHpcMode
         ? {
             projectId: projectContext.projectId,
             cifId: projectContext.cifId,
@@ -1156,6 +1157,48 @@ export function SCFWizard({
             phase: "Save Error",
           }));
         }
+      } else if (projectContext && (isHpcMode || finalTask.hpc.backend === "hpc")) {
+        setIsSaving(true);
+        setProgress((prev) => ({
+          ...prev,
+          status: "running",
+          percent: null,
+          phase: "Saving to project",
+        }));
+        try {
+          const hpcCalcData = buildCalculationData(
+            calcResult,
+            startTime,
+            endTime,
+            inputText,
+            sourceStructure,
+            sourceDescriptor,
+            finalTask.hpc,
+          );
+          await invoke("save_calculation", {
+            projectId: projectContext.projectId,
+            cifId: projectContext.cifId,
+            calcData: hpcCalcData,
+            workingDir: finalTask.hpc.local_sync_dir ?? WORK_DIR,
+          });
+          setResultSaved(true);
+          setProgress((prev) => ({
+            ...prev,
+            status: "complete",
+            percent: 100,
+            phase: "Complete",
+          }));
+        } catch (saveError) {
+          setError(`Failed to auto-save calculation: ${saveError}`);
+          setProgress((prev) => ({
+            ...prev,
+            status: "error",
+            percent: null,
+            phase: "Save Error",
+          }));
+        } finally {
+          setIsSaving(false);
+        }
       } else {
         setProgress((prev) => ({
           ...prev,
@@ -1180,6 +1223,10 @@ export function SCFWizard({
 
   async function handleQueue() {
     if (!crystalData || !canRun()) return;
+    if (isHpcMode) {
+      setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
 
     if (!projectContext) {
       setError("Queueing is available when running from a project.");
@@ -2490,7 +2537,7 @@ export function SCFWizard({
                 )}
 
                 <div className="run-btn-group">
-                  {projectContext && (
+                  {projectContext && !isHpcMode && (
                     <button
                       className="secondary-button"
                       onClick={() => void handleQueue()}
@@ -2502,7 +2549,7 @@ export function SCFWizard({
                   <button
                     className="run-btn"
                     onClick={handleRun}
-                    disabled={!canRun() || hasExternalRunningTask}
+                    disabled={!canRun() || hasBlockingExternalTask}
                   >
                     {isHpcMode
                       ? "Submit SCF to Andromeda"

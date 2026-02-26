@@ -261,6 +261,8 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
             <span>State: {selectedTask.hpc.scheduler_state || selectedTask.status}</span>
             <span>Node: {selectedTask.hpc.remote_node || "—"}</span>
             <span>Task: {selectedTask.taskType.toUpperCase()}</span>
+            <span>Remote Dir: {selectedTask.hpc.remote_workdir || "—"}</span>
+            <span>Local Sync: {selectedTask.hpc.local_sync_dir || "—"}</span>
             <span>Started: {new Date(selectedTask.startedAt).toLocaleTimeString()}</span>
           </div>
 

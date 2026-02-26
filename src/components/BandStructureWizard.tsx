@@ -397,6 +397,7 @@ export function BandStructureWizard({
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
+  const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
   // Wizard state
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -1164,8 +1165,8 @@ export function BandStructureWizard({
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
     }
-    if (hasExternalRunningTask) {
-      setError("Another task is currently running. Queue this task or wait for completion.");
+    if (hasBlockingExternalTask) {
+      setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
     }
     setIsRunning(true);
@@ -1250,7 +1251,7 @@ export function BandStructureWizard({
             output_content: outputContent,
             tags: plan.saveTags,
           },
-          workingDir: BANDS_WORK_DIR,
+          workingDir: finalTask.hpc.local_sync_dir ?? BANDS_WORK_DIR,
         });
         setIsSaved(true);
       } catch (saveError) {
@@ -1272,6 +1273,10 @@ export function BandStructureWizard({
   };
 
   const queueCalculation = async () => {
+    if (isHpcMode) {
+      setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
     if (selectedScfDependencyBlocked) {
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
@@ -1971,17 +1976,19 @@ export function BandStructureWizard({
           <button className="secondary-button" onClick={() => setStep("kpath")}>
             Back
           </button>
-          <button
-            className="secondary-button"
-            onClick={queueCalculation}
-            disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
-          >
-            Queue Task
-          </button>
+          {!isHpcMode && (
+            <button
+              className="secondary-button"
+              onClick={queueCalculation}
+              disabled={!canRun || selectedScfDependencyBlocked || isResolvingDependency}
+            >
+              Queue Task
+            </button>
+          )}
           <button
             className="primary-button"
             onClick={runCalculation}
-            disabled={!canRun || hasExternalRunningTask || selectedScfDependencyBlocked || isResolvingDependency}
+            disabled={!canRun || hasBlockingExternalTask || selectedScfDependencyBlocked || isResolvingDependency}
           >
             {isHpcMode ? "Submit Bands to Andromeda" : "Run Calculation"}
           </button>
