@@ -186,7 +186,8 @@ fn sanitize_hpc_profile(
     profile.name = normalize_hpc_text(&profile.name, "Profile name")?;
     profile.host = normalize_hpc_text(&profile.host, "SSH host")?;
     profile.username = normalize_hpc_text(&profile.username, "SSH username")?;
-    profile.remote_qe_bin_dir = normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
+    profile.remote_qe_bin_dir =
+        normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_workspace_root =
@@ -313,6 +314,150 @@ fn resolve_hpc_profile_from_state(
         .first()
         .cloned()
         .ok_or_else(|| "No HPC profile is available".to_string())
+}
+
+fn normalize_remote_path_for_tracking(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn validate_remote_root_for_migration(path: &str, label: &str) -> Result<(), String> {
+    let normalized = path.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        return Err(format!("{} is empty.", label));
+    }
+    if normalized == "/" || normalized == "." || normalized == "~" {
+        return Err(format!(
+            "{} '{}' is not a safe migration path.",
+            label,
+            path.trim()
+        ));
+    }
+    let depth = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count();
+    if depth < 2 {
+        return Err(format!(
+            "{} '{}' is too shallow to migrate.",
+            label,
+            path.trim()
+        ));
+    }
+    Ok(())
+}
+
+fn paths_overlap(path_a: &str, path_b: &str) -> bool {
+    if path_a == path_b {
+        return true;
+    }
+    path_a.starts_with(&format!("{}/", path_b)) || path_b.starts_with(&format!("{}/", path_a))
+}
+
+fn collect_saved_hpc_remote_paths(app: &AppHandle) -> Result<HashSet<String>, String> {
+    let projects_dir = projects::ensure_projects_dir(app)?;
+    let entries = std::fs::read_dir(&projects_dir).map_err(|e| {
+        format!(
+            "Failed to read projects directory {}: {}",
+            projects_dir.display(),
+            e
+        )
+    })?;
+    let mut referenced_paths: HashSet<String> = HashSet::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read projects directory entry: {}", e))?;
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+        let project_json = project_dir.join("project.json");
+        if !project_json.exists() {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&project_json).map_err(|e| {
+            format!(
+                "Failed to read project metadata {}: {}",
+                project_json.display(),
+                e
+            )
+        })?;
+        let project: projects::Project = serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "Failed to parse project metadata {}: {}",
+                project_json.display(),
+                e
+            )
+        })?;
+
+        for calculation in project
+            .cif_variants
+            .iter()
+            .flat_map(|variant| variant.calculations.iter())
+        {
+            let Some(parameters) = calculation.parameters.as_object() else {
+                continue;
+            };
+
+            let backend = parameters
+                .get("execution_backend")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            let remote_workdir = parameters
+                .get("remote_workdir")
+                .and_then(|value| value.as_str())
+                .and_then(normalize_remote_path_for_tracking);
+            let remote_project_path = parameters
+                .get("remote_project_path")
+                .and_then(|value| value.as_str())
+                .and_then(normalize_remote_path_for_tracking);
+
+            if backend != "hpc" && remote_workdir.is_none() && remote_project_path.is_none() {
+                continue;
+            }
+
+            if let Some(path) = remote_workdir {
+                referenced_paths.insert(path);
+            }
+            if let Some(path) = remote_project_path {
+                referenced_paths.insert(path);
+            }
+        }
+    }
+
+    Ok(referenced_paths)
+}
+
+async fn resolve_remote_cleanup_path(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    raw_path: &str,
+) -> Result<String, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Remote path is empty".to_string());
+    }
+
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        let home = hpc::ssh::run_ssh_command(profile, secret, "printf %s \"$HOME\"").await?;
+        let home = home.trim();
+        if home.is_empty() {
+            return Err("Failed to resolve remote HOME directory".to_string());
+        }
+        if trimmed == "~" {
+            return Ok(home.to_string());
+        }
+        let suffix = trimmed.trim_start_matches("~/");
+        return Ok(format!("{}/{}", home.trim_end_matches('/'), suffix));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn effective_execution_mode(
@@ -772,9 +917,20 @@ struct HpcUtilizationSample {
     output: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct HpcRemoteOrphanCleanupResult {
+    profile_id: String,
+    scanned_paths: usize,
+    referenced_paths: usize,
+    orphan_paths: usize,
+    removed_paths: Vec<String>,
+    failed_paths: Vec<String>,
+}
+
 const HPC_PRESET_BUNDLE_KIND: &str = "qcortado_hpc_presets";
 const HPC_PRESET_BUNDLE_VERSION: u32 = 1;
 const IMPORTED_HPC_USERNAME_PLACEHOLDER: &str = "CHANGE_ME";
+const HPC_REMOTE_PROJECT_TASK_KINDS: [&str; 5] = ["scf", "bands", "dos", "fermi_surface", "phonon"];
 
 fn default_hpc_preset_bundle_kind() -> String {
     HPC_PRESET_BUNDLE_KIND.to_string()
@@ -916,13 +1072,23 @@ fn hpc_export_preset_bundle(
 
     if let Some(parent) = bundle_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create bundle directory {}: {}", parent.display(), e))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create bundle directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
         }
     }
 
-    std::fs::write(&bundle_path, bundle_json)
-        .map_err(|e| format!("Failed to write bundle file {}: {}", bundle_path.display(), e))?;
+    std::fs::write(&bundle_path, bundle_json).map_err(|e| {
+        format!(
+            "Failed to write bundle file {}: {}",
+            bundle_path.display(),
+            e
+        )
+    })?;
 
     Ok(HpcPresetBundleExportResult {
         bundle_path: bundle_path.display().to_string(),
@@ -942,8 +1108,12 @@ fn hpc_import_preset_bundle(
         return Err("Bundle path is required".to_string());
     }
 
-    let bundle_content = std::fs::read_to_string(normalized_bundle_path)
-        .map_err(|e| format!("Failed to read bundle file {}: {}", normalized_bundle_path, e))?;
+    let bundle_content = std::fs::read_to_string(normalized_bundle_path).map_err(|e| {
+        format!(
+            "Failed to read bundle file {}: {}",
+            normalized_bundle_path, e
+        )
+    })?;
     let bundle: HpcPresetBundle = serde_json::from_str(&bundle_content)
         .map_err(|e| format!("Failed to parse bundle file: {}", e))?;
 
@@ -977,7 +1147,8 @@ fn hpc_import_preset_bundle(
 
     let mut profiles = state.hpc_profiles.lock().unwrap();
     let mut active_profile_id = state.active_hpc_profile_id.lock().unwrap();
-    let mut used_profile_ids: HashSet<String> = profiles.iter().map(|profile| profile.id.clone()).collect();
+    let mut used_profile_ids: HashSet<String> =
+        profiles.iter().map(|profile| profile.id.clone()).collect();
 
     for imported_profile in bundle.profiles {
         let imported_profile_id = imported_profile.id.trim().to_string();
@@ -1003,7 +1174,8 @@ fn hpc_import_preset_bundle(
             profiles.iter().position(|profile| {
                 normalize_hpc_profile_lookup_value(&profile.name) == imported_name_lookup
                     && normalize_hpc_profile_lookup_value(&profile.host) == imported_host_lookup
-                    && normalize_hpc_profile_lookup_value(&profile.cluster) == imported_cluster_lookup
+                    && normalize_hpc_profile_lookup_value(&profile.cluster)
+                        == imported_cluster_lookup
             })
         });
 
@@ -1142,8 +1314,11 @@ fn hpc_save_profile(
         }
     } else if !persist {
         hpc::credentials::clear_session_secret(&profile.id);
-        let _ =
-            hpc::credentials::delete_persisted_secret(&profile.id, &profile.username, &profile.host);
+        let _ = hpc::credentials::delete_persisted_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+        );
     }
 
     let mut profiles = state.hpc_profiles.lock().unwrap();
@@ -1198,14 +1373,10 @@ fn hpc_update_profile_defaults(
         profile.launcher = launcher_value;
     }
     profile.launcher_extra_args = sanitize_optional_hpc_cli_field(launcher_extra_args);
-    profile.default_cpu_resources = sanitize_hpc_resource_defaults(
-        default_cpu_resources,
-        hpc::profile::ResourceType::Cpu,
-    );
-    profile.default_gpu_resources = sanitize_hpc_resource_defaults(
-        default_gpu_resources,
-        hpc::profile::ResourceType::Gpu,
-    );
+    profile.default_cpu_resources =
+        sanitize_hpc_resource_defaults(default_cpu_resources, hpc::profile::ResourceType::Cpu);
+    profile.default_gpu_resources =
+        sanitize_hpc_resource_defaults(default_gpu_resources, hpc::profile::ResourceType::Gpu);
     profile.updated_at = now_iso();
     let updated_profile = profile.clone();
 
@@ -1214,6 +1385,169 @@ fn hpc_update_profile_defaults(
     }
 
     config::update_hpc_profiles(&app, profiles.clone(), active_id.clone())?;
+    Ok(updated_profile)
+}
+
+/// Migrates remote workspace/project roots for an HPC profile.
+#[tauri::command]
+async fn hpc_migrate_remote_roots(
+    app: AppHandle,
+    profile_id: String,
+    new_workspace_root: String,
+    new_project_root: String,
+    state: State<'_, AppState>,
+) -> Result<hpc::profile::HpcProfile, String> {
+    let normalized_profile_id = profile_id.trim().to_string();
+    if normalized_profile_id.is_empty() {
+        return Err("HPC profile ID is required".to_string());
+    }
+
+    let normalized_workspace_root =
+        normalize_hpc_text(&new_workspace_root, "New remote workspace root")?;
+    let normalized_project_root = normalize_hpc_text(&new_project_root, "New remote project root")?;
+
+    let current_profile = {
+        let profiles = state.hpc_profiles.lock().unwrap();
+        profiles
+            .iter()
+            .find(|entry| entry.id == normalized_profile_id)
+            .cloned()
+            .ok_or_else(|| format!("HPC profile not found: {}", normalized_profile_id))?
+    };
+
+    if current_profile.remote_workspace_root == normalized_workspace_root
+        && current_profile.remote_project_root == normalized_project_root
+    {
+        return Ok(current_profile);
+    }
+
+    let secret = hpc::credentials::resolve_secret(
+        &current_profile.id,
+        &current_profile.username,
+        &current_profile.host,
+        current_profile.credential_persisted,
+    )?;
+
+    let old_workspace_resolved = resolve_remote_cleanup_path(
+        &current_profile,
+        secret.as_deref(),
+        current_profile.remote_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let old_project_resolved = resolve_remote_cleanup_path(
+        &current_profile,
+        secret.as_deref(),
+        current_profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let new_workspace_resolved = resolve_remote_cleanup_path(
+        &current_profile,
+        secret.as_deref(),
+        normalized_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let new_project_resolved = resolve_remote_cleanup_path(
+        &current_profile,
+        secret.as_deref(),
+        normalized_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+
+    validate_remote_root_for_migration(&old_workspace_resolved, "Current workspace root")?;
+    validate_remote_root_for_migration(&old_project_resolved, "Current project root")?;
+    validate_remote_root_for_migration(&new_workspace_resolved, "New workspace root")?;
+    validate_remote_root_for_migration(&new_project_resolved, "New project root")?;
+
+    let should_migrate_workspace = old_workspace_resolved != new_workspace_resolved;
+    let should_migrate_project = old_project_resolved != new_project_resolved;
+
+    if should_migrate_workspace && paths_overlap(&old_workspace_resolved, &new_workspace_resolved) {
+        return Err("Workspace roots overlap. Choose a non-overlapping destination.".to_string());
+    }
+    if should_migrate_project && paths_overlap(&old_project_resolved, &new_project_resolved) {
+        return Err("Project roots overlap. Choose a non-overlapping destination.".to_string());
+    }
+    if (should_migrate_workspace || should_migrate_project)
+        && paths_overlap(&new_workspace_resolved, &new_project_resolved)
+    {
+        return Err(
+            "New workspace root and new project root must not overlap each other.".to_string(),
+        );
+    }
+
+    if should_migrate_workspace || should_migrate_project {
+        let mut script_lines: Vec<String> = vec!["set -euo pipefail".to_string()];
+
+        if should_migrate_workspace {
+            script_lines.push(format!(
+                "mkdir -p {}",
+                shell_single_quote_local(&new_workspace_resolved)
+            ));
+            script_lines.push(format!(
+                "if [ -d {old} ]; then cp -a {old}/. {new}/; fi",
+                old = shell_single_quote_local(&old_workspace_resolved),
+                new = shell_single_quote_local(&new_workspace_resolved),
+            ));
+        }
+        if should_migrate_project {
+            script_lines.push(format!(
+                "mkdir -p {}",
+                shell_single_quote_local(&new_project_resolved)
+            ));
+            script_lines.push(format!(
+                "if [ -d {old} ]; then cp -a {old}/. {new}/; fi",
+                old = shell_single_quote_local(&old_project_resolved),
+                new = shell_single_quote_local(&new_project_resolved),
+            ));
+        }
+        if should_migrate_workspace {
+            script_lines.push(format!(
+                "if [ -d {old} ]; then rm -rf -- {old}; fi",
+                old = shell_single_quote_local(&old_workspace_resolved),
+            ));
+        }
+        if should_migrate_project {
+            script_lines.push(format!(
+                "if [ -d {old} ]; then rm -rf -- {old}; fi",
+                old = shell_single_quote_local(&old_project_resolved),
+            ));
+        }
+
+        let remote_script = script_lines.join(" && ");
+        hpc::ssh::run_ssh_command(&current_profile, secret.as_deref(), &remote_script)
+            .await
+            .map_err(|e| format!("Failed to migrate remote roots: {}", e))?;
+    }
+
+    let updated_profile = {
+        let mut profiles = state.hpc_profiles.lock().unwrap();
+        let mut active_id = state.active_hpc_profile_id.lock().unwrap();
+        let profile = profiles
+            .iter_mut()
+            .find(|entry| entry.id == normalized_profile_id)
+            .ok_or_else(|| format!("HPC profile not found: {}", normalized_profile_id))?;
+
+        profile.remote_workspace_root = normalized_workspace_root;
+        profile.remote_project_root = normalized_project_root;
+        profile.updated_at = now_iso();
+        let updated = profile.clone();
+
+        if active_id.is_none() {
+            *active_id = Some(updated.id.clone());
+        }
+
+        config::update_hpc_profiles(&app, profiles.clone(), active_id.clone())?;
+        updated
+    };
+
     Ok(updated_profile)
 }
 
@@ -1330,28 +1664,36 @@ async fn hpc_validate_environment(
         );
     }
 
-    let check_cmd = |tool: &str| format!("command -v {} >/dev/null 2>&1 && echo ok || echo missing", tool);
+    let check_cmd = |tool: &str| {
+        format!(
+            "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
+            tool
+        )
+    };
 
-    let sbatch_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sbatch"))
-        .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
+    let sbatch_available =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sbatch"))
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
     if !sbatch_available {
         messages.push("sbatch not available in remote shell PATH".to_string());
     }
 
-    let squeue_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("squeue"))
-        .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
+    let squeue_available =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("squeue"))
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
     if !squeue_available {
         messages.push("squeue not available in remote shell PATH".to_string());
     }
 
-    let sacct_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sacct"))
-        .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
+    let sacct_available =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &check_cmd("sacct"))
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
     if !sacct_available {
         messages.push("sacct not available in remote shell PATH".to_string());
     }
@@ -1427,16 +1769,8 @@ async fn hpc_sample_utilization(
         profile.credential_persisted,
     )?;
 
-    let job_id = remote_job_id
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let node_hint = remote_node
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let job_id = remote_job_id.as_deref().unwrap_or("").trim().to_string();
+    let node_hint = remote_node.as_deref().unwrap_or("").trim().to_string();
 
     let gpu_probe_inner = r#"gpu_source='unavailable';
 gpu_output='';
@@ -1594,7 +1928,10 @@ done | LC_ALL=C sort -u",
             continue;
         }
         if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
-            return Err(format!("Remote pseudopotential directory not found: {}", path));
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
         }
         if seen.insert(trimmed.to_string()) {
             pseudos.push(trimmed.to_string());
@@ -1661,7 +1998,10 @@ cat \"$sssp_file\"",
             continue;
         }
         if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
-            return Err(format!("Remote pseudopotential directory not found: {}", path));
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
         }
         if trimmed == "__QCORTADO_SSSP_NOT_FOUND__" {
             return Err("No SSSP JSON file found in remote pseudo directory".to_string());
@@ -1783,11 +2123,7 @@ async fn hpc_download_task_artifacts(
         hpc::runner::ArtifactSyncMode::Minimal
     };
 
-    let collect_line = format!(
-        "HPC_STAGE|Collecting|{} ({})",
-        remote_workdir,
-        mode.label()
-    );
+    let collect_line = format!("HPC_STAGE|Collecting|{} ({})", remote_workdir, mode.label());
     let _ = app.emit(&format!("task-output:{}", task_id), &collect_line);
     state
         .process_manager
@@ -1823,7 +2159,10 @@ async fn hpc_download_task_artifacts(
         remote_storage_bytes as f64 / (1024.0 * 1024.0),
     );
     let _ = app.emit(&format!("task-output:{}", task_id), &saved_line);
-    state.process_manager.append_output(&task_id, saved_line).await;
+    state
+        .process_manager
+        .append_output(&task_id, saved_line)
+        .await;
 
     Ok(report)
 }
@@ -1915,11 +2254,7 @@ async fn hpc_download_calculation_artifacts(
         .append_output(&calc_id, connecting_line)
         .await;
 
-    let collecting_line = format!(
-        "HPC_STAGE|Collecting|{} ({})",
-        remote_workdir,
-        mode.label()
-    );
+    let collecting_line = format!("HPC_STAGE|Collecting|{} ({})", remote_workdir, mode.label());
     let _ = app.emit(&format!("task-output:{}", calc_id), &collecting_line);
     state
         .process_manager
@@ -1959,9 +2294,126 @@ async fn hpc_download_calculation_artifacts(
         remote_storage_bytes as f64 / (1024.0 * 1024.0),
     );
     let _ = app.emit(&format!("task-output:{}", calc_id), &saved_line);
-    state.process_manager.append_output(&calc_id, saved_line).await;
+    state
+        .process_manager
+        .append_output(&calc_id, saved_line)
+        .await;
 
     Ok(report)
+}
+
+/// Removes remote QCortado HPC directories that are no longer referenced by local projects/tasks.
+#[tauri::command]
+async fn hpc_clean_remote_orphans(
+    app: AppHandle,
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<HpcRemoteOrphanCleanupResult, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let workspace_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let project_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+
+    let mut referenced_paths = collect_saved_hpc_remote_paths(&app)?;
+    for task in state.process_manager.list_tasks().await {
+        if task.backend.as_deref() != Some("hpc") {
+            continue;
+        }
+        if let Some(path) = task
+            .remote_workdir
+            .as_deref()
+            .and_then(normalize_remote_path_for_tracking)
+        {
+            referenced_paths.insert(path);
+        }
+        if let Some(path) = task
+            .remote_project_path
+            .as_deref()
+            .and_then(normalize_remote_path_for_tracking)
+        {
+            referenced_paths.insert(path);
+        }
+    }
+
+    let mut candidate_paths: HashSet<String> = HashSet::new();
+    let workspace_scan_cmd = format!(
+        "if [ -d {root} ]; then find {root} -mindepth 1 -maxdepth 1 -type d -name 'qcortado_hpc_bundle_*' -print; fi",
+        root = shell_single_quote_local(&workspace_root)
+    );
+    let workspace_listing =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &workspace_scan_cmd).await?;
+    for line in workspace_listing.lines() {
+        if let Some(path) = normalize_remote_path_for_tracking(line) {
+            candidate_paths.insert(path);
+        }
+    }
+
+    for task_kind in HPC_REMOTE_PROJECT_TASK_KINDS {
+        let project_scan_cmd = format!(
+            "if [ -d {root}/{kind} ]; then find {root}/{kind} -mindepth 1 -maxdepth 1 -type d -print; fi",
+            root = shell_single_quote_local(&project_root),
+            kind = shell_single_quote_local(task_kind),
+        );
+        let listing =
+            hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &project_scan_cmd).await?;
+        for line in listing.lines() {
+            if let Some(path) = normalize_remote_path_for_tracking(line) {
+                candidate_paths.insert(path);
+            }
+        }
+    }
+
+    let mut orphan_paths: Vec<String> = candidate_paths
+        .iter()
+        .filter(|path| !referenced_paths.contains(*path))
+        .cloned()
+        .collect();
+    orphan_paths.sort();
+
+    let mut removed_paths: Vec<String> = Vec::new();
+    let mut failed_paths: Vec<String> = Vec::new();
+    for path in &orphan_paths {
+        let remove_cmd = format!(
+            "if [ -e {target} ]; then rm -rf -- {target}; fi",
+            target = shell_single_quote_local(path)
+        );
+        match hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &remove_cmd).await {
+            Ok(_) => removed_paths.push(path.clone()),
+            Err(err) => {
+                eprintln!("Failed to remove orphan remote path {}: {}", path, err);
+                failed_paths.push(path.clone());
+            }
+        }
+    }
+
+    Ok(HpcRemoteOrphanCleanupResult {
+        profile_id: profile.id,
+        scanned_paths: candidate_paths.len(),
+        referenced_paths: referenced_paths.len(),
+        orphan_paths: orphan_paths.len(),
+        removed_paths,
+        failed_paths,
+    })
 }
 
 /// Checks if QE is configured and which executables are available.
@@ -2552,12 +3004,8 @@ fn resolve_hpc_scf_dependency_stage(
     project_id: Option<&str>,
     scf_calc_id: Option<&str>,
 ) -> Result<HpcScfDependencyStage, String> {
-    let project_id = project_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let scf_calc_id = scf_calc_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let project_id = project_id.map(str::trim).filter(|value| !value.is_empty());
+    let scf_calc_id = scf_calc_id.map(str::trim).filter(|value| !value.is_empty());
 
     let (project_id, scf_calc_id) = match (project_id, scf_calc_id) {
         (Some(project_id), Some(scf_calc_id)) => (project_id, scf_calc_id),
@@ -4069,12 +4517,10 @@ async fn run_hpc_bundle_task(
     let local_sync_dir = PathBuf::from(working_dir);
     prepare_working_directory(&local_sync_dir, false)?;
 
-    pm.set_hpc_profile_id(task_id, Some(profile.id.clone())).await;
-    pm.set_local_sync_dir(
-        task_id,
-        Some(local_sync_dir.to_string_lossy().to_string()),
-    )
-    .await;
+    pm.set_hpc_profile_id(task_id, Some(profile.id.clone()))
+        .await;
+    pm.set_local_sync_dir(task_id, Some(local_sync_dir.to_string_lossy().to_string()))
+        .await;
 
     let bundle_dir = hpc::sync::create_local_bundle_dir(task_id)?;
     let script = hpc::slurm::build_slurm_script(
@@ -4642,17 +5088,16 @@ async fn run_bands_hpc_background(
     .await?;
 
     let work_path = PathBuf::from(&working_dir);
-    let bands_out_text = std::fs::read_to_string(work_path.join("bands.out"))
-        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+    let bands_out_text =
+        std::fs::read_to_string(work_path.join("bands.out")).unwrap_or_else(|_| {
+            std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
+        });
     let fermi_energy = extract_fermi_energy_from_text(&bands_out_text).unwrap_or(0.0);
 
     let gnu_file_name = format!("{}.gnu", bands_x_config.filband);
     let gnu_file = work_path.join(&gnu_file_name);
     if !gnu_file.exists() {
-        return Err(format!(
-            "{} not found after HPC bands run.",
-            gnu_file_name
-        ));
+        return Err(format!("{} not found after HPC bands run.", gnu_file_name));
     }
     let mut band_data = read_bands_gnu_file(&gnu_file, fermi_energy)
         .map_err(|e| format!("Failed to parse band data: {}", e))?;
@@ -5358,7 +5803,10 @@ async fn run_dos_hpc_background(
     let work_path = PathBuf::from(&working_dir);
     let dos_file = work_path.join(&dos_calc.fildos);
     if !dos_file.exists() {
-        return Err(format!("DOS file not found after HPC run: {}", dos_file.display()));
+        return Err(format!(
+            "DOS file not found after HPC run: {}",
+            dos_file.display()
+        ));
     }
     let dos_content = std::fs::read_to_string(&dos_file)
         .map_err(|e| format!("Failed to read DOS file {}: {}", dos_file.display(), e))?;
@@ -5861,7 +6309,9 @@ async fn run_fermi_surface_hpc_background(
 
     let work_path = PathBuf::from(&working_dir);
     let fermi_output = std::fs::read_to_string(work_path.join("fermi_velocity.out"))
-        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+        .unwrap_or_else(|_| {
+            std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
+        });
     let fermi_energy = extract_fermi_energy_from_text(&fermi_output);
     let frmsf_files = collect_frmsf_files(&work_path)?;
     if frmsf_files.is_empty() {
@@ -6157,7 +6607,8 @@ async fn start_phonon_calculation(
 
             match result {
                 Ok(phonon_result) => {
-                    let json = serde_json::to_value(&phonon_result).unwrap_or(serde_json::Value::Null);
+                    let json =
+                        serde_json::to_value(&phonon_result).unwrap_or(serde_json::Value::Null);
                     pm.complete(&tid, json).await;
                     let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
                 }
@@ -6360,8 +6811,9 @@ async fn run_phonon_hpc_background(
     let work_path = PathBuf::from(&working_dir);
     ensure_phonon_restart_inputs(&work_path)?;
 
-    let ph_output = std::fs::read_to_string(work_path.join("ph.out"))
-        .unwrap_or_else(|_| std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default());
+    let ph_output = std::fs::read_to_string(work_path.join("ph.out")).unwrap_or_else(|_| {
+        std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
+    });
     let (converged, n_qpoints) = parse_ph_output(&ph_output);
     if !converged {
         return Err("ph.x did not converge successfully".to_string());
@@ -6393,11 +6845,16 @@ async fn run_phonon_hpc_background(
         }
     };
 
-    if let (Some(ref mut disp), Some(q_path)) = (dispersion_data.as_mut(), q_path_with_points.as_ref()) {
+    if let (Some(ref mut disp), Some(q_path)) =
+        (dispersion_data.as_mut(), q_path_with_points.as_ref())
+    {
         add_phonon_symmetry_markers(disp, q_path);
     }
 
-    let n_modes = dispersion_data.as_ref().map(|value| value.n_modes).unwrap_or(0);
+    let n_modes = dispersion_data
+        .as_ref()
+        .map(|value| value.n_modes)
+        .unwrap_or(0);
 
     Ok(PhononResult {
         converged: true,
@@ -7099,6 +7556,7 @@ pub fn run() {
             hpc_import_preset_bundle,
             hpc_save_profile,
             hpc_update_profile_defaults,
+            hpc_migrate_remote_roots,
             hpc_delete_profile,
             hpc_set_active_profile,
             hpc_get_active_profile_id,
@@ -7111,6 +7569,7 @@ pub fn run() {
             hpc_open_activity_window,
             hpc_download_task_artifacts,
             hpc_download_calculation_artifacts,
+            hpc_clean_remote_orphans,
             clear_temp_storage,
             launch_fermi_surface_viewer,
             check_qe_executables,

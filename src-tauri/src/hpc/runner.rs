@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
@@ -10,8 +10,8 @@ use crate::process_manager::ProcessManager;
 
 use super::profile::HpcProfile;
 use super::slurm::{
-    SchedulerSnapshot, is_terminal_state, normalize_scheduler_state, parse_sacct_snapshot,
-    parse_sbatch_job_id, parse_squeue_snapshot,
+    is_terminal_state, normalize_scheduler_state, parse_sacct_snapshot, parse_sbatch_job_id,
+    parse_squeue_snapshot, SchedulerSnapshot,
 };
 use super::ssh::{download_file, run_ssh_command, upload_directory};
 
@@ -453,7 +453,8 @@ async fn update_scheduler_snapshot(
     task_id: &str,
     snapshot: &SchedulerSnapshot,
 ) {
-    pm.set_scheduler_state(task_id, Some(snapshot.state.clone())).await;
+    pm.set_scheduler_state(task_id, Some(snapshot.state.clone()))
+        .await;
     if let Some(node) = snapshot.node.as_ref() {
         pm.set_remote_node(task_id, Some(node.clone())).await;
     }
@@ -699,29 +700,11 @@ pub async fn run_batch_task(
         format!("HPC_CMD|{}", request.sbatch_preview),
     )
     .await;
-    emit_task_line(
-        &app,
-        &pm,
-        task_id(&request),
-        "HPC_SCRIPT_BEGIN".to_string(),
-    )
-    .await;
+    emit_task_line(&app, &pm, task_id(&request), "HPC_SCRIPT_BEGIN".to_string()).await;
     for line in request.slurm_script.lines() {
-        emit_task_line(
-            &app,
-            &pm,
-            task_id(&request),
-            format!("HPC_SCRIPT|{}", line),
-        )
-        .await;
+        emit_task_line(&app, &pm, task_id(&request), format!("HPC_SCRIPT|{}", line)).await;
     }
-    emit_task_line(
-        &app,
-        &pm,
-        task_id(&request),
-        "HPC_SCRIPT_END".to_string(),
-    )
-    .await;
+    emit_task_line(&app, &pm, task_id(&request), "HPC_SCRIPT_END".to_string()).await;
 
     emit_task_line(
         &app,
@@ -760,9 +743,14 @@ pub async fn run_batch_task(
         "cd {} && sbatch run.sbatch",
         shell_single_quote(&remote_workdir)
     );
-    let submit_output = run_ssh_command(&request.profile, request.secret.as_deref(), &submit_cmd).await?;
-    let job_id = parse_sbatch_job_id(&submit_output)
-        .ok_or_else(|| format!("Failed to parse job ID from sbatch output: {}", submit_output.trim()))?;
+    let submit_output =
+        run_ssh_command(&request.profile, request.secret.as_deref(), &submit_cmd).await?;
+    let job_id = parse_sbatch_job_id(&submit_output).ok_or_else(|| {
+        format!(
+            "Failed to parse job ID from sbatch output: {}",
+            submit_output.trim()
+        )
+    })?;
 
     pm.set_remote_job_id(task_id(&request), Some(job_id.clone()))
         .await;

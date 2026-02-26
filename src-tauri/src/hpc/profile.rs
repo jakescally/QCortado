@@ -308,9 +308,10 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
             ));
         }
         if resources.nodes.unwrap_or(1) != 1 {
-            validation
-                .warnings
-                .push("Andromeda GPU examples default to one node; verify multi-node GPU usage.".to_string());
+            validation.warnings.push(
+                "Andromeda GPU examples default to one node; verify multi-node GPU usage."
+                    .to_string(),
+            );
         }
 
         if cpus_per_task < 4 {

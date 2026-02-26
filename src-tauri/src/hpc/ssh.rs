@@ -46,12 +46,14 @@ fn create_askpass_script(secret: &str) -> Result<PathBuf, String> {
         uuid::Uuid::new_v4()
     ));
     ensure_parent_dir(&script_path)?;
-    let body = format!(
-        "#!/bin/sh\nprintf %s {}\n",
-        shell_single_quote(secret)
-    );
-    fs::write(&script_path, body)
-        .map_err(|e| format!("Failed to write askpass script {}: {}", script_path.display(), e))?;
+    let body = format!("#!/bin/sh\nprintf %s {}\n", shell_single_quote(secret));
+    fs::write(&script_path, body).map_err(|e| {
+        format!(
+            "Failed to write askpass script {}: {}",
+            script_path.display(),
+            e
+        )
+    })?;
     make_executable(&script_path)?;
     Ok(script_path)
 }
@@ -236,13 +238,22 @@ pub async fn download_directory_contents(
     remote_dir: &str,
     local_dir: &Path,
 ) -> Result<(), String> {
-    fs::create_dir_all(local_dir)
-        .map_err(|e| format!("Failed to create local sync directory {}: {}", local_dir.display(), e))?;
+    fs::create_dir_all(local_dir).map_err(|e| {
+        format!(
+            "Failed to create local sync directory {}: {}",
+            local_dir.display(),
+            e
+        )
+    })?;
 
     let use_password = matches!(profile.auth_method, HpcAuthMethod::Password);
     let mut args = scp_options(profile, !use_password);
     args.push("-r".to_string());
-    args.push(format!("{}:{}/.", destination(profile), remote_dir.trim_end_matches('/')));
+    args.push(format!(
+        "{}:{}/.",
+        destination(profile),
+        remote_dir.trim_end_matches('/')
+    ));
     args.push(local_dir.display().to_string());
     let output = run_with_optional_askpass("scp", &args, secret).await?;
     if output.status.success() {

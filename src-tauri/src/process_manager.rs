@@ -295,7 +295,11 @@ impl ProcessManager {
         }
     }
 
-    pub async fn set_remote_project_path(&self, task_id: &str, remote_project_path: Option<String>) {
+    pub async fn set_remote_project_path(
+        &self,
+        task_id: &str,
+        remote_project_path: Option<String>,
+    ) {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
             task.remote_project_path = remote_project_path;

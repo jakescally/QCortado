@@ -8,7 +8,10 @@ fn ensure_safe_rel_path(path: &str) -> Result<PathBuf, String> {
     }
     for component in rel.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err(format!("Refusing to write parent-relative bundle path: {}", path));
+            return Err(format!(
+                "Refusing to write parent-relative bundle path: {}",
+                path
+            ));
         }
     }
     Ok(rel)
@@ -35,7 +38,11 @@ pub fn create_local_bundle_dir(task_id: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub fn write_bundle_text_file(bundle_dir: &Path, relative_path: &str, content: &str) -> Result<(), String> {
+pub fn write_bundle_text_file(
+    bundle_dir: &Path,
+    relative_path: &str,
+    content: &str,
+) -> Result<(), String> {
     let rel = ensure_safe_rel_path(relative_path)?;
     let full = bundle_dir.join(rel);
     if let Some(parent) = full.parent() {

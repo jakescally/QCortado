@@ -47,6 +47,15 @@ export interface HpcArtifactSyncReport {
   skipped_bytes: number;
 }
 
+export interface HpcRemoteOrphanCleanupResult {
+  profile_id: string;
+  scanned_paths: number;
+  referenced_paths: number;
+  orphan_paths: number;
+  removed_paths: string[];
+  failed_paths: string[];
+}
+
 export interface HpcPresetBundleExportResult {
   bundle_path: string;
   profile_count: number;
@@ -206,6 +215,18 @@ export async function updateHpcProfileDefaults(
   });
 }
 
+export async function migrateHpcRemoteRoots(
+  profileId: string,
+  newWorkspaceRoot: string,
+  newProjectRoot: string,
+): Promise<HpcProfile> {
+  return invoke<HpcProfile>("hpc_migrate_remote_roots", {
+    profileId,
+    newWorkspaceRoot,
+    newProjectRoot,
+  });
+}
+
 export async function deleteHpcProfile(profileId: string): Promise<void> {
   await invoke("hpc_delete_profile", { profileId });
 }
@@ -307,6 +328,14 @@ export async function downloadHpcCalculationArtifacts(
     calcId,
     profileId: profileId ?? null,
     full,
+  });
+}
+
+export async function cleanHpcRemoteOrphans(
+  profileId?: string | null,
+): Promise<HpcRemoteOrphanCleanupResult> {
+  return invoke<HpcRemoteOrphanCleanupResult>("hpc_clean_remote_orphans", {
+    profileId: profileId ?? null,
   });
 }
 

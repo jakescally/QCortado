@@ -3400,7 +3400,7 @@ export function ProjectDashboard({
                 Cancel
               </button>
               <button
-                className="dialog-btn delete"
+                className="dialog-btn delete width-lock"
                 onClick={handleConfirmDeleteCalc}
                 disabled={isDeletingCalc}
               >
@@ -3469,11 +3469,11 @@ export function ProjectDashboard({
             >
               Cancel
             </button>
-              <button
-                className="dialog-btn delete"
-                onClick={handleConfirmDelete}
-                disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeleting}
-              >
+            <button
+              className="dialog-btn delete width-lock"
+              onClick={handleConfirmDelete}
+              disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeleting}
+            >
               {isDeleting ? "Deleting..." : "Delete Project"}
             </button>
           </div>

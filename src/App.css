@@ -1483,6 +1483,14 @@ html[data-theme="dark"] {
   transition: all 0.15s ease;
 }
 
+.dialog-btn.width-lock {
+  min-width: 10.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
 .dialog-btn.cancel {
   background: white;
   border: 1px solid #e2e8f0;

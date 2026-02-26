@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -1413,7 +1414,10 @@ pub fn refresh_calculation_artifact_metadata(
         {
             parameters.insert("artifact_sync_mode".to_string(), serde_json::json!(mode));
             if mode.eq_ignore_ascii_case("full") {
-                parameters.insert("artifacts_downloaded_full".to_string(), serde_json::json!(true));
+                parameters.insert(
+                    "artifacts_downloaded_full".to_string(),
+                    serde_json::json!(true),
+                );
             }
         }
         parameters.insert(
@@ -2638,10 +2642,153 @@ pub async fn import_project_archive(
     .map_err(|e| format!("Import task failed to join: {}", e))?
 }
 
+fn shell_single_quote_remote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{}'", escaped)
+}
+
+fn normalized_hpc_param_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|entry| entry.as_str())
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+}
+
+fn normalize_remote_cleanup_path(raw_path: &str) -> Result<String, String> {
+    let normalized = raw_path.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() || normalized == "/" || normalized == "." || normalized == "~" {
+        return Err(format!(
+            "Refusing to delete unsafe remote path '{}'.",
+            raw_path.trim()
+        ));
+    }
+
+    let depth = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count();
+    if depth < 2 {
+        return Err(format!(
+            "Refusing to delete shallow remote path '{}'.",
+            raw_path.trim()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn calculation_uses_hpc(parameters: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if parameters
+        .get("execution_backend")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().eq_ignore_ascii_case("hpc"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    normalized_hpc_param_string(parameters.get("remote_workdir")).is_some()
+        || normalized_hpc_param_string(parameters.get("remote_project_path")).is_some()
+}
+
+fn resolve_hpc_profile_for_cleanup(
+    state: &crate::AppState,
+    requested_profile_id: Option<String>,
+) -> Result<crate::hpc::profile::HpcProfile, String> {
+    let profiles = state.hpc_profiles.lock().unwrap();
+    if profiles.is_empty() {
+        return Err(
+            "No HPC profiles are configured. Configure Andromeda in Settings before deleting this calculation."
+                .to_string(),
+        );
+    }
+
+    if let Some(profile_id) = requested_profile_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "HPC profile '{}' referenced by this calculation no longer exists.",
+                    profile_id
+                )
+            });
+    }
+
+    if let Some(active_id) = state.active_hpc_profile_id.lock().unwrap().clone() {
+        if let Some(profile) = profiles.iter().find(|profile| profile.id == active_id) {
+            return Ok(profile.clone());
+        }
+    }
+
+    if profiles.len() == 1 {
+        return Ok(profiles[0].clone());
+    }
+
+    Err("Cannot determine which HPC profile owns this calculation's remote artifacts. Set the active profile and retry."
+        .to_string())
+}
+
+async fn cleanup_remote_hpc_artifacts_for_calculation(
+    state: &crate::AppState,
+    calculation: &CalculationRun,
+) -> Result<(), String> {
+    let Some(parameters) = calculation.parameters.as_object() else {
+        return Ok(());
+    };
+    if !calculation_uses_hpc(parameters) {
+        return Ok(());
+    }
+
+    let remote_workdir = normalized_hpc_param_string(parameters.get("remote_workdir"));
+    let remote_project_path = normalized_hpc_param_string(parameters.get("remote_project_path"));
+    if remote_workdir.is_none() && remote_project_path.is_none() {
+        return Ok(());
+    }
+
+    let requested_profile_id = normalized_hpc_param_string(parameters.get("hpc_profile_id"));
+    let profile = resolve_hpc_profile_for_cleanup(state, requested_profile_id)?;
+    let secret = crate::hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let mut targets: HashSet<String> = HashSet::new();
+    if let Some(path) = remote_project_path {
+        targets.insert(normalize_remote_cleanup_path(&path)?);
+    }
+    if let Some(path) = remote_workdir {
+        targets.insert(normalize_remote_cleanup_path(&path)?);
+    }
+
+    for target in targets {
+        let quoted_target = shell_single_quote_remote(&target);
+        let remove_cmd = format!(
+            "if [ -e {target} ]; then rm -rf -- {target}; fi",
+            target = quoted_target
+        );
+        crate::hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &remove_cmd)
+            .await
+            .map_err(|err| format!("Failed to delete remote artifacts at {}: {}", target, err))?;
+    }
+
+    Ok(())
+}
+
 /// Deletes a calculation from a project
 #[tauri::command]
-pub fn delete_calculation(
+pub async fn delete_calculation(
     app: AppHandle,
+    state: State<'_, crate::AppState>,
     project_id: String,
     cif_id: String,
     calc_id: String,
@@ -2672,6 +2819,14 @@ pub fn delete_calculation(
         .iter()
         .position(|c| c.id == calc_id)
         .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    let calculation = variant
+        .calculations
+        .get(calc_index)
+        .cloned()
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    cleanup_remote_hpc_artifacts_for_calculation(&state, &calculation).await?;
 
     variant.calculations.remove(calc_index);
 

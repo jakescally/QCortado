@@ -34,6 +34,7 @@ import {
   SlurmResourceRequest,
 } from "./lib/types";
 import {
+  cleanHpcRemoteOrphans,
   defaultCpuResources,
   defaultGpuResources,
   deleteHpcProfile,
@@ -42,6 +43,7 @@ import {
   importHpcPresetBundle,
   listHpcProfiles,
   loadExecutionMode,
+  migrateHpcRemoteRoots,
   normalizeCliDashText,
   openHpcActivityWindow,
   saveExecutionMode,
@@ -293,6 +295,8 @@ function AppInner() {
   const [hpcStatus, setHpcStatus] = useState<string | null>(null);
   const [isExportingHpcPresetBundle, setIsExportingHpcPresetBundle] = useState(false);
   const [isImportingHpcPresetBundle, setIsImportingHpcPresetBundle] = useState(false);
+  const [isCleaningHpcRemote, setIsCleaningHpcRemote] = useState(false);
+  const [isMigratingHpcRoots, setIsMigratingHpcRoots] = useState(false);
   const [hpcDefaultCpuDraft, setHpcDefaultCpuDraft] = useState<SlurmResourceRequest>(
     defaultCpuResources(),
   );
@@ -324,6 +328,10 @@ function AppInner() {
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeletingProject, setIsDeletingProject] = useState(false);
   const [deleteProjectSnapshot, setDeleteProjectSnapshot] = useState<SettingsProjectSnapshot | null>(null);
+  const [showCleanRemoteConfirmDialog, setShowCleanRemoteConfirmDialog] = useState(false);
+  const [showMigrateHpcRootsDialog, setShowMigrateHpcRootsDialog] = useState(false);
+  const [migrateWorkspaceRootDraft, setMigrateWorkspaceRootDraft] = useState("");
+  const [migrateProjectRootDraft, setMigrateProjectRootDraft] = useState("");
   const [projectDashboardRefreshToken, setProjectDashboardRefreshToken] = useState(0);
 
   // Active task ID for reconnection when navigating to wizard from indicator
@@ -715,6 +723,96 @@ function AppInner() {
       setHpcStatus(`Failed to import presets: ${e}`);
     } finally {
       setIsImportingHpcPresetBundle(false);
+    }
+  }
+
+  function openCleanRemoteConfirmDialog() {
+    if (!activeHpcProfile) {
+      setHpcStatus("Select an active HPC profile first.");
+      return;
+    }
+    setShowCleanRemoteConfirmDialog(true);
+  }
+
+  async function handleConfirmCleanRemoteOrphans() {
+    if (!activeHpcProfile) {
+      setShowCleanRemoteConfirmDialog(false);
+      setHpcStatus("Select an active HPC profile first.");
+      return;
+    }
+
+    setIsCleaningHpcRemote(true);
+    setHpcStatus(null);
+    try {
+      const result = await cleanHpcRemoteOrphans(activeHpcProfile.id);
+      if (result.failed_paths.length > 0) {
+        setHpcStatus(
+          `Removed ${result.removed_paths.length} orphan path(s), but ${result.failed_paths.length} could not be removed.`,
+        );
+      } else if (result.removed_paths.length > 0) {
+        setHpcStatus(
+          `Removed ${result.removed_paths.length} orphan remote path(s) after scanning ${result.scanned_paths}.`,
+        );
+      } else {
+        setHpcStatus(`No orphaned QCortado remote paths found (${result.scanned_paths} scanned).`);
+      }
+      setShowCleanRemoteConfirmDialog(false);
+    } catch (e) {
+      console.error("Failed to clean remote HPC artifacts:", e);
+      setHpcStatus(`Failed to clean remote artifacts: ${e}`);
+    } finally {
+      setIsCleaningHpcRemote(false);
+    }
+  }
+
+  function openMigrateHpcRootsDialog() {
+    if (!activeHpcProfile) {
+      setHpcStatus("Select an active HPC profile first.");
+      return;
+    }
+    setMigrateWorkspaceRootDraft(activeHpcProfile.remote_workspace_root || "");
+    setMigrateProjectRootDraft(activeHpcProfile.remote_project_root || "");
+    setShowMigrateHpcRootsDialog(true);
+  }
+
+  async function handleConfirmMigrateHpcRoots() {
+    if (!activeHpcProfile) {
+      setHpcStatus("Select an active HPC profile first.");
+      setShowMigrateHpcRootsDialog(false);
+      return;
+    }
+
+    const newWorkspaceRoot = migrateWorkspaceRootDraft.trim();
+    const newProjectRoot = migrateProjectRootDraft.trim();
+    if (!newWorkspaceRoot || !newProjectRoot) {
+      setHpcStatus("Both new remote roots are required.");
+      return;
+    }
+
+    if (
+      newWorkspaceRoot === activeHpcProfile.remote_workspace_root
+      && newProjectRoot === activeHpcProfile.remote_project_root
+    ) {
+      setHpcStatus("Remote roots are unchanged.");
+      return;
+    }
+
+    setIsMigratingHpcRoots(true);
+    setHpcStatus(null);
+    try {
+      const updated = await migrateHpcRemoteRoots(
+        activeHpcProfile.id,
+        newWorkspaceRoot,
+        newProjectRoot,
+      );
+      setHpcProfiles((prev) => prev.map((profile) => (profile.id === updated.id ? updated : profile)));
+      setHpcStatus("Remote roots migrated and profile updated.");
+      setShowMigrateHpcRootsDialog(false);
+    } catch (e) {
+      console.error("Failed to migrate HPC remote roots:", e);
+      setHpcStatus(`Failed to migrate remote roots: ${e}`);
+    } finally {
+      setIsMigratingHpcRoots(false);
     }
   }
 
@@ -1176,6 +1274,20 @@ function AppInner() {
                           Delete Active Profile
                         </button>
                       )}
+                      <button
+                        className="settings-menu-item"
+                        onClick={openMigrateHpcRootsDialog}
+                        disabled={!activeHpcProfile || isMigratingHpcRoots}
+                      >
+                        {isMigratingHpcRoots ? "Migrating Remote..." : "Migrate Remote Roots"}
+                      </button>
+                      <button
+                        className="settings-menu-item warning"
+                        onClick={openCleanRemoteConfirmDialog}
+                        disabled={!activeHpcProfile || isCleaningHpcRemote}
+                      >
+                        {isCleaningHpcRemote ? "Cleaning Remote..." : "Clean Remote Orphans"}
+                      </button>
                       <button
                         className="settings-menu-item"
                         onClick={() => void handleExportHpcPresetBundle()}
@@ -1892,6 +2004,123 @@ function AppInner() {
     </div>
   ) : null;
 
+  const cleanRemoteConfirmModal = showCleanRemoteConfirmDialog ? (
+    <div className="dialog-overlay" onClick={() => !isCleaningHpcRemote && setShowCleanRemoteConfirmDialog(false)}>
+      <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h2>Clean Remote Orphans</h2>
+          <button
+            className="dialog-close"
+            onClick={() => setShowCleanRemoteConfirmDialog(false)}
+            disabled={isCleaningHpcRemote}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="dialog-body">
+          <p className="exit-warning">
+            Delete remote QCortado bundle directories not referenced by local projects?
+          </p>
+          <p className="exit-hint">
+            Referenced calculations are preserved. Only orphaned remote directories are removed.
+          </p>
+        </div>
+
+        <div className="dialog-footer">
+          <button
+            className="dialog-btn cancel"
+            onClick={() => setShowCleanRemoteConfirmDialog(false)}
+            disabled={isCleaningHpcRemote}
+          >
+            Cancel
+          </button>
+          <button
+            className="dialog-btn delete"
+            onClick={() => void handleConfirmCleanRemoteOrphans()}
+            disabled={isCleaningHpcRemote}
+          >
+            {isCleaningHpcRemote ? "Cleaning..." : "Clean Orphans"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const migrateHpcRootsModal = showMigrateHpcRootsDialog ? (
+    <div className="dialog-overlay" onClick={() => !isMigratingHpcRoots && setShowMigrateHpcRootsDialog(false)}>
+      <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h2>Migrate Remote Roots</h2>
+          <button
+            className="dialog-close"
+            onClick={() => setShowMigrateHpcRootsDialog(false)}
+            disabled={isMigratingHpcRoots}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="dialog-body">
+          <p className="exit-warning">
+            This will copy all data to new roots and then remove old roots.
+          </p>
+          <p className="exit-hint">
+            QCortado will copy all contents from the current remote workspace/project roots to the new roots, then remove the old roots and update this profile.
+          </p>
+          <div className="form-group">
+            <label>
+              New Remote Workspace Root
+            </label>
+            <input
+              type="text"
+              value={migrateWorkspaceRootDraft}
+              onChange={(e) => setMigrateWorkspaceRootDraft(e.target.value)}
+              placeholder="e.g. ~/scratch/qcortado"
+              disabled={isMigratingHpcRoots}
+              autoFocus
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="form-group">
+            <label>
+              New Remote Project Root
+            </label>
+            <input
+              type="text"
+              value={migrateProjectRootDraft}
+              onChange={(e) => setMigrateProjectRootDraft(e.target.value)}
+              placeholder="e.g. ~/projects/qcortado"
+              disabled={isMigratingHpcRoots}
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+          </div>
+        </div>
+
+        <div className="dialog-footer">
+          <button
+            className="dialog-btn cancel"
+            onClick={() => setShowMigrateHpcRootsDialog(false)}
+            disabled={isMigratingHpcRoots}
+          >
+            Cancel
+          </button>
+          <button
+            className="dialog-btn save"
+            onClick={() => void handleConfirmMigrateHpcRoots()}
+            disabled={isMigratingHpcRoots || migrateWorkspaceRootDraft.trim().length === 0 || migrateProjectRootDraft.trim().length === 0}
+          >
+            {isMigratingHpcRoots ? "Migrating..." : "Migrate Roots"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const appChrome = (
     <>
       {queueLauncher}
@@ -1900,6 +2129,8 @@ function AppInner() {
       {processIndicator}
       {closeConfirmModal}
       {deleteProjectModal}
+      {cleanRemoteConfirmModal}
+      {migrateHpcRootsModal}
       <HpcSetupWizard
         isOpen={showHpcSetupWizard}
         initialProfile={editingHpcProfile}

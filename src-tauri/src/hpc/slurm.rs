@@ -1,5 +1,5 @@
 use super::profile::{
-    validate_andromeda_resources, HpcProfile, ResourceValidation, ResourceType,
+    validate_andromeda_resources, HpcProfile, ResourceType, ResourceValidation,
     SlurmResourceRequest,
 };
 
@@ -153,7 +153,10 @@ pub fn build_slurm_script(
         header.push(format!("#SBATCH --mem={}G", memory_gb.max(1)));
     }
     if matches!(resources.resource_type, ResourceType::Gpu) {
-        header.push(format!("#SBATCH --gres=gpu:{}", resources.gpus.unwrap_or(1).max(1)));
+        header.push(format!(
+            "#SBATCH --gres=gpu:{}",
+            resources.gpus.unwrap_or(1).max(1)
+        ));
     }
     if let Some(qos) = resources.qos.as_deref() {
         if !qos.trim().is_empty() {
