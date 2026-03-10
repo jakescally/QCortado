@@ -1,6 +1,8 @@
+pub mod cluster_snapshot;
 pub mod credentials;
 pub mod profile;
 pub mod runner;
 pub mod slurm;
 pub mod ssh;
 pub mod sync;
+pub mod viewer_library;

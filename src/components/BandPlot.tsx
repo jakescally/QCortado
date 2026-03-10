@@ -708,22 +708,37 @@ export function BandPlot({
     const weights = selectedProjectionGroup?.weights;
     if (!weights || weights.length === 0) return null;
 
+    const normalizationGroups =
+      projectionMode === "atom" ? projectionGroups : selectedProjectionGroup ? [selectedProjectionGroup] : [];
+    if (normalizationGroups.length === 0) return null;
+
     if (projectionNormalizeMode === "band") {
-      return weights.map((bandWeights) => {
-        const maxBandWeight = bandWeights.reduce((max, value) => {
-          if (!Number.isFinite(value)) return max;
-          return Math.max(max, value);
-        }, 0);
-        const denom = maxBandWeight > 0 ? maxBandWeight : 1;
+      const perBandDenominators = weights.map((_, bandIndex) => {
+        let maxBandWeight = 0;
+        for (const group of normalizationGroups) {
+          const bandWeights = group.weights[bandIndex];
+          if (!bandWeights) continue;
+          for (const value of bandWeights) {
+            if (Number.isFinite(value) && value > maxBandWeight) {
+              maxBandWeight = value;
+            }
+          }
+        }
+        return maxBandWeight > 0 ? maxBandWeight : 1;
+      });
+      return weights.map((bandWeights, bandIndex) => {
+        const denom = perBandDenominators[bandIndex] ?? 1;
         return bandWeights.map((value) => clamp01((Number.isFinite(value) ? value : 0) / denom));
       });
     }
 
     let globalMax = 0;
-    for (const bandWeights of weights) {
-      for (const value of bandWeights) {
-        if (Number.isFinite(value) && value > globalMax) {
-          globalMax = value;
+    for (const group of normalizationGroups) {
+      for (const bandWeights of group.weights) {
+        for (const value of bandWeights) {
+          if (Number.isFinite(value) && value > globalMax) {
+            globalMax = value;
+          }
         }
       }
     }
@@ -731,7 +746,7 @@ export function BandPlot({
     return weights.map((bandWeights) =>
       bandWeights.map((value) => clamp01((Number.isFinite(value) ? value : 0) / denom)),
     );
-  }, [selectedProjectionGroup, projectionNormalizeMode]);
+  }, [projectionGroups, projectionMode, selectedProjectionGroup, projectionNormalizeMode]);
 
   const fatBandsActive =
     viewerType === "electronic" &&
@@ -1522,8 +1537,12 @@ export function BandPlot({
                             )
                           }
                         >
-                          <option value="global">Global</option>
-                          <option value="band">Per band</option>
+                          <option value="global">
+                            {projectionMode === "atom" ? "Global (all elements)" : "Global"}
+                          </option>
+                          <option value="band">
+                            {projectionMode === "atom" ? "Per band (all elements)" : "Per band"}
+                          </option>
                         </select>
                       </div>
 

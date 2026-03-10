@@ -160,11 +160,15 @@ fn is_heavy_scratch_path(rel_path: &str) -> bool {
 }
 
 fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
+    let lower_rel = entry.rel_path.to_ascii_lowercase();
+    if lower_rel.ends_with(".frmsf") || lower_rel.ends_with(".bxsf") {
+        return true;
+    }
+
     if is_heavy_scratch_path(&entry.rel_path) {
         return false;
     }
 
-    let lower_rel = entry.rel_path.to_ascii_lowercase();
     let file_name = Path::new(&lower_rel)
         .file_name()
         .and_then(|name| name.to_str())
@@ -206,9 +210,7 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
         return true;
     }
 
-    if lower_rel.ends_with(".frmsf")
-        || lower_rel.ends_with(".bxsf")
-        || lower_rel.ends_with(".gnu")
+    if lower_rel.ends_with(".gnu")
         || lower_rel.ends_with(".json")
         || lower_rel.ends_with(".txt")
         || lower_rel.ends_with(".log")
@@ -611,7 +613,8 @@ async fn stream_remote_file_incremental(
         return already_announced;
     };
 
-    let Some((mut lines_to_emit, mut total_lines)) = parse_incremental_read_output(&read_output) else {
+    let Some((mut lines_to_emit, mut total_lines)) = parse_incremental_read_output(&read_output)
+    else {
         return already_announced;
     };
 
@@ -811,9 +814,7 @@ pub async fn run_batch_task(
         }
 
         for file_name in &live_output_files {
-            let previous_line_count = live_line_counts
-                .entry(file_name.clone())
-                .or_insert(0);
+            let previous_line_count = live_line_counts.entry(file_name.clone()).or_insert(0);
             let announced = announced_live_files.contains(file_name);
             let updated_announced = stream_remote_file_incremental(
                 &app,
@@ -1061,7 +1062,10 @@ fn task_id(request: &HpcBatchRequest) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_incremental_read_output, LIVE_LINECOUNT_MARKER};
+    use super::{
+        parse_incremental_read_output, should_download_minimal, RemoteFileEntry,
+        LIVE_LINECOUNT_MARKER,
+    };
 
     #[test]
     fn parses_incremental_payload_with_lines() {
@@ -1082,5 +1086,23 @@ mod tests {
     #[test]
     fn rejects_payload_without_marker() {
         assert!(parse_incremental_read_output("line-1\nline-2\n").is_none());
+    }
+
+    #[test]
+    fn minimal_sync_keeps_surface_files_from_scratch_paths() {
+        let entry = RemoteFileEntry {
+            rel_path: "tmp/si.save/vfermi.frmsf".to_string(),
+            size_bytes: 1_024,
+        };
+        assert!(should_download_minimal("fermi_surface", &entry));
+    }
+
+    #[test]
+    fn minimal_sync_skips_non_surface_files_from_scratch_paths() {
+        let entry = RemoteFileEntry {
+            rel_path: "tmp/si.save/prefix.rho".to_string(),
+            size_bytes: 1_024,
+        };
+        assert!(!should_download_minimal("fermi_surface", &entry));
     }
 }

@@ -39,6 +39,51 @@ export interface HpcUtilizationSample {
   output: string;
 }
 
+export type HpcQueueScope = "all" | "mine";
+
+export interface HpcNodeSnapshot {
+  node_name: string;
+  partitions: string[];
+  state: string;
+  raw_state: string;
+  cpus: number;
+  cpu_name?: string | null;
+  memory_mb: number;
+  free_memory_mb?: number | null;
+  gpus: number;
+  gpu_name?: string | null;
+  gres?: string | null;
+  features: string[];
+  reason?: string | null;
+  node_type: string;
+}
+
+export interface HpcQueueSnapshot {
+  job_id: string;
+  user: string;
+  state: string;
+  raw_state: string;
+  partition: string;
+  nodes: number;
+  elapsed: string;
+  time_limit: string;
+  reason: string;
+  nodelist: string;
+  name: string;
+}
+
+export interface HpcClusterSnapshot {
+  captured_at: string;
+  cluster: string;
+  host: string;
+  queue_scope: HpcQueueScope | string;
+  queue_included: boolean;
+  queue_limit: number;
+  nodes: HpcNodeSnapshot[];
+  queue: HpcQueueSnapshot[];
+  warnings: string[];
+}
+
 export interface HpcArtifactSyncReport {
   mode: string;
   downloaded_files: number;
@@ -304,6 +349,20 @@ export async function sampleHpcUtilization(
     profileId: profileId ?? null,
     remoteJobId: remoteJobId ?? null,
     remoteNode: remoteNode ?? null,
+  });
+}
+
+export async function getHpcClusterSnapshot(
+  profileId?: string | null,
+  queueScope: HpcQueueScope = "all",
+  includeQueue = true,
+  queueLimit = 1500,
+): Promise<HpcClusterSnapshot> {
+  return invoke<HpcClusterSnapshot>("hpc_get_cluster_snapshot", {
+    profileId: profileId ?? null,
+    queueScope,
+    includeQueue,
+    queueLimit,
   });
 }
 

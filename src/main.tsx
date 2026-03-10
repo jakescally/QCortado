@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import ViewerApp from "./ViewerApp";
 import { validateBrillouinZoneFixtures } from "./lib/brillouinZoneFixtures";
 
 if (import.meta.env.DEV) {
@@ -19,6 +20,6 @@ document.documentElement.setAttribute("data-platform", platform);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {import.meta.env.VITE_APP_ROLE === "viewer" ? <ViewerApp /> : <App />}
   </React.StrictMode>,
 );

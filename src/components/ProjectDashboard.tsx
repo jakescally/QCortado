@@ -60,6 +60,7 @@ interface Project {
 interface ProjectDashboardProps {
   projectId: string;
   showFloatingSettings?: boolean;
+  readOnly?: boolean;
   refreshToken?: number;
   onBack: () => void;
   onDeleted: () => void;
@@ -743,6 +744,7 @@ function asCellMatrix(value: unknown): CellMatrix | null {
 export function ProjectDashboard({
   projectId,
   showFloatingSettings = true,
+  readOnly = false,
   refreshToken,
   onBack,
   onDeleted,
@@ -838,6 +840,7 @@ export function ProjectDashboard({
   }
 
   async function saveExecutionPrefix() {
+    if (readOnly) return;
     const normalized = executionPrefixInput.trim();
     setIsSavingExecutionPrefix(true);
     setPrefixStatus(null);
@@ -869,6 +872,7 @@ export function ProjectDashboard({
   }
 
   async function saveMpiDefaults() {
+    if (readOnly) return;
     setIsSavingGlobalMpi(true);
     setGlobalMpiStatus(null);
     try {
@@ -893,6 +897,7 @@ export function ProjectDashboard({
   }
 
   async function saveSaveSizeMode() {
+    if (readOnly) return;
     setIsSavingSaveSizeMode(true);
     setSaveSizeStatus(null);
     try {
@@ -944,6 +949,7 @@ export function ProjectDashboard({
   }
 
   async function clearTempStorage() {
+    if (readOnly) return;
     setIsClearingTempStorage(true);
     setTempStorageStatus(null);
     try {
@@ -1050,6 +1056,7 @@ export function ProjectDashboard({
   }
 
   async function handleImportCIF() {
+    if (readOnly) return;
     try {
       const selected = await open({
         multiple: false,
@@ -1089,12 +1096,14 @@ export function ProjectDashboard({
   }
 
   function openDeleteDialog() {
+    if (readOnly) return;
     setShowSettingsMenu(false);
     setDeleteConfirmText("");
     setShowDeleteDialog(true);
   }
 
   function openEditProjectDialog() {
+    if (readOnly) return;
     setShowSettingsMenu(false);
     setShowEditProjectDialog(true);
   }
@@ -1119,6 +1128,7 @@ export function ProjectDashboard({
   }
 
   async function handleConfirmDelete() {
+    if (readOnly) return;
     if (deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
 
     setIsDeleting(true);
@@ -1139,6 +1149,7 @@ export function ProjectDashboard({
   }
 
   async function handleConfirmDeleteCalc() {
+    if (readOnly) return;
     if (!calcToDelete || !selectedCifId) return;
 
     setIsDeletingCalc(true);
@@ -1250,6 +1261,7 @@ export function ProjectDashboard({
   }
 
   async function handleViewFermiSurface(calc: CalculationRun, surfaceFile: string | null) {
+    if (readOnly) return;
     setLaunchingFermiCalcId(calc.id);
     setError(null);
     try {
@@ -1477,6 +1489,7 @@ export function ProjectDashboard({
   }
 
   function renderHpcDownloadButton(calc: CalculationRun) {
+    if (readOnly) return null;
     if (!isHpcCalculation(calc)) return null;
     const isDownloading = downloadingCalcId === calc.id;
     const isDownloaded = isHpcArtifactsDownloaded(calc) && !isDownloading;
@@ -1502,6 +1515,7 @@ export function ProjectDashboard({
   }
 
   async function handleRecoverPhonon() {
+    if (readOnly) return;
     if (!selectedCifId) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
@@ -1667,6 +1681,7 @@ export function ProjectDashboard({
   }
 
   async function togglePinnedCalculation(calcId: string, isPinned: boolean) {
+    if (readOnly) return;
     if (!selectedCifId) return;
     const cifId = selectedCifId;
     const shouldBePinned = !isPinned;
@@ -1838,6 +1853,7 @@ export function ProjectDashboard({
   }, [hasPrimitiveDisplay, cellViewMode]);
 
   function renderSettingsMenu() {
+    if (readOnly) return null;
     return (
       <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
         <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
@@ -2072,30 +2088,32 @@ export function ProjectDashboard({
           <div className="dashboard-title">
             <div className="dashboard-title-row">
               <h2>{project.name}</h2>
-              <button
-                className="project-title-edit-btn"
-                type="button"
-                onClick={openEditProjectDialog}
-                title="Edit project"
-                aria-label="Edit project"
-              >
-                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path
-                    d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M13.5 6.5l4 4"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
+              {!readOnly && (
+                <button
+                  className="project-title-edit-btn"
+                  type="button"
+                  onClick={openEditProjectDialog}
+                  title="Edit project"
+                  aria-label="Edit project"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                      d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M13.5 6.5l4 4"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              )}
             </div>
             {project.description && (
               <p className="dashboard-description">{project.description}</p>
@@ -2120,18 +2138,24 @@ export function ProjectDashboard({
           <div className="empty-state">
             <div className="empty-icon">📄</div>
             <h3>No Structure File</h3>
-            <p>Import a CIF file to get started with your calculations</p>
-            <button
-              className="add-structure-btn primary"
-              onClick={handleImportCIF}
-              disabled={isImporting}
-            >
-              {isImporting ? "Importing..." : "Import CIF File"}
-            </button>
+            {readOnly ? (
+              <p>No structures are available in this synced project snapshot.</p>
+            ) : (
+              <>
+                <p>Import a CIF file to get started with your calculations</p>
+                <button
+                  className="add-structure-btn primary"
+                  onClick={handleImportCIF}
+                  disabled={isImporting}
+                >
+                  {isImporting ? "Importing..." : "Import CIF File"}
+                </button>
+              </>
+            )}
           </div>
         </div>
 
-        {showFloatingSettings && (
+        {showFloatingSettings && !readOnly && (
           <div className="floating-settings" ref={settingsRef}>
             <button
               className="floating-settings-btn"
@@ -2150,15 +2174,19 @@ export function ProjectDashboard({
         )}
 
         {/* Delete Dialog */}
-        <EditProjectDialog
-          isOpen={showEditProjectDialog}
-          projectId={project.id}
-          initialName={project.name}
-          initialDescription={project.description}
-          onClose={() => setShowEditProjectDialog(false)}
-          onSaved={handleProjectMetadataSaved}
-        />
-        {showDeleteDialog && renderDeleteDialog()}
+        {!readOnly && (
+          <>
+            <EditProjectDialog
+              isOpen={showEditProjectDialog}
+              projectId={project.id}
+              initialName={project.name}
+              initialDescription={project.description}
+              onClose={() => setShowEditProjectDialog(false)}
+              onSaved={handleProjectMetadataSaved}
+            />
+            {showDeleteDialog && renderDeleteDialog()}
+          </>
+        )}
       </div>
     );
   }
@@ -2172,30 +2200,32 @@ export function ProjectDashboard({
         <div className="dashboard-title">
           <div className="dashboard-title-row">
             <h2>{project.name}</h2>
-            <button
-              className="project-title-edit-btn"
-              type="button"
-              onClick={openEditProjectDialog}
-              title="Edit project"
-              aria-label="Edit project"
-            >
-              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M13.5 6.5l4 4"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
+            {!readOnly && (
+              <button
+                className="project-title-edit-btn"
+                type="button"
+                onClick={openEditProjectDialog}
+                title="Edit project"
+                aria-label="Edit project"
+              >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M13.5 6.5l4 4"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
           </div>
           {project.description && (
             <p className="dashboard-description">{project.description}</p>
@@ -2222,14 +2252,16 @@ export function ProjectDashboard({
                 </option>
               ))}
             </select>
-            <button
-              className="add-structure-inline-btn"
-              onClick={handleImportCIF}
-              disabled={isImporting}
-              title="Add new structure"
-            >
-              +
-            </button>
+            {!readOnly && (
+              <button
+                className="add-structure-inline-btn"
+                onClick={handleImportCIF}
+                disabled={isImporting}
+                title="Add new structure"
+              >
+                +
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -2324,62 +2356,64 @@ export function ProjectDashboard({
               </select>
             </div>
           </div>
-          <div className="calc-action-grid">
-            <button className="calc-action-btn" onClick={handleRunSCF}>
-              <span className="calc-action-icon">SCF</span>
-              <span className="calc-action-label">Self-Consistent Field</span>
-              <span className="calc-action-hint">Ground state energy</span>
-            </button>
-            <button
-              className="calc-action-btn"
-              onClick={handleRunBands}
-              disabled={!hasConvergedSCF()}
-            >
-              <span className="calc-action-icon">Band</span>
-              <span className="calc-action-label">Band Structure</span>
-              <span className="calc-action-hint">
-                {hasConvergedSCF() ? "Electronic bands" : "Requires SCF"}
-              </span>
-            </button>
-            <button
-              className="calc-action-btn"
-              onClick={handleRunDos}
-              disabled={!hasConvergedSCF()}
-            >
-              <span className="calc-action-icon">DOS</span>
-              <span className="calc-action-label">Electronic DOS</span>
-              <span className="calc-action-hint">
-                {hasConvergedSCF() ? "Total density of states" : "Requires SCF"}
-              </span>
-            </button>
-            <button
-              className="calc-action-btn"
-              onClick={handleRunFermiSurface}
-              disabled={!hasConvergedSCF()}
-            >
-              <span className="calc-action-icon">FS</span>
-              <span className="calc-action-label">Fermi Surface</span>
-              <span className="calc-action-hint">
-                {hasConvergedSCF() ? "Generate FRMSF" : "Requires SCF"}
-              </span>
-            </button>
-            <button
-              className="calc-action-btn"
-              onClick={handleRunPhonons}
-              disabled={!hasConvergedSCF()}
-            >
-              <span className="calc-action-icon">Ph</span>
-              <span className="calc-action-label">Phonons</span>
-              <span className="calc-action-hint">
-                {hasConvergedSCF() ? "DOS & Dispersion" : "Requires SCF"}
-              </span>
-            </button>
-            <button className="calc-action-btn" onClick={handleRunOptimization}>
-              <span className="calc-action-icon">Opt</span>
-              <span className="calc-action-label">Geometry Optimization</span>
-              <span className="calc-action-hint">VC-Relax preset</span>
-            </button>
-          </div>
+          {!readOnly && (
+            <div className="calc-action-grid">
+              <button className="calc-action-btn" onClick={handleRunSCF}>
+                <span className="calc-action-icon">SCF</span>
+                <span className="calc-action-label">Self-Consistent Field</span>
+                <span className="calc-action-hint">Ground state energy</span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunBands}
+                disabled={!hasConvergedSCF()}
+              >
+                <span className="calc-action-icon">Band</span>
+                <span className="calc-action-label">Band Structure</span>
+                <span className="calc-action-hint">
+                  {hasConvergedSCF() ? "Electronic bands" : "Requires SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunDos}
+                disabled={!hasConvergedSCF()}
+              >
+                <span className="calc-action-icon">DOS</span>
+                <span className="calc-action-label">Electronic DOS</span>
+                <span className="calc-action-hint">
+                  {hasConvergedSCF() ? "Total density of states" : "Requires SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunFermiSurface}
+                disabled={!hasConvergedSCF()}
+              >
+                <span className="calc-action-icon">FS</span>
+                <span className="calc-action-label">Fermi Surface</span>
+                <span className="calc-action-hint">
+                  {hasConvergedSCF() ? "Generate FRMSF" : "Requires SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunPhonons}
+                disabled={!hasConvergedSCF()}
+              >
+                <span className="calc-action-icon">Ph</span>
+                <span className="calc-action-label">Phonons</span>
+                <span className="calc-action-hint">
+                  {hasConvergedSCF() ? "DOS & Dispersion" : "Requires SCF"}
+                </span>
+              </button>
+              <button className="calc-action-btn" onClick={handleRunOptimization}>
+                <span className="calc-action-icon">Opt</span>
+                <span className="calc-action-label">Geometry Optimization</span>
+                <span className="calc-action-hint">VC-Relax preset</span>
+              </button>
+            </div>
+          )}
         </section>
 
         {/* SCF Calculations */}
@@ -2430,6 +2464,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -2492,15 +2527,17 @@ export function ProjectDashboard({
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete Calculation
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete Calculation
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -2548,6 +2585,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -2621,15 +2659,17 @@ export function ProjectDashboard({
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -2677,6 +2717,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -2762,15 +2803,17 @@ export function ProjectDashboard({
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -2782,7 +2825,7 @@ export function ProjectDashboard({
         )}
 
         {/* Fermi Surface Calculations */}
-        {fermiSurfaceCalculations.length > 0 && (
+        {!readOnly && fermiSurfaceCalculations.length > 0 && (
           <section className="history-section fermi-surface-section">
             <h3>Fermi Surface</h3>
             <div className="calculations-list">
@@ -2830,6 +2873,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -2920,15 +2964,17 @@ export function ProjectDashboard({
                             {launchingFermiCalcId === calc.id ? "Launching..." : "View Fermi Surface"}
                           </button>
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -2990,6 +3036,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -3080,15 +3127,17 @@ export function ProjectDashboard({
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -3217,6 +3266,7 @@ export function ProjectDashboard({
                             e.stopPropagation();
                             void togglePinnedCalculation(calc.id, isPinned);
                           }}
+                          disabled={readOnly}
                           title={isPinned ? "Unpin calculation" : "Pin calculation"}
                           aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
                         >
@@ -3317,15 +3367,17 @@ export function ProjectDashboard({
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {renderHpcDownloadButton(calc)}
-                          <button
-                            className="delete-calc-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openDeleteCalcDialog(calc.id, calc.calc_type);
-                            }}
-                          >
-                            Delete
-                          </button>
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
@@ -3337,7 +3389,7 @@ export function ProjectDashboard({
         )}
       </div>
 
-      {showFloatingSettings && (
+      {showFloatingSettings && !readOnly && (
         <div className="floating-settings" ref={settingsRef}>
           <button
             className="floating-settings-btn"
@@ -3355,60 +3407,64 @@ export function ProjectDashboard({
         </div>
       )}
 
-      <EditProjectDialog
-        isOpen={showEditProjectDialog}
-        projectId={project.id}
-        initialName={project.name}
-        initialDescription={project.description}
-        onClose={() => setShowEditProjectDialog(false)}
-        onSaved={handleProjectMetadataSaved}
-      />
+      {!readOnly && (
+        <>
+          <EditProjectDialog
+            isOpen={showEditProjectDialog}
+            projectId={project.id}
+            initialName={project.name}
+            initialDescription={project.description}
+            onClose={() => setShowEditProjectDialog(false)}
+            onSaved={handleProjectMetadataSaved}
+          />
 
-      {/* Delete Project Dialog */}
-      {showDeleteDialog && renderDeleteDialog()}
+          {/* Delete Project Dialog */}
+          {showDeleteDialog && renderDeleteDialog()}
 
-      {/* Delete Calculation Dialog */}
-      {showDeleteCalcDialog && (
-        <div className="dialog-overlay" onClick={() => !isDeletingCalc && setShowDeleteCalcDialog(false)}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Delete Calculation</h2>
-              <button
-                className="dialog-close"
-                onClick={() => setShowDeleteCalcDialog(false)}
-                disabled={isDeletingCalc}
-              >
-                &times;
-              </button>
+          {/* Delete Calculation Dialog */}
+          {showDeleteCalcDialog && (
+            <div className="dialog-overlay" onClick={() => !isDeletingCalc && setShowDeleteCalcDialog(false)}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Delete Calculation</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={() => setShowDeleteCalcDialog(false)}
+                    disabled={isDeletingCalc}
+                  >
+                    &times;
+                  </button>
+                </div>
+
+                <div className="dialog-body">
+                  <p className="exit-warning">
+                    Are you sure you want to delete this {calcToDelete?.calcType.toUpperCase()} calculation?
+                  </p>
+                  <p className="exit-hint">
+                    This will permanently remove the calculation results and all associated input/output files.
+                  </p>
+                </div>
+
+                <div className="dialog-footer">
+                  <button
+                    className="dialog-btn cancel"
+                    onClick={() => setShowDeleteCalcDialog(false)}
+                    disabled={isDeletingCalc}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn delete width-lock"
+                    onClick={handleConfirmDeleteCalc}
+                    disabled={isDeletingCalc}
+                  >
+                    {isDeletingCalc ? "Deleting..." : "Delete Calculation"}
+                  </button>
+                </div>
+              </div>
             </div>
-
-            <div className="dialog-body">
-              <p className="exit-warning">
-                Are you sure you want to delete this {calcToDelete?.calcType.toUpperCase()} calculation?
-              </p>
-              <p className="exit-hint">
-                This will permanently remove the calculation results and all associated input/output files.
-              </p>
-            </div>
-
-            <div className="dialog-footer">
-              <button
-                className="dialog-btn cancel"
-                onClick={() => setShowDeleteCalcDialog(false)}
-                disabled={isDeletingCalc}
-              >
-                Cancel
-              </button>
-              <button
-                className="dialog-btn delete width-lock"
-                onClick={handleConfirmDeleteCalc}
-                disabled={isDeletingCalc}
-              >
-                {isDeletingCalc ? "Deleting..." : "Delete Calculation"}
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+        </>
       )}
     </div>
   );

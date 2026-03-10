@@ -377,8 +377,7 @@ impl ProcessManager {
         tasks
             .values()
             .filter(|task| {
-                task.status == TaskStatus::Running
-                    && matches!(task.backend.as_deref(), Some("hpc"))
+                task.status == TaskStatus::Running && matches!(task.backend.as_deref(), Some("hpc"))
             })
             .map(|task| RunningHpcJobContext {
                 task_id: task.task_id.clone(),

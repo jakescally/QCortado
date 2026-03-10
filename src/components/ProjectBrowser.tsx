@@ -119,6 +119,7 @@ interface ProjectBrowserProps {
   onSelectProject?: (projectId: string, folderId: string | null) => void;
   onProjectsChanged?: () => void;
   initialActiveFolderId?: string | null;
+  readOnly?: boolean;
 }
 
 interface ProjectArchiveExportResult {
@@ -171,6 +172,7 @@ export function ProjectBrowser({
   onSelectProject,
   onProjectsChanged,
   initialActiveFolderId = null,
+  readOnly = false,
 }: ProjectBrowserProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [folders, setFolders] = useState<ProjectFolder[]>([]);
@@ -220,13 +222,17 @@ export function ProjectBrowser({
   );
 
   const projectsForActiveFolder = useMemo<ProjectWithCalculationTypes[]>(() => {
+    const isRootVisibleProject = (project: ProjectSummary) => (
+      !project.folder_id || !folderById.has(project.folder_id)
+    );
+
     if (!activeFolderId) {
-      return projectsWithCalculationTypes.filter(({ project }) => !project.folder_id);
+      return projectsWithCalculationTypes.filter(({ project }) => isRootVisibleProject(project));
     }
     return projectsWithCalculationTypes.filter(
       ({ project }) => project.folder_id === activeFolderId,
     );
-  }, [projectsWithCalculationTypes, activeFolderId]);
+  }, [projectsWithCalculationTypes, activeFolderId, folderById]);
 
   const hasActiveFilters = activeProjectFilters.length > 0;
 
@@ -452,6 +458,7 @@ export function ProjectBrowser({
   }
 
   function openExportDialog() {
+    if (readOnly) return;
     if (projects.length === 0) {
       setError("No projects are available to export.");
       return;
@@ -480,6 +487,7 @@ export function ProjectBrowser({
   }
 
   async function handleCancelExport() {
+    if (readOnly) return;
     if (!isExporting) {
       closeExportDialog();
       return;
@@ -504,6 +512,7 @@ export function ProjectBrowser({
   }
 
   async function handleExportProject() {
+    if (readOnly) return;
     if (!selectedExportProjectId) {
       setError("Select a project to export.");
       return;
@@ -562,6 +571,7 @@ export function ProjectBrowser({
   }
 
   async function handleImportProject() {
+    if (readOnly) return;
     if (isImporting || isExporting) {
       return;
     }
@@ -608,6 +618,7 @@ export function ProjectBrowser({
   }
 
   function openEditProjectDialog(projectId: string) {
+    if (readOnly) return;
     setOpenProjectMenuId(null);
     setError(null);
     setStatusMessage(null);
@@ -638,6 +649,7 @@ export function ProjectBrowser({
   }
 
   function openCreateFolderModal() {
+    if (readOnly) return;
     setError(null);
     setStatusMessage(null);
     setNewFolderName("");
@@ -645,6 +657,7 @@ export function ProjectBrowser({
   }
 
   function openRenameFolderModal(folder: ProjectFolder) {
+    if (readOnly) return;
     setError(null);
     setStatusMessage(null);
     setRenamingFolder(folder);
@@ -662,6 +675,7 @@ export function ProjectBrowser({
   }
 
   async function handleCreateFolder() {
+    if (readOnly) return;
     if (!newFolderName.trim()) {
       setError("Folder name is required.");
       return;
@@ -686,6 +700,7 @@ export function ProjectBrowser({
   }
 
   async function handleRenameFolder() {
+    if (readOnly) return;
     if (!renamingFolder) return;
     if (!renameFolderName.trim()) {
       setError("Folder name is required.");
@@ -712,6 +727,7 @@ export function ProjectBrowser({
   }
 
   async function handleMoveProject(projectId: string, targetFolderId: string | null) {
+    if (readOnly) return;
     const destinationFolderId = targetFolderId?.trim() || null;
     const project = projects.find((item) => item.id === projectId);
     if (!project) return;
@@ -743,6 +759,7 @@ export function ProjectBrowser({
   }
 
   async function openDeleteProjectDialog(projectId: string) {
+    if (readOnly) return;
     setOpenProjectMenuId(null);
     setError(null);
     setStatusMessage(null);
@@ -757,6 +774,7 @@ export function ProjectBrowser({
   }
 
   async function handleConfirmDeleteProject() {
+    if (readOnly) return;
     if (!deleteProjectSnapshot || deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
     const projectId = deleteProjectSnapshot.id;
     const projectName = deleteProjectSnapshot.name;
@@ -780,6 +798,7 @@ export function ProjectBrowser({
   }
 
   async function handleProjectCreated(project: CreatedProject) {
+    if (readOnly) return;
     setShowCreateDialog(false);
     setError(null);
     setStatusMessage(null);
@@ -820,30 +839,34 @@ export function ProjectBrowser({
         </button>
         <h2>Projects</h2>
         <div className="browser-actions">
-          <button
-            className="secondary-project-btn"
-            onClick={handleImportProject}
-            disabled={isImporting || isExporting}
-          >
-            {isImporting ? "Importing..." : "Import"}
-          </button>
-          <button
-            className="secondary-project-btn"
-            onClick={openExportDialog}
-            disabled={projects.length === 0 || isImporting || isExporting}
-          >
-            Export
-          </button>
-          <button
-            className="secondary-project-btn"
-            onClick={openCreateFolderModal}
-            disabled={isImporting || isExporting}
-          >
-            + New Folder
-          </button>
-          <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
-            + New Project
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                className="secondary-project-btn"
+                onClick={handleImportProject}
+                disabled={isImporting || isExporting}
+              >
+                {isImporting ? "Importing..." : "Import"}
+              </button>
+              <button
+                className="secondary-project-btn"
+                onClick={openExportDialog}
+                disabled={projects.length === 0 || isImporting || isExporting}
+              >
+                Export
+              </button>
+              <button
+                className="secondary-project-btn"
+                onClick={openCreateFolderModal}
+                disabled={isImporting || isExporting}
+              >
+                + New Folder
+              </button>
+              <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
+                + New Project
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -857,10 +880,16 @@ export function ProjectBrowser({
           <div className="empty-state">
             <div className="empty-icon">📁</div>
             <h3>No Projects Yet</h3>
-            <p>Create a project to organize your calculations</p>
-            <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
-              Create Your First Project
-            </button>
+            {readOnly ? (
+              <p>No synced projects are available yet. Use Sync to refresh from the shared viewer library.</p>
+            ) : (
+              <>
+                <p>Create a project to organize your calculations</p>
+                <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
+                  Create Your First Project
+                </button>
+              </>
+            )}
           </div>
         ) : (
           <>
@@ -893,16 +922,18 @@ export function ProjectBrowser({
                     >
                       <div className="folder-card-header">
                         <h4>{folder.name}</h4>
-                        <button
-                          className="folder-rename-btn"
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openRenameFolderModal(folder);
-                          }}
-                        >
-                          Rename
-                        </button>
+                        {!readOnly && (
+                          <button
+                            className="folder-rename-btn"
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openRenameFolderModal(folder);
+                            }}
+                          >
+                            Rename
+                          </button>
+                        )}
                       </div>
 
                       {folderProjects.length === 0 ? (
@@ -1013,10 +1044,16 @@ export function ProjectBrowser({
                 ) : projects.length === 0 ? (
                   <>
                     <h3>No Projects Yet</h3>
-                    <p>Create a project and place it in root or inside a folder.</p>
-                    <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
-                      Create Project
-                    </button>
+                    {readOnly ? (
+                      <p>No synced projects are available yet.</p>
+                    ) : (
+                      <>
+                        <p>Create a project and place it in root or inside a folder.</p>
+                        <button className="new-project-btn" onClick={() => setShowCreateDialog(true)}>
+                          Create Project
+                        </button>
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
@@ -1042,69 +1079,71 @@ export function ProjectBrowser({
                   >
                     <div className="project-card-header">
                       <h3 className="project-name">{project.name}</h3>
-                      <div className="project-card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          className="project-card-menu-btn"
-                          type="button"
-                          onClick={() => {
-                            setOpenProjectMenuId((current) => (
-                              current === project.id ? null : project.id
-                            ));
-                          }}
-                          title="Project options"
-                          aria-label={`Open options for ${project.name}`}
-                        >
-                          ⋮
-                        </button>
-                        {openProjectMenuId === project.id && (
-                          <div className="project-card-menu">
-                            <button
-                              type="button"
-                              className="project-card-menu-item"
-                              onClick={() => {
-                                openEditProjectDialog(project.id);
-                              }}
-                            >
-                              Edit Project
-                            </button>
-                            <div className="project-card-menu-divider" />
-                            <button
-                              type="button"
-                              className="project-card-menu-item"
-                              onClick={() => {
-                                void handleMoveProject(project.id, null);
-                              }}
-                              disabled={movingProjectId === project.id || !project.folder_id}
-                            >
-                              Move to Root
-                            </button>
-                            {folders.map((folder) => (
+                      {!readOnly && (
+                        <div className="project-card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            className="project-card-menu-btn"
+                            type="button"
+                            onClick={() => {
+                              setOpenProjectMenuId((current) => (
+                                current === project.id ? null : project.id
+                              ));
+                            }}
+                            title="Project options"
+                            aria-label={`Open options for ${project.name}`}
+                          >
+                            ⋮
+                          </button>
+                          {openProjectMenuId === project.id && (
+                            <div className="project-card-menu">
                               <button
-                                key={`${project.id}-${folder.id}`}
                                 type="button"
                                 className="project-card-menu-item"
                                 onClick={() => {
-                                  void handleMoveProject(project.id, folder.id);
+                                  openEditProjectDialog(project.id);
                                 }}
-                                disabled={movingProjectId === project.id || project.folder_id === folder.id}
                               >
-                                Move to {folder.name}
+                                Edit Project
                               </button>
-                            ))}
-                            <div className="project-card-menu-divider" />
-                            <button
-                              type="button"
-                              className="project-card-menu-item danger"
-                              onClick={() => {
-                                void openDeleteProjectDialog(project.id);
-                              }}
-                              disabled={isDeletingProject}
-                            >
-                              Delete Project
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                              <div className="project-card-menu-divider" />
+                              <button
+                                type="button"
+                                className="project-card-menu-item"
+                                onClick={() => {
+                                  void handleMoveProject(project.id, null);
+                                }}
+                                disabled={movingProjectId === project.id || !project.folder_id}
+                              >
+                                Move to Root
+                              </button>
+                              {folders.map((folder) => (
+                                <button
+                                  key={`${project.id}-${folder.id}`}
+                                  type="button"
+                                  className="project-card-menu-item"
+                                  onClick={() => {
+                                    void handleMoveProject(project.id, folder.id);
+                                  }}
+                                  disabled={movingProjectId === project.id || project.folder_id === folder.id}
+                                >
+                                  Move to {folder.name}
+                                </button>
+                              ))}
+                              <div className="project-card-menu-divider" />
+                              <button
+                                type="button"
+                                className="project-card-menu-item danger"
+                                onClick={() => {
+                                  void openDeleteProjectDialog(project.id);
+                                }}
+                                disabled={isDeletingProject}
+                              >
+                                Delete Project
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {project.description && (
@@ -1155,306 +1194,310 @@ export function ProjectBrowser({
         )}
       </div>
 
-      <CreateProjectDialog
-        isOpen={showCreateDialog}
-        onClose={() => setShowCreateDialog(false)}
-        onCreated={(project) => {
-          void handleProjectCreated(project);
-        }}
-      />
+      {!readOnly && (
+        <>
+          <CreateProjectDialog
+            isOpen={showCreateDialog}
+            onClose={() => setShowCreateDialog(false)}
+            onCreated={(project) => {
+              void handleProjectCreated(project);
+            }}
+          />
 
-      <EditProjectDialog
-        isOpen={Boolean(editingProject)}
-        projectId={editingProject?.id ?? null}
-        initialName={editingProject?.name ?? ""}
-        initialDescription={editingProject?.description ?? null}
-        onClose={closeEditProjectDialog}
-        onSaved={handleProjectMetadataSaved}
-      />
+          <EditProjectDialog
+            isOpen={Boolean(editingProject)}
+            projectId={editingProject?.id ?? null}
+            initialName={editingProject?.name ?? ""}
+            initialDescription={editingProject?.description ?? null}
+            onClose={closeEditProjectDialog}
+            onSaved={handleProjectMetadataSaved}
+          />
 
-      {deleteProjectSnapshot && (
-        <div className="dialog-overlay" onClick={closeDeleteProjectDialog}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Delete Project</h2>
-              <button
-                className="dialog-close"
-                onClick={closeDeleteProjectDialog}
-                disabled={isDeletingProject}
-              >
-                &times;
-              </button>
-            </div>
-
-            <div className="dialog-body">
-              <div className="delete-warning">
-                <p>
-                  You are about to permanently delete <strong>{deleteProjectSnapshot.name}</strong> and all of its
-                  data:
-                </p>
-                <ul>
-                  <li>
-                    {deleteProjectSnapshot.cif_variants.length} structure
-                    {deleteProjectSnapshot.cif_variants.length !== 1 ? "s" : ""}
-                  </li>
-                  <li>
-                    {deleteProjectCalculationCount}{" "}
-                    calculation
-                    {deleteProjectCalculationCount !== 1 ? "s" : ""}
-                  </li>
-                  <li>All input/output files</li>
-                </ul>
-                <p className="delete-warning-emphasis">
-                  This action cannot be undone.
-                </p>
-              </div>
-
-              <div className="form-group">
-                <label>
-                  Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
-                </label>
-                <input
-                  type="text"
-                  value={deleteConfirmText}
-                  onChange={(e) => setDeleteConfirmText(e.target.value)}
-                  placeholder={DELETE_CONFIRM_TEXT}
-                  disabled={isDeletingProject}
-                  autoFocus
-                />
-              </div>
-            </div>
-
-            <div className="dialog-footer">
-              <button className="dialog-btn cancel" onClick={closeDeleteProjectDialog} disabled={isDeletingProject}>
-                Cancel
-              </button>
-              <button
-                className="dialog-btn delete"
-                onClick={() => {
-                  void handleConfirmDeleteProject();
-                }}
-                disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeletingProject}
-              >
-                {isDeletingProject ? "Deleting..." : "Delete Project"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showCreateFolderDialog && (
-        <div className="dialog-overlay" onClick={closeCreateFolderModal}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>New Folder</h2>
-              <button className="dialog-close" onClick={closeCreateFolderModal} disabled={isSavingFolder}>
-                &times;
-              </button>
-            </div>
-            <div className="dialog-body">
-              <div className="save-form">
-                <div className="form-group">
-                  <label>Folder Name *</label>
-                  <input
-                    type="text"
-                    value={newFolderName}
-                    onChange={(e) => setNewFolderName(e.target.value)}
-                    placeholder="e.g., Catalyst studies"
-                    autoFocus
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="dialog-footer">
-              <button className="dialog-btn cancel" onClick={closeCreateFolderModal} disabled={isSavingFolder}>
-                Cancel
-              </button>
-              <button
-                className="dialog-btn save"
-                onClick={() => {
-                  void handleCreateFolder();
-                }}
-                disabled={isSavingFolder || !newFolderName.trim()}
-              >
-                {isSavingFolder ? "Creating..." : "Create Folder"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {renamingFolder && (
-        <div className="dialog-overlay" onClick={closeRenameFolderModal}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Rename Folder</h2>
-              <button className="dialog-close" onClick={closeRenameFolderModal} disabled={isSavingFolder}>
-                &times;
-              </button>
-            </div>
-            <div className="dialog-body">
-              <div className="save-form">
-                <div className="form-group">
-                  <label>Folder Name *</label>
-                  <input
-                    type="text"
-                    value={renameFolderName}
-                    onChange={(e) => setRenameFolderName(e.target.value)}
-                    autoFocus
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="dialog-footer">
-              <button className="dialog-btn cancel" onClick={closeRenameFolderModal} disabled={isSavingFolder}>
-                Cancel
-              </button>
-              <button
-                className="dialog-btn save"
-                onClick={() => {
-                  void handleRenameFolder();
-                }}
-                disabled={isSavingFolder || !renameFolderName.trim()}
-              >
-                {isSavingFolder ? "Saving..." : "Save Name"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showExportDialog && (
-        <div className="dialog-overlay" onClick={closeExportDialog}>
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Export Project</h2>
-              <button
-                className="dialog-close"
-                onClick={() => {
-                  void handleCancelExport();
-                }}
-                disabled={isCancelingExport}
-              >
-                &times;
-              </button>
-            </div>
-            <div className="dialog-body">
-              <div className="save-form">
-                <div className="form-group">
-                  <label>Project</label>
-                  <select
-                    value={selectedExportProjectId}
-                    onChange={(e) => setSelectedExportProjectId(e.target.value)}
-                    disabled={isExporting}
+          {deleteProjectSnapshot && (
+            <div className="dialog-overlay" onClick={closeDeleteProjectDialog}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Delete Project</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={closeDeleteProjectDialog}
+                    disabled={isDeletingProject}
                   >
-                    {projects.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {project.name}
-                      </option>
-                    ))}
-                  </select>
+                    &times;
+                  </button>
                 </div>
-                <p className="project-archive-hint">
-                  The full project directory will be compressed into a `.qcproj` archive.
-                </p>
-                {isExporting && (
-                  <div className="export-progress">
-                    <div className="export-progress-labels">
-                      <span>{getProgressText(exportProgress)}</span>
-                      {exportProgress && exportProgress.total_bytes > 0 && (
-                        <span>
-                          {formatBytes(exportProgress.processed_bytes)} / {formatBytes(exportProgress.total_bytes)}
-                        </span>
-                      )}
-                    </div>
-                    <div
-                      className={`export-progress-track ${
-                        exportProgress && exportProgress.total_bytes > 0 ? "" : "indeterminate"
-                      }`}
-                    >
-                      <div
-                        className="export-progress-fill"
-                        style={{
-                          width:
-                            exportProgress && exportProgress.total_bytes > 0
-                              ? `${Math.min(100, Math.max(0, exportProgress.progress_percent))}%`
-                              : "35%",
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="dialog-footer">
-              <button
-                className="dialog-btn cancel"
-                onClick={() => {
-                  void handleCancelExport();
-                }}
-                disabled={isCancelingExport}
-              >
-                {isExporting ? (isCancelingExport ? "Canceling..." : "Cancel Export") : "Cancel"}
-              </button>
-              <button
-                className="dialog-btn save"
-                onClick={() => {
-                  void handleExportProject();
-                }}
-                disabled={isExporting || isCancelingExport || !selectedExportProjectId}
-              >
-                {isExporting ? "Exporting..." : "Export Project"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {isImporting && (
-        <div className="dialog-overlay">
-          <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
-            <div className="dialog-header">
-              <h2>Import Project</h2>
-            </div>
-            <div className="dialog-body">
-              <div className="save-form">
-                <p className="project-archive-hint">
-                  The archive is being extracted and copied into your projects directory.
-                </p>
-                <div className="export-progress">
-                  <div className="export-progress-labels">
-                    <span>{getImportProgressText(importProgress)}</span>
-                    {importProgress && importProgress.total_bytes > 0 && (
-                      <span>
-                        {formatBytes(importProgress.processed_bytes)} / {formatBytes(importProgress.total_bytes)}
-                      </span>
-                    )}
+                <div className="dialog-body">
+                  <div className="delete-warning">
+                    <p>
+                      You are about to permanently delete <strong>{deleteProjectSnapshot.name}</strong> and all of its
+                      data:
+                    </p>
+                    <ul>
+                      <li>
+                        {deleteProjectSnapshot.cif_variants.length} structure
+                        {deleteProjectSnapshot.cif_variants.length !== 1 ? "s" : ""}
+                      </li>
+                      <li>
+                        {deleteProjectCalculationCount}{" "}
+                        calculation
+                        {deleteProjectCalculationCount !== 1 ? "s" : ""}
+                      </li>
+                      <li>All input/output files</li>
+                    </ul>
+                    <p className="delete-warning-emphasis">
+                      This action cannot be undone.
+                    </p>
                   </div>
-                  <div
-                    className={`export-progress-track ${
-                      importProgress && importProgress.total_bytes > 0 ? "" : "indeterminate"
-                    }`}
-                  >
-                    <div
-                      className="export-progress-fill"
-                      style={{
-                        width:
-                          importProgress && importProgress.total_bytes > 0
-                            ? `${Math.min(100, Math.max(0, importProgress.progress_percent))}%`
-                            : "35%",
-                      }}
+
+                  <div className="form-group">
+                    <label>
+                      Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
+                    </label>
+                    <input
+                      type="text"
+                      value={deleteConfirmText}
+                      onChange={(e) => setDeleteConfirmText(e.target.value)}
+                      placeholder={DELETE_CONFIRM_TEXT}
+                      disabled={isDeletingProject}
+                      autoFocus
                     />
                   </div>
                 </div>
+
+                <div className="dialog-footer">
+                  <button className="dialog-btn cancel" onClick={closeDeleteProjectDialog} disabled={isDeletingProject}>
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn delete"
+                    onClick={() => {
+                      void handleConfirmDeleteProject();
+                    }}
+                    disabled={deleteConfirmText !== DELETE_CONFIRM_TEXT || isDeletingProject}
+                  >
+                    {isDeletingProject ? "Deleting..." : "Delete Project"}
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="dialog-footer">
-              <button className="dialog-btn save" disabled>
-                Importing...
-              </button>
+          )}
+
+          {showCreateFolderDialog && (
+            <div className="dialog-overlay" onClick={closeCreateFolderModal}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>New Folder</h2>
+                  <button className="dialog-close" onClick={closeCreateFolderModal} disabled={isSavingFolder}>
+                    &times;
+                  </button>
+                </div>
+                <div className="dialog-body">
+                  <div className="save-form">
+                    <div className="form-group">
+                      <label>Folder Name *</label>
+                      <input
+                        type="text"
+                        value={newFolderName}
+                        onChange={(e) => setNewFolderName(e.target.value)}
+                        placeholder="e.g., Catalyst studies"
+                        autoFocus
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="dialog-footer">
+                  <button className="dialog-btn cancel" onClick={closeCreateFolderModal} disabled={isSavingFolder}>
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn save"
+                    onClick={() => {
+                      void handleCreateFolder();
+                    }}
+                    disabled={isSavingFolder || !newFolderName.trim()}
+                  >
+                    {isSavingFolder ? "Creating..." : "Create Folder"}
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+
+          {renamingFolder && (
+            <div className="dialog-overlay" onClick={closeRenameFolderModal}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Rename Folder</h2>
+                  <button className="dialog-close" onClick={closeRenameFolderModal} disabled={isSavingFolder}>
+                    &times;
+                  </button>
+                </div>
+                <div className="dialog-body">
+                  <div className="save-form">
+                    <div className="form-group">
+                      <label>Folder Name *</label>
+                      <input
+                        type="text"
+                        value={renameFolderName}
+                        onChange={(e) => setRenameFolderName(e.target.value)}
+                        autoFocus
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="dialog-footer">
+                  <button className="dialog-btn cancel" onClick={closeRenameFolderModal} disabled={isSavingFolder}>
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn save"
+                    onClick={() => {
+                      void handleRenameFolder();
+                    }}
+                    disabled={isSavingFolder || !renameFolderName.trim()}
+                  >
+                    {isSavingFolder ? "Saving..." : "Save Name"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showExportDialog && (
+            <div className="dialog-overlay" onClick={closeExportDialog}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Export Project</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={() => {
+                      void handleCancelExport();
+                    }}
+                    disabled={isCancelingExport}
+                  >
+                    &times;
+                  </button>
+                </div>
+                <div className="dialog-body">
+                  <div className="save-form">
+                    <div className="form-group">
+                      <label>Project</label>
+                      <select
+                        value={selectedExportProjectId}
+                        onChange={(e) => setSelectedExportProjectId(e.target.value)}
+                        disabled={isExporting}
+                      >
+                        {projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="project-archive-hint">
+                      The full project directory will be compressed into a `.qcproj` archive.
+                    </p>
+                    {isExporting && (
+                      <div className="export-progress">
+                        <div className="export-progress-labels">
+                          <span>{getProgressText(exportProgress)}</span>
+                          {exportProgress && exportProgress.total_bytes > 0 && (
+                            <span>
+                              {formatBytes(exportProgress.processed_bytes)} / {formatBytes(exportProgress.total_bytes)}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className={`export-progress-track ${
+                            exportProgress && exportProgress.total_bytes > 0 ? "" : "indeterminate"
+                          }`}
+                        >
+                          <div
+                            className="export-progress-fill"
+                            style={{
+                              width:
+                                exportProgress && exportProgress.total_bytes > 0
+                                  ? `${Math.min(100, Math.max(0, exportProgress.progress_percent))}%`
+                                  : "35%",
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="dialog-footer">
+                  <button
+                    className="dialog-btn cancel"
+                    onClick={() => {
+                      void handleCancelExport();
+                    }}
+                    disabled={isCancelingExport}
+                  >
+                    {isExporting ? (isCancelingExport ? "Canceling..." : "Cancel Export") : "Cancel"}
+                  </button>
+                  <button
+                    className="dialog-btn save"
+                    onClick={() => {
+                      void handleExportProject();
+                    }}
+                    disabled={isExporting || isCancelingExport || !selectedExportProjectId}
+                  >
+                    {isExporting ? "Exporting..." : "Export Project"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isImporting && (
+            <div className="dialog-overlay">
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Import Project</h2>
+                </div>
+                <div className="dialog-body">
+                  <div className="save-form">
+                    <p className="project-archive-hint">
+                      The archive is being extracted and copied into your projects directory.
+                    </p>
+                    <div className="export-progress">
+                      <div className="export-progress-labels">
+                        <span>{getImportProgressText(importProgress)}</span>
+                        {importProgress && importProgress.total_bytes > 0 && (
+                          <span>
+                            {formatBytes(importProgress.processed_bytes)} / {formatBytes(importProgress.total_bytes)}
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        className={`export-progress-track ${
+                          importProgress && importProgress.total_bytes > 0 ? "" : "indeterminate"
+                        }`}
+                      >
+                        <div
+                          className="export-progress-fill"
+                          style={{
+                            width:
+                              importProgress && importProgress.total_bytes > 0
+                                ? `${Math.min(100, Math.max(0, importProgress.progress_percent))}%`
+                                : "35%",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="dialog-footer">
+                  <button className="dialog-btn save" disabled>
+                    Importing...
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

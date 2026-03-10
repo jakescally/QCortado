@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev:viewer": "VITE_APP_ROLE=viewer QCORTADO_APP_ROLE=viewer tauri dev -c src-tauri/tauri.viewer.conf.json --features viewer",
+    "tauri:build:viewer": "VITE_APP_ROLE=viewer QCORTADO_APP_ROLE=viewer tauri build -c src-tauri/tauri.viewer.conf.json --features viewer"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

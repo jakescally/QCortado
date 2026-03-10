@@ -5,6 +5,10 @@ description = "A modern UI for Quantum ESPRESSO"
 authors = ["Jake Scally"]
 edition = "2021"
 
+[features]
+default = []
+viewer = []
+
 [lib]
 name = "qcortado_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

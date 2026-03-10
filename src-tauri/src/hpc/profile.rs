@@ -260,9 +260,9 @@ pub fn walltime_seconds(input: &str) -> Option<u64> {
 pub fn andromeda_partition_limit_seconds(partition: &str) -> Option<u64> {
     match partition.trim().to_ascii_lowercase().as_str() {
         "interactive" => Some(12 * 3600),
-        "short" => Some(24 * 3600),
-        "medium" => Some(72 * 3600),
-        "long" => Some(7 * 24 * 3600),
+        "short" => Some(12 * 3600),
+        "medium" => Some(48 * 3600),
+        "long" => Some(5 * 24 * 3600),
         _ => None,
     }
 }

@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   defaultCpuResources,
   defaultGpuResources,
+  getActiveHpcProfileId,
+  importHpcPresetBundle,
+  listHpcProfiles,
   normalizeCliDashText,
   saveHpcProfile,
   setActiveHpcProfile,
@@ -57,8 +61,11 @@ export function HpcSetupWizard({
   const [credential, setCredential] = useState("");
   const [persistCredential, setPersistCredential] = useState(initialProfile?.credential_persisted ?? false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isImportingPresetBundle, setIsImportingPresetBundle] = useState(false);
+  const [importMessage, setImportMessage] = useState<string | null>(null);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [validationDetails, setValidationDetails] = useState<string[]>([]);
+  const isBusy = isSaving || isImportingPresetBundle;
 
   useEffect(() => {
     const isNewlyOpened = isOpen && !wasOpenRef.current;
@@ -67,6 +74,7 @@ export function HpcSetupWizard({
       setProfile(initialProfile ?? makeDefaultProfile());
       setCredential("");
       setPersistCredential(initialProfile?.credential_persisted ?? false);
+      setImportMessage(null);
       setValidationMessage(null);
       setValidationDetails([]);
     }
@@ -133,10 +141,59 @@ export function HpcSetupWizard({
     }
   }
 
+  async function handleImportExistingProfile() {
+    if (isBusy) {
+      return;
+    }
+
+    setIsImportingPresetBundle(true);
+    setImportMessage(null);
+    setValidationMessage(null);
+    setValidationDetails([]);
+    try {
+      const selectedPath = await open({
+        title: "Import HPC Presets + Defaults",
+        directory: false,
+        multiple: false,
+        filters: [{ name: "QCortado HPC Preset Bundle", extensions: ["qchpc", "json"] }],
+      });
+      if (!selectedPath || Array.isArray(selectedPath)) {
+        return;
+      }
+
+      const result = await importHpcPresetBundle(selectedPath);
+      const [profiles, activeProfileId] = await Promise.all([
+        listHpcProfiles(),
+        getActiveHpcProfileId(),
+      ]);
+      const importedProfile = profiles.find((candidate) => candidate.id === activeProfileId) ?? profiles[0] ?? null;
+
+      const summaryBase = `Imported ${result.imported_profile_count} profile preset(s): ${result.updated_profile_count} updated, ${result.created_profile_count} created.`;
+      const summary = result.profiles_requiring_username.length > 0
+        ? `${summaryBase} Set usernames before connecting for: ${result.profiles_requiring_username.join(", ")}.`
+        : summaryBase;
+      setImportMessage(summary);
+
+      if (!importedProfile) {
+        return;
+      }
+
+      setStep(0);
+      setProfile(importedProfile);
+      setCredential("");
+      setPersistCredential(importedProfile.credential_persisted);
+      onSaved(importedProfile);
+    } catch (e) {
+      setImportMessage(`Failed to import presets: ${e}`);
+    } finally {
+      setIsImportingPresetBundle(false);
+    }
+  }
+
   if (!isOpen) return null;
 
   return (
-    <div className="settings-window-overlay" onClick={() => !isSaving && onClose()}>
+    <div className="settings-window-overlay" onClick={() => !isBusy && onClose()}>
       <div
         className="floating-settings-menu hpc-setup-wizard"
         onClick={(event) => event.stopPropagation()}
@@ -146,7 +203,7 @@ export function HpcSetupWizard({
       >
         <div className="settings-window-header">
           <h3>HPC Setup ({STEP_TITLES[step]})</h3>
-          <button className="settings-window-close" onClick={onClose} disabled={isSaving} aria-label="Close setup">
+          <button className="settings-window-close" onClick={onClose} disabled={isBusy} aria-label="Close setup">
             &times;
           </button>
         </div>
@@ -162,6 +219,17 @@ export function HpcSetupWizard({
         <div className="settings-window-content">
           {step === 0 && (
             <div className="settings-menu-section">
+              <button
+                className="settings-menu-item"
+                onClick={() => void handleImportExistingProfile()}
+                disabled={isBusy}
+              >
+                {isImportingPresetBundle ? "Importing..." : "Import Existing Profile"}
+              </button>
+              <p className="settings-menu-hint">
+                Load a saved HPC preset bundle (<code>.qchpc</code> or <code>.json</code>) instead of entering all fields manually.
+              </p>
+              {importMessage && <div className="settings-menu-status">{importMessage}</div>}
               <label className="settings-menu-label">Profile Name</label>
               <input
                 className="settings-menu-input"
@@ -381,7 +449,7 @@ export function HpcSetupWizard({
               <button
                 className="settings-menu-item"
                 onClick={() => void handlePersistProfile(true)}
-                disabled={isSaving}
+                disabled={isBusy}
               >
                 {isSaving ? "Running checks..." : "Save Profile + Run Checks"}
               </button>
@@ -401,7 +469,7 @@ export function HpcSetupWizard({
           <button
             className="dialog-btn cancel"
             onClick={() => setStep((prev) => Math.max(0, prev - 1))}
-            disabled={step === 0 || isSaving}
+            disabled={step === 0 || isBusy}
           >
             Back
           </button>
@@ -409,7 +477,7 @@ export function HpcSetupWizard({
             <button
               className="dialog-btn primary"
               onClick={() => setStep((prev) => Math.min(STEP_TITLES.length - 1, prev + 1))}
-              disabled={!canContinue || isSaving}
+              disabled={!canContinue || isBusy}
             >
               Next
             </button>
@@ -417,11 +485,11 @@ export function HpcSetupWizard({
             <button
               className="dialog-btn primary"
               onClick={async () => {
-                if (isSaving) return;
+                if (isBusy) return;
                 await handlePersistProfile(false);
                 onClose();
               }}
-              disabled={isSaving}
+              disabled={isBusy}
             >
               Done
             </button>

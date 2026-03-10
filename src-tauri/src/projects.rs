@@ -1090,6 +1090,18 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
 // Tauri Commands
 // ============================================================================
 
+fn queue_viewer_library_publish(app: &AppHandle) {
+    let state = app.state::<crate::AppState>();
+    crate::queue_auto_viewer_publish(app, state.inner());
+}
+
+fn ensure_research_mode() -> Result<(), String> {
+    if cfg!(feature = "viewer") {
+        return Err("Viewer mode is read-only; this action is disabled.".to_string());
+    }
+    Ok(())
+}
+
 /// Lists all project folders.
 #[tauri::command]
 pub fn list_project_folders(app: AppHandle) -> Result<Vec<ProjectFolder>, String> {
@@ -1105,6 +1117,7 @@ pub fn list_project_folders(app: AppHandle) -> Result<Vec<ProjectFolder>, String
 /// Creates a new project folder.
 #[tauri::command]
 pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFolder, String> {
+    ensure_research_mode()?;
     let normalized_name = normalize_folder_name(&name)?;
     let mut folders = load_project_folders(&app)?;
 
@@ -1125,6 +1138,7 @@ pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFold
     };
     folders.push(folder.clone());
     save_project_folders(&app, &folders)?;
+    queue_viewer_library_publish(&app);
     Ok(folder)
 }
 
@@ -1135,6 +1149,7 @@ pub fn rename_project_folder(
     folder_id: String,
     name: String,
 ) -> Result<ProjectFolder, String> {
+    ensure_research_mode()?;
     let normalized_name = normalize_folder_name(&name)?;
     let mut folders = load_project_folders(&app)?;
 
@@ -1156,6 +1171,7 @@ pub fn rename_project_folder(
 
     let updated_folder = folder.clone();
     save_project_folders(&app, &folders)?;
+    queue_viewer_library_publish(&app);
     Ok(updated_folder)
 }
 
@@ -1166,6 +1182,7 @@ pub fn move_project_to_folder(
     project_id: String,
     folder_id: Option<String>,
 ) -> Result<Project, String> {
+    ensure_research_mode()?;
     let normalized_folder_id = folder_id
         .as_ref()
         .map(|value| value.trim().to_string())
@@ -1198,6 +1215,7 @@ pub fn move_project_to_folder(
     fs::write(&project_json_path, serialized)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(project)
 }
 
@@ -1306,6 +1324,7 @@ pub fn create_project(
     name: String,
     description: Option<String>,
 ) -> Result<Project, String> {
+    ensure_research_mode()?;
     let projects_dir = ensure_projects_dir(&app)?;
 
     let id = generate_id();
@@ -1335,6 +1354,7 @@ pub fn create_project(
     fs::write(project_dir.join("project.json"), project_json)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(project)
 }
 
@@ -1452,6 +1472,7 @@ pub fn update_project_metadata(
     name: String,
     description: Option<String>,
 ) -> Result<Project, String> {
+    ensure_research_mode()?;
     let projects_dir = ensure_projects_dir(&app)?;
     let project_dir = projects_dir.join(&project_id);
 
@@ -1484,6 +1505,7 @@ pub fn update_project_metadata(
     fs::write(&project_json_path, project_json)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(project)
 }
 
@@ -1494,6 +1516,7 @@ pub fn add_cif_to_project(
     project_id: String,
     cif_data: CifData,
 ) -> Result<CifVariant, String> {
+    ensure_research_mode()?;
     let projects_dir = ensure_projects_dir(&app)?;
     let project_dir = projects_dir.join(&project_id);
 
@@ -1544,6 +1567,7 @@ pub fn add_cif_to_project(
     fs::write(&project_json_path, project_json)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(variant)
 }
 
@@ -1556,6 +1580,7 @@ pub fn save_calculation(
     calc_data: SaveCalculationData,
     working_dir: Option<String>,
 ) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
     let save_size_mode = config::load_config(&app)
         .map(|cfg| cfg.save_size_mode)
         .unwrap_or_else(|_| SaveSizeMode::Large);
@@ -1680,6 +1705,7 @@ pub fn save_calculation(
     fs::write(&project_json_path, project_json)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(calc_run)
 }
 
@@ -1955,6 +1981,7 @@ pub fn recover_phonon_calculation(
     tr2_ph: Option<f64>,
     q_path: Option<String>,
 ) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
     let tmp_dir = PathBuf::from(&working_dir);
     if !tmp_dir.exists() || !tmp_dir.is_dir() {
         return Err(format!(
@@ -2083,6 +2110,7 @@ pub fn recover_phonon_calculation(
 /// Deletes a project
 #[tauri::command]
 pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> {
+    ensure_research_mode()?;
     let projects_dir = ensure_projects_dir(&app)?;
     let project_dir = projects_dir.join(&project_id);
 
@@ -2092,6 +2120,7 @@ pub fn delete_project(app: AppHandle, project_id: String) -> Result<(), String> 
 
     fs::remove_dir_all(&project_dir).map_err(|e| format!("Failed to delete project: {}", e))?;
 
+    queue_viewer_library_publish(&app);
     Ok(())
 }
 
@@ -2465,8 +2494,9 @@ pub async fn import_project_archive(
     archive_path: String,
     import_id: String,
 ) -> Result<ProjectArchiveImportResult, String> {
+    ensure_research_mode()?;
     let app_handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let archive = PathBuf::from(&archive_path);
         if !archive.exists() || !archive.is_file() {
             return Err(format!("Archive not found: {}", archive.display()));
@@ -2639,7 +2669,10 @@ pub async fn import_project_archive(
         result
     })
     .await
-    .map_err(|e| format!("Import task failed to join: {}", e))?
+    .map_err(|e| format!("Import task failed to join: {}", e))??;
+
+    queue_viewer_library_publish(&app);
+    Ok(result)
 }
 
 fn shell_single_quote_remote(value: &str) -> String {
@@ -2793,6 +2826,7 @@ pub async fn delete_calculation(
     cif_id: String,
     calc_id: String,
 ) -> Result<(), String> {
+    ensure_research_mode()?;
     let projects_dir = ensure_projects_dir(&app)?;
     let project_dir = projects_dir.join(&project_id);
 
@@ -2843,6 +2877,7 @@ pub async fn delete_calculation(
             .map_err(|e| format!("Failed to delete calculation files: {}", e))?;
     }
 
+    crate::queue_auto_viewer_publish(&app, state.inner());
     Ok(())
 }
 
@@ -2856,6 +2891,7 @@ pub fn set_calculation_tag(
     tag: String,
     enabled: bool,
 ) -> Result<(), String> {
+    ensure_research_mode()?;
     let tag = tag.trim().to_string();
     if tag.is_empty() {
         return Err("Tag cannot be empty".to_string());
@@ -2914,6 +2950,7 @@ pub fn set_calculation_tag(
             .map_err(|e| format!("Failed to write calc.json: {}", e))?;
     }
 
+    queue_viewer_library_publish(&app);
     Ok(())
 }
 

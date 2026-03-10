@@ -26,7 +26,7 @@ pub struct MpiDefaultsConfig {
 }
 
 /// Application configuration stored on disk
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Path to QE bin directory
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +53,45 @@ pub struct AppConfig {
     /// Active HPC profile ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_hpc_profile_id: Option<String>,
+    /// Automatically publish a read-only viewer library after project mutations.
+    #[serde(default = "default_true")]
+    pub viewer_auto_publish_enabled: bool,
+    /// Last successful viewer-library publish timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_last_publish_at: Option<String>,
+    /// Most recent viewer-library publish error, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_last_publish_error: Option<String>,
+    /// Last successful viewer-library sync timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_last_sync_at: Option<String>,
+    /// Most recent viewer-library sync error, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_last_sync_error: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            qe_bin_dir: None,
+            execution_prefix: None,
+            fermi_surfer_path: None,
+            mpi_defaults: None,
+            save_size_mode: SaveSizeMode::Large,
+            execution_mode: ExecutionMode::Local,
+            hpc_profiles: Vec::new(),
+            active_hpc_profile_id: None,
+            viewer_auto_publish_enabled: true,
+            viewer_last_publish_at: None,
+            viewer_last_publish_error: None,
+            viewer_last_sync_at: None,
+            viewer_last_sync_error: None,
+        }
+    }
 }
 
 /// Gets the config file path
@@ -151,5 +190,36 @@ pub fn update_hpc_profiles(
     let mut config = load_config(app)?;
     config.hpc_profiles = profiles;
     config.active_hpc_profile_id = active_hpc_profile_id;
+    save_config(app, &config)
+}
+
+/// Updates viewer auto-publish preference and saves.
+pub fn update_viewer_auto_publish_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.viewer_auto_publish_enabled = enabled;
+    save_config(app, &config)
+}
+
+/// Updates viewer-library publish status metadata and saves.
+pub fn update_viewer_publish_status(
+    app: &AppHandle,
+    last_publish_at: Option<String>,
+    last_publish_error: Option<String>,
+) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.viewer_last_publish_at = last_publish_at;
+    config.viewer_last_publish_error = last_publish_error;
+    save_config(app, &config)
+}
+
+/// Updates viewer-library sync status metadata and saves.
+pub fn update_viewer_sync_status(
+    app: &AppHandle,
+    last_sync_at: Option<String>,
+    last_sync_error: Option<String>,
+) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.viewer_last_sync_at = last_sync_at;
+    config.viewer_last_sync_error = last_sync_error;
     save_config(app, &config)
 }

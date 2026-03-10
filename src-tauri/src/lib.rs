@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "viewer", allow(dead_code))]
+
 //! QCortado - A modern UI for Quantum ESPRESSO
 //!
 //! This is the Tauri backend providing:
@@ -11,6 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
@@ -60,6 +63,12 @@ pub struct AppState {
     pub allow_exit: AtomicBool,
     /// Tracks whether a full shutdown workflow is currently in progress.
     pub exit_in_progress: AtomicBool,
+    /// Whether automatic viewer-library publishing is enabled.
+    pub viewer_auto_publish_enabled: AtomicBool,
+    /// Debounce flag for queued viewer-library publishing.
+    pub viewer_publish_pending: AtomicBool,
+    /// Last-known viewer sync status, used by the viewer UI.
+    pub viewer_sync_status: Mutex<hpc::viewer_library::ViewerSyncStatus>,
 }
 
 impl Default for AppState {
@@ -77,6 +86,9 @@ impl Default for AppState {
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
             exit_in_progress: AtomicBool::new(false),
+            viewer_auto_publish_enabled: AtomicBool::new(true),
+            viewer_publish_pending: AtomicBool::new(false),
+            viewer_sync_status: Mutex::new(hpc::viewer_library::ViewerSyncStatus::default()),
         }
     }
 }
@@ -1027,6 +1039,147 @@ fn get_execution_mode(state: State<AppState>) -> hpc::profile::ExecutionMode {
     *state.execution_mode.lock().unwrap()
 }
 
+fn app_role() -> &'static str {
+    if cfg!(feature = "viewer") {
+        "viewer"
+    } else {
+        "research"
+    }
+}
+
+#[tauri::command]
+fn get_app_role() -> String {
+    app_role().to_string()
+}
+
+#[tauri::command]
+fn get_viewer_auto_publish_enabled(state: State<AppState>) -> bool {
+    state.viewer_auto_publish_enabled.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn set_viewer_auto_publish_enabled(
+    app: AppHandle,
+    state: State<AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state
+        .viewer_auto_publish_enabled
+        .store(enabled, Ordering::SeqCst);
+    config::update_viewer_auto_publish_enabled(&app, enabled)?;
+    Ok(enabled)
+}
+
+async fn publish_viewer_library_with_profile(
+    app: &AppHandle,
+    state: &AppState,
+    profile_id: Option<String>,
+    project_id: Option<String>,
+) -> Result<hpc::viewer_library::ViewerPublishResult, String> {
+    let profile = resolve_hpc_profile_from_state(state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    match hpc::viewer_library::publish_viewer_library(
+        app,
+        &profile,
+        secret.as_deref(),
+        project_id.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => {
+            let _ =
+                config::update_viewer_publish_status(app, Some(result.generated_at.clone()), None);
+            Ok(result)
+        }
+        Err(err) => {
+            let _ = config::update_viewer_publish_status(app, None, Some(err.clone()));
+            Err(err)
+        }
+    }
+}
+
+pub(crate) fn queue_auto_viewer_publish(app: &AppHandle, state: &AppState) {
+    if !state.viewer_auto_publish_enabled.load(Ordering::SeqCst) {
+        return;
+    }
+    if state.viewer_publish_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+        let state = app.state::<AppState>();
+        let _ = publish_viewer_library_with_profile(&app, state.inner(), None, None).await;
+        state.viewer_publish_pending.store(false, Ordering::SeqCst);
+    });
+}
+
+#[tauri::command]
+async fn hpc_publish_viewer_library(
+    app: AppHandle,
+    profile_id: Option<String>,
+    project_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<hpc::viewer_library::ViewerPublishResult, String> {
+    publish_viewer_library_with_profile(&app, state.inner(), profile_id, project_id).await
+}
+
+async fn sync_viewer_library_with_profile(
+    app: &AppHandle,
+    state: &AppState,
+    profile_id: Option<String>,
+) -> Result<hpc::viewer_library::ViewerSyncResult, String> {
+    let profile = resolve_hpc_profile_from_state(state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    match hpc::viewer_library::sync_viewer_library(app, &profile, secret.as_deref()).await {
+        Ok(result) => {
+            {
+                let mut status = state.viewer_sync_status.lock().unwrap();
+                status.last_synced_at = Some(result.synced_at.clone());
+                status.last_error = None;
+                status.local_project_count = result.total_projects;
+            }
+            let _ = config::update_viewer_sync_status(app, Some(result.synced_at.clone()), None);
+            Ok(result)
+        }
+        Err(err) => {
+            {
+                let mut status = state.viewer_sync_status.lock().unwrap();
+                status.last_error = Some(err.clone());
+            }
+            let _ = config::update_viewer_sync_status(app, None, Some(err.clone()));
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+async fn viewer_sync_remote_library(
+    app: AppHandle,
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<hpc::viewer_library::ViewerSyncResult, String> {
+    sync_viewer_library_with_profile(&app, state.inner(), profile_id).await
+}
+
+#[tauri::command]
+fn viewer_get_sync_status(state: State<AppState>) -> hpc::viewer_library::ViewerSyncStatus {
+    state.viewer_sync_status.lock().unwrap().clone()
+}
+
 /// Lists configured HPC profiles.
 #[tauri::command]
 fn hpc_list_profiles(state: State<AppState>) -> Vec<hpc::profile::HpcProfile> {
@@ -1760,6 +1913,54 @@ async fn hpc_validate_environment(
         qe_pw_available,
         workspace_writable,
         messages,
+    })
+}
+
+/// Queries cluster-wide node + queue activity snapshot for Andromeda.
+#[tauri::command]
+async fn hpc_get_cluster_snapshot(
+    profile_id: Option<String>,
+    queue_scope: Option<String>,
+    include_queue: Option<bool>,
+    queue_limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<hpc::cluster_snapshot::HpcClusterSnapshot, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    if !hpc::cluster_snapshot::is_andromeda_profile(&profile) {
+        return Err(format!(
+            "Node Activity currently supports Andromeda only (profile cluster='{}', host='{}').",
+            profile.cluster, profile.host
+        ));
+    }
+
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let resolved_scope = hpc::cluster_snapshot::normalize_queue_scope(queue_scope);
+    let include_queue = include_queue.unwrap_or(true);
+    let queue_limit = queue_limit.unwrap_or(1500).clamp(1, 5000) as usize;
+    let remote_cmd = hpc::cluster_snapshot::build_cluster_snapshot_command(
+        resolved_scope,
+        include_queue,
+        queue_limit,
+    );
+    let raw_output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &remote_cmd).await?;
+    let parsed = hpc::cluster_snapshot::parse_cluster_snapshot_output(&raw_output, include_queue)?;
+
+    Ok(hpc::cluster_snapshot::HpcClusterSnapshot {
+        captured_at: now_iso(),
+        cluster: profile.cluster.trim().to_string(),
+        host: profile.host.trim().to_string(),
+        queue_scope: resolved_scope.as_str().to_string(),
+        queue_included: include_queue,
+        queue_limit,
+        nodes: parsed.nodes,
+        queue: parsed.queue,
+        warnings: parsed.warnings,
     })
 }
 
@@ -4527,9 +4728,7 @@ async fn run_hpc_bundle_task(
 ) -> Result<PathBuf, String> {
     // Keep a task-scoped local sync directory to prevent collisions across
     // concurrent HPC submissions from the same wizard.
-    let local_sync_dir = PathBuf::from(working_dir)
-        .join("hpc_tasks")
-        .join(task_id);
+    let local_sync_dir = PathBuf::from(working_dir).join("hpc_tasks").join(task_id);
     prepare_working_directory(&local_sync_dir, false)?;
 
     pm.set_hpc_profile_id(task_id, Some(profile.id.clone()))
@@ -6310,6 +6509,10 @@ async fn run_fermi_surface_hpc_background(
         "fermi_velocity.in",
         "fermi_velocity.out",
     ));
+    commands.push(
+        "if [ -d ./tmp ]; then find ./tmp -type f \\( -iname '*.frmsf' -o -iname '*.bxsf' \\) -exec cp -n {} . \\; || true; rm -rf ./tmp; fi"
+            .to_string(),
+    );
     let work_path = run_hpc_bundle_task(
         app,
         pm,
@@ -7750,6 +7953,8 @@ pub fn run() {
             let mut execution_mode = hpc::profile::ExecutionMode::Local;
             let mut hpc_profiles: Vec<hpc::profile::HpcProfile> = Vec::new();
             let mut active_hpc_profile_id: Option<String> = None;
+            let mut viewer_auto_publish_enabled = true;
+            let mut viewer_sync_status = hpc::viewer_library::ViewerSyncStatus::default();
             match config::load_config(&app.handle()) {
                 Ok(cfg) => {
                     if let Some(path) = cfg.qe_bin_dir {
@@ -7771,6 +7976,9 @@ pub fn run() {
                     execution_mode = cfg.execution_mode;
                     hpc_profiles = cfg.hpc_profiles;
                     active_hpc_profile_id = cfg.active_hpc_profile_id;
+                    viewer_auto_publish_enabled = cfg.viewer_auto_publish_enabled;
+                    viewer_sync_status.last_synced_at = cfg.viewer_last_sync_at;
+                    viewer_sync_status.last_error = cfg.viewer_last_sync_error;
                 }
                 Err(e) => {
                     eprintln!("Warning: Failed to load config: {}", e);
@@ -7791,7 +7999,23 @@ pub fn run() {
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
                 exit_in_progress: AtomicBool::new(false),
+                viewer_auto_publish_enabled: AtomicBool::new(viewer_auto_publish_enabled),
+                viewer_publish_pending: AtomicBool::new(false),
+                viewer_sync_status: Mutex::new(viewer_sync_status),
             });
+
+            #[cfg(feature = "viewer")]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let state = app_handle.state::<AppState>();
+                        let _ = sync_viewer_library_with_profile(&app_handle, state.inner(), None)
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
+                    }
+                });
+            }
 
             #[cfg(target_os = "windows")]
             {
@@ -7829,91 +8053,126 @@ pub fn run() {
                 request_app_quit(app);
             }
             _ => {}
-        })
-        .invoke_handler(tauri::generate_handler![
-            set_qe_path,
-            get_qe_path,
-            set_fermi_surfer_path,
-            get_fermi_surfer_path,
-            set_execution_prefix,
-            get_execution_prefix,
-            set_mpi_defaults,
-            get_mpi_defaults,
-            set_save_size_mode,
-            get_save_size_mode,
-            set_execution_mode,
-            get_execution_mode,
-            hpc_list_profiles,
-            hpc_export_preset_bundle,
-            hpc_import_preset_bundle,
-            hpc_save_profile,
-            hpc_update_profile_defaults,
-            hpc_migrate_remote_roots,
-            hpc_delete_profile,
-            hpc_set_active_profile,
-            hpc_get_active_profile_id,
-            hpc_test_connection,
-            hpc_validate_environment,
-            hpc_sample_utilization,
-            hpc_list_remote_pseudopotentials,
-            hpc_load_remote_sssp_data,
-            hpc_preview_slurm_script,
-            hpc_open_activity_window,
-            hpc_download_task_artifacts,
-            hpc_download_calculation_artifacts,
-            hpc_clean_remote_orphans,
-            clear_temp_storage,
-            launch_fermi_surface_viewer,
-            check_qe_executables,
-            analyze_structure_symmetry,
-            generate_input,
-            validate_calculation,
-            parse_output,
-            get_cpu_count,
-            check_mpi_available,
-            run_calculation,
-            run_calculation_streaming,
-            run_bands_calculation,
-            run_phonon_calculation,
-            set_project_dir,
-            get_project_dir,
-            list_pseudopotentials,
-            load_sssp_data,
-            // Background task commands
-            start_scf_calculation,
-            start_bands_calculation,
-            start_dos_calculation,
-            start_fermi_surface_calculation,
-            start_phonon_calculation,
-            list_running_tasks,
-            get_task_info,
-            get_task_output,
-            cancel_task,
-            dismiss_task,
-            shutdown_and_close,
-            // Project management commands
-            projects::list_projects,
-            projects::list_project_folders,
-            projects::create_project,
-            projects::create_project_folder,
-            projects::get_project,
-            projects::update_project_metadata,
-            projects::rename_project_folder,
-            projects::move_project_to_folder,
-            projects::add_cif_to_project,
-            projects::save_calculation,
-            projects::export_project_archive,
-            projects::cancel_project_export,
-            projects::import_project_archive,
-            projects::delete_project,
-            projects::delete_calculation,
-            projects::set_calculation_tag,
-            projects::set_last_opened_cif,
-            projects::get_cif_crystal_data,
-            projects::get_cif_content,
-            projects::get_saved_phonon_data,
-            projects::recover_phonon_calculation,
-        ]);
+        });
+
+    #[cfg(feature = "viewer")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_app_role,
+        hpc_list_profiles,
+        hpc_import_preset_bundle,
+        hpc_save_profile,
+        hpc_set_active_profile,
+        hpc_get_active_profile_id,
+        hpc_test_connection,
+        hpc_validate_environment,
+        viewer_sync_remote_library,
+        viewer_get_sync_status,
+        list_running_tasks,
+        get_task_info,
+        get_task_output,
+        dismiss_task,
+        shutdown_and_close,
+        projects::list_projects,
+        projects::list_project_folders,
+        projects::get_project,
+        projects::set_last_opened_cif,
+        projects::get_cif_crystal_data,
+        projects::get_cif_content,
+        projects::get_saved_phonon_data,
+    ]);
+
+    #[cfg(not(feature = "viewer"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        get_app_role,
+        get_viewer_auto_publish_enabled,
+        set_viewer_auto_publish_enabled,
+        set_qe_path,
+        get_qe_path,
+        set_fermi_surfer_path,
+        get_fermi_surfer_path,
+        set_execution_prefix,
+        get_execution_prefix,
+        set_mpi_defaults,
+        get_mpi_defaults,
+        set_save_size_mode,
+        get_save_size_mode,
+        set_execution_mode,
+        get_execution_mode,
+        hpc_list_profiles,
+        hpc_export_preset_bundle,
+        hpc_import_preset_bundle,
+        hpc_save_profile,
+        hpc_update_profile_defaults,
+        hpc_migrate_remote_roots,
+        hpc_delete_profile,
+        hpc_set_active_profile,
+        hpc_get_active_profile_id,
+        hpc_test_connection,
+        hpc_validate_environment,
+        hpc_get_cluster_snapshot,
+        hpc_sample_utilization,
+        hpc_list_remote_pseudopotentials,
+        hpc_load_remote_sssp_data,
+        hpc_preview_slurm_script,
+        hpc_open_activity_window,
+        hpc_download_task_artifacts,
+        hpc_download_calculation_artifacts,
+        hpc_clean_remote_orphans,
+        hpc_publish_viewer_library,
+        clear_temp_storage,
+        launch_fermi_surface_viewer,
+        check_qe_executables,
+        analyze_structure_symmetry,
+        generate_input,
+        validate_calculation,
+        parse_output,
+        get_cpu_count,
+        check_mpi_available,
+        run_calculation,
+        run_calculation_streaming,
+        run_bands_calculation,
+        run_phonon_calculation,
+        set_project_dir,
+        get_project_dir,
+        list_pseudopotentials,
+        load_sssp_data,
+        // Background task commands
+        start_scf_calculation,
+        start_bands_calculation,
+        start_dos_calculation,
+        start_fermi_surface_calculation,
+        start_phonon_calculation,
+        list_running_tasks,
+        get_task_info,
+        get_task_output,
+        cancel_task,
+        dismiss_task,
+        shutdown_and_close,
+        // Project management commands
+        projects::list_projects,
+        projects::list_project_folders,
+        projects::create_project,
+        projects::create_project_folder,
+        projects::get_project,
+        projects::update_project_metadata,
+        projects::rename_project_folder,
+        projects::move_project_to_folder,
+        projects::add_cif_to_project,
+        projects::save_calculation,
+        projects::export_project_archive,
+        projects::cancel_project_export,
+        projects::import_project_archive,
+        projects::delete_project,
+        projects::delete_calculation,
+        projects::set_calculation_tag,
+        projects::set_last_opened_cif,
+        projects::get_cif_crystal_data,
+        projects::get_cif_content,
+        projects::get_saved_phonon_data,
+        projects::recover_phonon_calculation,
+        viewer_sync_remote_library,
+        viewer_get_sync_status,
+    ]);
 
     let app = builder
         .build(tauri::generate_context!())

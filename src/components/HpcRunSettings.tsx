@@ -162,7 +162,7 @@ export function HpcRunSettings({
       </div>
 
       <p className="hpc-run-settings-hint">
-        Andromeda limits: interactive (12h), short (24h), medium (72h), long (7d). GPU jobs require
+        Andromeda limits: interactive (12h), short (12h), medium (48h), long (5d). GPU jobs require
         <code> --gres=gpu:N </code>.
       </p>
       {resourceModeLabel && (

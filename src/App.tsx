@@ -18,6 +18,7 @@ import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
+import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
@@ -92,7 +93,7 @@ interface SettingsProjectSnapshot {
 const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
 
 interface SCFContext {
   cifId: string;
@@ -282,7 +283,7 @@ function AppInner() {
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showQueueMenu, setShowQueueMenu] = useState(false);
-  const [lastNonQueueView, setLastNonQueueView] = useState<AppView>("home");
+  const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("home");
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"general" | "hpc">("general");
@@ -1068,14 +1069,24 @@ function AppInner() {
   function navigateToQueue() {
     setShowQueueMenu(false);
     if (currentView !== "task-queue") {
-      setLastNonQueueView(currentView);
+      setLastNonUtilityView(currentView);
       setCurrentView("task-queue");
     }
   }
 
-  function returnFromQueue() {
+  function navigateToNodeActivity() {
+    setShowQueueMenu(false);
+    if (currentView !== "node-activity") {
+      setLastNonUtilityView(currentView);
+      setCurrentView("node-activity");
+    }
+  }
+
+  function returnFromUtilityView() {
     const fallback: AppView = selectedProjectId ? "project-dashboard" : "home";
-    const destination = lastNonQueueView === "task-queue" ? fallback : lastNonQueueView;
+    const destination = (lastNonUtilityView === "task-queue" || lastNonUtilityView === "node-activity")
+      ? fallback
+      : lastNonUtilityView;
     setCurrentView(destination);
   }
 
@@ -1120,13 +1131,16 @@ function AppInner() {
           setShowSettingsMenu(false);
           setShowQueueMenu((prev) => !prev);
         }}
-        title={executionMode === "hpc" ? "Task manager menu" : "Task queue menu"}
+        title={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
       >
         ☰
       </button>
       {showQueueMenu && (
         <div className="floating-queue-menu">
           <button onClick={navigateToQueue}>{executionMode === "hpc" ? "View Task Manager" : "View Queue"}</button>
+          {executionMode === "hpc" && (
+            <button onClick={navigateToNodeActivity}>View Node Activity</button>
+          )}
         </div>
       )}
     </div>
@@ -2163,7 +2177,21 @@ function AppInner() {
   if (currentView === "task-queue") {
     return (
       <>
-        <TaskQueuePage onBack={returnFromQueue} executionMode={executionMode} />
+        <TaskQueuePage onBack={returnFromUtilityView} executionMode={executionMode} />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "node-activity") {
+    return (
+      <>
+        <HpcNodeActivityPage
+          onBack={returnFromUtilityView}
+          executionMode={executionMode}
+          activeProfileId={activeHpcProfileId}
+          activeProfileName={activeHpcProfile?.name ?? "Andromeda"}
+        />
         {appChrome}
       </>
     );
