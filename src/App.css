@@ -460,8 +460,6 @@ html[data-theme="dark"] {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-bottom: var(--floating-content-clearance);
-  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 /* Import Step */
@@ -524,8 +522,6 @@ html[data-theme="dark"] {
   flex-direction: column;
   gap: 1rem;
   overflow-y: auto;
-  padding-bottom: var(--floating-content-clearance);
-  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 .config-right {
@@ -876,19 +872,51 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  position: sticky;
-  bottom: calc(var(--floating-control-bottom) + var(--floating-control-size) + 0.4rem);
-  z-index: 6;
-  padding: 0.55rem 0;
-  background: linear-gradient(180deg, rgba(247, 250, 252, 0), rgba(247, 250, 252, 0.96) 36%);
 }
 
 .run-btn-group .run-btn {
   margin-top: 0;
 }
 
-html[data-theme="dark"] .run-btn-group {
-  background: linear-gradient(180deg, rgba(30, 30, 46, 0), rgba(30, 30, 46, 0.96) 36%);
+/* SCF configure actions should live in the fixed bottom action lane */
+.wizard-container.wizard-step-configure .run-btn-group {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--floating-control-bottom);
+  z-index: 140;
+  margin: 0;
+  padding-left: max(
+    clamp(1rem, 3.5vw, 2.5rem),
+    var(--floating-left-reserve)
+  );
+  padding-right: max(
+    clamp(1rem, 3.5vw, 2.5rem),
+    var(--floating-right-reserve)
+  );
+  justify-content: flex-start;
+  pointer-events: none;
+}
+
+.wizard-container.wizard-step-configure .run-btn-group > button {
+  pointer-events: auto;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
+}
+
+.wizard-container .wizard-content::after {
+  content: "";
+  display: block;
+  height: var(--floating-content-clearance);
+  width: 100%;
+  pointer-events: none;
+}
+
+.config-left::after {
+  content: "";
+  display: block;
+  height: var(--floating-content-clearance);
+  flex: 0 0 var(--floating-content-clearance);
+  pointer-events: none;
 }
 
 /* Run Step */
@@ -1639,8 +1667,14 @@ html[data-theme="dark"] {
 .browser-content {
   flex: 1;
   overflow-y: auto;
-  padding-bottom: var(--floating-content-clearance);
-  scroll-padding-bottom: var(--floating-content-clearance);
+}
+
+.browser-content::after {
+  content: "";
+  display: block;
+  height: var(--floating-content-clearance);
+  width: 100%;
+  pointer-events: none;
 }
 
 .loading-state,
@@ -4809,7 +4843,7 @@ html[data-theme="dark"] .save-status .saved {
   display: flex;
   flex-direction: column;
   background: #f7fafc;
-  padding: 0.75rem 1rem var(--floating-content-clearance);
+  padding: 0.75rem 1rem;
 }
 
 .bands-viewer-header {
@@ -7727,7 +7761,7 @@ html[data-theme="dark"] .epw-warning {
   display: flex;
   flex-direction: column;
   background: #f7fafc;
-  padding: 0.75rem 1rem var(--floating-content-clearance);
+  padding: 0.75rem 1rem;
 }
 
 .phonon-viewer-header {
@@ -8099,8 +8133,6 @@ html[data-platform="linux"] .phonon-viewer-header {
   background: rgba(248, 250, 252, 0.96);
 }
 
-.wizard-container.wizard-step-run .wizard-content,
-.wizard-container.wizard-step-results .wizard-content,
 .band-structure-wizard .wizard-content,
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
