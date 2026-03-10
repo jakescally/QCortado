@@ -5,10 +5,12 @@ import {
   ELEMENT_MASSES,
   ExecutionMode,
   HpcProfile,
+  SavedStructureData,
   SlurmResourceRequest,
 } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import { isSavedStructureData } from "../lib/optimizedStructure";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
@@ -171,6 +173,22 @@ function getCalculationTags(
 
 function getBaseElement(symbol: string): string {
   return symbol.replace(/[\d+-]+$/, "");
+}
+
+function resolveScfSourceStructure(params: Record<string, unknown>): SavedStructureData | null {
+  const raw = params.source_structure;
+  if (!isSavedStructureData(raw)) return null;
+  if (!raw.cell_parameters || raw.atoms.length === 0) return null;
+
+  return {
+    position_units: raw.position_units,
+    cell_units: raw.cell_units,
+    cell_parameters: raw.cell_parameters,
+    atoms: raw.atoms.map((atom) => ({
+      symbol: getBaseElement(atom.symbol),
+      position: atom.position,
+    })),
+  };
 }
 
 function pseudoMatchesElement(filename: string, element: string): boolean {
@@ -641,10 +659,15 @@ export function FermiSurfaceWizard({
       : parseOptionalPositiveInt(String(fermiNbnd), "number of bands");
 
     const scfParams = selectedScf.parameters || {};
+    const sourceStructure = resolveScfSourceStructure(scfParams);
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
       ? scfParams.selected_pseudos as Record<string, string>
       : {};
-    const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
+    const elements = [...new Set(
+      sourceStructure
+        ? sourceStructure.atoms.map((atom) => getBaseElement(atom.symbol))
+        : crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)),
+    )];
     const resolvedPseudos: Record<string, string> = {};
     for (const element of elements) {
       const savedPseudo = savedPseudoMap[element];
@@ -684,7 +707,7 @@ export function FermiSurfaceWizard({
         mass: ELEMENT_MASSES[element] || 1.0,
         pseudopotential: resolvedPseudos[element],
       })),
-      position_units: "crystal",
+      position_units: sourceStructure?.position_units || "crystal",
       ecutwfc,
       ecutrho,
       nspin: Number(scfParams.nspin) || 1,
@@ -693,7 +716,20 @@ export function FermiSurfaceWizard({
       degauss: parsedDegauss,
     };
 
-    const systemConfig = primitiveCell
+    const systemConfig = sourceStructure
+      ? {
+        ...commonSystemFields,
+        ibrav: "free" as const,
+        celldm: null,
+        cell_parameters: sourceStructure.cell_parameters,
+        cell_units: sourceStructure.cell_units || "angstrom",
+        atoms: sourceStructure.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true] as [boolean, boolean, boolean],
+        })),
+      }
+      : primitiveCell
       ? {
         ...commonSystemFields,
         ibrav: primitiveCell.ibrav,

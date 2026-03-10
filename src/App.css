@@ -11,6 +11,24 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* Global spacing reserve for fixed bottom chrome */
+  --floating-control-size: 48px;
+  --floating-control-gap: 0.85rem;
+  --floating-control-inset: 1.5rem;
+  --floating-control-bottom: calc(var(--floating-control-inset) + env(safe-area-inset-bottom, 0px));
+  --floating-right-reserve: calc(var(--floating-control-inset) + var(--floating-control-size) + var(--floating-control-gap));
+  --floating-left-reserve: calc(
+    var(--floating-control-inset)
+    + (var(--floating-control-size) * 2)
+    + (var(--floating-control-gap) * 2)
+  );
+  --floating-content-clearance: calc(
+    var(--floating-control-bottom)
+    + (var(--floating-control-size) * 2)
+    + var(--floating-control-gap)
+    + 0.65rem
+  );
 }
 
 html, body {
@@ -23,6 +41,7 @@ html, body {
 #root {
   height: 100%;
   overflow-y: auto;
+  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 * {
@@ -32,7 +51,7 @@ html, body {
 .container {
   max-width: 900px;
   margin: 0 auto;
-  padding: 2rem;
+  padding: 2rem 2rem var(--floating-content-clearance);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -441,6 +460,8 @@ html[data-theme="dark"] {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding-bottom: var(--floating-content-clearance);
+  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 /* Import Step */
@@ -503,6 +524,8 @@ html[data-theme="dark"] {
   flex-direction: column;
   gap: 1rem;
   overflow-y: auto;
+  padding-bottom: var(--floating-content-clearance);
+  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 .config-right {
@@ -853,10 +876,19 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  position: sticky;
+  bottom: calc(var(--floating-control-bottom) + var(--floating-control-size) + 0.4rem);
+  z-index: 6;
+  padding: 0.55rem 0;
+  background: linear-gradient(180deg, rgba(247, 250, 252, 0), rgba(247, 250, 252, 0.96) 36%);
 }
 
 .run-btn-group .run-btn {
   margin-top: 0;
+}
+
+html[data-theme="dark"] .run-btn-group {
+  background: linear-gradient(180deg, rgba(30, 30, 46, 0), rgba(30, 30, 46, 0.96) 36%);
 }
 
 /* Run Step */
@@ -1607,6 +1639,8 @@ html[data-theme="dark"] {
 .browser-content {
   flex: 1;
   overflow-y: auto;
+  padding-bottom: var(--floating-content-clearance);
+  scroll-padding-bottom: var(--floating-content-clearance);
 }
 
 .loading-state,
@@ -2662,18 +2696,6 @@ html[data-theme="dark"] {
 }
 
 /* Floating Settings Button */
-:root {
-  --floating-control-size: 48px;
-  --floating-control-gap: 0.85rem;
-  --floating-control-inset: 1.5rem;
-  --floating-control-bottom: calc(var(--floating-control-inset) + env(safe-area-inset-bottom, 0px));
-  --floating-right-reserve: calc(var(--floating-control-inset) + var(--floating-control-size) + var(--floating-control-gap));
-  --floating-left-reserve: calc(
-    var(--floating-control-inset)
-    + (var(--floating-control-size) * 2)
-    + (var(--floating-control-gap) * 2)
-  );
-}
 
 .floating-settings {
   position: fixed;
@@ -2791,7 +2813,7 @@ html[data-theme="dark"] {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  padding: 1rem 1.2rem 5.5rem;
+  padding: 1rem 1.2rem var(--floating-content-clearance);
   background: #f7fafc;
 }
 
@@ -4274,7 +4296,7 @@ html[data-theme="dark"] {
 .dashboard-container {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 2rem;
+  padding: 2rem 2rem var(--floating-content-clearance);
   min-height: 100vh;
 }
 
@@ -4787,7 +4809,7 @@ html[data-theme="dark"] .save-status .saved {
   display: flex;
   flex-direction: column;
   background: #f7fafc;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 1rem var(--floating-content-clearance);
 }
 
 .bands-viewer-header {
@@ -5210,6 +5232,7 @@ html[data-theme="dark"] {
 
 .band-structure-wizard,
 .electronic-dos-wizard,
+.fermi-surface-wizard,
 .phonon-wizard {
   min-height: 100vh;
   display: flex;
@@ -5220,12 +5243,14 @@ html[data-theme="dark"] {
 
 html[data-theme="dark"] .band-structure-wizard,
 html[data-theme="dark"] .electronic-dos-wizard,
+html[data-theme="dark"] .fermi-surface-wizard,
 html[data-theme="dark"] .phonon-wizard {
   background: #1e1e2e;
 }
 
 .band-structure-wizard > .wizard-header,
 .electronic-dos-wizard > .wizard-header,
+.fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header {
   display: flex;
   align-items: center;
@@ -5237,12 +5262,14 @@ html[data-theme="dark"] .phonon-wizard {
 
 html[data-theme="dark"] .band-structure-wizard > .wizard-header,
 html[data-theme="dark"] .electronic-dos-wizard > .wizard-header,
+html[data-theme="dark"] .fermi-surface-wizard > .wizard-header,
 html[data-theme="dark"] .phonon-wizard > .wizard-header {
   border-bottom-color: #45475a;
 }
 
 .band-structure-wizard .wizard-header h2,
 .electronic-dos-wizard .wizard-header h2,
+.fermi-surface-wizard .wizard-header h2,
 .phonon-wizard .wizard-header h2 {
   margin: 0;
   font-size: 1.5rem;
@@ -5252,12 +5279,14 @@ html[data-theme="dark"] .phonon-wizard > .wizard-header {
 
 html[data-theme="dark"] .band-structure-wizard .wizard-header h2,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-header h2,
+html[data-theme="dark"] .fermi-surface-wizard .wizard-header h2,
 html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
   color: #f7fafc;
 }
 
 .band-structure-wizard .step-indicator,
 .electronic-dos-wizard .step-indicator,
+.fermi-surface-wizard .step-indicator,
 .phonon-wizard .step-indicator {
   display: flex;
   gap: 1.5rem;
@@ -5266,6 +5295,7 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 
 .band-structure-wizard .step-indicator span,
 .electronic-dos-wizard .step-indicator span,
+.fermi-surface-wizard .step-indicator span,
 .phonon-wizard .step-indicator span {
   color: #718096;
   padding: 0.25rem 0.5rem;
@@ -5274,12 +5304,14 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span,
+html[data-theme="dark"] .fermi-surface-wizard .step-indicator span,
 html[data-theme="dark"] .phonon-wizard .step-indicator span {
   color: #6c7086;
 }
 
 .band-structure-wizard .step-indicator span.active,
 .electronic-dos-wizard .step-indicator span.active,
+.fermi-surface-wizard .step-indicator span.active,
 .phonon-wizard .step-indicator span.active {
   background: #4299e1;
   color: #fff;
@@ -5288,6 +5320,7 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span {
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.active,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.active,
+html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.active,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.active {
   background: #89b4fa;
   color: #1e1e2e;
@@ -5295,18 +5328,21 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.active {
 
 .band-structure-wizard .step-indicator span.completed,
 .electronic-dos-wizard .step-indicator span.completed,
+.fermi-surface-wizard .step-indicator span.completed,
 .phonon-wizard .step-indicator span.completed {
   color: #38a169;
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.completed,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.completed,
+html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.completed,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
   color: #a6e3a1;
 }
 
 .band-structure-wizard .wizard-content,
 .electronic-dos-wizard .wizard-content,
+.fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content {
   flex: 1;
   padding: 2rem;
@@ -5320,12 +5356,14 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 
 .band-structure-wizard .wizard-step.run-step,
 .electronic-dos-wizard .wizard-step.run-step,
+.fermi-surface-wizard .wizard-step.run-step,
 .phonon-wizard .wizard-step.run-step {
   max-width: 1180px;
 }
 
 .band-structure-wizard .wizard-step h3,
 .electronic-dos-wizard .wizard-step h3,
+.fermi-surface-wizard .wizard-step h3,
 .phonon-wizard .wizard-step h3 {
   margin: 0 0 1rem 0;
   font-size: 1.5rem;
@@ -5334,12 +5372,14 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 
 html[data-theme="dark"] .band-structure-wizard .wizard-step h3,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-step h3,
+html[data-theme="dark"] .fermi-surface-wizard .wizard-step h3,
 html[data-theme="dark"] .phonon-wizard .wizard-step h3 {
   color: #cdd6f4;
 }
 
 .band-structure-wizard .step-description,
 .electronic-dos-wizard .step-description,
+.fermi-surface-wizard .step-description,
 .phonon-wizard .step-description {
   color: #718096;
   margin-bottom: 1.5rem;
@@ -5347,6 +5387,7 @@ html[data-theme="dark"] .phonon-wizard .wizard-step h3 {
 
 html[data-theme="dark"] .band-structure-wizard .step-description,
 html[data-theme="dark"] .electronic-dos-wizard .step-description,
+html[data-theme="dark"] .fermi-surface-wizard .step-description,
 html[data-theme="dark"] .phonon-wizard .step-description {
   color: #a6adc8;
 }
@@ -7686,7 +7727,7 @@ html[data-theme="dark"] .epw-warning {
   display: flex;
   flex-direction: column;
   background: #f7fafc;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 1rem var(--floating-content-clearance);
 }
 
 .phonon-viewer-header {
@@ -8011,6 +8052,7 @@ html[data-theme="dark"] {
 .wizard-container > .wizard-header,
 .band-structure-wizard > .wizard-header,
 .electronic-dos-wizard > .wizard-header,
+.fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
 .bands-viewer-header,
 .phonon-viewer-header {
@@ -8027,6 +8069,7 @@ html[data-platform="linux"] .dashboard-header,
 html[data-platform="linux"] .wizard-container > .wizard-header,
 html[data-platform="linux"] .band-structure-wizard > .wizard-header,
 html[data-platform="linux"] .electronic-dos-wizard > .wizard-header,
+html[data-platform="linux"] .fermi-surface-wizard > .wizard-header,
 html[data-platform="linux"] .phonon-wizard > .wizard-header,
 html[data-platform="linux"] .bands-viewer-header,
 html[data-platform="linux"] .phonon-viewer-header {
@@ -8051,6 +8094,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 
 .band-structure-wizard > .wizard-header,
 .electronic-dos-wizard > .wizard-header,
+.fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header {
   background: rgba(248, 250, 252, 0.96);
 }
@@ -8059,20 +8103,25 @@ html[data-platform="linux"] .phonon-viewer-header {
 .wizard-container.wizard-step-results .wizard-content,
 .band-structure-wizard .wizard-content,
 .electronic-dos-wizard .wizard-content,
+.fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content {
-  padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: var(--floating-content-clearance);
 }
 
 .band-structure-wizard.wizard-step-run .wizard-content,
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content {
-  padding-bottom: calc(1.4rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(
+    calc(1.4rem + env(safe-area-inset-bottom, 0px)),
+    var(--floating-content-clearance)
+  );
 }
 
 .wizard-container .run-actions,
 .band-structure-wizard .step-actions,
 .electronic-dos-wizard .step-actions,
+.fermi-surface-wizard .step-actions,
 .phonon-wizard .step-actions {
   display: flex;
   gap: 1rem;
@@ -8103,6 +8152,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .wizard-container .run-actions > button,
 .band-structure-wizard .step-actions > button,
 .electronic-dos-wizard .step-actions > button,
+.fermi-surface-wizard .step-actions > button,
 .phonon-wizard .step-actions > button {
   pointer-events: auto;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
@@ -8111,6 +8161,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .wizard-container .run-actions > button:first-child,
 .band-structure-wizard .step-actions > button:first-child,
 .electronic-dos-wizard .step-actions > button:first-child,
+.fermi-surface-wizard .step-actions > button:first-child,
 .phonon-wizard .step-actions > button:first-child {
   margin-right: auto;
 }

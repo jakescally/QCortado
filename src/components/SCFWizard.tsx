@@ -1559,6 +1559,7 @@ export function SCFWizard({
         ecutwfc: config.ecutwfc,
         ecutrho: config.ecutrho,
         kgrid: config.kgrid,
+        kgrid_offset: config.kgrid_offset,
         conv_thr: config.conv_thr,
         mixing_beta: config.mixing_beta,
         selected_pseudos: selectedPseudos,
