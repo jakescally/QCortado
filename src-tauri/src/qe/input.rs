@@ -510,6 +510,7 @@ mod tests {
             tstress: false,
             forc_conv_thr: None,
             etot_conv_thr: None,
+            press: None,
             verbosity: None,
         };
 

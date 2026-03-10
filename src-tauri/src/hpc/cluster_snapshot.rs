@@ -516,11 +516,11 @@ fn infer_andromeda_cpu_name(
         if gpu_label.contains("v100") {
             return Some("Intel Xeon Platinum 8260".to_string());
         }
-        if gpu_label.contains("a10") {
-            return Some("Intel Xeon Platinum 8362".to_string());
-        }
         if gpu_label.contains("a100") {
             return Some("Intel Xeon Platinum 8358/8362".to_string());
+        }
+        if gpu_label.contains("a10") {
+            return Some("Intel Xeon Platinum 8362".to_string());
         }
         if gpu_label.contains("l40s")
             || gpu_label.contains("l4")

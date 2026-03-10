@@ -11,6 +11,8 @@ import {
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { isSavedStructureData } from "../lib/optimizedStructure";
+import { analyzeCrystalSymmetry } from "../lib/symmetryTransform";
+import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
@@ -632,7 +634,7 @@ export function FermiSurfaceWizard({
     taskContext.getTask(activeTaskId ?? "")?.status,
   ]);
 
-  function buildTaskPlan(): FermiSurfaceTaskPlan {
+  async function buildTaskPlan(): Promise<FermiSurfaceTaskPlan> {
     if (!selectedScf) {
       throw new Error("No source SCF calculation selected");
     }
@@ -660,12 +662,35 @@ export function FermiSurfaceWizard({
 
     const scfParams = selectedScf.parameters || {};
     const sourceStructure = resolveScfSourceStructure(scfParams);
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
+    let structureForNscf: SavedStructureData | null = sourceStructure;
+    if (sourceUsesPrimitive) {
+      try {
+        const resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        if (resolvedSymmetry.standardizedPrimitiveAtoms.length === 0) {
+          throw new Error("Primitive cell data is unavailable.");
+        }
+        structureForNscf = {
+          position_units: "crystal",
+          cell_units: "angstrom",
+          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
+          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+            symbol: getBaseElement(atom.symbol),
+            position: atom.position,
+          })),
+        };
+      } catch (err) {
+        throw new Error(
+          `Selected SCF was run in a primitive cell, but matching primitive structure data could not be reconstructed: ${err}`,
+        );
+      }
+    }
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
       ? scfParams.selected_pseudos as Record<string, string>
       : {};
     const elements = [...new Set(
-      sourceStructure
-        ? sourceStructure.atoms.map((atom) => getBaseElement(atom.symbol))
+      structureForNscf
+        ? structureForNscf.atoms.map((atom) => getBaseElement(atom.symbol))
         : crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)),
     )];
     const resolvedPseudos: Record<string, string> = {};
@@ -707,7 +732,7 @@ export function FermiSurfaceWizard({
         mass: ELEMENT_MASSES[element] || 1.0,
         pseudopotential: resolvedPseudos[element],
       })),
-      position_units: sourceStructure?.position_units || "crystal",
+      position_units: structureForNscf?.position_units || "crystal",
       ecutwfc,
       ecutrho,
       nspin: Number(scfParams.nspin) || 1,
@@ -716,14 +741,14 @@ export function FermiSurfaceWizard({
       degauss: parsedDegauss,
     };
 
-    const systemConfig = sourceStructure
+    const systemConfig = structureForNscf
       ? {
         ...commonSystemFields,
         ibrav: "free" as const,
         celldm: null,
-        cell_parameters: sourceStructure.cell_parameters,
-        cell_units: sourceStructure.cell_units || "angstrom",
-        atoms: sourceStructure.atoms.map((atom) => ({
+        cell_parameters: structureForNscf.cell_parameters,
+        cell_units: structureForNscf.cell_units || "angstrom",
+        atoms: structureForNscf.atoms.map((atom) => ({
           symbol: atom.symbol,
           position: atom.position,
           if_pos: [true, true, true] as [boolean, boolean, boolean],
@@ -880,7 +905,7 @@ export function FermiSurfaceWizard({
     }
 
     try {
-      const plan = buildTaskPlan();
+      const plan = await buildTaskPlan();
       const taskId = await taskContext.startTask("fermi_surface", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
 
@@ -965,7 +990,7 @@ export function FermiSurfaceWizard({
     }
   }
 
-  function queueCalculation() {
+  async function queueCalculation() {
     if (isHpcMode) {
       setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
       return;
@@ -975,7 +1000,7 @@ export function FermiSurfaceWizard({
       return;
     }
     try {
-      const plan = buildTaskPlan();
+      const plan = await buildTaskPlan();
       setError(null);
       taskContext.enqueueTask(
         "fermi_surface",

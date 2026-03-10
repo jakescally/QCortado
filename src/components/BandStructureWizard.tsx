@@ -229,10 +229,7 @@ function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "ma
   return "gaussian";
 }
 
-type KPathSamplingMode = "segment" | "total";
-
-const MIN_POINTS_PER_SEGMENT = 5;
-const MAX_POINTS_PER_SEGMENT = 400;
+const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
 const MAX_TOTAL_K_POINTS = 5000;
 
 function clampInt(value: number, min: number, max: number): number {
@@ -248,31 +245,6 @@ function getConnectedSegmentIndices(path: KPathPoint[]): number[] {
     }
   }
   return indices;
-}
-
-function applyPointsPerSegment(path: KPathPoint[], pointsPerSegment: number): KPathPoint[] {
-  const connectedSegmentIndices = new Set(getConnectedSegmentIndices(path));
-  if (path.length === 0 || connectedSegmentIndices.size === 0) {
-    return path.map((point) => ({
-      ...point,
-      npoints: 0,
-    }));
-  }
-
-  const safePointsPerSegment = clampInt(
-    pointsPerSegment,
-    MIN_POINTS_PER_SEGMENT,
-    MAX_POINTS_PER_SEGMENT,
-  );
-  return path.map((point, index) => {
-    if (index >= path.length - 1) {
-      return { ...point, npoints: 0 };
-    }
-    if (!connectedSegmentIndices.has(index)) {
-      return { ...point, npoints: 0 };
-    }
-    return { ...point, npoints: safePointsPerSegment };
-  });
 }
 
 function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint[] {
@@ -341,18 +313,6 @@ function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint
   });
 }
 
-function normalizeKPathSampling(
-  path: KPathPoint[],
-  samplingMode: KPathSamplingMode,
-  pointsPerSegment: number,
-  totalKPoints: number,
-): KPathPoint[] {
-  if (samplingMode === "total") {
-    return applyTotalKPoints(path, totalKPoints);
-  }
-  return applyPointsPerSegment(path, pointsPerSegment);
-}
-
 interface BandStructureWizardProps {
   onBack: () => void;
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
@@ -417,8 +377,6 @@ export function BandStructureWizard({
   // Step 2: K-Path (using BrillouinZoneViewer)
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
   const [kPathRhombohedralConvention, setKPathRhombohedralConvention] = useState<RhombohedralConvention | undefined>(undefined);
-  const [kPathSamplingMode, setKPathSamplingMode] = useState<KPathSamplingMode>("segment");
-  const [pointsPerSegment, setPointsPerSegment] = useState(20);
   const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
   const [totalKPointsInput, setTotalKPointsInput] = useState("120");
 
@@ -816,15 +774,15 @@ export function BandStructureWizard({
   // Handle k-path changes from the BZ viewer
   const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
     setKPath(
-      normalizeKPathSampling(newPath, kPathSamplingMode, pointsPerSegment, totalKPointsTarget),
+      applyTotalKPoints(newPath, totalKPointsTarget),
     );
-  }, [kPathSamplingMode, pointsPerSegment, totalKPointsTarget]);
+  }, [totalKPointsTarget]);
 
   useEffect(() => {
     setKPath((prevPath) =>
-      normalizeKPathSampling(prevPath, kPathSamplingMode, pointsPerSegment, totalKPointsTarget),
+      applyTotalKPoints(prevPath, totalKPointsTarget),
     );
-  }, [kPathSamplingMode, pointsPerSegment, totalKPointsTarget]);
+  }, [totalKPointsTarget]);
 
   const kPathSegmentCount = useMemo(
     () => getConnectedSegmentIndices(kPath).length,
@@ -835,13 +793,11 @@ export function BandStructureWizard({
     [kPath],
   );
   const minimumTotalKPoints = Math.max(1, kPathSegmentCount);
-  const viewerPointsPerSegment = kPathSamplingMode === "total"
-    ? clampInt(
-      totalKPointsTarget / minimumTotalKPoints,
-      1,
-      MAX_POINTS_PER_SEGMENT,
-    )
-    : pointsPerSegment;
+  const viewerPointsPerSegment = clampInt(
+    totalKPointsTarget / minimumTotalKPoints,
+    1,
+    MAX_VIEWER_POINTS_PER_SEGMENT,
+  );
   const hpcCommandLines = useMemo(() => {
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
@@ -1115,9 +1071,8 @@ export function BandStructureWizard({
     const saveParameters = {
       source_scf_id: selectedScf.id,
       k_path: pathString,
-      k_path_sampling_mode: kPathSamplingMode,
-      points_per_segment: kPathSamplingMode === "segment" ? pointsPerSegment : null,
-      total_k_points_target: kPathSamplingMode === "total" ? totalKPoints : null,
+      k_path_sampling_mode: "total",
+      total_k_points_target: totalKPoints,
       total_k_points: null,
       n_bands: manualNbnd,
       n_bands_requested: manualNbnd,
@@ -1444,83 +1399,38 @@ export function BandStructureWizard({
           <div className="kpath-sampling-header">
             <div>
               <h4>K-Path Sampling</h4>
-              <p>Choose how k-points are distributed along the selected path.</p>
+              <p>K-points are distributed along the full path by segment length.</p>
             </div>
             <span className="kpath-sampling-summary">
               {totalKPoints} total k-points
             </span>
           </div>
 
-          <div className="phonon-unit-toggle kpath-sampling-toggle" role="group" aria-label="K-path sampling mode">
-            <button
-              type="button"
-              className={`phonon-unit-btn ${kPathSamplingMode === "segment" ? "active" : ""}`}
-              onClick={() => setKPathSamplingMode("segment")}
-            >
-              Points / segment
-            </button>
-            <button
-              type="button"
-              className={`phonon-unit-btn ${kPathSamplingMode === "total" ? "active" : ""}`}
-              onClick={() => {
-                if (totalKPoints > 0) {
-                  setTotalKPointsTarget(totalKPoints);
-                  setTotalKPointsInput(String(totalKPoints));
-                }
-                setKPathSamplingMode("total");
+          <label className="kpath-sampling-input">
+            <span>Total k-points</span>
+            <input
+              type="number"
+              min={minimumTotalKPoints}
+              max={MAX_TOTAL_K_POINTS}
+              value={totalKPointsInput}
+              onChange={(e) => {
+                setTotalKPointsInput(e.target.value);
               }}
-            >
-              Total k-points
-            </button>
-          </div>
+              onBlur={commitTotalKPointsInput}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitTotalKPointsInput();
+                }
+              }}
+            />
+          </label>
 
-          {kPathSamplingMode === "segment" ? (
-            <label className="kpath-sampling-input">
-              <span>Points per segment</span>
-              <input
-                type="number"
-                min={MIN_POINTS_PER_SEGMENT}
-                max={MAX_POINTS_PER_SEGMENT}
-                value={pointsPerSegment}
-                onChange={(e) => {
-                  const parsed = Number.parseInt(e.target.value, 10);
-                  setPointsPerSegment(
-                    Number.isFinite(parsed)
-                      ? clampInt(parsed, MIN_POINTS_PER_SEGMENT, MAX_POINTS_PER_SEGMENT)
-                      : 20,
-                  );
-                }}
-              />
-            </label>
-          ) : (
-            <label className="kpath-sampling-input">
-              <span>Total k-points</span>
-              <input
-                type="number"
-                min={minimumTotalKPoints}
-                max={MAX_TOTAL_K_POINTS}
-                value={totalKPointsInput}
-                onChange={(e) => {
-                  setTotalKPointsInput(e.target.value);
-                }}
-                onBlur={commitTotalKPointsInput}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    commitTotalKPointsInput();
-                  }
-                }}
-              />
-            </label>
-          )}
-
-          {kPathSamplingMode === "total" && (
-            <p className="kpath-sampling-note">
-              {kPathSegmentCount > 0
-                ? `Evenly distributed by segment length across ${kPathSegmentCount} path segment${kPathSegmentCount === 1 ? "" : "s"}.`
-                : "Add at least 2 points to distribute k-points along the path."}
-            </p>
-          )}
+          <p className="kpath-sampling-note">
+            {kPathSegmentCount > 0
+              ? `Evenly distributed by segment length across ${kPathSegmentCount} path segment${kPathSegmentCount === 1 ? "" : "s"}.`
+              : "Add at least 2 points to distribute k-points along the path."}
+          </p>
         </div>
 
         <div className="step-actions">

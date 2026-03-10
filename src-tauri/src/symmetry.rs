@@ -134,6 +134,16 @@ fn transpose(m: &Matrix3) -> Matrix3 {
     ]
 }
 
+fn to_spglib_lattice(lattice_row_wise: &Matrix3) -> Matrix3 {
+    // Frontend uses row-wise basis vectors [a, b, c], while spglib expects
+    // [[ax, bx, cx], [ay, by, cy], [az, bz, cz]] (basis vectors as columns).
+    transpose(lattice_row_wise)
+}
+
+fn from_spglib_lattice(spglib_lattice: &Matrix3) -> Matrix3 {
+    transpose(spglib_lattice)
+}
+
 fn mat_mul(a: &Matrix3, b: &Matrix3) -> Matrix3 {
     let mut out = [[0.0; 3]; 3];
     for i in 0..3 {
@@ -244,7 +254,7 @@ fn get_dataset_meta(
     symprec: f64,
     angle_tolerance: f64,
 ) -> Result<DatasetMeta, String> {
-    let mut lattice_copy = *lattice;
+    let mut lattice_copy = to_spglib_lattice(lattice);
     let mut positions_copy = positions.to_vec();
     let types_copy = types.to_vec();
 
@@ -294,7 +304,7 @@ fn standardize_cell(
         nat.saturating_mul(4).max(4)
     };
 
-    let mut lattice_buffer = *lattice;
+    let mut lattice_buffer = to_spglib_lattice(lattice);
     let mut position_buffer = vec![[0.0; 3]; capacity];
     let mut type_buffer = vec![0_i32; capacity];
     for idx in 0..nat {
@@ -330,7 +340,11 @@ fn standardize_cell(
         *pos = wrap_fractional(*pos);
     }
 
-    Ok((lattice_buffer, position_buffer, type_buffer))
+    Ok((
+        from_spglib_lattice(&lattice_buffer),
+        position_buffer,
+        type_buffer,
+    ))
 }
 
 fn atoms_with_symbols(
@@ -459,4 +473,79 @@ pub fn analyze_structure(input: SymmetryAnalyzeInput) -> Result<SymmetryAnalyzeR
         transformation_matrix: dataset_meta.transformation_matrix,
         origin_shift: dataset_meta.origin_shift,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{analyze_structure, SymmetryAnalyzeInput, SymmetryAtomInput};
+
+    #[test]
+    fn pdcoo2_conventional_cell_detects_r3m() {
+        let input = SymmetryAnalyzeInput {
+            // Conventional hexagonal cell from the ICSD PdCoO2 structure.
+            lattice: [
+                [2.83, 0.0, 0.0],
+                [-1.415, 2.4508518927099616, 0.0],
+                [0.0, 0.0, 17.743],
+            ],
+            atoms: vec![
+                SymmetryAtomInput {
+                    symbol: "Pd".to_string(),
+                    position: [0.0, 0.0, 0.0],
+                },
+                SymmetryAtomInput {
+                    symbol: "Pd".to_string(),
+                    position: [2.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+                },
+                SymmetryAtomInput {
+                    symbol: "Pd".to_string(),
+                    position: [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+                },
+                SymmetryAtomInput {
+                    symbol: "Co".to_string(),
+                    position: [0.0, 0.0, 0.5],
+                },
+                SymmetryAtomInput {
+                    symbol: "Co".to_string(),
+                    position: [2.0 / 3.0, 1.0 / 3.0, 5.0 / 6.0],
+                },
+                SymmetryAtomInput {
+                    symbol: "Co".to_string(),
+                    position: [1.0 / 3.0, 2.0 / 3.0, 1.0 / 6.0],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [0.0, 0.0, 0.8888],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [0.0, 0.0, 0.1112],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [2.0 / 3.0, 1.0 / 3.0, 0.22213333],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [2.0 / 3.0, 1.0 / 3.0, 0.44453333],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [1.0 / 3.0, 2.0 / 3.0, 0.55546667],
+                },
+                SymmetryAtomInput {
+                    symbol: "O".to_string(),
+                    position: [1.0 / 3.0, 2.0 / 3.0, 0.77786667],
+                },
+            ],
+            symprec: 1e-5,
+            angle_tolerance: -1.0,
+        };
+
+        let result = analyze_structure(input).expect("symmetry analysis should succeed");
+        assert_eq!(166, result.spacegroup_number);
+        assert_eq!("R-3m", result.international_symbol);
+        assert_eq!(12, result.standardized_conventional_atoms.len());
+        assert_eq!(4, result.standardized_primitive_atoms.len());
+    }
 }

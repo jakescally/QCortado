@@ -94,6 +94,13 @@ pub struct ProjectFolder {
     pub created_at: String,
 }
 
+/// Result returned after deleting a project folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteProjectFolderResult {
+    pub folder_id: String,
+    pub moved_projects_to_root: usize,
+}
+
 /// Data needed to save a calculation to a project
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveCalculationData {
@@ -1173,6 +1180,67 @@ pub fn rename_project_folder(
     save_project_folders(&app, &folders)?;
     queue_viewer_library_publish(&app);
     Ok(updated_folder)
+}
+
+/// Deletes an existing project folder and moves its projects to root.
+#[tauri::command]
+pub fn delete_project_folder(
+    app: AppHandle,
+    folder_id: String,
+) -> Result<DeleteProjectFolderResult, String> {
+    ensure_research_mode()?;
+    let normalized_folder_id = folder_id.trim();
+    if normalized_folder_id.is_empty() {
+        return Err("Folder ID is required".to_string());
+    }
+
+    let mut folders = load_project_folders(&app)?;
+    let folder_index = folders
+        .iter()
+        .position(|folder| folder.id == normalized_folder_id)
+        .ok_or_else(|| format!("Folder not found: {}", normalized_folder_id))?;
+    folders.remove(folder_index);
+
+    let projects_dir = ensure_projects_dir(&app)?;
+    let entries = fs::read_dir(&projects_dir)
+        .map_err(|e| format!("Failed to read projects directory: {}", e))?;
+    let mut moved_projects_to_root = 0usize;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+
+        let project_json_path = project_dir.join("project.json");
+        if !project_json_path.exists() {
+            continue;
+        }
+
+        let content = fs::read_to_string(&project_json_path)
+            .map_err(|e| format!("Failed to read project.json: {}", e))?;
+        let mut project: Project = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+        if project.folder_id.as_deref() != Some(normalized_folder_id) {
+            continue;
+        }
+
+        project.folder_id = None;
+        let serialized = serde_json::to_string_pretty(&project)
+            .map_err(|e| format!("Failed to serialize project: {}", e))?;
+        fs::write(&project_json_path, serialized)
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+        moved_projects_to_root += 1;
+    }
+
+    save_project_folders(&app, &folders)?;
+    queue_viewer_library_publish(&app);
+    Ok(DeleteProjectFolderResult {
+        folder_id: normalized_folder_id.to_string(),
+        moved_projects_to_root,
+    })
 }
 
 /// Moves a project into a folder, or to root when `folder_id` is `None`.

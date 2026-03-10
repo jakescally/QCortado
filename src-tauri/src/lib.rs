@@ -8286,6 +8286,7 @@ pub fn run() {
         projects::get_project,
         projects::update_project_metadata,
         projects::rename_project_folder,
+        projects::delete_project_folder,
         projects::move_project_to_folder,
         projects::add_cif_to_project,
         projects::save_calculation,
