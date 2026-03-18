@@ -214,7 +214,6 @@ function ViewerAppInner() {
         <ProjectDashboard
           projectId={selectedProjectId}
           readOnly
-          showFloatingSettings={false}
           onBack={() => {
             setCurrentView("project-browser");
             setSelectedProjectId(null);

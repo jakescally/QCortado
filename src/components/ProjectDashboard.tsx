@@ -1,6 +1,6 @@
 // Project Dashboard - Main view for working with a project's structures and calculations
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -9,12 +9,9 @@ import { parseCIF } from "../lib/cifParser";
 import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
-import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "../lib/saveSizeMode";
 import { isPhononReadyScf } from "../lib/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
-import { useTheme } from "../lib/ThemeContext";
 import { EditProjectDialog } from "./EditProjectDialog";
 
 interface QEResult {
@@ -59,7 +56,6 @@ interface Project {
 
 interface ProjectDashboardProps {
   projectId: string;
-  showFloatingSettings?: boolean;
   readOnly?: boolean;
   refreshToken?: number;
   onBack: () => void;
@@ -111,12 +107,6 @@ interface DisplayCellMetrics {
   alpha: number;
   beta: number;
   gamma: number;
-}
-
-interface TempCleanupResult {
-  removed_paths: string[];
-  failed_paths: string[];
-  bytes_freed: number;
 }
 
 type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
@@ -743,7 +733,6 @@ function asCellMatrix(value: unknown): CellMatrix | null {
 
 export function ProjectDashboard({
   projectId,
-  showFloatingSettings = true,
   readOnly = false,
   refreshToken,
   onBack,
@@ -757,7 +746,6 @@ export function ProjectDashboard({
   onRunPhonons,
   onViewPhonons,
 }: ProjectDashboardProps) {
-  const { theme, setTheme } = useTheme();
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -767,23 +755,6 @@ export function ProjectDashboard({
   const [selectedCifId, setSelectedCifId] = useState<string | null>(null);
   const [crystalData, setCrystalData] = useState<CrystalData | null>(null);
   const [cifContent, setCifContent] = useState<string>("");
-
-  // Settings menu state
-  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
-  const settingsRef = useRef<HTMLDivElement>(null);
-  const [executionPrefixInput, setExecutionPrefixInput] = useState("");
-  const [isSavingExecutionPrefix, setIsSavingExecutionPrefix] = useState(false);
-  const [prefixStatus, setPrefixStatus] = useState<string | null>(null);
-  const [globalMpiEnabled, setGlobalMpiEnabled] = useState(false);
-  const [globalMpiProcs, setGlobalMpiProcs] = useState(1);
-  const [globalMpiCpuCount, setGlobalMpiCpuCount] = useState(1);
-  const [isSavingGlobalMpi, setIsSavingGlobalMpi] = useState(false);
-  const [globalMpiStatus, setGlobalMpiStatus] = useState<string | null>(null);
-  const [saveSizeMode, setSaveSizeMode] = useState<SaveSizeMode>("large");
-  const [isSavingSaveSizeMode, setIsSavingSaveSizeMode] = useState(false);
-  const [saveSizeStatus, setSaveSizeStatus] = useState<string | null>(null);
-  const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
-  const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
 
   // Delete project confirmation dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -798,7 +769,6 @@ export function ProjectDashboard({
 
   // Import state
   const [isImporting, setIsImporting] = useState(false);
-  const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [isRefreshingProject, setIsRefreshingProject] = useState(false);
   const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
@@ -812,105 +782,6 @@ export function ProjectDashboard({
   useEffect(() => {
     loadProject();
   }, [projectId, refreshToken]);
-
-  useEffect(() => {
-    void loadExecutionPrefix();
-    void loadGlobalMpiSettings();
-    void loadGlobalSaveSizeSetting();
-  }, []);
-
-  // Close settings menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
-        setShowSettingsMenu(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
-  async function loadExecutionPrefix() {
-    try {
-      const prefix = await invoke<string | null>("get_execution_prefix");
-      setExecutionPrefixInput(prefix ?? "");
-    } catch (e) {
-      console.error("Failed to load execution prefix:", e);
-    }
-  }
-
-  async function saveExecutionPrefix() {
-    if (readOnly) return;
-    const normalized = executionPrefixInput.trim();
-    setIsSavingExecutionPrefix(true);
-    setPrefixStatus(null);
-    try {
-      await invoke("set_execution_prefix", {
-        prefix: normalized.length > 0 ? normalized : null,
-      });
-      setExecutionPrefixInput(normalized);
-      setPrefixStatus("Saved");
-    } catch (e) {
-      console.error("Failed to save execution prefix:", e);
-      setPrefixStatus("Failed to save");
-    } finally {
-      setIsSavingExecutionPrefix(false);
-    }
-  }
-
-  async function loadGlobalMpiSettings() {
-    try {
-      const cores = await invoke<number>("get_cpu_count");
-      const safeCores = Math.max(1, Math.floor(cores));
-      setGlobalMpiCpuCount(safeCores);
-      const defaults = await loadGlobalMpiDefaults(safeCores);
-      setGlobalMpiEnabled(defaults.enabled);
-      setGlobalMpiProcs(defaults.nprocs);
-    } catch (e) {
-      console.error("Failed to load global MPI defaults:", e);
-    }
-  }
-
-  async function saveMpiDefaults() {
-    if (readOnly) return;
-    setIsSavingGlobalMpi(true);
-    setGlobalMpiStatus(null);
-    try {
-      const saved = await saveGlobalMpiDefaults(
-        { enabled: globalMpiEnabled, nprocs: globalMpiProcs },
-        globalMpiCpuCount,
-      );
-      setGlobalMpiEnabled(saved.enabled);
-      setGlobalMpiProcs(saved.nprocs);
-      setGlobalMpiStatus("Saved");
-    } catch (e) {
-      console.error("Failed to save global MPI defaults:", e);
-      setGlobalMpiStatus("Failed to save");
-    } finally {
-      setIsSavingGlobalMpi(false);
-    }
-  }
-
-  async function loadGlobalSaveSizeSetting() {
-    const mode = await loadGlobalSaveSizeMode();
-    setSaveSizeMode(mode);
-  }
-
-  async function saveSaveSizeMode() {
-    if (readOnly) return;
-    setIsSavingSaveSizeMode(true);
-    setSaveSizeStatus(null);
-    try {
-      const saved = await saveGlobalSaveSizeMode(saveSizeMode);
-      setSaveSizeMode(saved);
-      setSaveSizeStatus("Saved");
-    } catch (e) {
-      console.error("Failed to save global save-size mode:", e);
-      setSaveSizeStatus("Failed to save");
-    } finally {
-      setIsSavingSaveSizeMode(false);
-    }
-  }
 
   function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -946,31 +817,6 @@ export function ProjectDashboard({
         )}
       </>
     );
-  }
-
-  async function clearTempStorage() {
-    if (readOnly) return;
-    setIsClearingTempStorage(true);
-    setTempStorageStatus(null);
-    try {
-      const result = await invoke<TempCleanupResult>("clear_temp_storage");
-      if (result.failed_paths.length > 0) {
-        setTempStorageStatus(
-          `Removed ${result.removed_paths.length} item(s), but ${result.failed_paths.length} item(s) could not be removed.`,
-        );
-      } else if (result.removed_paths.length > 0) {
-        setTempStorageStatus(
-          `Cleared ${formatBytes(result.bytes_freed)} from ${result.removed_paths.length} item(s).`,
-        );
-      } else {
-        setTempStorageStatus("No QCortado temporary data found.");
-      }
-    } catch (e) {
-      console.error("Failed to clear temp storage:", e);
-      setTempStorageStatus(`Failed to clear temporary storage: ${e}`);
-    } finally {
-      setIsClearingTempStorage(false);
-    }
   }
 
   async function loadProject(options: { showLoading?: boolean; refreshSelectedCif?: boolean } = {}): Promise<boolean> {
@@ -1095,16 +941,8 @@ export function ProjectDashboard({
     }
   }
 
-  function openDeleteDialog() {
-    if (readOnly) return;
-    setShowSettingsMenu(false);
-    setDeleteConfirmText("");
-    setShowDeleteDialog(true);
-  }
-
   function openEditProjectDialog() {
     if (readOnly) return;
-    setShowSettingsMenu(false);
     setShowEditProjectDialog(true);
   }
 
@@ -1514,69 +1352,6 @@ export function ProjectDashboard({
     onRunPhonons(selectedCifId, crystalData, variant.calculations);
   }
 
-  async function handleRecoverPhonon() {
-    if (readOnly) return;
-    if (!selectedCifId) return;
-    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
-    if (!variant) return;
-
-    const defaultTmpDir = "/tmp/qcortado_phonon";
-
-    const fallbackScf = variant.calculations
-      .filter((calc) => calc.calc_type === "scf" && calc.result?.converged)
-      .sort((a, b) => {
-        const aTime = a.completed_at ?? a.started_at;
-        const bTime = b.completed_at ?? b.started_at;
-        return bTime.localeCompare(aTime);
-      })[0];
-
-    setIsRecoveringPhonon(true);
-    setError(null);
-    setInfoMessage(null);
-    try {
-      // First try the default pipeline scratch path automatically.
-      try {
-        await invoke("recover_phonon_calculation", {
-          projectId,
-          cifId: selectedCifId,
-          workingDir: defaultTmpDir,
-          sourceScfId: fallbackScf?.id ?? null,
-        });
-        await loadProject();
-        setInfoMessage(`Recovered phonon calculation from ${defaultTmpDir}.`);
-        return;
-      } catch {
-        // If default location is unavailable, let the user pick a folder.
-      }
-
-      const selected = await open({
-        multiple: false,
-        directory: true,
-        defaultPath: defaultTmpDir,
-        title: "Select phonon scratch directory",
-      });
-
-      if (!selected || Array.isArray(selected)) {
-        setInfoMessage("Phonon recovery canceled.");
-        return;
-      }
-
-      await invoke("recover_phonon_calculation", {
-        projectId,
-        cifId: selectedCifId,
-        workingDir: selected,
-        sourceScfId: fallbackScf?.id ?? null,
-      });
-      await loadProject();
-      setInfoMessage(`Recovered phonon calculation from ${selected}.`);
-    } catch (e) {
-      console.error("Failed to recover phonon calculation:", e);
-      setError(`Phonon recovery failed: ${e}`);
-    } finally {
-      setIsRecoveringPhonon(false);
-    }
-  }
-
   async function handleViewPhonon(
     calc: CalculationRun,
     viewMode: "bands" | "dos",
@@ -1852,190 +1627,6 @@ export function ProjectDashboard({
     }
   }, [hasPrimitiveDisplay, cellViewMode]);
 
-  function renderSettingsMenu() {
-    if (readOnly) return null;
-    return (
-      <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
-        <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
-          <div className="settings-window-header">
-            <h3>Settings</h3>
-            <button
-              className="settings-window-close"
-              onClick={() => setShowSettingsMenu(false)}
-              aria-label="Close settings"
-            >
-              &times;
-            </button>
-          </div>
-          <div className="settings-window-content">
-            <div className="settings-menu-section">
-              <label className="settings-menu-label" htmlFor="execution-prefix-input">
-                MPI Command Path
-              </label>
-              <input
-                id="execution-prefix-input"
-                className="settings-menu-input"
-                value={executionPrefixInput}
-                onChange={(e) => {
-                  setExecutionPrefixInput(e.target.value);
-                  setPrefixStatus(null);
-                }}
-                placeholder="e.g. /opt/homebrew/bin/mpirun"
-              />
-              <p className="settings-menu-hint">
-                Path to MPI launcher command (recommended: absolute path). Prepended before every QE executable launch.
-              </p>
-              <button
-                className="settings-menu-item"
-                onClick={saveExecutionPrefix}
-                disabled={isSavingExecutionPrefix}
-              >
-                {isSavingExecutionPrefix ? "Saving..." : "Save MPI Command"}
-              </button>
-              {prefixStatus && <div className="settings-menu-status">{prefixStatus}</div>}
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-menu-section">
-              <label className="settings-menu-label">MPI Defaults</label>
-              <label className="toggle-label">
-                <input
-                  type="checkbox"
-                  checked={globalMpiEnabled}
-                  onChange={(e) => {
-                    setGlobalMpiEnabled(e.target.checked);
-                    setGlobalMpiStatus(null);
-                  }}
-                />
-                <span>Enable MPI by default</span>
-              </label>
-              <label className="settings-menu-label" htmlFor="dashboard-mpi-procs-input">
-                Default MPI Processes
-              </label>
-              <input
-                id="dashboard-mpi-procs-input"
-                type="number"
-                min={1}
-                max={globalMpiCpuCount}
-                className="settings-menu-input"
-                value={globalMpiProcs}
-                onChange={(e) => {
-                  setGlobalMpiProcs(clampMpiProcs(Number.parseInt(e.target.value, 10), globalMpiCpuCount));
-                  setGlobalMpiStatus(null);
-                }}
-              />
-              <p className="settings-menu-hint">
-                Used as the initial MPI option in all calculation wizards ({globalMpiCpuCount} cores available).
-              </p>
-              <button
-                className="settings-menu-item"
-                onClick={saveMpiDefaults}
-                disabled={isSavingGlobalMpi}
-              >
-                {isSavingGlobalMpi ? "Saving..." : "Save MPI Defaults"}
-              </button>
-              {globalMpiStatus && <div className="settings-menu-status">{globalMpiStatus}</div>}
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-menu-section">
-              <label className="settings-menu-label" htmlFor="dashboard-save-size-mode">
-                Non-SCF Save Size
-              </label>
-              <select
-                id="dashboard-save-size-mode"
-                className="settings-menu-input"
-                value={saveSizeMode}
-                onChange={(event) => {
-                  const value = event.target.value === "small" ? "small" : "large";
-                  setSaveSizeMode(value);
-                  setSaveSizeStatus(null);
-                }}
-              >
-                <option value="large">Large (keep full non-SCF restart files)</option>
-                <option value="small">Small (compact non-SCF saves)</option>
-              </select>
-              <p className="settings-menu-hint">
-                This only affects non-SCF saves. SCF always keeps restart files required for phonon workflows.
-              </p>
-              <button
-                className="settings-menu-item"
-                onClick={saveSaveSizeMode}
-                disabled={isSavingSaveSizeMode}
-              >
-                {isSavingSaveSizeMode ? "Saving..." : "Save Non-SCF Size Mode"}
-              </button>
-              {saveSizeStatus && <div className="settings-menu-status">{saveSizeStatus}</div>}
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-menu-section">
-              <label className="settings-menu-label">Temporary Storage</label>
-              <p className="settings-menu-hint">
-                Remove `/tmp` and system temp QCortado working folders.
-              </p>
-              <button
-                className="settings-menu-item warning"
-                onClick={clearTempStorage}
-                disabled={isClearingTempStorage}
-              >
-                {isClearingTempStorage ? "Clearing..." : "Clear Temp Storage"}
-              </button>
-              {tempStorageStatus && (
-                <div className="settings-menu-status">{tempStorageStatus}</div>
-              )}
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-menu-section">
-              <label className="settings-menu-label">Recovery</label>
-              <p className="settings-menu-hint">
-                Import a completed phonon scratch run into the current structure history.
-              </p>
-              <button
-                className="settings-menu-item"
-                onClick={() => {
-                  setShowSettingsMenu(false);
-                  void handleRecoverPhonon();
-                }}
-                disabled={isRecoveringPhonon || !selectedCifId}
-              >
-                {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
-              </button>
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-menu-section">
-              <label className="settings-menu-label">Theme</label>
-              <div className="theme-toggle-group" role="group" aria-label="Theme">
-                <button
-                  type="button"
-                  className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
-                  onClick={() => setTheme("system")}
-                >
-                  System
-                </button>
-                <button
-                  type="button"
-                  className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
-                  onClick={() => setTheme("light")}
-                >
-                  Light
-                </button>
-                <button
-                  type="button"
-                  className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
-                  onClick={() => setTheme("dark")}
-                >
-                  Dark
-                </button>
-              </div>
-            </div>
-            <div className="settings-menu-divider" />
-            <button className="settings-menu-item danger" onClick={openDeleteDialog}>
-              Delete Project
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   if (isLoading) {
     return (
       <div className="dashboard-container">
@@ -2154,24 +1745,6 @@ export function ProjectDashboard({
             )}
           </div>
         </div>
-
-        {showFloatingSettings && !readOnly && (
-          <div className="floating-settings" ref={settingsRef}>
-            <button
-              className="floating-settings-btn"
-              onClick={() => setShowSettingsMenu(!showSettingsMenu)}
-              title="Project settings"
-            >
-              <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-              </svg>
-            </button>
-
-            {showSettingsMenu && (
-              renderSettingsMenu()
-            )}
-          </div>
-        )}
 
         {/* Delete Dialog */}
         {!readOnly && (
@@ -3388,24 +2961,6 @@ export function ProjectDashboard({
           </section>
         )}
       </div>
-
-      {showFloatingSettings && !readOnly && (
-        <div className="floating-settings" ref={settingsRef}>
-          <button
-            className="floating-settings-btn"
-            onClick={() => setShowSettingsMenu(!showSettingsMenu)}
-            title="Project settings"
-          >
-            <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-            </svg>
-          </button>
-
-          {showSettingsMenu && (
-            renderSettingsMenu()
-          )}
-        </div>
-      )}
 
       {!readOnly && (
         <>

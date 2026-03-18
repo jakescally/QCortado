@@ -246,6 +246,12 @@ pub struct QESystem {
     /// Spin polarization (1 = non-magnetic, 2 = collinear magnetic)
     #[serde(default = "default_nspin")]
     pub nspin: u32,
+    /// Non-collinear magnetism flag.
+    #[serde(default)]
+    pub noncolin: bool,
+    /// Spin-orbit coupling flag (requires noncolin = .true.).
+    #[serde(default)]
+    pub lspinorb: bool,
     /// Occupations scheme
     #[serde(default)]
     pub occupations: Occupations,

@@ -90,6 +90,28 @@ interface SettingsProjectSnapshot {
   cif_variants: RecoveryCifVariant[];
 }
 
+interface HpcRecoverableRemotePhononRun {
+  profile_id: string;
+  remote_workdir: string;
+  location: string;
+  modified_at_epoch: number;
+}
+
+interface HpcRemotePhononRecoveryDebugReport {
+  profile_id: string;
+  workspace_root: string;
+  project_phonon_root: string;
+  workspace_probe_output: string;
+  project_probe_output: string;
+  recoverable_runs: HpcRecoverableRemotePhononRun[];
+}
+
+interface RemotePhononRecoveryContext {
+  projectId: string;
+  cifId: string;
+  sourceScfId: string | null;
+}
+
 const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 
@@ -143,6 +165,20 @@ type PhononViewMode = "bands" | "dos";
 type PhononFrequencyUnit = "cm-1" | "thz";
 type PhononBandFocus = "full" | "acoustic" | "optical";
 const CM1_TO_THZ = 0.0299792458;
+
+function formatEpochSeconds(epochSeconds: number): string {
+  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) {
+    return "unknown time";
+  }
+  return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+function formatRemotePhononCandidateLocation(location: string): string {
+  if (location === "project_archive") {
+    return "archive";
+  }
+  return "workspace";
+}
 
 function normalizePositiveIntInput(input: string, fallback: number): number {
   const parsed = Number.parseInt(input, 10);
@@ -324,6 +360,12 @@ function AppInner() {
   const [isClearingTempStorage, setIsClearingTempStorage] = useState(false);
   const [tempStorageStatus, setTempStorageStatus] = useState<string | null>(null);
   const [isRecoveringPhonon, setIsRecoveringPhonon] = useState(false);
+  const [isLoadingRemotePhononCandidates, setIsLoadingRemotePhononCandidates] = useState(false);
+  const [isRecoveringRemotePhonon, setIsRecoveringRemotePhonon] = useState(false);
+  const [showRemotePhononSelectionDialog, setShowRemotePhononSelectionDialog] = useState(false);
+  const [remotePhononRecoveryContext, setRemotePhononRecoveryContext] = useState<RemotePhononRecoveryContext | null>(null);
+  const [remotePhononCandidates, setRemotePhononCandidates] = useState<HpcRecoverableRemotePhononRun[]>([]);
+  const [selectedRemotePhononWorkdir, setSelectedRemotePhononWorkdir] = useState("");
   const [recoveryStatus, setRecoveryStatus] = useState<string | null>(null);
   const [showDeleteProjectDialog, setShowDeleteProjectDialog] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
@@ -420,13 +462,16 @@ function AppInner() {
       if (queueMenuRef.current && !queueMenuRef.current.contains(event.target as Node)) {
         setShowQueueMenu(false);
       }
+      if (showRemotePhononSelectionDialog) {
+        return;
+      }
       if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
         setShowSettingsMenu(false);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [showRemotePhononSelectionDialog]);
 
   useEffect(() => {
     if (showHpcSetupWizard) {
@@ -1006,6 +1051,142 @@ function AppInner() {
       setRecoveryStatus(`Phonon recovery failed: ${e}`);
     } finally {
       setIsRecoveringPhonon(false);
+    }
+  }
+
+  async function recoverRemotePhononFromSettings() {
+    if (!selectedProjectId) {
+      setRecoveryStatus("Open a project to recover remote phonon data.");
+      return;
+    }
+
+    setRecoveryStatus(null);
+    setShowSettingsMenu(false);
+    setShowQueueMenu(false);
+    closeRemotePhononSelectionDialog(true);
+    setShowRemotePhononSelectionDialog(true);
+    setIsLoadingRemotePhononCandidates(true);
+    try {
+      const project = await invoke<SettingsProjectSnapshot>("get_project", { projectId: selectedProjectId });
+      const selectedVariant = (project.last_opened_cif_id && project.cif_variants.some((variant) => variant.id === project.last_opened_cif_id))
+        ? project.cif_variants.find((variant) => variant.id === project.last_opened_cif_id) ?? null
+        : project.cif_variants[0] ?? null;
+      if (!selectedVariant) {
+        setRecoveryStatus("No structure found in this project.");
+        closeRemotePhononSelectionDialog(true);
+        return;
+      }
+
+      const fallbackScf = selectedVariant.calculations
+        .filter((calc) => calc.calc_type === "scf" && calc.result?.converged)
+        .sort((a, b) => {
+          const aTime = a.completed_at ?? a.started_at;
+          const bTime = b.completed_at ?? b.started_at;
+          return bTime.localeCompare(aTime);
+        })[0];
+
+      const candidates = await invoke<HpcRecoverableRemotePhononRun[]>(
+        "hpc_list_recoverable_remote_phonon_runs",
+        { profileId: null, limit: 20 },
+      );
+      console.info("[remote-phonon-recovery] recoverable candidates", candidates);
+
+      if (candidates.length === 0) {
+        try {
+          const debugReport = await invoke<HpcRemotePhononRecoveryDebugReport>(
+            "hpc_debug_remote_phonon_recovery",
+            { profileId: null },
+          );
+          console.info("[remote-phonon-recovery] debug probe", debugReport);
+          const workspaceScanned = debugReport.workspace_probe_output
+            .split(/\r?\n/)
+            .filter((line) => line.trim().length > 0).length;
+          const projectScanned = debugReport.project_probe_output
+            .split(/\r?\n/)
+            .filter((line) => line.trim().length > 0).length;
+          setRecoveryStatus(
+            `No recoverable remote phonon runs found. Debug scanned ${workspaceScanned} workspace and ${projectScanned} archive directories; see DevTools console for details.`,
+          );
+        } catch (debugError) {
+          console.error("[remote-phonon-recovery] debug probe failed", debugError);
+          setRecoveryStatus(
+            `No recoverable remote phonon runs found. Debug probe failed: ${String(debugError)}`,
+          );
+        }
+        setRemotePhononCandidates([]);
+        setSelectedRemotePhononWorkdir("");
+        setRemotePhononRecoveryContext(null);
+        return;
+      }
+
+      const sortedCandidates = [...candidates].sort((a, b) => {
+        if (b.modified_at_epoch !== a.modified_at_epoch) {
+          return b.modified_at_epoch - a.modified_at_epoch;
+        }
+        return a.remote_workdir.localeCompare(b.remote_workdir);
+      });
+      const defaultCandidate = sortedCandidates[0];
+      setRemotePhononCandidates(sortedCandidates);
+      setSelectedRemotePhononWorkdir(defaultCandidate.remote_workdir);
+      setRemotePhononRecoveryContext({
+        projectId: selectedProjectId,
+        cifId: selectedVariant.id,
+        sourceScfId: fallbackScf?.id ?? null,
+      });
+      setRecoveryStatus(
+        `Found ${sortedCandidates.length} recoverable remote phonon runs. Select a run by date/time.`,
+      );
+    } catch (e) {
+      console.error("Failed to recover remote phonon calculation:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      setRecoveryStatus(`Remote phonon recovery failed: ${message}`);
+    } finally {
+      setIsLoadingRemotePhononCandidates(false);
+    }
+  }
+
+  function closeRemotePhononSelectionDialog(force = false) {
+    if (isRecoveringRemotePhonon && !force) {
+      return;
+    }
+    setIsLoadingRemotePhononCandidates(false);
+    setShowRemotePhononSelectionDialog(false);
+    setRemotePhononRecoveryContext(null);
+    setRemotePhononCandidates([]);
+    setSelectedRemotePhononWorkdir("");
+  }
+
+  async function confirmRemotePhononRecoverySelection() {
+    if (isLoadingRemotePhononCandidates) {
+      return;
+    }
+    if (!remotePhononRecoveryContext) {
+      setRecoveryStatus("Remote recovery context is missing. Re-open recovery and select a run.");
+      return;
+    }
+    if (!selectedRemotePhononWorkdir.trim()) {
+      setRecoveryStatus("Select a remote phonon run to recover.");
+      return;
+    }
+
+    setIsRecoveringRemotePhonon(true);
+    try {
+      await invoke("hpc_recover_remote_phonon_calculation", {
+        projectId: remotePhononRecoveryContext.projectId,
+        cifId: remotePhononRecoveryContext.cifId,
+        remoteWorkdir: selectedRemotePhononWorkdir,
+        profileId: null,
+        sourceScfId: remotePhononRecoveryContext.sourceScfId,
+      });
+      setRecoveryStatus(`Recovered remote phonon calculation from ${selectedRemotePhononWorkdir}.`);
+      setProjectDashboardRefreshToken((prev) => prev + 1);
+      closeRemotePhononSelectionDialog(true);
+    } catch (e) {
+      console.error("Failed to recover selected remote phonon calculation:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      setRecoveryStatus(`Remote phonon recovery failed: ${message}`);
+    } finally {
+      setIsRecoveringRemotePhonon(false);
     }
   }
 
@@ -1904,9 +2085,16 @@ function AppInner() {
                 <button
                   className="settings-menu-item"
                   onClick={() => void recoverPhononFromSettings()}
-                  disabled={isRecoveringPhonon || !selectedProjectId}
+                  disabled={isRecoveringPhonon || isRecoveringRemotePhonon || !selectedProjectId}
                 >
                   {isRecoveringPhonon ? "Recovering..." : "Recover Phonon"}
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => void recoverRemotePhononFromSettings()}
+                  disabled={isRecoveringPhonon || isRecoveringRemotePhonon || showRemotePhononSelectionDialog || !selectedProjectId}
+                >
+                  {isRecoveringRemotePhonon ? "Recovering..." : "Recover Remote Phonon"}
                 </button>
                 {recoveryStatus && <div className="settings-menu-status">{recoveryStatus}</div>}
               </div>
@@ -1955,6 +2143,94 @@ function AppInner() {
       )}
     </div>
   );
+
+  const remotePhononSelectionModal = showRemotePhononSelectionDialog ? (
+    <div
+      className="remote-recovery-overlay"
+      onPointerDown={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={() => closeRemotePhononSelectionDialog()}
+    >
+      <div
+        className="remote-recovery-dialog"
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="dialog-header">
+          <h2>Recover Remote Phonon</h2>
+          <button
+            className="dialog-close"
+            onClick={() => closeRemotePhononSelectionDialog()}
+            disabled={isRecoveringRemotePhonon}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="remote-recovery-body">
+          <p className="exit-hint">
+            Select the remote phonon run to import. Entries are sorted by newest timestamp first.
+          </p>
+          {isLoadingRemotePhononCandidates ? (
+            <div className="remote-recovery-state">Loading recoverable remote phonon runs...</div>
+          ) : remotePhononCandidates.length === 0 ? (
+            <div className="remote-recovery-state">
+              No recoverable remote phonon runs found. Check the recovery status message for debug details.
+            </div>
+          ) : (
+            <div className="remote-recovery-list" role="radiogroup" aria-label="Recoverable remote phonon runs">
+              {remotePhononCandidates.map((candidate) => {
+                const isSelected = selectedRemotePhononWorkdir === candidate.remote_workdir;
+                return (
+                  <label
+                    key={`${candidate.remote_workdir}-${candidate.modified_at_epoch}`}
+                    className={`radio-option remote-recovery-option ${isSelected ? "selected" : ""}`.trim()}
+                  >
+                    <input
+                      type="radio"
+                      name="remote-phonon-recovery-choice"
+                      checked={isSelected}
+                      onChange={() => setSelectedRemotePhononWorkdir(candidate.remote_workdir)}
+                      disabled={isRecoveringRemotePhonon}
+                    />
+                    <div className="remote-recovery-option-details">
+                      <strong>{formatEpochSeconds(candidate.modified_at_epoch)}</strong>
+                      <div className="remote-recovery-option-meta">
+                        <span>Source: {formatRemotePhononCandidateLocation(candidate.location)}</span>
+                      </div>
+                      <code className="remote-recovery-option-path">{candidate.remote_workdir}</code>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="remote-recovery-footer">
+          <button
+            className="remote-recovery-btn remote-recovery-btn-cancel"
+            onClick={() => closeRemotePhononSelectionDialog()}
+            disabled={isRecoveringRemotePhonon}
+          >
+            Cancel
+          </button>
+          <button
+            className="remote-recovery-btn remote-recovery-btn-primary"
+            onClick={() => void confirmRemotePhononRecoverySelection()}
+            disabled={
+              isLoadingRemotePhononCandidates
+              || isRecoveringRemotePhonon
+              || !selectedRemotePhononWorkdir
+            }
+          >
+            {isRecoveringRemotePhonon ? "Recovering..." : "Recover Selected Run"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   const deleteProjectModal = showDeleteProjectDialog && deleteProjectSnapshot ? (
     <div className="dialog-overlay" onClick={() => !isDeletingProject && setShowDeleteProjectDialog(false)}>
@@ -2140,16 +2416,20 @@ function AppInner() {
     </div>
   ) : null;
 
+  const activeDialogModal =
+    closeConfirmModal
+    || remotePhononSelectionModal
+    || deleteProjectModal
+    || cleanRemoteConfirmModal
+    || migrateHpcRootsModal;
+
   const appChrome = (
     <>
       {queueLauncher}
       {clusterActivityLauncher}
       {settingsLauncher}
       {processIndicator}
-      {closeConfirmModal}
-      {deleteProjectModal}
-      {cleanRemoteConfirmModal}
-      {migrateHpcRootsModal}
+      {activeDialogModal}
       <HpcSetupWizard
         isOpen={showHpcSetupWizard}
         initialProfile={editingHpcProfile}
@@ -2553,7 +2833,6 @@ function AppInner() {
       <>
         <ProjectDashboard
           projectId={selectedProjectId}
-          showFloatingSettings={false}
           refreshToken={projectDashboardRefreshToken}
           onBack={() => {
             setCurrentView("project-browser");

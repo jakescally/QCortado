@@ -108,7 +108,14 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
         writeln!(out, "  ecutrho = {},", ecutrho).unwrap();
     }
 
-    if sys.nspin != 1 {
+    let noncolin = sys.noncolin || sys.nspin == 4 || sys.lspinorb;
+    if noncolin {
+        writeln!(out, "  noncolin = .true.,").unwrap();
+    }
+    if sys.lspinorb {
+        writeln!(out, "  lspinorb = .true.,").unwrap();
+    }
+    if !noncolin && sys.nspin != 1 {
         writeln!(out, "  nspin = {},", sys.nspin).unwrap();
     }
 
@@ -496,6 +503,8 @@ mod tests {
                 ecutwfc: 20.0,
                 ecutrho: Some(80.0),
                 nspin: 1,
+                noncolin: false,
+                lspinorb: false,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::default(),
                 degauss: None,
@@ -524,6 +533,56 @@ mod tests {
         assert!(input.contains("Si 28.086 Si.pz-vbc.UPF"));
         assert!(input.contains("K_POINTS {automatic}"));
         assert!(input.contains("4 4 4  1 1 1"));
+    }
+
+    #[test]
+    fn test_soc_input_writes_noncolin_and_lspinorb() {
+        let calc = QECalculation {
+            calculation: CalculationType::Scf,
+            prefix: "soc".to_string(),
+            outdir: "./tmp".to_string(),
+            pseudo_dir: "./pseudo".to_string(),
+            system: QESystem {
+                ibrav: BravaisLattice::Free,
+                celldm: None,
+                cell_parameters: Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                cell_units: Some(PositionUnits::Angstrom),
+                species: vec![AtomicSpecies {
+                    symbol: "Bi".to_string(),
+                    mass: 208.98,
+                    pseudopotential: "Bi.rel-pbe.upf".to_string(),
+                }],
+                atoms: vec![Atom {
+                    symbol: "Bi".to_string(),
+                    position: [0.0, 0.0, 0.0],
+                    if_pos: [true, true, true],
+                }],
+                position_units: PositionUnits::Crystal,
+                ecutwfc: 50.0,
+                ecutrho: Some(400.0),
+                nspin: 4,
+                noncolin: true,
+                lspinorb: true,
+                occupations: Occupations::Smearing,
+                smearing: SmearingType::FermiDirac,
+                degauss: Some(0.02),
+            },
+            kpoints: KPoints::Gamma,
+            conv_thr: 1.0e-8,
+            mixing_beta: 0.7,
+            tprnfor: false,
+            tstress: false,
+            forc_conv_thr: None,
+            etot_conv_thr: None,
+            press: None,
+            verbosity: None,
+        };
+
+        let input = generate_pw_input(&calc);
+
+        assert!(input.contains("noncolin = .true."));
+        assert!(input.contains("lspinorb = .true."));
+        assert!(!input.contains("nspin = 4"));
     }
 
     #[test]

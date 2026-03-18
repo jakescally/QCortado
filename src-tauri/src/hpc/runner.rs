@@ -267,15 +267,46 @@ pub async fn sync_remote_artifacts(
         mode: request.mode.label().to_string(),
         ..HpcArtifactSyncReport::default()
     };
+    emit_task_line(
+        app,
+        pm,
+        &request.task_id,
+        format!(
+            "[QCortado] Starting {} artifact sync from {} to {}",
+            request.mode.label(),
+            request.remote_workdir,
+            request.local_sync_dir.display()
+        ),
+    )
+    .await;
 
     match request.mode {
         ArtifactSyncMode::Full => {
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                "[QCortado] Enumerating remote files for full sync...".to_string(),
+            )
+            .await;
+            let scan_started = Instant::now();
             let remote_files = list_remote_files(
                 &request.profile,
                 request.secret.as_deref(),
                 &request.remote_workdir,
             )
             .await?;
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!(
+                    "[QCortado] Full sync manifest complete: {} files discovered in {:.1}s.",
+                    remote_files.len(),
+                    scan_started.elapsed().as_secs_f64()
+                ),
+            )
+            .await;
             let total_files = remote_files.len();
             let total_bytes = remote_files
                 .iter()
@@ -380,12 +411,31 @@ pub async fn sync_remote_artifacts(
             Ok(report)
         }
         ArtifactSyncMode::Minimal => {
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                "[QCortado] Enumerating remote files for minimal sync...".to_string(),
+            )
+            .await;
+            let scan_started = Instant::now();
             let remote_files = list_remote_files(
                 &request.profile,
                 request.secret.as_deref(),
                 &request.remote_workdir,
             )
             .await?;
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!(
+                    "[QCortado] Minimal sync manifest complete: {} files discovered in {:.1}s.",
+                    remote_files.len(),
+                    scan_started.elapsed().as_secs_f64()
+                ),
+            )
+            .await;
             let mut candidates: Vec<RemoteFileEntry> = Vec::new();
             for entry in remote_files {
                 if should_download_minimal(&request.task_kind, &entry) {
@@ -395,8 +445,22 @@ pub async fn sync_remote_artifacts(
                     report.skipped_bytes = report.skipped_bytes.saturating_add(entry.size_bytes);
                 }
             }
+            let total_candidates = candidates.len();
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!(
+                    "[QCortado] Minimal sync selected {} files ({} skipped as heavy/scratch).",
+                    total_candidates,
+                    report.skipped_files
+                ),
+            )
+            .await;
 
             let mut failures: Vec<String> = Vec::new();
+            let mut processed_files: usize = 0;
+            let mut last_emit = Instant::now();
             for entry in candidates {
                 let remote_file = format!(
                     "{}/{}",
@@ -424,6 +488,26 @@ pub async fn sync_remote_artifacts(
                         failures.push(format!("{} ({})", entry.rel_path, err));
                     }
                 }
+                processed_files += 1;
+                let should_emit = processed_files == total_candidates
+                    || processed_files % 16 == 0
+                    || last_emit.elapsed() >= Duration::from_millis(900);
+                if should_emit {
+                    emit_task_line(
+                        app,
+                        pm,
+                        &request.task_id,
+                        format!(
+                            "[QCortado] Minimal sync progress: {}/{} files, {:.2} MB downloaded, {} skipped.",
+                            processed_files,
+                            total_candidates,
+                            report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                            report.skipped_files
+                        ),
+                    )
+                    .await;
+                    last_emit = Instant::now();
+                }
             }
 
             if !failures.is_empty() {
@@ -444,6 +528,20 @@ pub async fn sync_remote_artifacts(
                 )
                 .await;
             }
+
+            emit_task_line(
+                app,
+                pm,
+                &request.task_id,
+                format!(
+                    "[QCortado] Minimal sync finished: {} files downloaded ({:.2} MB), {} skipped ({:.2} MB).",
+                    report.downloaded_files,
+                    report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                    report.skipped_files,
+                    report.skipped_bytes as f64 / (1024.0 * 1024.0)
+                ),
+            )
+            .await;
 
             Ok(report)
         }
@@ -888,6 +986,17 @@ pub async fn run_batch_task(
             format!("HPC_STAGE|Archiving|{}", remote_project_path),
         )
         .await;
+        emit_task_line(
+            &app,
+            &pm,
+            task_id(&request),
+            format!(
+                "[QCortado] Remote archive copy started at {}.",
+                chrono::Utc::now().to_rfc3339()
+            ),
+        )
+        .await;
+        let archive_started = Instant::now();
 
         let archive_cmd = format!(
             "mkdir -p {dest} && if [ -d {src} ]; then cp -a {src}/. {dest}/; fi",
@@ -906,6 +1015,16 @@ pub async fn run_batch_task(
                     format!("HPC_STAGE|Archived|{}", remote_project_path),
                 )
                 .await;
+                emit_task_line(
+                    &app,
+                    &pm,
+                    task_id(&request),
+                    format!(
+                        "[QCortado] Remote archive copy finished in {:.1}s.",
+                        archive_started.elapsed().as_secs_f64()
+                    ),
+                )
+                .await;
             }
             Err(err) => {
                 emit_task_line(
@@ -915,6 +1034,16 @@ pub async fn run_batch_task(
                     format!(
                         "HPC_WARNING|Failed to archive run under remote project root ({}): {}",
                         remote_project_path, err
+                    ),
+                )
+                .await;
+                emit_task_line(
+                    &app,
+                    &pm,
+                    task_id(&request),
+                    format!(
+                        "[QCortado] Remote archive copy failed after {:.1}s.",
+                        archive_started.elapsed().as_secs_f64()
                     ),
                 )
                 .await;
@@ -938,6 +1067,7 @@ pub async fn run_batch_task(
             format!("HPC_STAGE|Collecting|{} (minimal)", remote_workdir),
         )
         .await;
+        let sync_started = Instant::now();
         let sync_report = sync_remote_artifacts(
             &app,
             &pm,
@@ -952,6 +1082,16 @@ pub async fn run_batch_task(
             },
         )
         .await?;
+        emit_task_line(
+            &app,
+            &pm,
+            task_id(&request),
+            format!(
+                "[QCortado] Minimal artifact sync finished in {:.1}s.",
+                sync_started.elapsed().as_secs_f64()
+            ),
+        )
+        .await;
         let remote_storage_bytes = sync_report
             .downloaded_bytes
             .saturating_add(sync_report.skipped_bytes);

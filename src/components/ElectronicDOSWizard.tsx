@@ -555,6 +555,9 @@ export function ElectronicDOSWizard({
     const ecutrho = Number.isFinite(ecutrhoValue) && ecutrhoValue > 0
       ? ecutrhoValue
       : ecutwfc * 8;
+    const nspin = Number(scfParams.nspin) || 1;
+    const lspinorb = Boolean(scfParams.lspinorb);
+    const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
 
     const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
     const commonSystemFields = {
@@ -566,7 +569,9 @@ export function ElectronicDOSWizard({
       position_units: "crystal",
       ecutwfc,
       ecutrho,
-      nspin: Number(scfParams.nspin) || 1,
+      nspin,
+      noncolin,
+      lspinorb,
       occupations,
       smearing,
       degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,

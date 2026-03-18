@@ -1496,6 +1496,135 @@ html[data-theme="dark"] {
   margin: 0;
 }
 
+.remote-recovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  padding-right: 0.1rem;
+}
+
+.remote-recovery-option {
+  align-items: flex-start;
+}
+
+.remote-recovery-option.selected {
+  border-color: #4299e1;
+  background: #ebf8ff;
+}
+
+.remote-recovery-option-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.remote-recovery-option-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+  color: #718096;
+}
+
+.remote-recovery-option-path {
+  display: block;
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+  background: #f7fafc;
+  color: #2d3748;
+  font-size: 0.78rem;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.remote-recovery-state {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #4a5568;
+  font-size: 0.92rem;
+}
+
+.remote-recovery-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 12000;
+  padding: 1rem;
+}
+
+.remote-recovery-dialog {
+  background: white;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 760px;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+}
+
+.remote-recovery-body {
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+.remote-recovery-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.remote-recovery-btn {
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 0.95rem;
+  min-width: 10.75rem;
+  padding: 0.7rem 1.2rem;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+
+.remote-recovery-btn-cancel {
+  background: white;
+  border: 1px solid #e2e8f0;
+  color: #4a5568;
+}
+
+.remote-recovery-btn-cancel:hover:not(:disabled) {
+  border-color: #cbd5e0;
+  background: #f7fafc;
+}
+
+.remote-recovery-btn-primary {
+  background: #4299e1;
+  border: 1px solid #4299e1;
+  color: white;
+}
+
+.remote-recovery-btn-primary:hover:not(:disabled) {
+  background: #3182ce;
+  border-color: #3182ce;
+}
+
+.remote-recovery-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .calculation-summary {
   margin-top: 1.5rem;
   padding: 1rem;
@@ -1821,6 +1950,12 @@ html[data-theme="dark"] {
   gap: 0.5rem;
 }
 
+.folder-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .folder-card-header h4 {
   margin: 0;
   font-size: 0.95rem;
@@ -1840,6 +1975,16 @@ html[data-theme="dark"] {
 
 .folder-rename-btn:hover {
   background: #ebf8ff;
+}
+
+.folder-delete-btn {
+  border-color: #fed7d7;
+  color: #c53030;
+}
+
+.folder-delete-btn:hover {
+  background: #fff5f5;
+  border-color: #feb2b2;
 }
 
 .folder-empty-text {
@@ -2356,6 +2501,56 @@ html[data-theme="dark"] {
     background: #4a5568;
   }
 
+  .remote-recovery-option.selected {
+    border-color: #63b3ed;
+    background: #2c5282;
+  }
+
+  .remote-recovery-option-meta {
+    color: #cbd5e0;
+  }
+
+  .remote-recovery-option-path {
+    background: #1a202c;
+    color: #e2e8f0;
+  }
+
+  .remote-recovery-state {
+    border-color: #4a5568;
+    background: #1f2937;
+    color: #cbd5e0;
+  }
+
+  .remote-recovery-dialog {
+    background: #2d3748;
+  }
+
+  .remote-recovery-footer {
+    border-color: #4a5568;
+  }
+
+  .remote-recovery-btn-cancel {
+    background: #4a5568;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .remote-recovery-btn-cancel:hover:not(:disabled) {
+    border-color: #718096;
+    background: #718096;
+  }
+
+  .remote-recovery-btn-primary {
+    background: #3182ce;
+    border-color: #3182ce;
+    color: #ffffff;
+  }
+
+  .remote-recovery-btn-primary:hover:not(:disabled) {
+    background: #2b6cb0;
+    border-color: #2b6cb0;
+  }
+
   .calculation-summary {
     background: #4a5568;
   }
@@ -2465,6 +2660,16 @@ html[data-theme="dark"] {
   .folder-rename-btn:hover {
     background: #2c5282;
     border-color: #63b3ed;
+  }
+
+  .folder-delete-btn {
+    border-color: #7f1d1d;
+    color: #fc8181;
+  }
+
+  .folder-delete-btn:hover {
+    background: #742a2a;
+    border-color: #fc8181;
   }
 
   .folder-empty-text,
@@ -7557,6 +7762,29 @@ html[data-theme="dark"] .option-checkbox input[type="checkbox"] {
 
 html[data-theme="dark"] .option-params {
   border-top-color: #45475a;
+}
+
+.log-path-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.85rem;
+}
+
+.log-path-controls label {
+  color: #2d3748;
+  font-size: 0.9rem;
+}
+
+html[data-theme="dark"] .log-path-controls label {
+  color: #cdd6f4;
+}
+
+.log-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
 }
 
 .phonon-grid {

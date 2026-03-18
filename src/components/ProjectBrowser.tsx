@@ -165,6 +165,11 @@ interface DeleteProjectSnapshot {
   }>;
 }
 
+interface DeleteProjectFolderResult {
+  folder_id: string;
+  moved_projects_to_root: number;
+}
+
 const DELETE_CONFIRM_TEXT = "DELETE";
 
 export function ProjectBrowser({
@@ -188,7 +193,10 @@ export function ProjectBrowser({
   const [newFolderName, setNewFolderName] = useState("");
   const [renamingFolder, setRenamingFolder] = useState<ProjectFolder | null>(null);
   const [renameFolderName, setRenameFolderName] = useState("");
+  const [deletingFolder, setDeletingFolder] = useState<ProjectFolder | null>(null);
+  const [deleteFolderConfirmText, setDeleteFolderConfirmText] = useState("");
   const [isSavingFolder, setIsSavingFolder] = useState(false);
+  const [isDeletingFolder, setIsDeletingFolder] = useState(false);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(initialActiveFolderId);
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const [movingProjectId, setMovingProjectId] = useState<string | null>(null);
@@ -660,8 +668,19 @@ export function ProjectBrowser({
     if (readOnly) return;
     setError(null);
     setStatusMessage(null);
+    setDeletingFolder(null);
+    setDeleteFolderConfirmText("");
     setRenamingFolder(folder);
     setRenameFolderName(folder.name);
+  }
+
+  function openDeleteFolderModal(folder: ProjectFolder) {
+    if (readOnly) return;
+    setError(null);
+    setStatusMessage(null);
+    setRenamingFolder(null);
+    setDeletingFolder(folder);
+    setDeleteFolderConfirmText("");
   }
 
   function closeCreateFolderModal() {
@@ -672,6 +691,12 @@ export function ProjectBrowser({
   function closeRenameFolderModal() {
     if (isSavingFolder) return;
     setRenamingFolder(null);
+  }
+
+  function closeDeleteFolderModal() {
+    if (isDeletingFolder) return;
+    setDeletingFolder(null);
+    setDeleteFolderConfirmText("");
   }
 
   async function handleCreateFolder() {
@@ -723,6 +748,41 @@ export function ProjectBrowser({
       setError(String(e));
     } finally {
       setIsSavingFolder(false);
+    }
+  }
+
+  async function handleConfirmDeleteFolder() {
+    if (readOnly) return;
+    if (!deletingFolder || deleteFolderConfirmText !== DELETE_CONFIRM_TEXT) return;
+    const folderId = deletingFolder.id;
+    const folderName = deletingFolder.name;
+
+    setIsDeletingFolder(true);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      const result = await invoke<DeleteProjectFolderResult>("delete_project_folder", { folderId });
+      setDeletingFolder(null);
+      setDeleteFolderConfirmText("");
+      if (activeFolderId === folderId) {
+        setActiveFolderId(null);
+      }
+      await loadProjectsAndFolders(false);
+      onProjectsChanged?.();
+      if (result.moved_projects_to_root > 0) {
+        setStatusMessage(
+          `Deleted folder "${folderName}". Moved ${result.moved_projects_to_root} project${
+            result.moved_projects_to_root !== 1 ? "s" : ""
+          } to root.`,
+        );
+      } else {
+        setStatusMessage(`Deleted folder "${folderName}".`);
+      }
+    } catch (e) {
+      console.error("Failed to delete folder:", e);
+      setError(String(e));
+    } finally {
+      setIsDeletingFolder(false);
     }
   }
 
@@ -830,6 +890,9 @@ export function ProjectBrowser({
   const deleteProjectCalculationCount = deleteProjectSnapshot
     ? deleteProjectSnapshot.cif_variants.reduce((sum, variant) => sum + variant.calculations.length, 0)
     : 0;
+  const deleteFolderProjectCount = deletingFolder
+    ? projects.filter((project) => project.folder_id === deletingFolder.id).length
+    : 0;
 
   return (
     <div className="browser-container">
@@ -923,16 +986,30 @@ export function ProjectBrowser({
                       <div className="folder-card-header">
                         <h4>{folder.name}</h4>
                         {!readOnly && (
-                          <button
-                            className="folder-rename-btn"
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openRenameFolderModal(folder);
-                            }}
-                          >
-                            Rename
-                          </button>
+                          <div className="folder-card-actions">
+                            <button
+                              className="folder-rename-btn"
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openRenameFolderModal(folder);
+                              }}
+                              disabled={isSavingFolder || isDeletingFolder}
+                            >
+                              Rename
+                            </button>
+                            <button
+                              className="folder-rename-btn folder-delete-btn"
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteFolderModal(folder);
+                              }}
+                              disabled={isSavingFolder || isDeletingFolder}
+                            >
+                              Delete
+                            </button>
+                          </div>
                         )}
                       </div>
 
@@ -1318,6 +1395,66 @@ export function ProjectBrowser({
                     disabled={isSavingFolder || !newFolderName.trim()}
                   >
                     {isSavingFolder ? "Creating..." : "Create Folder"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {deletingFolder && (
+            <div className="dialog-overlay" onClick={closeDeleteFolderModal}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Delete Folder</h2>
+                  <button className="dialog-close" onClick={closeDeleteFolderModal} disabled={isDeletingFolder}>
+                    &times;
+                  </button>
+                </div>
+
+                <div className="dialog-body">
+                  <div className="delete-warning">
+                    <p>
+                      You are about to permanently delete <strong>{deletingFolder.name}</strong>.
+                    </p>
+                    <ul>
+                      <li>
+                        {deleteFolderProjectCount} project{deleteFolderProjectCount !== 1 ? "s" : ""} will be moved to
+                        root
+                      </li>
+                      <li>Folder organization metadata will be removed</li>
+                    </ul>
+                    <p className="delete-warning-emphasis">
+                      This action cannot be undone.
+                    </p>
+                  </div>
+
+                  <div className="form-group">
+                    <label>
+                      Type <code>{DELETE_CONFIRM_TEXT}</code> to confirm:
+                    </label>
+                    <input
+                      type="text"
+                      value={deleteFolderConfirmText}
+                      onChange={(e) => setDeleteFolderConfirmText(e.target.value)}
+                      placeholder={DELETE_CONFIRM_TEXT}
+                      disabled={isDeletingFolder}
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                <div className="dialog-footer">
+                  <button className="dialog-btn cancel" onClick={closeDeleteFolderModal} disabled={isDeletingFolder}>
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn delete"
+                    onClick={() => {
+                      void handleConfirmDeleteFolder();
+                    }}
+                    disabled={deleteFolderConfirmText !== DELETE_CONFIRM_TEXT || isDeletingFolder}
+                  >
+                    {isDeletingFolder ? "Deleting..." : "Delete Folder"}
                   </button>
                 </div>
               </div>

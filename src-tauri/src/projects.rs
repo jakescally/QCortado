@@ -1933,27 +1933,64 @@ fn count_irreducible_qpoints(tmp_dir: &Path) -> Result<u32, String> {
     Ok(count)
 }
 
+fn file_contains_job_done(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|content| content.contains("JOB DONE"))
+        .unwrap_or(false)
+}
+
+fn any_named_file_contains_job_done(tmp_dir: &Path, file_names: &[&str]) -> bool {
+    file_names
+        .iter()
+        .map(|name| tmp_dir.join(name))
+        .any(|path| file_contains_job_done(&path))
+}
+
 fn looks_like_completed_phonon_run(tmp_dir: &Path) -> bool {
     // QE writes this status XML when running with ldisp.
-    let status_xml = tmp_dir
-        .join("_ph0")
-        .join("qcortado_scf.phsave")
-        .join("status_run.xml");
-    if let Ok(content) = fs::read_to_string(&status_xml) {
-        if content.contains("STOPPED_IN") && content.contains("dynmatrix") {
-            return true;
-        }
-        if content.contains("<RECOVER_CODE>30</RECOVER_CODE>") {
-            return true;
+    for status_xml in [
+        tmp_dir
+            .join("_ph0")
+            .join("qcortado_scf.phsave")
+            .join("status_run.xml"),
+        tmp_dir.join("status_run.xml"),
+    ] {
+        if let Ok(content) = fs::read_to_string(&status_xml) {
+            let lowered = content.to_ascii_lowercase();
+            if lowered.contains("stopped_in") && lowered.contains("dynmatrix") {
+                return true;
+            }
+            if lowered.contains("<recover_code>30</recover_code>") {
+                return true;
+            }
+            if lowered.contains("<current_stage>")
+                && lowered.contains("dynmatrix")
+                && lowered.contains("</current_stage>")
+            {
+                return true;
+            }
         }
     }
 
     if let Some(dynmat_path) = find_latest_dynmat_file(tmp_dir) {
-        if let Ok(content) = fs::read_to_string(dynmat_path) {
-            if content.contains("JOB DONE") {
-                return true;
-            }
+        if file_contains_job_done(&dynmat_path) {
+            return true;
         }
+    }
+
+    // Recovery artifacts often include only streamed outputs, not full phsave XML.
+    if any_named_file_contains_job_done(
+        tmp_dir,
+        &[
+            "ph_recover.stdout",
+            "ph.out",
+            "q2r.out",
+            "matdyn_dos.out",
+            "matdyn_bands.out",
+            "slurm.out",
+        ],
+    ) {
+        return true;
     }
 
     false
@@ -2048,6 +2085,12 @@ pub fn recover_phonon_calculation(
     q_grid: Option<[u32; 3]>,
     tr2_ph: Option<f64>,
     q_path: Option<String>,
+    execution_backend: Option<String>,
+    hpc_profile_id: Option<String>,
+    remote_workdir: Option<String>,
+    remote_project_path: Option<String>,
+    remote_storage_bytes: Option<u64>,
+    artifact_sync_mode: Option<String>,
 ) -> Result<CalculationRun, String> {
     ensure_research_mode()?;
     let tmp_dir = PathBuf::from(&working_dir);
@@ -2060,7 +2103,7 @@ pub fn recover_phonon_calculation(
 
     if !looks_like_completed_phonon_run(&tmp_dir) {
         return Err(
-            "Could not confirm a completed phonon run. Expected JOB DONE in dynmat output or status_run.xml at dynmatrix stage."
+            "Could not confirm a completed phonon run. Expected JOB DONE in phonon outputs (dynmat*, ph.out, matdyn_*.out) or dynmatrix markers in status_run.xml."
                 .to_string(),
         );
     }
@@ -2096,7 +2139,17 @@ pub fn recover_phonon_calculation(
     let raw_output = if let Some(dynmat_path) = find_latest_dynmat_file(&tmp_dir) {
         fs::read_to_string(&dynmat_path).unwrap_or_default()
     } else {
-        fs::read_to_string(tmp_dir.join("ph_recover.stdout")).unwrap_or_default()
+        [
+            "ph_recover.stdout",
+            "ph.out",
+            "matdyn_bands.out",
+            "matdyn_dos.out",
+            "q2r.out",
+        ]
+        .iter()
+        .map(|name| tmp_dir.join(name))
+        .find_map(|candidate| fs::read_to_string(candidate).ok())
+        .unwrap_or_default()
     };
 
     let n_modes = dispersion.n_modes;
@@ -2120,6 +2173,43 @@ pub fn recover_phonon_calculation(
     });
     if let Some(path) = q_path {
         parameters["q_path"] = serde_json::Value::String(path);
+    }
+    if let Some(backend) = execution_backend
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    {
+        parameters["execution_backend"] = serde_json::Value::String(backend);
+    }
+    if let Some(profile_id) = hpc_profile_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        parameters["hpc_profile_id"] = serde_json::Value::String(profile_id);
+    }
+    if let Some(path) = remote_workdir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        parameters["remote_workdir"] = serde_json::Value::String(path);
+    }
+    if let Some(path) = remote_project_path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        parameters["remote_project_path"] = serde_json::Value::String(path);
+    }
+    if let Some(bytes) = remote_storage_bytes {
+        parameters["remote_storage_bytes"] = serde_json::json!(bytes);
+    }
+    if let Some(sync_mode) = artifact_sync_mode
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let is_full = sync_mode.eq_ignore_ascii_case("full");
+        parameters["artifact_sync_mode"] = serde_json::Value::String(sync_mode);
+        if is_full {
+            parameters["artifacts_downloaded_full"] = serde_json::json!(true);
+        }
     }
 
     let result = QEResult {
@@ -3258,4 +3348,71 @@ pub fn get_saved_phonon_data(
             "dispersion_data": serde_json::Value::Null,
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_completed_phonon_run;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_test_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "qcortado_projects_test_{}_{}_{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).expect("failed to create temp test directory");
+        dir
+    }
+
+    #[test]
+    fn completed_when_matdyn_bands_out_has_job_done() {
+        let dir = make_temp_test_dir("matdyn_bands_done");
+        fs::write(
+            dir.join("matdyn_bands.out"),
+            "Program MATDYN v.7.5\n...\nJOB DONE.\n",
+        )
+        .expect("failed to write matdyn_bands.out");
+
+        assert!(looks_like_completed_phonon_run(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completed_when_status_xml_reports_dynmatrix() {
+        let dir = make_temp_test_dir("status_dynmatrix");
+        let status_path = dir
+            .join("_ph0")
+            .join("qcortado_scf.phsave")
+            .join("status_run.xml");
+        if let Some(parent) = status_path.parent() {
+            fs::create_dir_all(parent).expect("failed to create status_run.xml parent");
+        }
+        fs::write(
+            &status_path,
+            "<STATUS><STOPPED_IN>dynmatrix</STOPPED_IN></STATUS>",
+        )
+        .expect("failed to write status_run.xml");
+
+        assert!(looks_like_completed_phonon_run(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn incomplete_when_no_completion_markers() {
+        let dir = make_temp_test_dir("missing_markers");
+        fs::write(dir.join("matdyn_bands.out"), "Program MATDYN v.7.5\n")
+            .expect("failed to write matdyn_bands.out");
+        fs::write(dir.join("ph.out"), "Program PHONON\n").expect("failed to write ph.out");
+
+        assert!(!looks_like_completed_phonon_run(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

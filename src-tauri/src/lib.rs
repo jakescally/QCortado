@@ -187,6 +187,30 @@ fn build_hpc_qe_input_command(
     command
 }
 
+fn build_hpc_logged_qe_step_command(
+    profile: &hpc::profile::HpcProfile,
+    step_label: &str,
+    executable: &str,
+    extra_args: Option<&str>,
+    input_file: &str,
+    output_file: &str,
+) -> String {
+    let qe_cmd = build_hpc_qe_input_command(profile, executable, extra_args, input_file, output_file);
+    format!(
+        "echo \"[QCortado] {step} started at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; \
+__qcortado_step_start=$(date +%s); \
+set +e; \
+{cmd}; \
+__qcortado_step_status=$?; \
+set -e; \
+__qcortado_step_end=$(date +%s); \
+echo \"[QCortado] {step} finished with exit=${{__qcortado_step_status}} elapsed=$((__qcortado_step_end-__qcortado_step_start))s at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; \
+[ $__qcortado_step_status -eq 0 ]",
+        step = step_label,
+        cmd = qe_cmd,
+    )
+}
+
 fn normalize_cli_dash_text(input: &str) -> String {
     input
         .replace('\u{2014}', "--")
@@ -477,6 +501,134 @@ async fn resolve_remote_cleanup_path(
     }
 
     Ok(trimmed.to_string())
+}
+
+fn parse_recoverable_remote_phonon_runs(
+    output: &str,
+    profile_id: &str,
+    location: &str,
+) -> Vec<HpcRecoverableRemotePhononRun> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (raw_ts, raw_path) = line.split_once('\t')?;
+            let remote_workdir = raw_path.trim().trim_end_matches('/').to_string();
+            if remote_workdir.is_empty() {
+                return None;
+            }
+
+            let modified_at_epoch = raw_ts.trim().parse::<i64>().unwrap_or(0);
+            Some(HpcRecoverableRemotePhononRun {
+                profile_id: profile_id.to_string(),
+                remote_workdir,
+                location: location.to_string(),
+                modified_at_epoch,
+            })
+        })
+        .collect()
+}
+
+fn build_recoverable_remote_phonon_scan_cmd(root: &str, name_filter: Option<&str>) -> String {
+    let find_name_clause = name_filter
+        .map(|pattern| format!(" -name {}", shell_single_quote_local(pattern)))
+        .unwrap_or_default();
+    format!(
+        "if [ -d {root} ]; then \
+            find {root} -mindepth 1 -maxdepth 1 -type d{find_name_clause} -print | \
+            while IFS= read -r dir; do \
+                if [ -z \"$dir\" ]; then continue; fi; \
+                if ( [ -f \"$dir/phonon_freq.gp\" ] || [ -f \"$dir/phonon_freq\" ] ) && ls \"$dir\"/dynmat* >/dev/null 2>&1; then \
+                    ts=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); \
+                    printf '%s\\t%s\\n' \"$ts\" \"$dir\"; \
+                fi; \
+            done; \
+         fi",
+        root = shell_single_quote_local(root),
+        find_name_clause = find_name_clause,
+    )
+}
+
+fn build_remote_phonon_debug_probe_scan_cmd(root: &str, name_filter: Option<&str>) -> String {
+    let find_name_clause = name_filter
+        .map(|pattern| format!(" -name {}", shell_single_quote_local(pattern)))
+        .unwrap_or_default();
+    format!(
+        "if [ -d {root} ]; then \
+            find {root} -mindepth 1 -maxdepth 1 -type d{find_name_clause} -print | sort | \
+            while IFS= read -r dir; do \
+                if [ -z \"$dir\" ]; then continue; fi; \
+                ts=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); \
+                has_gp=0; [ -f \"$dir/phonon_freq.gp\" ] && has_gp=1; \
+                has_freq=0; [ -f \"$dir/phonon_freq\" ] && has_freq=1; \
+                dyn_count=$(find \"$dir\" -maxdepth 1 -type f -name 'dynmat*' | wc -l | tr -d ' '); \
+                job_done=0; \
+                if [ \"$dyn_count\" -gt 0 ] && grep -qs 'JOB DONE' \"$dir\"/dynmat* 2>/dev/null; then job_done=1; fi; \
+                status_dynmatrix=0; \
+                if [ -f \"$dir/status_run.xml\" ] && grep -qi '<current_stage>[[:space:]]*dynmatrix[[:space:]]*</current_stage>' \"$dir/status_run.xml\"; then status_dynmatrix=1; fi; \
+                printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$ts\" \"$dir\" \"$has_gp\" \"$has_freq\" \"$dyn_count\" \"$job_done\" \"$status_dynmatrix\"; \
+            done; \
+         fi",
+        root = shell_single_quote_local(root),
+        find_name_clause = find_name_clause,
+    )
+}
+
+async fn list_recoverable_remote_phonon_runs_for_profile(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    limit: usize,
+) -> Result<Vec<HpcRecoverableRemotePhononRun>, String> {
+    let workspace_root = resolve_remote_cleanup_path(
+        profile,
+        secret,
+        profile.remote_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let project_root = resolve_remote_cleanup_path(
+        profile,
+        secret,
+        profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+
+    let workspace_scan_cmd =
+        build_recoverable_remote_phonon_scan_cmd(&workspace_root, Some("qcortado_hpc_bundle_*"));
+    let workspace_output =
+        hpc::ssh::run_ssh_command(profile, secret, &workspace_scan_cmd).await?;
+    let workspace_runs =
+        parse_recoverable_remote_phonon_runs(&workspace_output, &profile.id, "workspace");
+
+    let project_phonon_root = format!("{}/phonon", project_root.trim_end_matches('/'));
+    let project_scan_cmd = build_recoverable_remote_phonon_scan_cmd(&project_phonon_root, None);
+    let project_output = hpc::ssh::run_ssh_command(profile, secret, &project_scan_cmd).await?;
+    let project_runs =
+        parse_recoverable_remote_phonon_runs(&project_output, &profile.id, "project_archive");
+
+    let mut unique_runs: std::collections::HashMap<String, HpcRecoverableRemotePhononRun> =
+        std::collections::HashMap::new();
+    for run in workspace_runs.into_iter().chain(project_runs.into_iter()) {
+        match unique_runs.get(&run.remote_workdir) {
+            Some(existing) if existing.modified_at_epoch >= run.modified_at_epoch => {}
+            _ => {
+                unique_runs.insert(run.remote_workdir.clone(), run);
+            }
+        }
+    }
+
+    let mut runs: Vec<HpcRecoverableRemotePhononRun> = unique_runs.into_values().collect();
+    runs.sort_by(|a, b| {
+        b.modified_at_epoch
+            .cmp(&a.modified_at_epoch)
+            .then_with(|| a.remote_workdir.cmp(&b.remote_workdir))
+    });
+    if runs.len() > limit {
+        runs.truncate(limit);
+    }
+    Ok(runs)
 }
 
 fn effective_execution_mode(
@@ -948,6 +1100,24 @@ struct HpcRemoteOrphanCleanupResult {
     orphan_paths: usize,
     removed_paths: Vec<String>,
     failed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct HpcRecoverableRemotePhononRun {
+    profile_id: String,
+    remote_workdir: String,
+    location: String,
+    modified_at_epoch: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HpcRemotePhononRecoveryDebugReport {
+    profile_id: String,
+    workspace_root: String,
+    project_phonon_root: String,
+    workspace_probe_output: String,
+    project_probe_output: String,
+    recoverable_runs: Vec<HpcRecoverableRemotePhononRun>,
 }
 
 const HPC_PRESET_BUNDLE_KIND: &str = "qcortado_hpc_presets";
@@ -2512,6 +2682,231 @@ async fn hpc_download_calculation_artifacts(
         .await;
 
     Ok(report)
+}
+
+/// Lists finished remote phonon directories that look recoverable.
+#[tauri::command]
+async fn hpc_list_recoverable_remote_phonon_runs(
+    profile_id: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<HpcRecoverableRemotePhononRun>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let resolved_limit = limit.unwrap_or(30).clamp(1, 200) as usize;
+    let runs =
+        list_recoverable_remote_phonon_runs_for_profile(&profile, secret.as_deref(), resolved_limit)
+            .await?;
+    eprintln!(
+        "[remote-phonon-recovery] list profile={} limit={} recoverable_runs={}",
+        profile.id,
+        resolved_limit,
+        runs.len()
+    );
+    for run in runs.iter().take(8) {
+        eprintln!(
+            "[remote-phonon-recovery] candidate location={} modified_at_epoch={} remote_workdir={}",
+            run.location, run.modified_at_epoch, run.remote_workdir
+        );
+    }
+    Ok(runs)
+}
+
+/// Returns a detailed probe report for remote phonon recovery diagnostics.
+#[tauri::command]
+async fn hpc_debug_remote_phonon_recovery(
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<HpcRemotePhononRecoveryDebugReport, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let workspace_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let project_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let project_phonon_root = format!("{}/phonon", project_root);
+
+    let workspace_probe_cmd = build_remote_phonon_debug_probe_scan_cmd(
+        &workspace_root,
+        Some("qcortado_hpc_bundle_*"),
+    );
+    let project_probe_cmd = build_remote_phonon_debug_probe_scan_cmd(&project_phonon_root, None);
+    let workspace_probe_output =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &workspace_probe_cmd).await?;
+    let project_probe_output =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &project_probe_cmd).await?;
+
+    let recoverable_runs =
+        list_recoverable_remote_phonon_runs_for_profile(&profile, secret.as_deref(), 200).await?;
+    let workspace_probe_rows = workspace_probe_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let project_probe_rows = project_probe_output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    eprintln!(
+        "[remote-phonon-recovery] debug profile={} workspace_root={} project_phonon_root={} workspace_probe_rows={} project_probe_rows={} recoverable_runs={}",
+        profile.id,
+        workspace_root,
+        project_phonon_root,
+        workspace_probe_rows,
+        project_probe_rows,
+        recoverable_runs.len()
+    );
+
+    Ok(HpcRemotePhononRecoveryDebugReport {
+        profile_id: profile.id.clone(),
+        workspace_root,
+        project_phonon_root,
+        workspace_probe_output,
+        project_probe_output,
+        recoverable_runs,
+    })
+}
+
+/// Downloads a remote phonon run and imports it into a project as a recovered calculation.
+#[tauri::command]
+async fn hpc_recover_remote_phonon_calculation(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    remote_workdir: String,
+    profile_id: Option<String>,
+    source_scf_id: Option<String>,
+    q_grid: Option<[u32; 3]>,
+    tr2_ph: Option<f64>,
+    q_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<projects::CalculationRun, String> {
+    let normalized_remote_workdir = remote_workdir
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if normalized_remote_workdir.is_empty() {
+        return Err("Remote working directory is required.".to_string());
+    }
+
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    eprintln!(
+        "[remote-phonon-recovery] start profile={} project_id={} cif_id={} remote_workdir={}",
+        profile.id, project_id, cif_id, normalized_remote_workdir
+    );
+
+    let recovery_id = uuid::Uuid::new_v4().to_string();
+    let local_sync_dir = std::env::temp_dir().join(format!(
+        "qcortado_remote_phonon_recovery_{}",
+        recovery_id
+    ));
+    std::fs::create_dir_all(&local_sync_dir).map_err(|e| {
+        format!(
+            "Failed to create temporary recovery directory {}: {}",
+            local_sync_dir.display(),
+            e
+        )
+    })?;
+
+    let sync_result = hpc::runner::sync_remote_artifacts(
+        &app,
+        &state.process_manager,
+        hpc::runner::HpcArtifactSyncRequest {
+            task_id: format!("remote_phonon_recovery_{}", recovery_id),
+            task_kind: "phonon".to_string(),
+            profile: profile.clone(),
+            secret,
+            remote_workdir: normalized_remote_workdir.clone(),
+            local_sync_dir: local_sync_dir.clone(),
+            mode: hpc::runner::ArtifactSyncMode::Minimal,
+        },
+    )
+    .await;
+
+    let recovery_result = match sync_result {
+        Ok(report) => {
+            eprintln!(
+                "[remote-phonon-recovery] synced profile={} remote_workdir={} downloaded_files={} downloaded_bytes={} skipped_files={} skipped_bytes={} mode={}",
+                profile.id,
+                normalized_remote_workdir,
+                report.downloaded_files,
+                report.downloaded_bytes,
+                report.skipped_files,
+                report.skipped_bytes,
+                report.mode
+            );
+            let remote_storage_bytes = report
+                .downloaded_bytes
+                .saturating_add(report.skipped_bytes);
+            let recovered = projects::recover_phonon_calculation(
+                app.clone(),
+                project_id.clone(),
+                cif_id,
+                local_sync_dir.to_string_lossy().to_string(),
+                source_scf_id,
+                q_grid,
+                tr2_ph,
+                q_path,
+                Some("hpc".to_string()),
+                Some(profile.id.clone()),
+                Some(normalized_remote_workdir.clone()),
+                None,
+                Some(remote_storage_bytes),
+                Some(report.mode.clone()),
+            )?;
+            let _ = projects::refresh_calculation_artifact_metadata(
+                &app,
+                &project_id,
+                &recovered.id,
+                Some(remote_storage_bytes),
+                Some(report.mode.as_str()),
+            );
+            eprintln!(
+                "[remote-phonon-recovery] imported calc_id={} project_id={} remote_workdir={}",
+                recovered.id, project_id, normalized_remote_workdir
+            );
+            Ok(recovered)
+        }
+        Err(err) => {
+            eprintln!(
+                "[remote-phonon-recovery] sync failed profile={} remote_workdir={} error={}",
+                profile.id, normalized_remote_workdir, err
+            );
+            Err(err)
+        }
+    };
+
+    let _ = std::fs::remove_dir_all(&local_sync_dir);
+    recovery_result
 }
 
 /// Removes remote QCortado HPC directories that are no longer referenced by local projects/tasks.
@@ -5189,6 +5584,7 @@ async fn run_bands_hpc_background(
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<BandData, String> {
+    let pipeline_start = std::time::Instant::now();
     let mut bands_calc = config.base_calculation.clone();
     bands_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
     bands_calc.calculation = qe::CalculationType::Bands;
@@ -5234,6 +5630,15 @@ async fn run_bands_hpc_background(
         .as_ref()
         .map(|entry| entry.enabled)
         .unwrap_or(false);
+    let config_line = format!(
+        "[QCortado] Bands HPC config: k_path_points={}, projections_enabled={}, bands_filband={}.",
+        config.k_path.len(),
+        projections_enabled,
+        bands_filband
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &config_line);
+    pm.append_output(task_id, config_line).await;
+
     let projection_options = config.projections.as_ref();
     let projection_file = projection_options
         .and_then(|opts| opts.filproj.as_deref())
@@ -5260,32 +5665,43 @@ async fn run_bands_hpc_background(
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
     )?;
+    if !dependency_stage.remote_hydration_commands.is_empty() {
+        let hydrate_line =
+            "[QCortado] Remote SCF dependency hydration is enabled for this run.".to_string();
+        let _ = app.emit(&format!("task-output:{}", task_id), &hydrate_line);
+        pm.append_output(task_id, hydrate_line).await;
+    }
 
     let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
     commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
-    commands.push(build_hpc_qe_input_command(
+    commands.push(build_hpc_logged_qe_step_command(
         &profile,
+        "pw.x (NSCF along k-path)",
         "pw.x",
         None,
         "bands.in",
         "bands.out",
     ));
-    commands.push(build_hpc_qe_input_command(
+    commands.push(build_hpc_logged_qe_step_command(
         &profile,
+        "bands.x post-processing",
         "bands.x",
         None,
         "bands_pp.in",
         "bands_pp.out",
     ));
     if projections_enabled {
-        let projwfc_cmd =
-            build_hpc_qe_input_command(&profile, "projwfc.x", None, "projwfc.in", "projwfc.out");
-        commands.push(format!(
-            "if ! {}; then echo \"WARNING: projwfc.x failed\"; fi",
-            projwfc_cmd
-        ));
+        let projwfc_cmd = build_hpc_logged_qe_step_command(
+            &profile,
+            "projwfc.x orbital projections",
+            "projwfc.x",
+            None,
+            "projwfc.in",
+            "projwfc.out",
+        );
+        commands.push(format!("{} || echo \"WARNING: projwfc.x failed\"", projwfc_cmd));
     }
 
     let mut bundle_files = vec![
@@ -5301,9 +5717,17 @@ async fn run_bands_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
+    let submit_started = std::time::Instant::now();
+    let submit_line = format!(
+        "[QCortado] Submitting bands bundle to HPC at {}.",
+        now_iso()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &submit_line);
+    pm.append_output(task_id, submit_line).await;
+
     let work_path = run_hpc_bundle_task(
-        app,
-        pm,
+        app.clone(),
+        pm.clone(),
         task_id,
         "bands",
         "Bands",
@@ -5318,6 +5742,13 @@ async fn run_bands_hpc_background(
     )
     .await?;
 
+    let submit_done_line = format!(
+        "[QCortado] HPC run + artifact sync returned after {:.1}s. Parsing downloaded bands artifacts...",
+        submit_started.elapsed().as_secs_f64()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &submit_done_line);
+    pm.append_output(task_id, submit_done_line).await;
+
     let bands_out_text =
         std::fs::read_to_string(work_path.join("bands.out")).unwrap_or_else(|_| {
             std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
@@ -5329,6 +5760,8 @@ async fn run_bands_hpc_background(
     if !gnu_file.exists() {
         return Err(format!("{} not found after HPC bands run.", gnu_file_name));
     }
+
+    let parse_started = std::time::Instant::now();
     let mut band_data = read_bands_gnu_file(&gnu_file, fermi_energy)
         .map_err(|e| format!("Failed to parse band data: {}", e))?;
     qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
@@ -5353,6 +5786,14 @@ async fn run_bands_hpc_background(
         }
     }
 
+    let done_line = format!(
+        "[QCortado] Bands HPC pipeline complete in {:.1}s (post-download parse {:.1}s).",
+        pipeline_start.elapsed().as_secs_f64(),
+        parse_started.elapsed().as_secs_f64()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &done_line);
+    pm.append_output(task_id, done_line).await;
+
     Ok(band_data)
 }
 
@@ -5373,6 +5814,7 @@ async fn run_bands_background(
 
     let work_path = PathBuf::from(&working_dir);
     prepare_working_directory(&work_path, false)?;
+    let pipeline_start = std::time::Instant::now();
 
     // Helper to emit output to both the task event and the output buffer
     macro_rules! emit_line {
@@ -5489,6 +5931,13 @@ async fn run_bands_background(
         .unwrap_or(false);
     let total_steps = if projections_enabled { 3 } else { 2 };
     emit_line!(format!(
+        "[QCortado] Bands local config: k_path_points={}, projections_enabled={}, total_steps={}, started_at={}.",
+        config.k_path.len(),
+        projections_enabled,
+        total_steps,
+        now_iso()
+    ));
+    emit_line!(format!(
         "Step 1/{}: Running NSCF calculation along k-path...",
         total_steps
     ));
@@ -5497,6 +5946,7 @@ async fn run_bands_background(
     if !exe_path.exists() {
         return Err("pw.x not found".to_string());
     }
+    let nscf_started = std::time::Instant::now();
 
     let mut child = if let Some(ref mpi) = mpi_config {
         if mpi.enabled && mpi.nprocs > 1 {
@@ -5568,6 +6018,10 @@ async fn run_bands_background(
     if !status.success() {
         return Err(format!("pw.x failed with exit code: {:?}", status.code()));
     }
+    emit_line!(format!(
+        "[QCortado] NSCF stage finished in {:.1}s.",
+        nscf_started.elapsed().as_secs_f64()
+    ));
 
     std::fs::write(work_path.join("bands.out"), &full_output)
         .map_err(|e| format!("Failed to write output file: {}", e))?;
@@ -5585,6 +6039,7 @@ async fn run_bands_background(
             "bands.x not found. Make sure your QE installation includes bands.x".to_string(),
         );
     }
+    let bands_started = std::time::Instant::now();
 
     let bands_x_options = config.bands_x.as_ref();
     let bands_filband = bands_x_options
@@ -5671,6 +6126,10 @@ async fn run_bands_background(
             bands_status.code()
         ));
     }
+    emit_line!(format!(
+        "[QCortado] bands.x stage finished in {:.1}s.",
+        bands_started.elapsed().as_secs_f64()
+    ));
 
     emit_line!("".to_string());
     emit_line!("Parsing band structure data...".to_string());
@@ -5691,6 +6150,7 @@ async fn run_bands_background(
     let ef = fermi_energy.unwrap_or(0.0);
     emit_line!(format!("Using Fermi energy: {:.4} eV", ef));
 
+    let parse_started = std::time::Instant::now();
     let mut band_data = read_bands_gnu_file(&gnu_file, ef)
         .map_err(|e| format!("Failed to parse band data: {}", e))?;
 
@@ -5703,6 +6163,10 @@ async fn run_bands_background(
     ));
 
     qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+    emit_line!(format!(
+        "[QCortado] bands.dat.gnu parse finished in {:.1}s.",
+        parse_started.elapsed().as_secs_f64()
+    ));
 
     // Step 3: projwfc.x (optional)
     if projections_enabled {
@@ -5841,6 +6305,10 @@ async fn run_bands_background(
         let gap_type = if gap.is_direct { "direct" } else { "indirect" };
         emit_line!(format!("  Band gap: {:.3} eV ({})", gap.value, gap_type));
     }
+    emit_line!(format!(
+        "[QCortado] Bands local pipeline complete in {:.1}s.",
+        pipeline_start.elapsed().as_secs_f64()
+    ));
 
     Ok(band_data)
 }
@@ -8247,6 +8715,9 @@ pub fn run() {
         hpc_open_activity_window,
         hpc_download_task_artifacts,
         hpc_download_calculation_artifacts,
+        hpc_list_recoverable_remote_phonon_runs,
+        hpc_debug_remote_phonon_recovery,
+        hpc_recover_remote_phonon_calculation,
         hpc_clean_remote_orphans,
         hpc_publish_viewer_library,
         clear_temp_storage,

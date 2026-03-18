@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeTextFile } from "@tauri-apps/plugin-fs";
 import {
   CrystalData,
   ELEMENT_MASSES,
@@ -174,6 +176,50 @@ function Tooltip({ text }: { text: string }) {
       <span className="tooltip-text">{text}</span>
     </span>
   );
+}
+
+const BANDS_WIZARD_SETTINGS_STORAGE_KEY = "qcortado-bands-wizard-settings-v1";
+
+interface StoredBandWizardSettings {
+  nbnd: number | "auto";
+  nscfConvThrInput: string;
+  nscfMixingBetaInput: string;
+  nscfOccupations: "fixed" | "smearing" | "from_input" | "tetrahedra";
+  nscfSmearing: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
+  nscfDegaussInput: string;
+  nscfVerbosity: "low" | "high" | "debug";
+  bandsFilbandInput: string;
+  bandsLsym: boolean;
+  bandsNoOverlap: boolean;
+  enableProjections: boolean;
+  projectionLsym: boolean;
+  projectionDiagBasis: boolean;
+  projectionPawproj: boolean;
+  projectionFilprojInput: string;
+  autoSaveLogEnabled: boolean;
+  autoSaveLogPath: string;
+}
+
+function readStoredBandWizardSettings(): Partial<StoredBandWizardSettings> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(BANDS_WIZARD_SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as Partial<StoredBandWizardSettings>;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredBandWizardSettings(settings: StoredBandWizardSettings): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(BANDS_WIZARD_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Ignore persistence failures and keep in-memory behavior.
+  }
 }
 
 function parseOptionalNumber(input: string, label: string): number | null {
@@ -350,6 +396,9 @@ export function BandStructureWizard({
   scfCalculations,
   reconnectTaskId,
 }: BandStructureWizardProps) {
+  const storedBandWizardSettingsRef = useRef<Partial<StoredBandWizardSettings> | null>(readStoredBandWizardSettings());
+  const shouldPreserveStoredConfigRef = useRef(Boolean(storedBandWizardSettingsRef.current));
+  const storedBandWizardSettings = storedBandWizardSettingsRef.current;
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
@@ -381,21 +430,60 @@ export function BandStructureWizard({
   const [totalKPointsInput, setTotalKPointsInput] = useState("120");
 
   // Step 3: Parameters
-  const [nbnd, setNbnd] = useState<number | "auto">("auto");
-  const [nscfConvThrInput, setNscfConvThrInput] = useState("1e-8");
-  const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState("0.7");
-  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">("smearing");
-  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("gaussian");
-  const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
-  const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
-  const [bandsFilbandInput, setBandsFilbandInput] = useState("bands.dat");
-  const [bandsLsym, setBandsLsym] = useState(true);
-  const [bandsNoOverlap, setBandsNoOverlap] = useState(true);
-  const [enableProjections, setEnableProjections] = useState(true);
-  const [projectionLsym, setProjectionLsym] = useState(false);
-  const [projectionDiagBasis, setProjectionDiagBasis] = useState(false);
-  const [projectionPawproj, setProjectionPawproj] = useState(false);
-  const [projectionFilprojInput, setProjectionFilprojInput] = useState("bands.projwfc.dat");
+  const [nbnd, setNbnd] = useState<number | "auto">(() => {
+    const storedNbnd = storedBandWizardSettings?.nbnd;
+    if (storedNbnd === "auto") return "auto";
+    if (Number.isInteger(storedNbnd) && Number(storedNbnd) > 0) {
+      return Number(storedNbnd);
+    }
+    return "auto";
+  });
+  const [nscfConvThrInput, setNscfConvThrInput] = useState(
+    () => storedBandWizardSettings?.nscfConvThrInput ?? "1e-8",
+  );
+  const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState(
+    () => storedBandWizardSettings?.nscfMixingBetaInput ?? "0.7",
+  );
+  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">(
+    () => normalizeOccupations(storedBandWizardSettings?.nscfOccupations),
+  );
+  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(
+    () => normalizeSmearing(storedBandWizardSettings?.nscfSmearing),
+  );
+  const [nscfDegaussInput, setNscfDegaussInput] = useState(
+    () => storedBandWizardSettings?.nscfDegaussInput ?? "0.02",
+  );
+  const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">(() => {
+    const storedVerbosity = storedBandWizardSettings?.nscfVerbosity;
+    if (storedVerbosity === "low" || storedVerbosity === "debug") {
+      return storedVerbosity;
+    }
+    return "high";
+  });
+  const [bandsFilbandInput, setBandsFilbandInput] = useState(
+    () => storedBandWizardSettings?.bandsFilbandInput ?? "bands.dat",
+  );
+  const [bandsLsym, setBandsLsym] = useState(
+    () => storedBandWizardSettings?.bandsLsym ?? true,
+  );
+  const [bandsNoOverlap, setBandsNoOverlap] = useState(
+    () => storedBandWizardSettings?.bandsNoOverlap ?? true,
+  );
+  const [enableProjections, setEnableProjections] = useState(
+    () => storedBandWizardSettings?.enableProjections ?? true,
+  );
+  const [projectionLsym, setProjectionLsym] = useState(
+    () => storedBandWizardSettings?.projectionLsym ?? false,
+  );
+  const [projectionDiagBasis, setProjectionDiagBasis] = useState(
+    () => storedBandWizardSettings?.projectionDiagBasis ?? false,
+  );
+  const [projectionPawproj, setProjectionPawproj] = useState(
+    () => storedBandWizardSettings?.projectionPawproj ?? false,
+  );
+  const [projectionFilprojInput, setProjectionFilprojInput] = useState(
+    () => storedBandWizardSettings?.projectionFilprojInput ?? "bands.projwfc.dat",
+  );
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     core: true,
     nscf: true,
@@ -409,6 +497,14 @@ export function BandStructureWizard({
   const [output, setOutput] = useState("");
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
+  const [autoSaveLogEnabled, setAutoSaveLogEnabled] = useState(
+    () => storedBandWizardSettings?.autoSaveLogEnabled ?? false,
+  );
+  const [autoSaveLogPath, setAutoSaveLogPath] = useState(
+    () => storedBandWizardSettings?.autoSaveLogPath ?? "",
+  );
+  const [isSavingLog, setIsSavingLog] = useState(false);
+  const [logSaveStatus, setLogSaveStatus] = useState<string | null>(null);
 
   const handleOutputScroll = () => {
     const el = outputRef.current;
@@ -462,6 +558,46 @@ export function BandStructureWizard({
     if (!isHpcMode) return;
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
+
+  useEffect(() => {
+    writeStoredBandWizardSettings({
+      nbnd,
+      nscfConvThrInput,
+      nscfMixingBetaInput,
+      nscfOccupations,
+      nscfSmearing,
+      nscfDegaussInput,
+      nscfVerbosity,
+      bandsFilbandInput,
+      bandsLsym,
+      bandsNoOverlap,
+      enableProjections,
+      projectionLsym,
+      projectionDiagBasis,
+      projectionPawproj,
+      projectionFilprojInput,
+      autoSaveLogEnabled,
+      autoSaveLogPath,
+    });
+  }, [
+    nbnd,
+    nscfConvThrInput,
+    nscfMixingBetaInput,
+    nscfOccupations,
+    nscfSmearing,
+    nscfDegaussInput,
+    nscfVerbosity,
+    bandsFilbandInput,
+    bandsLsym,
+    bandsNoOverlap,
+    enableProjections,
+    projectionLsym,
+    projectionDiagBasis,
+    projectionPawproj,
+    projectionFilprojInput,
+    autoSaveLogEnabled,
+    autoSaveLogPath,
+  ]);
 
   // Helper functions
   function getBaseElement(symbol: string): string {
@@ -519,7 +655,9 @@ export function BandStructureWizard({
     setSelectedScf(scf);
     setDependencyStatus(null);
     setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-    applyScfDefaults(scf);
+    if (!shouldPreserveStoredConfigRef.current) {
+      applyScfDefaults(scf);
+    }
   }, [applyScfDefaults]);
 
   const selectedScfDependencyBlocked = useMemo(() => {
@@ -909,6 +1047,8 @@ export function BandStructureWizard({
       : ecutwfc * 8;
     const sourceNspin = Number(scfParams.nspin);
     const nspin = Number.isFinite(sourceNspin) && sourceNspin > 0 ? sourceNspin : 1;
+    const lspinorb = Boolean(scfParams.lspinorb);
+    const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
 
     let resolvedSymmetry = symmetryTransform;
     let resolvedSymmetryError = symmetryError;
@@ -972,6 +1112,8 @@ export function BandStructureWizard({
           ecutwfc,
           ecutrho,
           nspin,
+          noncolin,
+          lspinorb,
           occupations: nscfOccupations,
           smearing: nscfSmearing,
           degauss: parsedDegauss,
@@ -1011,6 +1153,8 @@ export function BandStructureWizard({
           ecutwfc,
           ecutrho,
           nspin,
+          noncolin,
+          lspinorb,
           occupations: nscfOccupations,
           smearing: nscfSmearing,
           degauss: parsedDegauss,
@@ -1096,6 +1240,8 @@ export function BandStructureWizard({
       projection_lsym: projectionLsym,
       projection_diag_basis: projectionDiagBasis,
       projection_pawproj: projectionPawproj,
+      log_auto_save_enabled: autoSaveLogEnabled,
+      log_auto_save_path: autoSaveLogEnabled ? autoSaveLogPath.trim() || null : null,
       scf_fermi_energy: selectedScf.result?.fermi_energy ?? scfFermiEnergy,
       cell_representation: bandCellRepresentation,
       k_path_convention: context.centering === "R" ? effectiveRhombohedralConvention : null,
@@ -1120,6 +1266,10 @@ export function BandStructureWizard({
       setError("Selected SCF was computed remotely and needs a full local bundle for local execution.");
       return;
     }
+    if (autoSaveLogEnabled && autoSaveLogPath.trim().length === 0) {
+      setError("Set a local log file path or disable auto-save log before running.");
+      return;
+    }
     if (hasBlockingExternalTask) {
       setError("Another local task is currently running. Queue this task or wait for completion.");
       return;
@@ -1130,6 +1280,7 @@ export function BandStructureWizard({
     setError(null);
     setBandData(null);
     setIsSaved(false);
+    setLogSaveStatus(null);
     setProgress(defaultProgressState("Band structure"));
     const startTime = new Date().toISOString();
     setCalcStartTime(startTime);
@@ -1156,6 +1307,7 @@ export function BandStructureWizard({
       const result = finalTask.result as BandData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      await persistLogToConfiguredPath(outputContent);
       const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")
         ? {
           execution_backend: "hpc",
@@ -1214,8 +1366,13 @@ export function BandStructureWizard({
         setError(`Failed to auto-save band calculation: ${saveError}`);
       }
     } catch (e) {
-      setError(String(e));
-      setOutput((prev) => prev + `\nError: ${e}\n`);
+      const errorText = String(e);
+      setError(errorText);
+      const fallbackLog = output.trim().length > 0
+        ? `${output}\nError: ${errorText}\n`
+        : `Error: ${errorText}\n`;
+      await persistLogToConfiguredPath(fallbackLog);
+      setOutput((prev) => prev + `\nError: ${errorText}\n`);
       setProgress((prev) => ({
         ...prev,
         status: "error",
@@ -1230,6 +1387,10 @@ export function BandStructureWizard({
   const queueCalculation = async () => {
     if (isHpcMode) {
       setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
+      return;
+    }
+    if (autoSaveLogEnabled) {
+      setError("Auto-save log currently applies to direct runs only. Disable it before queueing.");
       return;
     }
     if (selectedScfDependencyBlocked) {
@@ -1257,6 +1418,59 @@ export function BandStructureWizard({
       setError(String(e));
     }
   };
+
+  const handleChooseAutoLogPath = useCallback(async () => {
+    setLogSaveStatus(null);
+    try {
+      const timestamp = new Date().toISOString().replace(/:/g, "-").replace(/\..+$/, "");
+      const defaultPath = autoSaveLogPath.trim().length > 0
+        ? autoSaveLogPath.trim()
+        : `bands-log-${isHpcMode ? "hpc" : "local"}-${timestamp}.log`;
+      const destinationPath = await save({
+        title: "Choose Band Structure Log Path",
+        defaultPath,
+        filters: [{ name: "Log file", extensions: ["log", "txt"] }],
+      });
+      if (!destinationPath || Array.isArray(destinationPath)) {
+        return;
+      }
+      setAutoSaveLogPath(destinationPath);
+      setAutoSaveLogEnabled(true);
+    } catch (e) {
+      console.error("Failed to choose band-structure log path:", e);
+      setLogSaveStatus(`Failed to choose log path: ${e}`);
+    }
+  }, [autoSaveLogPath, isHpcMode]);
+
+  const persistLogToConfiguredPath = useCallback(async (logText: string) => {
+    if (!autoSaveLogEnabled) return;
+    const destinationPath = autoSaveLogPath.trim();
+    if (!destinationPath) {
+      setLogSaveStatus("Auto-save log is enabled, but no log file path is set.");
+      return;
+    }
+
+    setIsSavingLog(true);
+    setLogSaveStatus(null);
+    try {
+      const content = logText.endsWith("\n")
+        ? logText
+        : `${logText}\n`;
+      await writeTextFile(destinationPath, content);
+      setLogSaveStatus(`Run log saved to ${destinationPath}.`);
+    } catch (e) {
+      console.error("Failed to save configured band-structure log:", e);
+      const errorText = String(e);
+      const permissionHint = /scope|denied|forbidden|not allowed|permission/i.test(errorText)
+        ? " Re-select the path with 'Choose...' to refresh file access permissions."
+        : "";
+      const statusText = `Failed to save log: ${errorText}${permissionHint}`.trim();
+      setLogSaveStatus(statusText);
+      setError(`Run completed, but log save failed. ${errorText}${permissionHint}`.trim());
+    } finally {
+      setIsSavingLog(false);
+    }
+  }, [autoSaveLogEnabled, autoSaveLogPath]);
 
   // Render current step
   const renderStep = () => {
@@ -1472,9 +1686,10 @@ export function BandStructureWizard({
     const isConvThrValid = parsedConvThr !== null;
     const isMixingBetaValid = parsedMixingBeta !== null && parsedMixingBeta <= 1.0;
     const isDegaussValid = !degaussRequired || parsedDegauss !== null;
+    const hasValidLogPath = !autoSaveLogEnabled || autoSaveLogPath.trim().length > 0;
     const bandsFilband = sanitizeOutputFilename(bandsFilbandInput, "bands.dat");
     const projectionFilproj = sanitizeOutputFilename(projectionFilprojInput, "bands.projwfc.dat");
-    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid;
+    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid && hasValidLogPath;
 
     return (
       <div className="wizard-step parameters-step">
@@ -1775,6 +1990,57 @@ export function BandStructureWizard({
           )}
         </div>
 
+        <div className="option-section config-section">
+          <h4>Run Logging</h4>
+          <div className="option-params">
+            <label className="option-checkbox">
+              <input
+                type="checkbox"
+                checked={autoSaveLogEnabled}
+                onChange={(e) => setAutoSaveLogEnabled(e.target.checked)}
+              />
+              <span>
+                Auto-save calculation log to local file
+                <Tooltip text="Writes the full run log to the configured local file path after completion (success or failure)." />
+              </span>
+            </label>
+
+            {autoSaveLogEnabled && (
+              <div className="log-path-controls">
+                <label>
+                  Log file path
+                </label>
+                <div className="log-path-row">
+                  <input
+                    className="config-path-input"
+                    type="text"
+                    value={autoSaveLogPath}
+                    onChange={(e) => setAutoSaveLogPath(e.target.value)}
+                    placeholder="/tmp/bands-run.log"
+                    spellCheck={false}
+                  />
+                  <button
+                    className="secondary-button"
+                    onClick={() => void handleChooseAutoLogPath()}
+                    disabled={isSavingLog}
+                  >
+                    Choose...
+                  </button>
+                </div>
+                <span className="param-hint">
+                  The file is overwritten each run.
+                </span>
+                {autoSaveLogPath.trim().length === 0 && (
+                  <span className="param-hint input-error">
+                    Set a local path before running.
+                  </span>
+                )}
+              </div>
+            )}
+            {logSaveStatus && <span className="param-hint">{logSaveStatus}</span>}
+          </div>
+        </div>
+
         {isHpcMode ? (
           <HpcRunSettings
             profileId={activeHpcProfile?.id ?? null}
@@ -1853,6 +2119,14 @@ export function BandStructureWizard({
           <div className="summary-row">
             <span>Fat-band projections:</span>
             <span>{enableProjections ? `Enabled (${projectionFilproj})` : "Disabled"}</span>
+          </div>
+          <div className="summary-row">
+            <span>Log auto-save:</span>
+            <span>
+              {autoSaveLogEnabled
+                ? (autoSaveLogPath.trim().length > 0 ? autoSaveLogPath : "Enabled (path not set)")
+                : "Disabled"}
+            </span>
           </div>
         </div>
 
