@@ -27,7 +27,7 @@ interface ViewerSyncResult {
   total_projects: number;
 }
 
-type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "dos-viewer" | "phonon-viewer";
+type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "dos-viewer" | "wannier-viewer" | "phonon-viewer";
 type PhononViewMode = "bands" | "dos";
 
 interface PhononData {
@@ -81,6 +81,7 @@ function ViewerAppInner() {
 
   const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
   const [viewDosData, setViewDosData] = useState<{ dosData: ElectronicDOSData; fermiEnergy: number | null } | null>(null);
+  const [viewWannierData, setViewWannierData] = useState<{ result: any; fermiEnergy: number | null } | null>(null);
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
 
   const activeHpcProfile = useMemo(
@@ -233,6 +234,11 @@ function ViewerAppInner() {
             setViewDosData({ dosData, fermiEnergy });
             setCurrentView("dos-viewer");
           }}
+          onRunWannier={viewOnlyNoopCalc}
+          onViewWannier={(wannierData, fermiEnergy) => {
+            setViewWannierData({ result: wannierData, fermiEnergy });
+            setCurrentView("wannier-viewer");
+          }}
           onRunFermiSurface={viewOnlyNoopCalc}
           onRunPhonons={viewOnlyNoopCalc}
           onViewPhonons={(phononData, viewMode) => {
@@ -297,6 +303,62 @@ function ViewerAppInner() {
                 fermi_energy: viewDosData.dosData.fermi_energy ?? viewDosData.fermiEnergy,
               }}
             />
+          </div>
+        </div>
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "wannier-viewer" && viewWannierData) {
+    const result = viewWannierData.result;
+    return (
+      <>
+        <div className="bands-viewer-container">
+          <div className="bands-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewWannierData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>Wannier90</h2>
+          </div>
+          <div className="bands-viewer-content" style={{ display: "block" }}>
+            <BandPlot
+              data={result.band_data}
+              scfFermiEnergy={viewWannierData.fermiEnergy ?? undefined}
+              viewerType="electronic"
+            />
+            <div className="details-grid" style={{ marginTop: "1.25rem" }}>
+              <div className="detail-item">
+                <label>seedname</label>
+                <span>{result.seedname || "N/A"}</span>
+              </div>
+              <div className="detail-item">
+                <label>num_wann</label>
+                <span>{result.num_wann ?? "N/A"}</span>
+              </div>
+              <div className="detail-item">
+                <label>num_bands</label>
+                <span>{result.num_bands ?? "N/A"}</span>
+              </div>
+              <div className="detail-item">
+                <label>Total Spread</label>
+                <span>{result.total_spread != null ? `${Number(result.total_spread).toFixed(6)} A^2` : "N/A"}</span>
+              </div>
+              <div className="detail-item">
+                <label>Converged</label>
+                <span>{result.convergence?.converged ? "Yes" : "No"}</span>
+              </div>
+              <div className="detail-item">
+                <label>Iterations</label>
+                <span>{result.convergence?.iterations ?? "N/A"}</span>
+              </div>
+            </div>
           </div>
         </div>
         {appChrome}

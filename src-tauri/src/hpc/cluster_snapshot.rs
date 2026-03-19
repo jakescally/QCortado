@@ -654,6 +654,7 @@ mod tests {
             auth_method: HpcAuthMethod::SshKey,
             ssh_key_path: Some("~/.ssh/id_rsa".to_string()),
             remote_qe_bin_dir: "~/qe/bin".to_string(),
+            remote_wannier90_path: Some("wannier90.x".to_string()),
             remote_pseudo_dir: "~/qe/pseudo".to_string(),
             remote_workspace_root: "~/qcortado/work".to_string(),
             remote_project_root: "~/qcortado/projects".to_string(),

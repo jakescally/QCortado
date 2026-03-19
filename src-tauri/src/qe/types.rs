@@ -188,6 +188,12 @@ pub enum Occupations {
     FromInput,
     /// Tetrahedra
     Tetrahedra,
+    /// Linear tetrahedra
+    #[serde(rename = "tetrahedra_lin")]
+    TetrahedraLin,
+    /// Optimized tetrahedra
+    #[serde(rename = "tetrahedra_opt")]
+    TetrahedraOpt,
 }
 
 /// Smearing types for metallic systems
@@ -212,6 +218,95 @@ impl SmearingType {
             Self::MethfesselPaxton => "methfessel-paxton",
             Self::MarzariVanderbilt => "marzari-vanderbilt",
             Self::FermiDirac => "fermi-dirac",
+        }
+    }
+}
+
+/// Starting potential source for SCF / NSCF.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StartingPotential {
+    Atomic,
+    File,
+}
+
+impl StartingPotential {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Atomic => "atomic",
+            Self::File => "file",
+        }
+    }
+}
+
+/// Starting wavefunction source for SCF / NSCF.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum StartingWavefunction {
+    #[serde(rename = "atomic")]
+    Atomic,
+    #[serde(rename = "atomic+random")]
+    AtomicRandom,
+    #[serde(rename = "random")]
+    Random,
+    #[serde(rename = "file")]
+    File,
+}
+
+impl StartingWavefunction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Atomic => "atomic",
+            Self::AtomicRandom => "atomic+random",
+            Self::Random => "random",
+            Self::File => "file",
+        }
+    }
+}
+
+/// Electronic minimization algorithm.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DiagonalizationMethod {
+    #[serde(rename = "david")]
+    David,
+    #[serde(rename = "cg")]
+    Cg,
+    #[serde(rename = "ppcg")]
+    Ppcg,
+    #[serde(rename = "paro")]
+    Paro,
+    #[serde(rename = "rmm-davidson")]
+    RmmDavidson,
+}
+
+impl DiagonalizationMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::David => "david",
+            Self::Cg => "cg",
+            Self::Ppcg => "ppcg",
+            Self::Paro => "paro",
+            Self::RmmDavidson => "rmm-davidson",
+        }
+    }
+}
+
+/// Charge-density mixing algorithm.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MixingMode {
+    #[serde(rename = "plain")]
+    Plain,
+    #[serde(rename = "TF")]
+    Tf,
+    #[serde(rename = "local-TF")]
+    LocalTf,
+}
+
+impl MixingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Tf => "TF",
+            Self::LocalTf => "local-TF",
         }
     }
 }
@@ -243,6 +338,15 @@ pub struct QESystem {
     /// Charge density cutoff in Ry (default: 4 * ecutwfc)
     #[serde(default)]
     pub ecutrho: Option<f64>,
+    /// Total number of bands.
+    #[serde(default)]
+    pub nbnd: Option<u32>,
+    /// Total system charge.
+    #[serde(default)]
+    pub tot_charge: Option<f64>,
+    /// XC functional override.
+    #[serde(default)]
+    pub input_dft: Option<String>,
     /// Spin polarization (1 = non-magnetic, 2 = collinear magnetic)
     #[serde(default = "default_nspin")]
     pub nspin: u32,
@@ -261,6 +365,12 @@ pub struct QESystem {
     /// Smearing width in Ry
     #[serde(default)]
     pub degauss: Option<f64>,
+    /// Disable symmetry reduction.
+    #[serde(default)]
+    pub nosym: bool,
+    /// Disable inversion symmetry.
+    #[serde(default)]
+    pub noinv: bool,
 }
 
 fn default_nspin() -> u32 {
@@ -278,6 +388,9 @@ pub struct QECalculation {
     pub outdir: String,
     /// Pseudopotential directory
     pub pseudo_dir: String,
+    /// Output file volume policy.
+    #[serde(default)]
+    pub disk_io: Option<String>,
     /// System definition
     pub system: QESystem,
     /// K-points specification
@@ -285,9 +398,30 @@ pub struct QECalculation {
     /// SCF convergence threshold
     #[serde(default = "default_conv_thr")]
     pub conv_thr: f64,
+    /// Maximum SCF iterations.
+    #[serde(default)]
+    pub electron_maxstep: Option<u32>,
+    /// Charge mixing algorithm.
+    #[serde(default)]
+    pub mixing_mode: Option<MixingMode>,
     /// Mixing beta for SCF
     #[serde(default = "default_mixing_beta")]
     pub mixing_beta: f64,
+    /// Mixing history dimension.
+    #[serde(default)]
+    pub mixing_ndim: Option<u32>,
+    /// Electronic minimization algorithm.
+    #[serde(default)]
+    pub diagonalization: Option<DiagonalizationMethod>,
+    /// Restart potential source.
+    #[serde(default)]
+    pub startingpot: Option<StartingPotential>,
+    /// Restart wavefunction source.
+    #[serde(default)]
+    pub startingwfc: Option<StartingWavefunction>,
+    /// Use full subspace diagonalization.
+    #[serde(default)]
+    pub diago_full_acc: bool,
     /// Whether to calculate forces
     #[serde(default)]
     pub tprnfor: bool,
@@ -348,6 +482,9 @@ pub struct QEResult {
     /// Full electronic DOS data (for DOS calculations)
     #[serde(default)]
     pub dos_data: Option<serde_json::Value>,
+    /// Full Wannier90 data (for Wannier calculations)
+    #[serde(default)]
+    pub wannier_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -366,6 +503,7 @@ impl Default for QEResult {
             band_data: None,
             phonon_data: None,
             dos_data: None,
+            wannier_data: None,
         }
     }
 }

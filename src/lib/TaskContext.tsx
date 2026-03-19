@@ -6,7 +6,7 @@ import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "
 import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
+export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -60,7 +60,7 @@ interface QueueSaveSpec {
   projectId: string;
   cifId: string;
   workingDir?: string | null;
-  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "optimization";
+  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "optimization";
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
@@ -122,6 +122,7 @@ const COMMAND_MAP: Record<TaskType, string> = {
   dos: "start_dos_calculation",
   fermi_surface: "start_fermi_surface_calculation",
   phonon: "start_phonon_calculation",
+  wannier: "start_wannier_calculation",
 };
 
 function sleep(ms: number): Promise<void> {
@@ -146,7 +147,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "wannier") {
     return taskType;
   }
   return "scf";
@@ -224,6 +225,26 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       n_scf_steps: null,
       wall_time_seconds: null,
       raw_output: outputText,
+    };
+  }
+
+  if (taskType === "wannier") {
+    const resultEf = Number(taskResult?.band_data?.fermi_energy);
+    const fallbackEf = Number(parameters?.scf_fermi_energy);
+    const fermiEnergy = Number.isFinite(resultEf)
+      ? resultEf
+      : Number.isFinite(fallbackEf)
+        ? fallbackEf
+        : null;
+    return {
+      converged: taskResult?.convergence?.converged ?? true,
+      total_energy: null,
+      fermi_energy: fermiEnergy,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+      band_data: taskResult?.band_data ?? null,
+      wannier_data: taskResult,
     };
   }
 
@@ -310,6 +331,19 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
     }
     if (next.n_modes == null && Number.isFinite(Number(taskResult?.n_modes))) {
       next.n_modes = Number(taskResult.n_modes);
+    }
+  } else if (taskType === "wannier") {
+    if (next.total_spread == null && Number.isFinite(Number(taskResult?.total_spread))) {
+      next.total_spread = Number(taskResult.total_spread);
+    }
+    if (next.n_wann == null && Number.isFinite(Number(taskResult?.num_wann))) {
+      next.n_wann = Number(taskResult.num_wann);
+    }
+    if (next.n_bands == null && Number.isFinite(Number(taskResult?.num_bands))) {
+      next.n_bands = Number(taskResult.num_bands);
+    }
+    if (next.total_k_points == null && Number.isFinite(Number(taskResult?.band_data?.n_kpoints))) {
+      next.total_k_points = Number(taskResult.band_data.n_kpoints);
     }
   }
 

@@ -19,6 +19,8 @@ export interface HpcEnvironmentValidation {
   squeue_available: boolean;
   sacct_available: boolean;
   qe_pw_available: boolean;
+  qe_pw2wannier_available: boolean;
+  wannier90_available: boolean;
   workspace_writable: boolean;
   messages: string[];
 }

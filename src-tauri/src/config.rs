@@ -38,6 +38,9 @@ pub struct AppConfig {
     /// Optional absolute path to the FermiSurfer executable
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fermi_surfer_path: Option<String>,
+    /// Optional absolute path to the Wannier90 executable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wannier90_path: Option<String>,
     /// Optional global defaults for MPI in calculation wizards
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mpi_defaults: Option<MpiDefaultsConfig>,
@@ -80,6 +83,7 @@ impl Default for AppConfig {
             qe_bin_dir: None,
             execution_prefix: None,
             fermi_surfer_path: None,
+            wannier90_path: None,
             mpi_defaults: None,
             save_size_mode: SaveSizeMode::Large,
             execution_mode: ExecutionMode::Local,
@@ -154,6 +158,13 @@ pub fn update_execution_prefix(app: &AppHandle, prefix: Option<String>) -> Resul
 pub fn update_fermi_surfer_path(app: &AppHandle, path: Option<String>) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.fermi_surfer_path = path;
+    save_config(app, &config)
+}
+
+/// Updates the Wannier90 executable path and saves
+pub fn update_wannier90_path(app: &AppHandle, path: Option<String>) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.wannier90_path = path;
     save_config(app, &config)
 }
 

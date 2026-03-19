@@ -178,10 +178,11 @@ const EXPORT_COPY_BUFFER_SIZE: usize = 256 * 1024;
 const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
-const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 6] = [
+const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 7] = [
     "scf",
     "bands",
     "dos",
+    "wannier",
     "phonon",
     "optimization",
     "fermi_surface",
@@ -1080,6 +1081,7 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
         "scf" => Some("scf"),
         "bands" | "band" => Some("bands"),
         "dos" => Some("dos"),
+        "wannier" | "wannier90" => Some("wannier"),
         "phonon" => Some("phonon"),
         "optimization"
         | "geometry_optimization"
@@ -1320,6 +1322,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         let mut has_scf = false;
         let mut has_bands = false;
         let mut has_dos = false;
+        let mut has_wannier = false;
         let mut has_phonon = false;
         let mut has_optimization = false;
         let mut has_fermi_surface = false;
@@ -1341,6 +1344,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 Some("scf") => has_scf = true,
                 Some("bands") => has_bands = true,
                 Some("dos") => has_dos = true,
+                Some("wannier") => has_wannier = true,
                 Some("phonon") => has_phonon = true,
                 Some("optimization") => has_optimization = true,
                 Some("fermi_surface") => has_fermi_surface = true,
@@ -1354,6 +1358,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 "scf" => has_scf,
                 "bands" => has_bands,
                 "dos" => has_dos,
+                "wannier" => has_wannier,
                 "phonon" => has_phonon,
                 "optimization" => has_optimization,
                 "fermi_surface" => has_fermi_surface,
@@ -1703,6 +1708,18 @@ pub fn save_calculation(
                     .and_then(|value| value.as_bool())
             })
             .unwrap_or(false);
+    let wannier_seedname = if calc_data.calc_type == "wannier" {
+        calc_data
+            .parameters
+            .get("seedname")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("qcortado_wannier")
+            .to_string()
+    } else {
+        String::new()
+    };
     if let Some(work_dir) = working_dir {
         let work_path = PathBuf::from(&work_dir);
         if work_path.exists() {
@@ -1714,6 +1731,8 @@ pub fn save_calculation(
             // For phonons, default to compact artifacts unless EPW-prep explicitly asks for full data.
             if calc_data.calc_type == "phonon" && !preserve_full_phonon_artifacts {
                 copy_compact_phonon_artifacts(&work_path, &tmp_dir)?;
+            } else if calc_data.calc_type == "wannier" && save_size_mode == SaveSizeMode::Small {
+                copy_compact_wannier_artifacts(&work_path, &tmp_dir, &wannier_seedname)?;
             } else if save_size_mode == SaveSizeMode::Small && calc_data.calc_type != "scf" {
                 // Compact mode strips heavy wavefunction archives for non-SCF runs.
                 // SCF keeps wfc* restart files so downstream phonon workflows remain valid.
@@ -2052,6 +2071,44 @@ fn copy_compact_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> 
     Ok(())
 }
 
+fn copy_compact_wannier_artifacts(
+    src_tmp_dir: &Path,
+    staging_tmp_dir: &Path,
+    seedname: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(staging_tmp_dir)
+        .map_err(|e| format!("Failed to create staging directory: {}", e))?;
+
+    let top_level = [
+        format!("{}.win", seedname),
+        format!("{}.nnkp", seedname),
+        format!("{}.amn", seedname),
+        format!("{}.mmn", seedname),
+        format!("{}.eig", seedname),
+        format!("{}.wout", seedname),
+        format!("{}.chk", seedname),
+        format!("{}_hr.dat", seedname),
+        format!("{}_centres.xyz", seedname),
+        format!("{}_band.dat", seedname),
+        format!("{}_band.kpt", seedname),
+        "nscf.in".to_string(),
+        "nscf.out".to_string(),
+        "pw2wan.in".to_string(),
+        "pw2wan.out".to_string(),
+        "wannier90_pre.out".to_string(),
+        "wannier90.out".to_string(),
+        "run.sbatch".to_string(),
+        "slurm.out".to_string(),
+        "slurm.err".to_string(),
+    ];
+
+    for file in top_level {
+        copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, Path::new(&file))?;
+    }
+
+    Ok(())
+}
+
 /// Copies contents of a directory to another directory (public helper for bands calculation)
 pub fn copy_dir_contents(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
     if !dst.exists() {
@@ -2229,6 +2286,7 @@ pub fn recover_phonon_calculation(
             "dos_data": dos_data,
             "dispersion_data": dispersion,
         })),
+        wannier_data: None,
     };
 
     let input_content = fs::read_to_string(tmp_dir.join("ph.in")).unwrap_or_default();

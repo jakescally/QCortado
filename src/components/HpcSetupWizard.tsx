@@ -34,6 +34,7 @@ function makeDefaultProfile(): HpcProfile {
     auth_method: "ssh_key",
     ssh_key_path: "~/.ssh/id_rsa",
     remote_qe_bin_dir: "~/qe/bin",
+    remote_wannier90_path: "wannier90.x",
     remote_pseudo_dir: "~/qe/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
@@ -124,10 +125,21 @@ export function HpcSetupWizard({
         if (!validation.squeue_available) detail.push("`squeue` is not available.");
         if (!validation.sacct_available) detail.push("`sacct` is not available.");
         if (!validation.qe_pw_available) detail.push("`pw.x` is not executable at configured QE path.");
+        if (!validation.qe_pw2wannier_available) detail.push("`pw2wannier90.x` is not executable at configured QE path.");
+        if (!validation.wannier90_available) detail.push("`wannier90.x` is not executable at configured path or on `PATH`.");
         if (!validation.workspace_writable) detail.push("Remote workspace is not writable.");
         detail.push(...validation.messages);
 
-        if (connection.success && validation.sbatch_available && validation.squeue_available && validation.sacct_available && validation.qe_pw_available && validation.workspace_writable) {
+        if (
+          connection.success
+          && validation.sbatch_available
+          && validation.squeue_available
+          && validation.sacct_available
+          && validation.qe_pw_available
+          && validation.qe_pw2wannier_available
+          && validation.wannier90_available
+          && validation.workspace_writable
+        ) {
           setValidationMessage("Validation succeeded.");
         } else {
           setValidationMessage("Validation completed with issues.");
@@ -319,6 +331,16 @@ export function HpcSetupWizard({
                 value={profile.remote_qe_bin_dir}
                 onChange={(event) => setProfile((prev) => ({ ...prev, remote_qe_bin_dir: event.target.value }))}
               />
+              <label className="settings-menu-label">Remote Wannier90 Executable</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_wannier90_path || ""}
+                onChange={(event) => setProfile((prev) => ({ ...prev, remote_wannier90_path: event.target.value || null }))}
+                placeholder="wannier90.x or /path/to/wannier90.x"
+              />
+              <p className="settings-menu-hint">
+                Leave as <code>wannier90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
+              </p>
               <label className="settings-menu-label">Remote Pseudopotential Directory</label>
               <input
                 className="settings-menu-input"
@@ -444,7 +466,7 @@ export function HpcSetupWizard({
           {step === 4 && (
             <div className="settings-menu-section">
               <p className="settings-menu-hint">
-                Runs checks for SSH login, Slurm commands (`sbatch`/`squeue`/`sacct`), `pw.x`, and remote workspace write permissions.
+                Runs checks for SSH login, Slurm commands (`sbatch`/`squeue`/`sacct`), `pw.x`, `pw2wannier90.x`, `wannier90.x`, and remote workspace write permissions.
               </p>
               <button
                 className="settings-menu-item"

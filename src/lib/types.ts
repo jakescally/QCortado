@@ -107,6 +107,7 @@ export interface HpcProfile {
   auth_method: HpcAuthMethod;
   ssh_key_path?: string | null;
   remote_qe_bin_dir: string;
+  remote_wannier90_path?: string | null;
   remote_pseudo_dir: string;
   remote_workspace_root: string;
   remote_project_root: string;

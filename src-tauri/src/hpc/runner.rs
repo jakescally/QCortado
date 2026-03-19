@@ -190,6 +190,10 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
             | "projwfc.out"
             | "nscf.in"
             | "nscf.out"
+            | "pw2wan.in"
+            | "pw2wan.out"
+            | "wannier90_pre.out"
+            | "wannier90.out"
             | "dos.in"
             | "dos.out"
             | "fermi_velocity.in"
@@ -210,12 +214,44 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
         return true;
     }
 
+    if matches!(
+        file_name,
+        "run.sbatch"
+            | "slurm.out"
+            | "slurm.err"
+            | "nscf.in"
+            | "nscf.out"
+            | "pw2wan.in"
+            | "pw2wan.out"
+            | "wannier90_pre.out"
+            | "wannier90.out"
+    ) && task_kind == "wannier"
+    {
+        return true;
+    }
+
     if lower_rel.ends_with(".gnu")
         || lower_rel.ends_with(".json")
         || lower_rel.ends_with(".txt")
         || lower_rel.ends_with(".log")
     {
         return true;
+    }
+
+    if task_kind == "wannier"
+        && (file_name.ends_with(".win")
+            || file_name.ends_with(".nnkp")
+            || file_name.ends_with(".amn")
+            || file_name.ends_with(".mmn")
+            || file_name.ends_with(".eig")
+            || file_name.ends_with(".wout")
+            || file_name.ends_with(".chk")
+            || file_name.ends_with("_hr.dat")
+            || file_name.ends_with("_centres.xyz")
+            || file_name.ends_with("_band.dat")
+            || file_name.ends_with("_band.kpt"))
+    {
+        return entry.size_bytes <= 256 * 1024 * 1024;
     }
 
     if lower_rel.ends_with(".in") || lower_rel.ends_with(".out") || lower_rel.ends_with(".err") {

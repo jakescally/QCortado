@@ -10,6 +10,7 @@ import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } fr
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
 import { EditProjectDialog } from "./EditProjectDialog";
@@ -24,6 +25,7 @@ interface QEResult {
   band_data?: any;  // Band structure data for bands calculations
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
+  wannier_data?: any;  // Wannier90 data payload for Wannier calculations
 }
 
 export interface CalculationRun {
@@ -73,6 +75,8 @@ interface ProjectDashboardProps {
   onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
   onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
+  onRunWannier: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onViewWannier: (wannierData: any, scfFermiEnergy: number | null) => void;
   onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
@@ -81,7 +85,7 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "fermi_surface" | "phonon" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
 interface CalculationRuntimeDisplay {
@@ -165,11 +169,33 @@ function isHpcArtifactsDownloaded(calc: CalculationRun): boolean {
   return syncMode === "full";
 }
 
+function isWannierReadyScf(calc: CalculationRun): boolean {
+  if (calc.calc_type !== "scf" || !calc.result?.converged) {
+    return false;
+  }
+  const params = calc.parameters || {};
+  if (!sourceScfUsesPrimitiveCell(params)) {
+    return false;
+  }
+  if (Number(params.nspin) !== 1) {
+    return false;
+  }
+  if (Boolean(params.noncolin) || Boolean(params.lspinorb)) {
+    return false;
+  }
+  if (Boolean(params.lda_plus_u)) {
+    return false;
+  }
+  const vdw = String(params.vdw_corr || "").trim().toLowerCase();
+  return !vdw || vdw === "none";
+}
+
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
   const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
+  const wannierReady = isWannierReadyScf(calc);
   let hasGeometryTag = false;
   const pushTag = (label: string, type: CalcTagType) => {
     if (!tags.some((tag) => tag.label === label)) {
@@ -199,6 +225,9 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
 
   if (phononReady) {
     pushTag("Phonon-Ready", "special");
+  }
+  if (wannierReady) {
+    pushTag("Wannier-Ready", "special");
   }
 
   // K-points grid
@@ -362,6 +391,38 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
     pushTag("vdW", "feature");
   }
 
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
+  return tags;
+}
+
+function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (params.k_grid) {
+    const [k1, k2, k3] = params.k_grid;
+    pushTag(`${k1}×${k2}×${k3} K`, "info");
+  }
+  if (params.n_wann) {
+    pushTag(`${params.n_wann} WF`, "info");
+  }
+  if (params.n_bands) {
+    pushTag(`${params.n_bands} bands`, "info");
+  }
+  if (Array.isArray(params.exclude_bands) && params.exclude_bands.length > 0) {
+    pushTag("Disentangled", "feature");
+  }
+  if (params.total_spread != null && Number.isFinite(Number(params.total_spread))) {
+    pushTag(`Ω ${Number(params.total_spread).toFixed(3)}`, "info");
+  }
   if (isHpcCalculation(calc)) {
     pushTag("HPC", "feature");
   }
@@ -600,6 +661,14 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     return convergedBonus + (4 * kScore) + (2 * resolutionScore) + socBonus;
   }
 
+  if (category === "wannier") {
+    const meshScore = Math.log2(Math.max(1, getMeshProduct(params.k_grid)));
+    const wannScore = Math.log2(Math.max(1, Number(params.n_wann) || 1));
+    const bandScore = Math.log2(Math.max(1, Number(params.n_bands) || 1));
+    const interpolationScore = Math.log2(Math.max(1, Number(params.total_k_points) || 1));
+    return convergedBonus + (4 * meshScore) + wannScore + bandScore + interpolationScore + socBonus;
+  }
+
   // Bands: prioritize denser path sampling, then inherited SCF settings when present.
   const pathScore = Math.log2(Math.max(1, Number(params.total_k_points) || 0));
   const bandCountScore = Math.log2(Math.max(1, Number(params.n_bands) || 0));
@@ -742,6 +811,8 @@ export function ProjectDashboard({
   onViewBands,
   onRunDos,
   onViewDos,
+  onRunWannier,
+  onViewWannier,
   onRunFermiSurface,
   onRunPhonons,
   onViewPhonons,
@@ -1091,6 +1162,13 @@ export function ProjectDashboard({
     onRunDos(selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunWannier() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunWannier(selectedCifId, crystalData, variant.calculations);
+  }
+
   function handleRunFermiSurface() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -1388,6 +1466,12 @@ export function ProjectDashboard({
     return variant.calculations.some(c => c.calc_type === "scf" && c.result?.converged);
   }
 
+  function hasWannierReadyScf(): boolean {
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some((calc) => isWannierReadyScf(calc));
+  }
+
   function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
     const wallSeconds = calc.result?.wall_time_seconds;
     if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
@@ -1532,6 +1616,15 @@ export function ProjectDashboard({
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "dos") || [],
       calculationSortMode,
       "dos",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
+  const wannierCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "wannier") || [],
+      calculationSortMode,
+      "wannier",
       pinnedCalcIds,
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
@@ -1960,6 +2053,17 @@ export function ProjectDashboard({
               </button>
               <button
                 className="calc-action-btn"
+                onClick={handleRunWannier}
+                disabled={!hasWannierReadyScf()}
+              >
+                <span className="calc-action-icon">W90</span>
+                <span className="calc-action-label">Wannier90</span>
+                <span className="calc-action-hint">
+                  {hasWannierReadyScf() ? "MLWFs + interpolated bands" : "Requires primitive scalar SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
                 onClick={handleRunFermiSurface}
                 disabled={!hasConvergedSCF()}
               >
@@ -2373,6 +2477,158 @@ export function ProjectDashboard({
                               }}
                             >
                               View DOS
+                            </button>
+                          )}
+                          {renderHpcDownloadButton(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {wannierCalculations.length > 0 && (
+          <section className="history-section wannier-section">
+            <h3>Wannier90</h3>
+            <div className="calculations-list">
+              {wannierCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const runtime = getCalculationRuntime(calc);
+                const wannierData = calc.result?.wannier_data ?? null;
+                const bandData = wannierData?.band_data ?? calc.result?.band_data ?? null;
+                const totalSpread = Number(wannierData?.total_spread ?? calc.parameters?.total_spread);
+                return (
+                  <div key={calc.id} className="calculation-item bands-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">WANNIER</span>
+                        {calc.parameters?.k_path && (
+                          <span className="calc-kpath">{calc.parameters.k_path}</span>
+                        )}
+                        <div className="calc-tags">
+                          {getWannierTags(calc).map((tag, i) => (
+                            <span key={i} className={getCalcTagClass(tag)}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          disabled={readOnly}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>K-Mesh</label>
+                            <span>
+                              {calc.parameters?.k_grid
+                                ? `${calc.parameters.k_grid[0]}×${calc.parameters.k_grid[1]}×${calc.parameters.k_grid[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>num_wann</label>
+                            <span>{wannierData?.num_wann ?? calc.parameters?.n_wann ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>num_bands</label>
+                            <span>{wannierData?.num_bands ?? calc.parameters?.n_bands ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Interpolated K-Points</label>
+                            <span>{bandData?.n_kpoints ?? calc.parameters?.total_k_points ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Total Spread</label>
+                            <span>{Number.isFinite(totalSpread) ? `${totalSpread.toFixed(6)} A^2` : "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
+                          {calc.result?.fermi_energy != null && (
+                            <div className="detail-item">
+                              <label>Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                          {renderStorageDetailItems(calc)}
+                        </div>
+                        {Array.isArray(calc.parameters?.projection_summary) && calc.parameters.projection_summary.length > 0 && (
+                          <div className="detail-item parameters">
+                            <label>Projections</label>
+                            <pre>{calc.parameters.projection_summary.join("\n")}</pre>
+                          </div>
+                        )}
+                        <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
+                          {wannierData && bandData && (
+                            <button
+                              className="view-bands-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewWannier(wannierData, calc.result?.fermi_energy ?? null);
+                              }}
+                            >
+                              View Wannier
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}

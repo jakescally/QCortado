@@ -14,6 +14,7 @@ pub mod output;
 pub mod phonon;
 pub mod runner;
 pub mod types;
+pub mod wannier;
 
 // Re-export commonly used items
 pub use bands::{
@@ -32,3 +33,12 @@ pub use phonon::{
 };
 pub use runner::{QERunner, RunnerError};
 pub use types::*;
+pub use wannier::{
+    collect_wannier_artifacts, generate_pw2wannier90_input, generate_uniform_mp_kpoints,
+    generate_wannier90_win, parse_wannier_band_data, parse_wannier_centres_xyz,
+    parse_wannier_wout, prepare_wannier_nscf_calculation, read_wannier_result,
+    validate_wannier_config, Pw2Wannier90Config, WannierArtifact, WannierBandPathConfig,
+    WannierCalculationConfig, WannierCentreRecord, WannierConvergenceData,
+    WannierDisentanglementConfig, WannierProjectionSpec, WannierProjectionTargetType,
+    WannierResult, WannierSourceMetadata, WannierSpread,
+};

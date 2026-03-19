@@ -5472,7 +5472,8 @@ html[data-theme="dark"] {
 .band-structure-wizard,
 .electronic-dos-wizard,
 .fermi-surface-wizard,
-.phonon-wizard {
+.phonon-wizard,
+.wannier-wizard {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -5480,17 +5481,25 @@ html[data-theme="dark"] {
   overflow: hidden;
 }
 
+.wannier-wizard {
+  height: 100%;
+  min-height: 0;
+  padding-top: 0;
+}
+
 html[data-theme="dark"] .band-structure-wizard,
 html[data-theme="dark"] .electronic-dos-wizard,
 html[data-theme="dark"] .fermi-surface-wizard,
-html[data-theme="dark"] .phonon-wizard {
+html[data-theme="dark"] .phonon-wizard,
+html[data-theme="dark"] .wannier-wizard {
   background: #1e1e2e;
 }
 
 .band-structure-wizard > .wizard-header,
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
-.phonon-wizard > .wizard-header {
+.phonon-wizard > .wizard-header,
+.wannier-wizard > .wizard-header {
   display: flex;
   align-items: center;
   gap: 1.5rem;
@@ -5499,17 +5508,28 @@ html[data-theme="dark"] .phonon-wizard {
   border-bottom: 1px solid #e2e8f0;
 }
 
+.wannier-wizard > .wizard-header {
+  flex-shrink: 0;
+  padding-top: 1.5rem;
+}
+
+.wannier-wizard .wizard-content {
+  min-height: 0;
+}
+
 html[data-theme="dark"] .band-structure-wizard > .wizard-header,
 html[data-theme="dark"] .electronic-dos-wizard > .wizard-header,
 html[data-theme="dark"] .fermi-surface-wizard > .wizard-header,
-html[data-theme="dark"] .phonon-wizard > .wizard-header {
+html[data-theme="dark"] .phonon-wizard > .wizard-header,
+html[data-theme="dark"] .wannier-wizard > .wizard-header {
   border-bottom-color: #45475a;
 }
 
 .band-structure-wizard .wizard-header h2,
 .electronic-dos-wizard .wizard-header h2,
 .fermi-surface-wizard .wizard-header h2,
-.phonon-wizard .wizard-header h2 {
+.phonon-wizard .wizard-header h2,
+.wannier-wizard .wizard-header h2 {
   margin: 0;
   font-size: 1.5rem;
   color: #1a202c;
@@ -5519,14 +5539,16 @@ html[data-theme="dark"] .phonon-wizard > .wizard-header {
 html[data-theme="dark"] .band-structure-wizard .wizard-header h2,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-header h2,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-header h2,
-html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
+html[data-theme="dark"] .phonon-wizard .wizard-header h2,
+html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
   color: #f7fafc;
 }
 
 .band-structure-wizard .step-indicator,
 .electronic-dos-wizard .step-indicator,
 .fermi-surface-wizard .step-indicator,
-.phonon-wizard .step-indicator {
+.phonon-wizard .step-indicator,
+.wannier-wizard .step-indicator {
   display: flex;
   gap: 1.5rem;
   font-size: 0.85rem;
@@ -5535,7 +5557,8 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 .band-structure-wizard .step-indicator span,
 .electronic-dos-wizard .step-indicator span,
 .fermi-surface-wizard .step-indicator span,
-.phonon-wizard .step-indicator span {
+.phonon-wizard .step-indicator span,
+.wannier-wizard .step-indicator span {
   color: #718096;
   padding: 0.25rem 0.5rem;
   border-radius: 4px;
@@ -5544,14 +5567,16 @@ html[data-theme="dark"] .phonon-wizard .wizard-header h2 {
 html[data-theme="dark"] .band-structure-wizard .step-indicator span,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span,
-html[data-theme="dark"] .phonon-wizard .step-indicator span {
+html[data-theme="dark"] .phonon-wizard .step-indicator span,
+html[data-theme="dark"] .wannier-wizard .step-indicator span {
   color: #6c7086;
 }
 
 .band-structure-wizard .step-indicator span.active,
 .electronic-dos-wizard .step-indicator span.active,
 .fermi-surface-wizard .step-indicator span.active,
-.phonon-wizard .step-indicator span.active {
+.phonon-wizard .step-indicator span.active,
+.wannier-wizard .step-indicator span.active {
   background: #4299e1;
   color: #fff;
   font-weight: 600;
@@ -5560,7 +5585,8 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span {
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.active,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.active,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.active,
-html[data-theme="dark"] .phonon-wizard .step-indicator span.active {
+html[data-theme="dark"] .phonon-wizard .step-indicator span.active,
+html[data-theme="dark"] .wannier-wizard .step-indicator span.active {
   background: #89b4fa;
   color: #1e1e2e;
 }
@@ -5568,21 +5594,24 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.active {
 .band-structure-wizard .step-indicator span.completed,
 .electronic-dos-wizard .step-indicator span.completed,
 .fermi-surface-wizard .step-indicator span.completed,
-.phonon-wizard .step-indicator span.completed {
+.phonon-wizard .step-indicator span.completed,
+.wannier-wizard .step-indicator span.completed {
   color: #38a169;
 }
 
 html[data-theme="dark"] .band-structure-wizard .step-indicator span.completed,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.completed,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.completed,
-html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
+html[data-theme="dark"] .phonon-wizard .step-indicator span.completed,
+html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
   color: #a6e3a1;
 }
 
 .band-structure-wizard .wizard-content,
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
-.phonon-wizard .wizard-content {
+.phonon-wizard .wizard-content,
+.wannier-wizard .wizard-content {
   flex: 1;
   padding: 2rem;
   overflow-y: auto;
@@ -5596,14 +5625,16 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 .band-structure-wizard .wizard-step.run-step,
 .electronic-dos-wizard .wizard-step.run-step,
 .fermi-surface-wizard .wizard-step.run-step,
-.phonon-wizard .wizard-step.run-step {
+.phonon-wizard .wizard-step.run-step,
+.wannier-wizard .wizard-step.run-step {
   max-width: 1180px;
 }
 
 .band-structure-wizard .wizard-step h3,
 .electronic-dos-wizard .wizard-step h3,
 .fermi-surface-wizard .wizard-step h3,
-.phonon-wizard .wizard-step h3 {
+.phonon-wizard .wizard-step h3,
+.wannier-wizard .wizard-step h3 {
   margin: 0 0 1rem 0;
   font-size: 1.5rem;
   color: #1a202c;
@@ -5612,14 +5643,16 @@ html[data-theme="dark"] .phonon-wizard .step-indicator span.completed {
 html[data-theme="dark"] .band-structure-wizard .wizard-step h3,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-step h3,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-step h3,
-html[data-theme="dark"] .phonon-wizard .wizard-step h3 {
+html[data-theme="dark"] .phonon-wizard .wizard-step h3,
+html[data-theme="dark"] .wannier-wizard .wizard-step h3 {
   color: #cdd6f4;
 }
 
 .band-structure-wizard .step-description,
 .electronic-dos-wizard .step-description,
 .fermi-surface-wizard .step-description,
-.phonon-wizard .step-description {
+.phonon-wizard .step-description,
+.wannier-wizard .step-description {
   color: #718096;
   margin-bottom: 1.5rem;
 }
@@ -5627,7 +5660,8 @@ html[data-theme="dark"] .phonon-wizard .wizard-step h3 {
 html[data-theme="dark"] .band-structure-wizard .step-description,
 html[data-theme="dark"] .electronic-dos-wizard .step-description,
 html[data-theme="dark"] .fermi-surface-wizard .step-description,
-html[data-theme="dark"] .phonon-wizard .step-description {
+html[data-theme="dark"] .phonon-wizard .step-description,
+html[data-theme="dark"] .wannier-wizard .step-description {
   color: #a6adc8;
 }
 
@@ -8316,6 +8350,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.wannier-wizard > .wizard-header,
 .bands-viewer-header,
 .phonon-viewer-header {
   position: sticky;
@@ -8333,6 +8368,7 @@ html[data-platform="linux"] .band-structure-wizard > .wizard-header,
 html[data-platform="linux"] .electronic-dos-wizard > .wizard-header,
 html[data-platform="linux"] .fermi-surface-wizard > .wizard-header,
 html[data-platform="linux"] .phonon-wizard > .wizard-header,
+html[data-platform="linux"] .wannier-wizard > .wizard-header,
 html[data-platform="linux"] .bands-viewer-header,
 html[data-platform="linux"] .phonon-viewer-header {
   backdrop-filter: none;
@@ -8357,21 +8393,24 @@ html[data-platform="linux"] .phonon-viewer-header {
 .band-structure-wizard > .wizard-header,
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
-.phonon-wizard > .wizard-header {
+.phonon-wizard > .wizard-header,
+.wannier-wizard > .wizard-header {
   background: rgba(248, 250, 252, 0.96);
 }
 
 .band-structure-wizard .wizard-content,
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
-.phonon-wizard .wizard-content {
+.phonon-wizard .wizard-content,
+.wannier-wizard .wizard-content {
   padding-bottom: var(--floating-content-clearance);
 }
 
 .band-structure-wizard.wizard-step-run .wizard-content,
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
-.fermi-surface-wizard.wizard-step-run .wizard-content {
+.fermi-surface-wizard.wizard-step-run .wizard-content,
+.wannier-wizard.wizard-step-run .wizard-content {
   padding-bottom: max(
     calc(1.4rem + env(safe-area-inset-bottom, 0px)),
     var(--floating-content-clearance)
@@ -8382,7 +8421,8 @@ html[data-platform="linux"] .phonon-viewer-header {
 .band-structure-wizard .step-actions,
 .electronic-dos-wizard .step-actions,
 .fermi-surface-wizard .step-actions,
-.phonon-wizard .step-actions {
+.phonon-wizard .step-actions,
+.wannier-wizard .step-actions {
   display: flex;
   gap: 1rem;
   justify-content: flex-end;
@@ -8413,7 +8453,8 @@ html[data-platform="linux"] .phonon-viewer-header {
 .band-structure-wizard .step-actions > button,
 .electronic-dos-wizard .step-actions > button,
 .fermi-surface-wizard .step-actions > button,
-.phonon-wizard .step-actions > button {
+.phonon-wizard .step-actions > button,
+.wannier-wizard .step-actions > button {
   pointer-events: auto;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.24);
 }
@@ -8422,7 +8463,8 @@ html[data-platform="linux"] .phonon-viewer-header {
 .band-structure-wizard .step-actions > button:first-child,
 .electronic-dos-wizard .step-actions > button:first-child,
 .fermi-surface-wizard .step-actions > button:first-child,
-.phonon-wizard .step-actions > button:first-child {
+.phonon-wizard .step-actions > button:first-child,
+.wannier-wizard .step-actions > button:first-child {
   margin-right: auto;
 }
 
@@ -8795,7 +8837,8 @@ html[data-theme="dark"] {
   .wizard-container > .wizard-header,
   .band-structure-wizard > .wizard-header,
   .electronic-dos-wizard > .wizard-header,
-  .phonon-wizard > .wizard-header {
+  .phonon-wizard > .wizard-header,
+  .wannier-wizard > .wizard-header {
     background: rgba(45, 55, 72, 0.95);
   }
 

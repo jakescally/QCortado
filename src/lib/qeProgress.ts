@@ -247,6 +247,36 @@ export function updatePhononProgress(line: string, state: ProgressState): Progre
   return attachMeta(next);
 }
 
+export function updateWannierProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 8, phase: "wannier90.x -pp" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 35, phase: "pw.x NSCF" };
+    }
+    if (step === 3) {
+      return { ...next, percent: 65, phase: "pw2wannier90.x" };
+    }
+    if (step === 4) {
+      return { ...next, percent: 88, phase: "wannier90.x" };
+    }
+  }
+
+  if (line.includes("Parsing Wannier artifacts")) {
+    return { ...next, percent: 95, phase: "Parsing Wannier results" };
+  }
+  if (line.includes("=== Wannier Calculation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
 function updateHpcProgress(line: string, state: ProgressState): ProgressState | null {
   if (line.startsWith("HPC_STAGE|")) {
     const [, stageRaw, infoRaw] = line.split("|", 3);
@@ -319,7 +349,7 @@ function updateHpcProgress(line: string, state: ProgressState): ProgressState | 
   return null;
 }
 
-type ProgressKind = "scf" | "bands" | "dos" | "fermi_surface" | "phonon";
+type ProgressKind = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier";
 
 export function progressReducer(
   kind: ProgressKind,
@@ -342,6 +372,8 @@ export function progressReducer(
       return updateFermiSurfaceProgress(line, state);
     case "phonon":
       return updatePhononProgress(line, state);
+    case "wannier":
+      return updateWannierProgress(line, state);
     default:
       return state;
   }

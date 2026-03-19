@@ -28,13 +28,16 @@ use process_manager::ProcessManager;
 use qe::{
     add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input,
     generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_ph_output,
-    read_phonon_dispersion_file, read_phonon_dos_file, DosCalculation, MatdynCalculation,
-    PhononPipelineConfig, PhononResult, Q2RCalculation, QPathPoint,
+    prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
+    read_wannier_result, validate_wannier_config, DosCalculation, MatdynCalculation,
+    PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint,
+    WannierCalculationConfig, WannierResult,
 };
 use qe::{
-    generate_bands_x_input, generate_projwfc_input, generate_pw_input, parse_dos_file,
-    parse_projwfc_projection_groups, parse_pw_output, read_bands_gnu_file, BandData, BandsXConfig,
-    KPathPoint, ProjwfcConfig, QECalculation, QEResult, QERunner,
+    generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input,
+    generate_pw_input, generate_wannier90_win, parse_dos_file,
+    parse_projwfc_projection_groups, parse_pw_output, read_bands_gnu_file, BandData,
+    BandsXConfig, KPathPoint, ProjwfcConfig, QECalculation, QEResult, QERunner,
 };
 
 /// Application state shared across commands.
@@ -43,6 +46,8 @@ pub struct AppState {
     pub qe_bin_dir: Mutex<Option<PathBuf>>,
     /// Path to FermiSurfer executable
     pub fermi_surfer_path: Mutex<Option<PathBuf>>,
+    /// Path to Wannier90 executable
+    pub wannier90_path: Mutex<Option<PathBuf>>,
     /// Optional command prefix prepended before all QE launches
     pub execution_prefix: Mutex<Option<String>>,
     /// Optional global MPI defaults used by calculation wizards
@@ -76,6 +81,7 @@ impl Default for AppState {
         Self {
             qe_bin_dir: Mutex::new(None),
             fermi_surfer_path: Mutex::new(None),
+            wannier90_path: Mutex::new(None),
             execution_prefix: Mutex::new(None),
             mpi_defaults: Mutex::new(None),
             save_size_mode: Mutex::new(config::SaveSizeMode::Large),
@@ -211,6 +217,22 @@ echo \"[QCortado] {step} finished with exit=${{__qcortado_step_status}} elapsed=
     )
 }
 
+fn build_hpc_logged_shell_step_command(step_label: &str, command: &str) -> String {
+    format!(
+        "echo \"[QCortado] {step} started at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; \
+__qcortado_step_start=$(date +%s); \
+set +e; \
+{cmd}; \
+__qcortado_step_status=$?; \
+set -e; \
+__qcortado_step_end=$(date +%s); \
+echo \"[QCortado] {step} finished with exit=${{__qcortado_step_status}} elapsed=$((__qcortado_step_end-__qcortado_step_start))s at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; \
+[ $__qcortado_step_status -eq 0 ]",
+        step = step_label,
+        cmd = command,
+    )
+}
+
 fn normalize_cli_dash_text(input: &str) -> String {
     input
         .replace('\u{2014}', "--")
@@ -231,6 +253,7 @@ fn sanitize_hpc_profile(
     profile.username = normalize_hpc_text(&profile.username, "SSH username")?;
     profile.remote_qe_bin_dir =
         normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
+    profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_workspace_root =
@@ -1017,6 +1040,49 @@ fn get_fermi_surfer_path(state: State<AppState>) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Sets the path to the Wannier90 executable.
+#[tauri::command]
+fn set_wannier90_path(
+    app: AppHandle,
+    path: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let normalized = normalize_optional_path(path);
+
+    let validated_path = if let Some(path_str) = normalized.clone() {
+        let path_buf = PathBuf::from(&path_str);
+        if !path_buf.exists() {
+            return Err(format!(
+                "Wannier90 executable not found at {}",
+                path_buf.display()
+            ));
+        }
+        if !path_buf.is_file() {
+            return Err(format!(
+                "Wannier90 path is not a file: {}",
+                path_buf.display()
+            ));
+        }
+        Some(path_buf)
+    } else {
+        None
+    };
+
+    *state.wannier90_path.lock().unwrap() = validated_path;
+    config::update_wannier90_path(&app, normalized)
+}
+
+/// Gets the current Wannier90 executable path.
+#[tauri::command]
+fn get_wannier90_path(state: State<AppState>) -> Option<String> {
+    state
+        .wannier90_path
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 /// Sets a command prefix prepended to all QE launches (e.g. "mpirun").
 #[tauri::command]
 fn set_execution_prefix(
@@ -1148,6 +1214,8 @@ struct HpcPresetBundleProfile {
     port: u16,
     host: String,
     remote_qe_bin_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_wannier90_path: Option<String>,
     remote_pseudo_dir: String,
     remote_workspace_root: String,
     remote_project_root: String,
@@ -1387,6 +1455,7 @@ fn hpc_export_preset_bundle(
                 port: profile.port,
                 host: profile.host,
                 remote_qe_bin_dir: profile.remote_qe_bin_dir,
+                remote_wannier90_path: profile.remote_wannier90_path,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
                 remote_workspace_root: profile.remote_workspace_root,
                 remote_project_root: profile.remote_project_root,
@@ -1525,6 +1594,7 @@ fn hpc_import_preset_bundle(
                 auth_method: existing_profile.auth_method.clone(),
                 ssh_key_path: existing_profile.ssh_key_path.clone(),
                 remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+                remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
                 remote_workspace_root: imported_profile.remote_workspace_root,
                 remote_project_root: imported_profile.remote_project_root,
@@ -1569,6 +1639,7 @@ fn hpc_import_preset_bundle(
             auth_method: hpc::profile::HpcAuthMethod::SshKey,
             ssh_key_path: None,
             remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+            remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
             remote_workspace_root: imported_profile.remote_workspace_root,
             remote_project_root: imported_profile.remote_project_root,
@@ -2050,6 +2121,58 @@ async fn hpc_validate_environment(
         ));
     }
 
+    let qe_pw2wannier_available = hpc::ssh::run_ssh_command(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "test -x {}/pw2wannier90.x && echo ok || echo missing",
+            profile.remote_qe_bin_dir.trim_end_matches('/')
+        ),
+    )
+    .await
+    .map(|value| value.contains("ok"))
+    .unwrap_or(false);
+    if !qe_pw2wannier_available {
+        messages.push(format!(
+            "pw2wannier90.x not found/executable at {}",
+            profile.remote_qe_bin_dir
+        ));
+    }
+
+    let remote_wannier90 = profile
+        .remote_wannier90_path
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("wannier90.x");
+    let wannier90_check = if remote_wannier90.contains('/') || remote_wannier90.starts_with('~') {
+        format!(
+            "tool={}; \
+if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
+test -x \"$tool\" && echo ok || echo missing",
+            shell_single_quote_local(remote_wannier90)
+        )
+    } else {
+        format!(
+            "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
+            remote_wannier90
+        )
+    };
+    let wannier90_available = hpc::ssh::run_ssh_command(
+        &profile,
+        secret.as_deref(),
+        &wannier90_check,
+    )
+    .await
+    .map(|value| value.contains("ok"))
+    .unwrap_or(false);
+    if !wannier90_available {
+        messages.push(format!(
+            "wannier90.x not found/executable at {}",
+            remote_wannier90
+        ));
+    }
+
     let probe_file = format!(
         "{}/.qcortado_probe_{}",
         profile.remote_workspace_root.trim_end_matches('/'),
@@ -2081,6 +2204,8 @@ async fn hpc_validate_environment(
         squeue_available,
         sacct_available,
         qe_pw_available,
+        qe_pw2wannier_available,
+        wannier90_available,
         workspace_writable,
         messages,
     })
@@ -3038,6 +3163,7 @@ fn check_qe_executables(state: State<AppState>) -> Result<Vec<String>, String> {
         "projwfc.x",
         "pp.x",
         "ph.x",
+        "pw2wannier90.x",
         "dynmat.x",
         "plotband.x",
         "neb.x",
@@ -3696,6 +3822,89 @@ fn insert_system_namelist_line(input: &str, line_to_insert: &str) -> Result<Stri
     } else {
         Err("Could not locate &SYSTEM namelist in pw.x input".to_string())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_local_stage_capture_stdout(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    work_path: &Path,
+    executable: &Path,
+    args: &[&str],
+    stdin_content: Option<&str>,
+    execution_prefix: Option<&str>,
+    mpi_config: Option<&MpiConfig>,
+    allow_mpi: bool,
+) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut child = if allow_mpi
+        && mpi_config
+            .map(|mpi| mpi.enabled && mpi.nprocs > 1)
+            .unwrap_or(false)
+    {
+        let mpi = mpi_config.unwrap();
+        let mut command = tokio_command_with_prefix("mpirun", execution_prefix);
+        command.args(["-np", &mpi.nprocs.to_string()]);
+        command.arg(executable);
+        command.args(args);
+        command
+    } else {
+        let mut command = tokio_command_with_prefix(executable, execution_prefix);
+        command.args(args);
+        command
+    };
+
+    child.current_dir(work_path);
+    if stdin_content.is_some() {
+        child.stdin(Stdio::piped());
+    } else {
+        child.stdin(Stdio::null());
+    }
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = child
+        .spawn()
+        .map_err(|e| format!("Failed to start {}: {}", executable.display(), e))?;
+
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(content) = stdin_content {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write stage input: {}", e))?;
+        }
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut output = String::new();
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        output.push_str(&line);
+        output.push('\n');
+        let _ = app.emit(&format!("task-output:{}", task_id), &line);
+        pm.append_output(task_id, line).await;
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!(
+            "{} failed with exit code {:?}",
+            executable
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("process"),
+            status.code()
+        ));
+    }
+
+    Ok(output)
 }
 
 fn collect_surface_files(
@@ -6313,6 +6522,478 @@ async fn run_bands_background(
     Ok(band_data)
 }
 
+// ============================================================================
+// Wannier90 Commands
+// ============================================================================
+
+/// Starts a scalar Wannier90 workflow as a background task.
+#[tauri::command]
+async fn start_wannier_calculation(
+    app: AppHandle,
+    config: WannierCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    validate_wannier_config(&config)?;
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
+    }
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("wannier".to_string(), label).await;
+
+    if let Some(hpc_target) = hpc_target {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_wannier_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(wannier_result) => {
+                    let json =
+                        serde_json::to_value(&wannier_result).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
+    let qe_bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let wannier90_path = {
+        let guard = state.wannier90_path.lock().unwrap();
+        guard
+            .as_ref()
+            .ok_or("Wannier90 path not configured")?
+            .clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = run_wannier_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            qe_bin_dir,
+            wannier90_path,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(wannier_result) => {
+                let json =
+                    serde_json::to_value(&wannier_result).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wannier_background(
+    app: AppHandle,
+    task_id: &str,
+    config: WannierCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    qe_bin_dir: PathBuf,
+    wannier90_path: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<WannierResult, String> {
+    let work_path = PathBuf::from(&working_dir);
+    prepare_working_directory(&work_path, false)?;
+    let pipeline_start = std::time::Instant::now();
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!("Copying SCF data to working directory...".to_string());
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+        } else {
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
+        }
+    }
+
+    let pw2wannier_path = qe_bin_dir.join("pw2wannier90.x");
+    if !pw2wannier_path.exists() {
+        return Err("pw2wannier90.x not found in the configured QE bin directory.".to_string());
+    }
+
+    if !wannier90_path.exists() {
+        return Err(format!(
+            "Wannier90 executable not found: {}",
+            wannier90_path.display()
+        ));
+    }
+
+    let (nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
+
+    if !matches!(nscf_calc.system.position_units, qe::PositionUnits::Crystal) {
+        return Err(
+            "Wannier v1 requires the base calculation to use crystal fractional atomic positions."
+                .to_string(),
+        );
+    }
+
+    let kpoints = match &nscf_calc.kpoints {
+        qe::KPoints::Crystal { points } => points.clone(),
+        _ => unreachable!(),
+    };
+    let win_content = generate_wannier90_win(&config, &kpoints)?;
+    let nscf_input = generate_pw_input(&nscf_calc);
+    let pw2_config = config.pw2wannier90.clone().unwrap_or_else(Pw2Wannier90Config::default);
+    let pw2wan_input = generate_pw2wannier90_input(&config, &pw2_config);
+
+    std::fs::write(work_path.join(format!("{}.win", config.seedname)), &win_content)
+        .map_err(|e| format!("Failed to write Wannier .win file: {}", e))?;
+    std::fs::write(work_path.join("nscf.in"), &nscf_input)
+        .map_err(|e| format!("Failed to write nscf.in: {}", e))?;
+    std::fs::write(work_path.join("pw2wan.in"), &pw2wan_input)
+        .map_err(|e| format!("Failed to write pw2wan.in: {}", e))?;
+
+    emit_line!(format!(
+        "[QCortado] Wannier local config: seedname={}, num_wann={}, num_bands={}, mesh={}x{}x{}, started_at={}.",
+        config.seedname,
+        config.num_wann,
+        config.num_bands,
+        config.k_grid[0],
+        config.k_grid[1],
+        config.k_grid[2],
+        now_iso()
+    ));
+    for note in nscf_notes {
+        emit_line!(format!("[QCortado] {}", note));
+    }
+
+    emit_line!("Step 1/4: Running wannier90.x -pp preprocessing...".to_string());
+    let pre_started = std::time::Instant::now();
+    let pre_output = run_local_stage_capture_stdout(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &wannier90_path,
+        &["-pp", &config.seedname],
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    std::fs::write(work_path.join("wannier90_pre.out"), &pre_output)
+        .map_err(|e| format!("Failed to write wannier90_pre.out: {}", e))?;
+    emit_line!(format!(
+        "[QCortado] wannier90.x -pp stage finished in {:.1}s.",
+        pre_started.elapsed().as_secs_f64()
+    ));
+    check_cancel!();
+
+    emit_line!("Step 2/4: Running pw.x NSCF on explicit full Monkhorst-Pack mesh...".to_string());
+    let pw_started = std::time::Instant::now();
+    let pw_output = run_local_stage_capture_stdout(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &qe_bin_dir.join("pw.x"),
+        &[],
+        Some(&nscf_input),
+        execution_prefix.as_deref(),
+        mpi_config.as_ref(),
+        true,
+    )
+    .await?;
+    std::fs::write(work_path.join("nscf.out"), &pw_output)
+        .map_err(|e| format!("Failed to write nscf.out: {}", e))?;
+    let fermi_energy = extract_fermi_energy_from_text(&pw_output).unwrap_or(0.0);
+    emit_line!(format!(
+        "[QCortado] pw.x NSCF stage finished in {:.1}s.",
+        pw_started.elapsed().as_secs_f64()
+    ));
+    check_cancel!();
+
+    emit_line!("Step 3/4: Running pw2wannier90.x interface...".to_string());
+    let pw2_started = std::time::Instant::now();
+    let pw2_output = run_local_stage_capture_stdout(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &pw2wannier_path,
+        &[],
+        Some(&pw2wan_input),
+        execution_prefix.as_deref(),
+        mpi_config.as_ref(),
+        true,
+    )
+    .await?;
+    std::fs::write(work_path.join("pw2wan.out"), &pw2_output)
+        .map_err(|e| format!("Failed to write pw2wan.out: {}", e))?;
+    emit_line!(format!(
+        "[QCortado] pw2wannier90.x stage finished in {:.1}s.",
+        pw2_started.elapsed().as_secs_f64()
+    ));
+    check_cancel!();
+
+    emit_line!("Step 4/4: Running wannier90.x minimization and band interpolation...".to_string());
+    let wan_started = std::time::Instant::now();
+    let wan_output = run_local_stage_capture_stdout(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &wannier90_path,
+        &[&config.seedname],
+        None,
+        None,
+        None,
+        false,
+    )
+    .await?;
+    std::fs::write(work_path.join("wannier90.out"), &wan_output)
+        .map_err(|e| format!("Failed to write wannier90.out: {}", e))?;
+    emit_line!(format!(
+        "[QCortado] wannier90.x stage finished in {:.1}s.",
+        wan_started.elapsed().as_secs_f64()
+    ));
+    check_cancel!();
+
+    emit_line!("Parsing Wannier artifacts...".to_string());
+    let parse_started = std::time::Instant::now();
+    let result = read_wannier_result(&work_path, &config, fermi_energy)?;
+    emit_line!(format!(
+        "Parsed: {} Wannier functions, {} interpolation bands, {} k-points.",
+        result.num_wann, result.band_data.n_bands, result.band_data.n_kpoints
+    ));
+    emit_line!(format!(
+        "[QCortado] Wannier parse finished in {:.1}s.",
+        parse_started.elapsed().as_secs_f64()
+    ));
+    emit_line!("=== Wannier Calculation Complete ===".to_string());
+    emit_line!(format!(
+        "[QCortado] Wannier local pipeline complete in {:.1}s.",
+        pipeline_start.elapsed().as_secs_f64()
+    ));
+
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wannier_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: WannierCalculationConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<WannierResult, String> {
+    let pipeline_start = std::time::Instant::now();
+    let remote_wannier90 = profile
+        .remote_wannier90_path
+        .as_deref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "wannier90.x".to_string());
+
+    let (mut nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
+    nscf_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+
+    let kpoints = match &nscf_calc.kpoints {
+        qe::KPoints::Crystal { points } => points.clone(),
+        _ => unreachable!(),
+    };
+    let win_content = generate_wannier90_win(&config, &kpoints)?;
+    let nscf_input = generate_pw_input(&nscf_calc);
+    let pw2_config = config.pw2wannier90.clone().unwrap_or_else(Pw2Wannier90Config::default);
+    let pw2wan_input = generate_pw2wannier90_input(&config, &pw2_config);
+
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
+    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let launcher = build_hpc_launcher_command(&profile);
+    let pre_cmd = format!(
+        "{} {} -pp {} > wannier90_pre.out 2>&1",
+        launcher,
+        shell_single_quote_local(&remote_wannier90),
+        shell_single_quote_local(&config.seedname)
+    );
+    let final_cmd = format!(
+        "{} {} {} > wannier90.out 2>&1",
+        launcher,
+        shell_single_quote_local(&remote_wannier90),
+        shell_single_quote_local(&config.seedname)
+    );
+
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_logged_shell_step_command(
+        "wannier90.x preprocessing",
+        &pre_cmd,
+    ));
+    commands.push(build_hpc_logged_qe_step_command(
+        &profile,
+        "pw.x NSCF on full k-mesh",
+        "pw.x",
+        None,
+        "nscf.in",
+        "nscf.out",
+    ));
+    commands.push(build_hpc_logged_qe_step_command(
+        &profile,
+        "pw2wannier90.x interface",
+        "pw2wannier90.x",
+        None,
+        "pw2wan.in",
+        "pw2wan.out",
+    ));
+    commands.push(build_hpc_logged_shell_step_command(
+        "wannier90.x minimization",
+        &final_cmd,
+    ));
+
+    let mut bundle_files = vec![
+        (format!("{}.win", config.seedname), win_content),
+        ("nscf.in".to_string(), nscf_input),
+        ("pw2wan.in".to_string(), pw2wan_input),
+    ];
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
+    }
+
+    let config_line = format!(
+        "[QCortado] Wannier HPC config: seedname={}, num_wann={}, num_bands={}, mesh={}x{}x{}.",
+        config.seedname,
+        config.num_wann,
+        config.num_bands,
+        config.k_grid[0],
+        config.k_grid[1],
+        config.k_grid[2]
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &config_line);
+    pm.append_output(task_id, config_line).await;
+    for note in nscf_notes {
+        let note_line = format!("[QCortado] {}", note);
+        let _ = app.emit(&format!("task-output:{}", task_id), &note_line);
+        pm.append_output(task_id, note_line).await;
+    }
+
+    let work_path = run_hpc_bundle_task(
+        app.clone(),
+        pm.clone(),
+        task_id,
+        "wannier",
+        "Wannier",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        bundle_files.drain(..).collect(),
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+
+    let nscf_out_text = std::fs::read_to_string(work_path.join("nscf.out")).unwrap_or_else(|_| {
+        std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
+    });
+    let fermi_energy = extract_fermi_energy_from_text(&nscf_out_text).unwrap_or(0.0);
+    let result = read_wannier_result(&work_path, &config, fermi_energy)?;
+
+    let done_line = format!(
+        "[QCortado] Wannier HPC pipeline complete in {:.1}s.",
+        pipeline_start.elapsed().as_secs_f64()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &done_line);
+    pm.append_output(task_id, done_line).await;
+
+    Ok(result)
+}
+
 /// Starts an electronic DOS calculation as a background task.
 #[tauri::command]
 async fn start_dos_calculation(
@@ -8545,6 +9226,7 @@ pub fn run() {
             // Load saved configuration
             let mut qe_bin_dir: Option<PathBuf> = None;
             let mut fermi_surfer_path: Option<PathBuf> = None;
+            let mut wannier90_path: Option<PathBuf> = None;
             let mut execution_prefix: Option<String> = None;
             let mut mpi_defaults: Option<config::MpiDefaultsConfig> = None;
             let mut save_size_mode = config::SaveSizeMode::Large;
@@ -8568,6 +9250,12 @@ pub fn run() {
                             fermi_surfer_path = Some(path_buf);
                         }
                     }
+                    if let Some(path) = cfg.wannier90_path {
+                        let path_buf = PathBuf::from(&path);
+                        if path_buf.exists() && path_buf.is_file() {
+                            wannier90_path = Some(path_buf);
+                        }
+                    }
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
                     mpi_defaults = normalize_mpi_defaults(cfg.mpi_defaults);
                     save_size_mode = cfg.save_size_mode;
@@ -8587,6 +9275,7 @@ pub fn run() {
             app.manage(AppState {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
                 fermi_surfer_path: Mutex::new(fermi_surfer_path),
+                wannier90_path: Mutex::new(wannier90_path),
                 execution_prefix: Mutex::new(execution_prefix),
                 mpi_defaults: Mutex::new(mpi_defaults),
                 save_size_mode: Mutex::new(save_size_mode),
@@ -8688,6 +9377,8 @@ pub fn run() {
         get_qe_path,
         set_fermi_surfer_path,
         get_fermi_surfer_path,
+        set_wannier90_path,
+        get_wannier90_path,
         set_execution_prefix,
         get_execution_prefix,
         set_mpi_defaults,
@@ -8743,6 +9434,7 @@ pub fn run() {
         start_dos_calculation,
         start_fermi_surface_calculation,
         start_phonon_calculation,
+        start_wannier_calculation,
         list_running_tasks,
         get_task_info,
         get_task_output,

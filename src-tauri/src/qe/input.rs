@@ -61,6 +61,10 @@ fn write_control_namelist(out: &mut String, calc: &QECalculation) {
     writeln!(out, "  outdir = '{}',", calc.outdir).unwrap();
     writeln!(out, "  pseudo_dir = '{}',", calc.pseudo_dir).unwrap();
 
+    if let Some(ref disk_io) = calc.disk_io {
+        writeln!(out, "  disk_io = '{}',", disk_io).unwrap();
+    }
+
     if calc.tprnfor {
         writeln!(out, "  tprnfor = .true.,").unwrap();
     }
@@ -107,6 +111,15 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
     if let Some(ecutrho) = sys.ecutrho {
         writeln!(out, "  ecutrho = {},", ecutrho).unwrap();
     }
+    if let Some(nbnd) = sys.nbnd {
+        writeln!(out, "  nbnd = {},", nbnd).unwrap();
+    }
+    if let Some(tot_charge) = sys.tot_charge {
+        writeln!(out, "  tot_charge = {},", tot_charge).unwrap();
+    }
+    if let Some(ref input_dft) = sys.input_dft {
+        writeln!(out, "  input_dft = '{}',", input_dft).unwrap();
+    }
 
     let noncolin = sys.noncolin || sys.nspin == 4 || sys.lspinorb;
     if noncolin {
@@ -128,6 +141,8 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
                 Occupations::Smearing => "smearing",
                 Occupations::FromInput => "from_input",
                 Occupations::Tetrahedra => "tetrahedra",
+                Occupations::TetrahedraLin => "tetrahedra_lin",
+                Occupations::TetrahedraOpt => "tetrahedra_opt",
             }
         )
         .unwrap();
@@ -140,13 +155,46 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
         }
     }
 
+    if sys.nosym {
+        writeln!(out, "  nosym = .true.,").unwrap();
+    }
+    if sys.noinv {
+        writeln!(out, "  noinv = .true.,").unwrap();
+    }
+
     writeln!(out, "/\n").unwrap();
 }
 
 fn write_electrons_namelist(out: &mut String, calc: &QECalculation) {
     writeln!(out, "&ELECTRONS").unwrap();
     writeln!(out, "  conv_thr = {:.2e},", calc.conv_thr).unwrap();
+    if let Some(electron_maxstep) = calc.electron_maxstep {
+        writeln!(out, "  electron_maxstep = {},", electron_maxstep).unwrap();
+    }
+    if let Some(ref mixing_mode) = calc.mixing_mode {
+        writeln!(out, "  mixing_mode = '{}',", mixing_mode.as_str()).unwrap();
+    }
     writeln!(out, "  mixing_beta = {},", calc.mixing_beta).unwrap();
+    if let Some(mixing_ndim) = calc.mixing_ndim {
+        writeln!(out, "  mixing_ndim = {},", mixing_ndim).unwrap();
+    }
+    if let Some(ref diagonalization) = calc.diagonalization {
+        writeln!(
+            out,
+            "  diagonalization = '{}',",
+            diagonalization.as_str()
+        )
+        .unwrap();
+    }
+    if let Some(ref startingpot) = calc.startingpot {
+        writeln!(out, "  startingpot = '{}',", startingpot.as_str()).unwrap();
+    }
+    if let Some(ref startingwfc) = calc.startingwfc {
+        writeln!(out, "  startingwfc = '{}',", startingwfc.as_str()).unwrap();
+    }
+    if calc.diago_full_acc {
+        writeln!(out, "  diago_full_acc = .true.,").unwrap();
+    }
     writeln!(out, "/\n").unwrap();
 }
 
@@ -502,25 +550,38 @@ mod tests {
                 position_units: PositionUnits::Crystal,
                 ecutwfc: 20.0,
                 ecutrho: Some(80.0),
+                nbnd: None,
+                tot_charge: None,
+                input_dft: None,
                 nspin: 1,
                 noncolin: false,
                 lspinorb: false,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::default(),
                 degauss: None,
+                nosym: false,
+                noinv: false,
             },
             kpoints: KPoints::Automatic {
                 grid: [4, 4, 4],
                 offset: [1, 1, 1],
             },
             conv_thr: 1.0e-8,
+            electron_maxstep: None,
+            mixing_mode: None,
             mixing_beta: 0.7,
+            mixing_ndim: None,
+            diagonalization: None,
+            startingpot: None,
+            startingwfc: None,
+            diago_full_acc: false,
             tprnfor: false,
             tstress: false,
             forc_conv_thr: None,
             etot_conv_thr: None,
             press: None,
             verbosity: None,
+            disk_io: None,
         };
 
         let input = generate_pw_input(&calc);
@@ -560,22 +621,35 @@ mod tests {
                 position_units: PositionUnits::Crystal,
                 ecutwfc: 50.0,
                 ecutrho: Some(400.0),
+                nbnd: None,
+                tot_charge: None,
+                input_dft: None,
                 nspin: 4,
                 noncolin: true,
                 lspinorb: true,
                 occupations: Occupations::Smearing,
                 smearing: SmearingType::FermiDirac,
                 degauss: Some(0.02),
+                nosym: false,
+                noinv: false,
             },
             kpoints: KPoints::Gamma,
             conv_thr: 1.0e-8,
+            electron_maxstep: None,
+            mixing_mode: None,
             mixing_beta: 0.7,
+            mixing_ndim: None,
+            diagonalization: None,
+            startingpot: None,
+            startingwfc: None,
+            diago_full_acc: false,
             tprnfor: false,
             tstress: false,
             forc_conv_thr: None,
             etot_conv_thr: None,
             press: None,
             verbosity: None,
+            disk_io: None,
         };
 
         let input = generate_pw_input(&calc);
