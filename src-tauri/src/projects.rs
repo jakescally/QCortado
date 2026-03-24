@@ -2085,6 +2085,7 @@ fn copy_compact_wannier_artifacts(
         format!("{}.amn", seedname),
         format!("{}.mmn", seedname),
         format!("{}.eig", seedname),
+        format!("{}_wsvec.dat", seedname),
         format!("{}.wout", seedname),
         format!("{}.chk", seedname),
         format!("{}_hr.dat", seedname),

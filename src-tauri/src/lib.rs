@@ -28,10 +28,11 @@ use process_manager::ProcessManager;
 use qe::{
     add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input,
     generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_ph_output,
-    prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
-    read_wannier_result, validate_wannier_config, DosCalculation, MatdynCalculation,
-    PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint,
-    WannierCalculationConfig, WannierResult,
+    export_ludwig_bundle, parse_wannier_hamiltonian, prepare_wannier_nscf_calculation,
+    read_phonon_dispersion_file, read_phonon_dos_file, read_wannier_result,
+    validate_wannier_config, DosCalculation, LudwigExportConfig, LudwigExportResult,
+    MatdynCalculation, PhononPipelineConfig, PhononResult, Pw2Wannier90Config,
+    Q2RCalculation, QPathPoint, WannierCalculationConfig, WannierResult,
 };
 use qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input,
@@ -4170,6 +4171,110 @@ fn launch_fermi_surface_viewer(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn export_wannier_for_ludwig(
+    app: AppHandle,
+    mut config: LudwigExportConfig,
+) -> Result<LudwigExportResult, String> {
+    config.project_id = config.project_id.trim().to_string();
+    config.calculation_id = config.calculation_id.trim().to_string();
+    config.destination_root = config.destination_root.trim().to_string();
+    if config.project_id.is_empty() {
+        return Err("Project ID is required for Ludwig export.".to_string());
+    }
+    if config.calculation_id.is_empty() {
+        return Err("Calculation ID is required for Ludwig export.".to_string());
+    }
+    if config.destination_root.is_empty() {
+        return Err("Destination directory is required for Ludwig export.".to_string());
+    }
+
+    let project = projects::get_project(app.clone(), config.project_id.clone())?;
+    let calculation = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == config.calculation_id)
+        .cloned()
+        .ok_or_else(|| format!("Calculation not found: {}", config.calculation_id))?;
+
+    if calculation.calc_type != "wannier" {
+        return Err(format!(
+            "Calculation {} is not a Wannier calculation.",
+            config.calculation_id
+        ));
+    }
+
+    let projects_dir = projects::get_projects_dir(&app)?;
+    let calc_tmp_dir = projects_dir
+        .join(&config.project_id)
+        .join("calculations")
+        .join(&config.calculation_id)
+        .join("tmp");
+    if !calc_tmp_dir.exists() {
+        return Err(format!(
+            "Saved calculation working directory not found: {}",
+            calc_tmp_dir.display()
+        ));
+    }
+
+    let seedname = calculation
+        .result
+        .as_ref()
+        .and_then(|result| result.wannier_data.as_ref())
+        .and_then(|payload| payload.get("seedname"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            calculation
+                .parameters
+                .get("seedname")
+                .and_then(|value| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("qcortado_wannier")
+        .to_string();
+
+    let win_path = calc_tmp_dir.join(format!("{}.win", seedname));
+    let hr_path = calc_tmp_dir.join(format!("{}_hr.dat", seedname));
+    let wsvec_path = calc_tmp_dir.join(format!("{}_wsvec.dat", seedname));
+    let wout_path = calc_tmp_dir.join(format!("{}.wout", seedname));
+
+    let win_content = std::fs::read_to_string(&win_path)
+        .map_err(|e| format!("Failed to read {}: {}", win_path.display(), e))?;
+    let hr_content = std::fs::read_to_string(&hr_path)
+        .map_err(|e| format!("Failed to read {}: {}", hr_path.display(), e))?;
+    let wsvec_content = if wsvec_path.exists() {
+        Some(
+            std::fs::read_to_string(&wsvec_path)
+                .map_err(|e| format!("Failed to read {}: {}", wsvec_path.display(), e))?,
+        )
+    } else {
+        None
+    };
+
+    let hamiltonian =
+        parse_wannier_hamiltonian(&seedname, &win_content, &hr_content, wsvec_content.as_deref())?;
+    let chemical_potential_ev = config
+        .chemical_potential_ev
+        .or_else(|| calculation.result.as_ref().and_then(|result| result.fermi_energy))
+        .ok_or_else(|| {
+            "Ludwig export requires a chemical potential. No override was provided and the saved Wannier calculation has no Fermi energy.".to_string()
+        })?;
+
+    let mut provenance_files = vec![win_path, hr_path, wout_path];
+    if wsvec_path.exists() {
+        provenance_files.push(wsvec_path);
+    }
+
+    export_ludwig_bundle(
+        &hamiltonian,
+        &config,
+        chemical_potential_ev,
+        &provenance_files,
+    )
 }
 
 /// Runs a band structure calculation (NSCF + bands.x) with streaming output.
@@ -9413,6 +9518,7 @@ pub fn run() {
         hpc_publish_viewer_library,
         clear_temp_storage,
         launch_fermi_surface_viewer,
+        export_wannier_for_ludwig,
         check_qe_executables,
         analyze_structure_symmetry,
         generate_input,

@@ -2,13 +2,19 @@
 
 use super::bands::{add_symmetry_markers, parse_bands_gnu, BandData, KPathPoint};
 use super::types::{
-    CalculationType, KPoint, KPoints, Occupations, PositionUnits, QECalculation, SmearingType,
-    StartingPotential,
+    CalculationType, CellMatrix, KPoint, KPoints, Occupations, PositionUnits, QECalculation,
+    SmearingType, StartingPotential,
 };
+use nalgebra::DMatrix;
+use num_complex::Complex64;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const BOHR_TO_ANGSTROM: f64 = 0.529_177_210_903;
+const TWO_PI: f64 = std::f64::consts::PI * 2.0;
 
 fn default_seedname() -> String {
     "qcortado_wannier".to_string()
@@ -243,6 +249,77 @@ pub struct WannierResult {
     pub artifact_manifest: Vec<WannierArtifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WannierHrTerm {
+    pub r: [i32; 3],
+    pub m: usize,
+    pub n: usize,
+    pub degeneracy: u32,
+    pub real: f64,
+    pub imag: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WannierHamiltonian {
+    pub seedname: String,
+    pub num_wann: u32,
+    pub lattice_vectors_angstrom: CellMatrix,
+    pub hr_terms: Vec<WannierHrTerm>,
+    #[serde(default)]
+    pub use_ws_distance: bool,
+    #[serde(default)]
+    pub ws_translations: HashMap<String, Vec<[i32; 3]>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LudwigExportMode {
+    Strict2d,
+    Quasi2dFixedSlice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LudwigExportConfig {
+    pub project_id: String,
+    pub calculation_id: String,
+    pub destination_root: String,
+    pub mode: LudwigExportMode,
+    pub in_plane_axes: [u8; 2],
+    pub slice_axis: u8,
+    pub slice_coordinate: f64,
+    pub nkx: u32,
+    pub nky: u32,
+    #[serde(default)]
+    pub chemical_potential_ev: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LudwigExportMetadata {
+    pub project_id: String,
+    pub calculation_id: String,
+    pub seedname: String,
+    pub mode: LudwigExportMode,
+    pub in_plane_axes: [u8; 2],
+    pub slice_axis: u8,
+    pub slice_coordinate: f64,
+    pub chemical_potential_ev: f64,
+    pub grid_shape: [u32; 2],
+    pub band_count: u32,
+    pub lattice_vectors_angstrom: CellMatrix,
+    pub in_plane_lattice_angstrom: [[f64; 2]; 2],
+    pub fractional_domain: String,
+    pub energy_reference: String,
+    pub provenance_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LudwigExportResult {
+    pub bundle_path: String,
+    pub band_count: u32,
+    pub chemical_potential_ev: f64,
+    pub grid_shape: [u32; 2],
+}
+
 fn orbital_template_count(orbital: &str) -> Option<u32> {
     match orbital.trim().to_ascii_lowercase().as_str() {
         "s" => Some(1),
@@ -256,6 +333,163 @@ fn orbital_template_count(orbital: &str) -> Option<u32> {
         "sp3d2" => Some(6),
         _ => None,
     }
+}
+
+fn parse_f64_token(token: &str, context: &str) -> Result<f64, String> {
+    token
+        .parse::<f64>()
+        .map_err(|_| format!("Failed to parse {} from '{}'.", context, token))
+}
+
+fn parse_i32_token(token: &str, context: &str) -> Result<i32, String> {
+    token
+        .parse::<i32>()
+        .map_err(|_| format!("Failed to parse {} from '{}'.", context, token))
+}
+
+fn parse_usize_token(token: &str, context: &str) -> Result<usize, String> {
+    token
+        .parse::<usize>()
+        .map_err(|_| format!("Failed to parse {} from '{}'.", context, token))
+}
+
+fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<CellMatrix, String> {
+    let cell = system
+        .cell_parameters
+        .ok_or_else(|| "Wannier export requires explicit cell_parameters.".to_string())?;
+    let cell_units = system.cell_units.unwrap_or(PositionUnits::Angstrom);
+
+    let scale = match cell_units {
+        PositionUnits::Angstrom => 1.0,
+        PositionUnits::Bohr => BOHR_TO_ANGSTROM,
+        PositionUnits::Alat => {
+            let celldm = system
+                .celldm
+                .ok_or_else(|| "CELL_PARAMETERS in alat units require celldm(1) to convert to angstrom.".to_string())?;
+            let alat_bohr = celldm[0];
+            if alat_bohr <= 0.0 {
+                return Err("Invalid celldm(1) for alat cell conversion.".to_string());
+            }
+            alat_bohr * BOHR_TO_ANGSTROM
+        }
+        PositionUnits::Crystal => {
+            return Err("CELL_PARAMETERS in crystal units cannot be exported to Wannier90 unit_cell_cart.".to_string());
+        }
+    };
+
+    let mut converted = cell;
+    for row in &mut converted {
+        for value in row {
+            *value *= scale;
+        }
+    }
+    Ok(converted)
+}
+
+fn wsvec_key(r: [i32; 3], m: usize, n: usize) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        r[0],
+        r[1],
+        r[2],
+        m.saturating_add(1),
+        n.saturating_add(1)
+    )
+}
+
+fn parse_win_bool_assignment(content: &str, key: &str) -> Option<bool> {
+    let prefix = format!("{} =", key);
+    content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+            return None;
+        }
+        let (_, raw_value) = trimmed.split_once('=')?;
+        let normalized = raw_value
+            .trim()
+            .trim_matches('.')
+            .trim_matches(',')
+            .to_ascii_lowercase();
+        match normalized.as_str() {
+            "true" | "t" => Some(true),
+            "false" | "f" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn parse_win_unit_cell_angstrom(content: &str) -> Result<CellMatrix, String> {
+    let mut lines = content.lines().enumerate();
+    while let Some((_, line)) = lines.next() {
+        if line.trim().eq_ignore_ascii_case("begin unit_cell_cart") {
+            let (_, unit_line) = lines
+                .next()
+                .ok_or_else(|| "Missing unit line in begin unit_cell_cart block.".to_string())?;
+            let unit = unit_line.trim().to_ascii_lowercase();
+            let scale = match unit.as_str() {
+                "ang" | "angstrom" => 1.0,
+                "bohr" => BOHR_TO_ANGSTROM,
+                "alat" => {
+                    return Err(
+                        "Wannier .win files written in alat units are not supported for Ludwig export."
+                            .to_string(),
+                    )
+                }
+                _ => {
+                    return Err(format!(
+                        "Unsupported unit_cell_cart unit '{}' in Wannier .win file.",
+                        unit_line.trim()
+                    ))
+                }
+            };
+
+            let mut cell = [[0.0; 3]; 3];
+            for row in &mut cell {
+                let (_, row_line) = lines.next().ok_or_else(|| {
+                    "Incomplete unit_cell_cart block in Wannier .win file.".to_string()
+                })?;
+                let parts: Vec<&str> = row_line.split_whitespace().collect();
+                if parts.len() < 3 {
+                    return Err("Malformed unit_cell_cart row in Wannier .win file.".to_string());
+                }
+                row[0] = parse_f64_token(parts[0], "unit cell x")? * scale;
+                row[1] = parse_f64_token(parts[1], "unit cell y")? * scale;
+                row[2] = parse_f64_token(parts[2], "unit cell z")? * scale;
+            }
+            return Ok(cell);
+        }
+    }
+
+    Err("Could not find begin unit_cell_cart block in Wannier .win file.".to_string())
+}
+
+fn embed_in_plane_lattice(lattice_vectors_angstrom: &CellMatrix, in_plane_axes: [u8; 2]) -> Result<[[f64; 2]; 2], String> {
+    let axis0 = usize::from(in_plane_axes[0]);
+    let axis1 = usize::from(in_plane_axes[1]);
+    if axis0 >= 3 || axis1 >= 3 || axis0 == axis1 {
+        return Err("In-plane lattice axes must be two distinct values from 0, 1, 2.".to_string());
+    }
+
+    let a1 = lattice_vectors_angstrom[axis0];
+    let a2 = lattice_vectors_angstrom[axis1];
+
+    let norm_a1 = (a1[0] * a1[0] + a1[1] * a1[1] + a1[2] * a1[2]).sqrt();
+    if norm_a1 <= 1.0e-12 {
+        return Err("Selected first in-plane lattice vector has zero length.".to_string());
+    }
+    let e1 = [a1[0] / norm_a1, a1[1] / norm_a1, a1[2] / norm_a1];
+    let dot_a2_e1 = a2[0] * e1[0] + a2[1] * e1[1] + a2[2] * e1[2];
+    let v2 = [
+        a2[0] - dot_a2_e1 * e1[0],
+        a2[1] - dot_a2_e1 * e1[1],
+        a2[2] - dot_a2_e1 * e1[2],
+    ];
+    let norm_v2 = (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]).sqrt();
+    if norm_v2 <= 1.0e-12 {
+        return Err("Selected in-plane lattice vectors are collinear.".to_string());
+    }
+
+    Ok([[norm_a1, 0.0], [dot_a2_e1, norm_v2]])
 }
 
 pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), String> {
@@ -597,16 +831,7 @@ fn format_exclude_bands(exclude_bands: &[u32]) -> Option<String> {
 pub fn generate_wannier90_win(config: &WannierCalculationConfig, kpoints: &[KPoint]) -> Result<String, String> {
     validate_wannier_config(config)?;
     let system = &config.base_calculation.system;
-    let cell = system
-        .cell_parameters
-        .as_ref()
-        .ok_or_else(|| "Wannier v1 requires explicit cell_parameters in the base calculation.".to_string())?;
-    let cell_units = system
-        .cell_units
-        .as_ref()
-        .unwrap_or(&PositionUnits::Angstrom)
-        .as_str()
-        .to_string();
+    let cell = convert_cell_matrix_to_angstrom(system)?;
 
     let mut output = String::new();
     writeln!(output, "num_wann = {}", config.num_wann).unwrap();
@@ -665,8 +890,8 @@ pub fn generate_wannier90_win(config: &WannierCalculationConfig, kpoints: &[KPoi
 
     writeln!(output).unwrap();
     writeln!(output, "begin unit_cell_cart").unwrap();
-    writeln!(output, "{}", cell_units).unwrap();
-    for row in cell {
+    writeln!(output, "angstrom").unwrap();
+    for row in &cell {
         writeln!(
             output,
             "{:16.10} {:16.10} {:16.10}",
@@ -976,6 +1201,7 @@ pub fn collect_wannier_artifacts(work_path: &Path, seedname: &str) -> Vec<Wannie
         format!("{}.amn", seedname),
         format!("{}.mmn", seedname),
         format!("{}.eig", seedname),
+        format!("{}_wsvec.dat", seedname),
         format!("{}.wout", seedname),
         format!("{}.chk", seedname),
         format!("{}_hr.dat", seedname),
@@ -1061,6 +1287,385 @@ pub fn read_wannier_result(
     })
 }
 
+fn parse_wannier_hr(content: &str) -> Result<(u32, Vec<WannierHrTerm>), String> {
+    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
+    let _header = lines
+        .next()
+        .ok_or_else(|| "Wannier hr.dat file is empty.".to_string())?;
+    let num_wann = lines
+        .next()
+        .ok_or_else(|| "Wannier hr.dat missing num_wann line.".to_string())
+        .and_then(|line| {
+            line.parse::<u32>()
+                .map_err(|_| format!("Invalid num_wann entry in hr.dat: {}", line))
+        })?;
+    let nrpts = lines
+        .next()
+        .ok_or_else(|| "Wannier hr.dat missing nrpts line.".to_string())
+        .and_then(|line| {
+            line.parse::<usize>()
+                .map_err(|_| format!("Invalid nrpts entry in hr.dat: {}", line))
+        })?;
+
+    let mut degeneracies = Vec::with_capacity(nrpts);
+    while degeneracies.len() < nrpts {
+        let line = lines
+            .next()
+            .ok_or_else(|| "Unexpected end of hr.dat while reading degeneracies.".to_string())?;
+        for token in line.split_whitespace() {
+            degeneracies.push(
+                token
+                    .parse::<u32>()
+                    .map_err(|_| format!("Invalid hr.dat degeneracy entry '{}'.", token))?,
+            );
+            if degeneracies.len() == nrpts {
+                break;
+            }
+        }
+    }
+
+    let expected_terms = nrpts
+        .checked_mul(num_wann as usize)
+        .and_then(|value| value.checked_mul(num_wann as usize))
+        .ok_or_else(|| "Wannier hr.dat term count overflow.".to_string())?;
+
+    let mut terms = Vec::with_capacity(expected_terms);
+    for term_index in 0..expected_terms {
+        let line = lines
+            .next()
+            .ok_or_else(|| "Unexpected end of hr.dat while reading Hamiltonian terms.".to_string())?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 7 {
+            return Err(format!("Malformed hr.dat term line: '{}'.", line));
+        }
+        let r = [
+            parse_i32_token(parts[0], "R1")?,
+            parse_i32_token(parts[1], "R2")?,
+            parse_i32_token(parts[2], "R3")?,
+        ];
+        let m = parse_usize_token(parts[3], "m")?
+            .checked_sub(1)
+            .ok_or_else(|| "Wannier hr.dat orbital indices must start at 1.".to_string())?;
+        let n = parse_usize_token(parts[4], "n")?
+            .checked_sub(1)
+            .ok_or_else(|| "Wannier hr.dat orbital indices must start at 1.".to_string())?;
+        let real = parse_f64_token(parts[5], "real hopping")?;
+        let imag = parse_f64_token(parts[6], "imag hopping")?;
+        let degeneracy = degeneracies[term_index / ((num_wann as usize) * (num_wann as usize))];
+        if degeneracy == 0 {
+            return Err("Encountered zero degeneracy in hr.dat.".to_string());
+        }
+        terms.push(WannierHrTerm {
+            r,
+            m,
+            n,
+            degeneracy,
+            real,
+            imag,
+        });
+    }
+
+    Ok((num_wann, terms))
+}
+
+fn parse_wannier_wsvec(content: &str) -> Result<HashMap<String, Vec<[i32; 3]>>, String> {
+    let mut entries = HashMap::new();
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'));
+
+    while let Some(header_line) = lines.next() {
+        let header_parts: Vec<&str> = header_line.split_whitespace().collect();
+        if header_parts.len() < 5 {
+            return Err(format!("Malformed wsvec header line: '{}'.", header_line));
+        }
+        let r = [
+            parse_i32_token(header_parts[0], "wsvec R1")?,
+            parse_i32_token(header_parts[1], "wsvec R2")?,
+            parse_i32_token(header_parts[2], "wsvec R3")?,
+        ];
+        let m = parse_usize_token(header_parts[3], "wsvec m")?
+            .checked_sub(1)
+            .ok_or_else(|| "wsvec orbital indices must start at 1.".to_string())?;
+        let n = parse_usize_token(header_parts[4], "wsvec n")?
+            .checked_sub(1)
+            .ok_or_else(|| "wsvec orbital indices must start at 1.".to_string())?;
+        let count_line = lines
+            .next()
+            .ok_or_else(|| "Unexpected end of wsvec.dat while reading translation count.".to_string())?;
+        let count = count_line
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid wsvec multiplicity '{}'.", count_line))?;
+        let mut translations = Vec::with_capacity(count);
+        for _ in 0..count {
+            let vector_line = lines
+                .next()
+                .ok_or_else(|| "Unexpected end of wsvec.dat while reading translation vectors.".to_string())?;
+            let parts: Vec<&str> = vector_line.split_whitespace().collect();
+            if parts.len() < 3 {
+                return Err(format!("Malformed wsvec translation line: '{}'.", vector_line));
+            }
+            translations.push([
+                parse_i32_token(parts[0], "wsvec T1")?,
+                parse_i32_token(parts[1], "wsvec T2")?,
+                parse_i32_token(parts[2], "wsvec T3")?,
+            ]);
+        }
+        entries.insert(wsvec_key(r, m, n), translations);
+    }
+
+    Ok(entries)
+}
+
+pub fn parse_wannier_hamiltonian(
+    seedname: &str,
+    win_content: &str,
+    hr_content: &str,
+    wsvec_content: Option<&str>,
+) -> Result<WannierHamiltonian, String> {
+    let lattice_vectors_angstrom = parse_win_unit_cell_angstrom(win_content)?;
+    let use_ws_distance = parse_win_bool_assignment(win_content, "use_ws_distance")
+        .unwrap_or_else(|| wsvec_content.is_some());
+    let (num_wann, hr_terms) = parse_wannier_hr(hr_content)?;
+    let ws_translations = if use_ws_distance {
+        let content = wsvec_content.ok_or_else(|| {
+            "Wannier export requires seedname_wsvec.dat because use_ws_distance = true.".to_string()
+        })?;
+        parse_wannier_wsvec(content)?
+    } else {
+        HashMap::new()
+    };
+
+    Ok(WannierHamiltonian {
+        seedname: seedname.to_string(),
+        num_wann,
+        lattice_vectors_angstrom,
+        hr_terms,
+        use_ws_distance,
+        ws_translations,
+    })
+}
+
+impl WannierHamiltonian {
+    fn phase_factor(&self, term: &WannierHrTerm, k_fractional: [f64; 3]) -> Complex64 {
+        let translations = if self.use_ws_distance {
+            self.ws_translations
+                .get(&wsvec_key(term.r, term.m, term.n))
+                .map(|values| values.as_slice())
+        } else {
+            None
+        };
+        let translations = translations.unwrap_or(&[[0, 0, 0]]);
+        let mut phase_sum = Complex64::new(0.0, 0.0);
+        for translation in translations {
+            let r_total = [
+                term.r[0] + translation[0],
+                term.r[1] + translation[1],
+                term.r[2] + translation[2],
+            ];
+            let angle = TWO_PI
+                * (k_fractional[0] * f64::from(r_total[0])
+                    + k_fractional[1] * f64::from(r_total[1])
+                    + k_fractional[2] * f64::from(r_total[2]));
+            phase_sum += Complex64::from_polar(1.0, angle);
+        }
+        phase_sum / (translations.len() as f64)
+    }
+
+    fn hamiltonian_matrix(&self, k_fractional: [f64; 3]) -> DMatrix<Complex64> {
+        let size = self.num_wann as usize;
+        let mut matrix = DMatrix::<Complex64>::zeros(size, size);
+        for term in &self.hr_terms {
+            let hopping = Complex64::new(term.real, term.imag);
+            let phase = self.phase_factor(term, k_fractional);
+            matrix[(term.m, term.n)] += hopping * phase / f64::from(term.degeneracy);
+        }
+        for row in 0..size {
+            for col in 0..row {
+                let averaged = (matrix[(row, col)] + matrix[(col, row)].conj()) * 0.5;
+                matrix[(row, col)] = averaged;
+                matrix[(col, row)] = averaged.conj();
+            }
+        }
+        matrix
+    }
+
+    pub fn eigenvalues_at(&self, k_fractional: [f64; 3]) -> Result<Vec<f64>, String> {
+        let matrix = self.hamiltonian_matrix(k_fractional);
+        let eigenvalues = matrix
+            .eigenvalues()
+            .ok_or_else(|| "Failed to diagonalize Wannier Hamiltonian.".to_string())?;
+        let mut values: Vec<f64> = eigenvalues.iter().map(|value| value.re).collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(values)
+    }
+}
+
+fn sanitize_fragment(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "export".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unique_export_dir(root: &Path, base_name: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(root)
+        .map_err(|e| format!("Failed to create export root {}: {}", root.display(), e))?;
+    let sanitized = sanitize_fragment(base_name);
+    for suffix in 0..1000 {
+        let candidate = if suffix == 0 {
+            root.join(&sanitized)
+        } else {
+            root.join(format!("{}_{}", sanitized, suffix))
+        };
+        if !candidate.exists() {
+            std::fs::create_dir_all(&candidate).map_err(|e| {
+                format!(
+                    "Failed to create Ludwig export bundle directory {}: {}",
+                    candidate.display(),
+                    e
+                )
+            })?;
+            return Ok(candidate);
+        }
+    }
+    Err("Could not allocate a unique Ludwig export directory.".to_string())
+}
+
+pub fn export_ludwig_bundle(
+    hamiltonian: &WannierHamiltonian,
+    config: &LudwigExportConfig,
+    chemical_potential_ev: f64,
+    provenance_files: &[PathBuf],
+) -> Result<LudwigExportResult, String> {
+    if config.nkx < 2 || config.nky < 2 {
+        return Err("Ludwig export requires nkx and nky to both be at least 2.".to_string());
+    }
+    let axis_a = usize::from(config.in_plane_axes[0]);
+    let axis_b = usize::from(config.in_plane_axes[1]);
+    let slice_axis = usize::from(config.slice_axis);
+    if axis_a >= 3 || axis_b >= 3 || slice_axis >= 3 {
+        return Err("Ludwig export axes must each be one of 0, 1, 2.".to_string());
+    }
+    if axis_a == axis_b || axis_a == slice_axis || axis_b == slice_axis {
+        return Err("Ludwig export requires a permutation of three distinct reciprocal axes.".to_string());
+    }
+
+    let slice_coordinate = config.slice_coordinate.rem_euclid(1.0);
+    let in_plane_lattice_angstrom =
+        embed_in_plane_lattice(&hamiltonian.lattice_vectors_angstrom, config.in_plane_axes)?;
+    let destination_root = PathBuf::from(config.destination_root.trim());
+    if destination_root.as_os_str().is_empty() {
+        return Err("Ludwig export destination root is required.".to_string());
+    }
+    let bundle_dir = unique_export_dir(
+        &destination_root,
+        &format!("{}_ludwig_{}", hamiltonian.seedname, config.calculation_id),
+    )?;
+
+    let mut csv = String::new();
+    csv.push_str("ix,iy,kx_frac,ky_frac");
+    for band_index in 0..hamiltonian.num_wann {
+        let _ = write!(csv, ",band_{}", band_index + 1);
+    }
+    csv.push('\n');
+
+    for iy in 0..config.nky {
+        let ky_frac = f64::from(iy) / f64::from(config.nky);
+        for ix in 0..config.nkx {
+            let kx_frac = f64::from(ix) / f64::from(config.nkx);
+            let mut k_fractional = [0.0; 3];
+            k_fractional[axis_a] = kx_frac;
+            k_fractional[axis_b] = ky_frac;
+            k_fractional[slice_axis] = slice_coordinate;
+            let eigenvalues = hamiltonian.eigenvalues_at(k_fractional)?;
+            let _ = write!(csv, "{},{},{:.10},{:.10}", ix, iy, kx_frac, ky_frac);
+            for energy in eigenvalues {
+                let _ = write!(csv, ",{:.12}", energy - chemical_potential_ev);
+            }
+            csv.push('\n');
+        }
+    }
+
+    let mut copied_provenance = Vec::new();
+    for source in provenance_files {
+        if !source.exists() {
+            continue;
+        }
+        let Some(file_name) = source.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let destination = bundle_dir.join(file_name);
+        std::fs::copy(source, &destination).map_err(|e| {
+            format!(
+                "Failed to copy Ludwig provenance file {} to {}: {}",
+                source.display(),
+                destination.display(),
+                e
+            )
+        })?;
+        copied_provenance.push(file_name.to_string());
+    }
+
+    let metadata = LudwigExportMetadata {
+        project_id: config.project_id.clone(),
+        calculation_id: config.calculation_id.clone(),
+        seedname: hamiltonian.seedname.clone(),
+        mode: config.mode.clone(),
+        in_plane_axes: config.in_plane_axes,
+        slice_axis: config.slice_axis,
+        slice_coordinate,
+        chemical_potential_ev,
+        grid_shape: [config.nkx, config.nky],
+        band_count: hamiltonian.num_wann,
+        lattice_vectors_angstrom: hamiltonian.lattice_vectors_angstrom,
+        in_plane_lattice_angstrom,
+        fractional_domain: "0 <= kx_frac, ky_frac < 1 in the selected reciprocal-basis directions".to_string(),
+        energy_reference: "Band energies are shifted by the exported chemical potential so Ludwig sees EF = 0.".to_string(),
+        provenance_files: copied_provenance,
+    };
+
+    let metadata_path = bundle_dir.join("metadata.json");
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to serialize Ludwig export metadata: {}", e))?;
+    std::fs::write(&metadata_path, metadata_json).map_err(|e| {
+        format!(
+            "Failed to write Ludwig metadata file {}: {}",
+            metadata_path.display(),
+            e
+        )
+    })?;
+
+    let bands_path = bundle_dir.join("bands.csv");
+    std::fs::write(&bands_path, csv).map_err(|e| {
+        format!(
+            "Failed to write Ludwig band grid {}: {}",
+            bands_path.display(),
+            e
+        )
+    })?;
+
+    Ok(LudwigExportResult {
+        bundle_path: bundle_dir.display().to_string(),
+        band_count: hamiltonian.num_wann,
+        chemical_potential_ev,
+        grid_shape: [config.nkx, config.nky],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,6 +1673,7 @@ mod tests {
         Atom, AtomicSpecies, BravaisLattice, CalculationType, KPoints, Occupations,
         PositionUnits, QESystem, QECalculation, SmearingType,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_base_calculation() -> QECalculation {
         QECalculation {
@@ -1206,6 +1812,7 @@ mod tests {
         let win = generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
         assert!(win.contains("num_wann = 4"));
         assert!(win.contains("mp_grid = 2 2 2"));
+        assert!(win.contains("begin unit_cell_cart\nangstrom"));
         assert!(win.contains("begin kpoints"));
         assert!(win.contains("begin kpoint_path"));
         assert!(win.contains("f=0.0000000000,0.0000000000,0.0000000000:sp3"));
@@ -1512,5 +2119,154 @@ mod tests {
 
         let error = validate_wannier_config(&config).unwrap_err();
         assert!(error.contains("too small for this scalar source"));
+    }
+
+    fn sample_win_content(use_ws_distance: bool) -> String {
+        format!(
+            r#"
+num_wann = 1
+num_bands = 1
+use_ws_distance = {}
+begin unit_cell_cart
+angstrom
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 5.0
+end unit_cell_cart
+"#,
+            if use_ws_distance { "true" } else { "false" }
+        )
+    }
+
+    fn sample_hr_content() -> &'static str {
+        r#"
+written by qcortado test
+1
+5
+1 1 1 1 1
+0 0 0 1 1 0.0 0.0
+1 0 0 1 1 -1.0 0.0
+-1 0 0 1 1 -1.0 0.0
+0 1 0 1 1 -1.0 0.0
+0 -1 0 1 1 -1.0 0.0
+"#
+    }
+
+    fn sample_wsvec_content() -> &'static str {
+        r#"
+0 0 0 1 1
+1
+0 0 0
+1 0 0 1 1
+1
+0 0 0
+-1 0 0 1 1
+1
+0 0 0
+0 1 0 1 1
+1
+0 0 0
+0 -1 0 1 1
+1
+0 0 0
+"#
+    }
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("qcortado_{}_{}_{}", label, std::process::id(), nanos))
+    }
+
+    #[test]
+    fn parse_wannier_hamiltonian_reconstructs_square_lattice_dispersion() {
+        let hamiltonian = parse_wannier_hamiltonian(
+            "toy",
+            &sample_win_content(true),
+            sample_hr_content(),
+            Some(sample_wsvec_content()),
+        )
+        .unwrap();
+
+        let gamma = hamiltonian.eigenvalues_at([0.0, 0.0, 0.0]).unwrap();
+        let m = hamiltonian.eigenvalues_at([0.5, 0.5, 0.0]).unwrap();
+        let x = hamiltonian.eigenvalues_at([0.5, 0.0, 0.0]).unwrap();
+
+        assert_eq!(gamma.len(), 1);
+        assert!((gamma[0] + 4.0).abs() < 1.0e-9);
+        assert!((m[0] - 4.0).abs() < 1.0e-9);
+        assert!(x[0].abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn collect_wannier_artifacts_includes_wsvec() {
+        let temp_dir = unique_temp_dir("wannier_artifacts");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let seedname = "toy";
+        std::fs::write(temp_dir.join(format!("{}_wsvec.dat", seedname)), sample_wsvec_content()).unwrap();
+        std::fs::write(temp_dir.join(format!("{}_hr.dat", seedname)), sample_hr_content()).unwrap();
+
+        let artifacts = collect_wannier_artifacts(&temp_dir, seedname);
+        assert!(artifacts.iter().any(|entry| entry.file_name == "toy_wsvec.dat"));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn export_ludwig_bundle_writes_metadata_and_band_grid() {
+        let hamiltonian = parse_wannier_hamiltonian(
+            "toy",
+            &sample_win_content(true),
+            sample_hr_content(),
+            Some(sample_wsvec_content()),
+        )
+        .unwrap();
+        let root_dir = unique_temp_dir("ludwig_export_root");
+        std::fs::create_dir_all(&root_dir).unwrap();
+
+        let provenance_dir = unique_temp_dir("ludwig_export_provenance");
+        std::fs::create_dir_all(&provenance_dir).unwrap();
+        let win_path = provenance_dir.join("toy.win");
+        let hr_path = provenance_dir.join("toy_hr.dat");
+        let wsvec_path = provenance_dir.join("toy_wsvec.dat");
+        let wout_path = provenance_dir.join("toy.wout");
+        std::fs::write(&win_path, sample_win_content(true)).unwrap();
+        std::fs::write(&hr_path, sample_hr_content()).unwrap();
+        std::fs::write(&wsvec_path, sample_wsvec_content()).unwrap();
+        std::fs::write(&wout_path, "dummy").unwrap();
+
+        let config = LudwigExportConfig {
+            project_id: "project".to_string(),
+            calculation_id: "calc123".to_string(),
+            destination_root: root_dir.display().to_string(),
+            mode: LudwigExportMode::Quasi2dFixedSlice,
+            in_plane_axes: [0, 1],
+            slice_axis: 2,
+            slice_coordinate: 0.25,
+            nkx: 4,
+            nky: 3,
+            chemical_potential_ev: None,
+        };
+        let result = export_ludwig_bundle(
+            &hamiltonian,
+            &config,
+            1.5,
+            &[win_path.clone(), hr_path.clone(), wsvec_path.clone(), wout_path.clone()],
+        )
+        .unwrap();
+
+        let metadata = std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("metadata.json")).unwrap();
+        let bands = std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("bands.csv")).unwrap();
+
+        assert!(metadata.contains("\"slice_coordinate\": 0.25"));
+        assert!(metadata.contains("\"band_count\": 1"));
+        assert!(bands.lines().next().unwrap().contains("band_1"));
+        assert!(bands.contains("-5.500000000000"));
+        assert!(PathBuf::from(&result.bundle_path).join("toy_wsvec.dat").exists());
+
+        let _ = std::fs::remove_dir_all(root_dir);
+        let _ = std::fs::remove_dir_all(provenance_dir);
     }
 }

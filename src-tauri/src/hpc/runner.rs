@@ -244,6 +244,7 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
             || file_name.ends_with(".amn")
             || file_name.ends_with(".mmn")
             || file_name.ends_with(".eig")
+            || file_name.ends_with("_wsvec.dat")
             || file_name.ends_with(".wout")
             || file_name.ends_with(".chk")
             || file_name.ends_with("_hr.dat")

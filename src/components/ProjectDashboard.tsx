@@ -94,6 +94,8 @@ interface CalculationRuntimeDisplay {
 }
 
 type HpcDownloadPhase = "connecting" | "collecting" | "downloading" | "saved" | "error";
+type LudwigExportMode = "strict_2d" | "quasi_2d_fixed_slice";
+type LudwigChemicalPotentialMode = "saved" | "override";
 
 interface HpcDownloadProgress {
   phase: HpcDownloadPhase;
@@ -102,6 +104,13 @@ interface HpcDownloadProgress {
   downloadedBytes: number;
   totalBytes: number;
   skippedFiles: number;
+}
+
+interface LudwigExportResult {
+  bundle_path: string;
+  band_count: number;
+  chemical_potential_ev: number;
+  grid_shape: [number, number];
 }
 
 interface DisplayCellMetrics {
@@ -118,6 +127,17 @@ type CellMatrix = [[number, number, number], [number, number, number], [number, 
 const DELETE_CONFIRM_TEXT = "DELETE";
 const SOC_PRIORITY_BOOST = 250;
 const PINNED_TAG = "pinned";
+const RECIPROCAL_AXIS_OPTIONS = [
+  { value: 0, label: "a*" },
+  { value: 1, label: "b*" },
+  { value: 2, label: "c*" },
+] as const;
+
+function findSliceAxis(primaryAxis: number, secondaryAxis: number): number | null {
+  const selected = new Set([primaryAxis, secondaryAxis]);
+  const remaining = RECIPROCAL_AXIS_OPTIONS.find((option) => !selected.has(option.value));
+  return remaining ? remaining.value : null;
+}
 
 function isHpcCalculation(calc: CalculationRun): boolean {
   const params = calc.parameters || {};
@@ -837,6 +857,18 @@ export function ProjectDashboard({
   const [showDeleteCalcDialog, setShowDeleteCalcDialog] = useState(false);
   const [calcToDelete, setCalcToDelete] = useState<{ calcId: string; calcType: string } | null>(null);
   const [isDeletingCalc, setIsDeletingCalc] = useState(false);
+  const [showLudwigExportDialog, setShowLudwigExportDialog] = useState(false);
+  const [calcToExportLudwig, setCalcToExportLudwig] = useState<CalculationRun | null>(null);
+  const [isExportingLudwig, setIsExportingLudwig] = useState(false);
+  const [ludwigExportMode, setLudwigExportMode] = useState<LudwigExportMode>("strict_2d");
+  const [ludwigPrimaryAxis, setLudwigPrimaryAxis] = useState<number>(0);
+  const [ludwigSecondaryAxis, setLudwigSecondaryAxis] = useState<number>(1);
+  const [ludwigSliceCoordinateInput, setLudwigSliceCoordinateInput] = useState("0.0");
+  const [ludwigNkxInput, setLudwigNkxInput] = useState("161");
+  const [ludwigNkyInput, setLudwigNkyInput] = useState("161");
+  const [ludwigChemicalPotentialMode, setLudwigChemicalPotentialMode] =
+    useState<LudwigChemicalPotentialMode>("saved");
+  const [ludwigChemicalPotentialInput, setLudwigChemicalPotentialInput] = useState("");
 
   // Import state
   const [isImporting, setIsImporting] = useState(false);
@@ -1084,6 +1116,109 @@ export function ProjectDashboard({
       setError(String(e));
     } finally {
       setIsDeletingCalc(false);
+    }
+  }
+
+  function closeLudwigExportDialog() {
+    if (isExportingLudwig) return;
+    setShowLudwigExportDialog(false);
+    setCalcToExportLudwig(null);
+  }
+
+  function openLudwigExportDialog(calc: CalculationRun) {
+    if (readOnly) return;
+    const savedChemicalPotential = calc.result?.fermi_energy;
+    setCalcToExportLudwig(calc);
+    setLudwigExportMode("strict_2d");
+    setLudwigPrimaryAxis(0);
+    setLudwigSecondaryAxis(1);
+    setLudwigSliceCoordinateInput("0.0");
+    setLudwigNkxInput("161");
+    setLudwigNkyInput("161");
+    if (savedChemicalPotential != null && Number.isFinite(savedChemicalPotential)) {
+      setLudwigChemicalPotentialMode("saved");
+      setLudwigChemicalPotentialInput(savedChemicalPotential.toFixed(6));
+    } else {
+      setLudwigChemicalPotentialMode("override");
+      setLudwigChemicalPotentialInput("0.000000");
+    }
+    setError(null);
+    setInfoMessage(null);
+    setShowLudwigExportDialog(true);
+  }
+
+  async function handleExportLudwigBundle() {
+    if (readOnly || !calcToExportLudwig) return;
+
+    const sliceAxis = findSliceAxis(ludwigPrimaryAxis, ludwigSecondaryAxis);
+    if (sliceAxis == null) {
+      setError("Choose two distinct in-plane reciprocal axes.");
+      return;
+    }
+
+    const nkx = Number.parseInt(ludwigNkxInput, 10);
+    const nky = Number.parseInt(ludwigNkyInput, 10);
+    if (!Number.isFinite(nkx) || nkx < 2 || !Number.isFinite(nky) || nky < 2) {
+      setError("Ludwig export requires nkx and nky to both be at least 2.");
+      return;
+    }
+
+    const sliceCoordinate =
+      ludwigExportMode === "strict_2d" ? 0.0 : Number.parseFloat(ludwigSliceCoordinateInput);
+    if (!Number.isFinite(sliceCoordinate)) {
+      setError("Enter a valid fractional slice coordinate.");
+      return;
+    }
+
+    let chemicalPotentialEv: number | null = null;
+    if (ludwigChemicalPotentialMode === "override") {
+      chemicalPotentialEv = Number.parseFloat(ludwigChemicalPotentialInput);
+      if (!Number.isFinite(chemicalPotentialEv)) {
+        setError("Enter a valid chemical potential in eV.");
+        return;
+      }
+    } else if (!Number.isFinite(calcToExportLudwig.result?.fermi_energy ?? NaN)) {
+      setError("This Wannier calculation has no saved Fermi energy. Switch to a manual chemical potential override.");
+      return;
+    }
+
+    const selectedDestination = await open({
+      title: "Select Ludwig Export Folder",
+      directory: true,
+      multiple: false,
+    });
+    if (!selectedDestination || Array.isArray(selectedDestination)) {
+      return;
+    }
+
+    setIsExportingLudwig(true);
+    setError(null);
+    setInfoMessage(null);
+    try {
+      const result = await invoke<LudwigExportResult>("export_wannier_for_ludwig", {
+        config: {
+          projectId,
+          calculationId: calcToExportLudwig.id,
+          destinationRoot: selectedDestination,
+          mode: ludwigExportMode,
+          inPlaneAxes: [ludwigPrimaryAxis, ludwigSecondaryAxis],
+          sliceAxis,
+          sliceCoordinate,
+          nkx,
+          nky,
+          chemicalPotentialEv,
+        },
+      });
+      setShowLudwigExportDialog(false);
+      setCalcToExportLudwig(null);
+      setInfoMessage(
+        `Exported Ludwig bundle (${result.band_count} bands, ${result.grid_shape[0]}×${result.grid_shape[1]} grid) to ${result.bundle_path}.`,
+      );
+    } catch (e) {
+      console.error("Failed to export Ludwig bundle:", e);
+      setError(`Failed to export Ludwig bundle: ${e}`);
+    } finally {
+      setIsExportingLudwig(false);
     }
   }
 
@@ -2631,6 +2766,20 @@ export function ProjectDashboard({
                               View Wannier
                             </button>
                           )}
+                          {!readOnly && (
+                            <button
+                              className="download-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openLudwigExportDialog(calc);
+                              }}
+                              disabled={isExportingLudwig}
+                            >
+                              {isExportingLudwig && calcToExportLudwig?.id === calc.id
+                                ? "Exporting..."
+                                : "Export to Ludwig"}
+                            </button>
+                          )}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (
                             <button
@@ -3228,6 +3377,171 @@ export function ProjectDashboard({
             onClose={() => setShowEditProjectDialog(false)}
             onSaved={handleProjectMetadataSaved}
           />
+
+          {showLudwigExportDialog && calcToExportLudwig && (
+            <div className="dialog-overlay" onClick={closeLudwigExportDialog}>
+              <div className="dialog-content" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Export to Ludwig</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={closeLudwigExportDialog}
+                    disabled={isExportingLudwig}
+                  >
+                    &times;
+                  </button>
+                </div>
+                <div className="dialog-body">
+                  <div className="save-form">
+                    <div className="form-group">
+                      <label>Source Calculation</label>
+                      <input
+                        type="text"
+                        value={`Wannier ${calcToExportLudwig.id.slice(0, 8)}`}
+                        disabled
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Export Mode</label>
+                      <select
+                        value={ludwigExportMode}
+                        onChange={(e) => {
+                          const nextMode = e.target.value as LudwigExportMode;
+                          setLudwigExportMode(nextMode);
+                          if (nextMode === "strict_2d") {
+                            setLudwigSliceCoordinateInput("0.0");
+                          }
+                        }}
+                        disabled={isExportingLudwig}
+                      >
+                        <option value="strict_2d">Strict 2D</option>
+                        <option value="quasi_2d_fixed_slice">Quasi-2D Fixed Slice</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Primary In-Plane Axis</label>
+                      <select
+                        value={String(ludwigPrimaryAxis)}
+                        onChange={(e) => setLudwigPrimaryAxis(Number.parseInt(e.target.value, 10))}
+                        disabled={isExportingLudwig}
+                      >
+                        {RECIPROCAL_AXIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Secondary In-Plane Axis</label>
+                      <select
+                        value={String(ludwigSecondaryAxis)}
+                        onChange={(e) => setLudwigSecondaryAxis(Number.parseInt(e.target.value, 10))}
+                        disabled={isExportingLudwig}
+                      >
+                        {RECIPROCAL_AXIS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Slice Axis</label>
+                      <input
+                        type="text"
+                        value={
+                          RECIPROCAL_AXIS_OPTIONS.find(
+                            (option) => option.value === findSliceAxis(ludwigPrimaryAxis, ludwigSecondaryAxis),
+                          )?.label ?? "Choose two distinct in-plane axes"
+                        }
+                        disabled
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Slice Coordinate (fractional)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={ludwigSliceCoordinateInput}
+                        onChange={(e) => setLudwigSliceCoordinateInput(e.target.value)}
+                        disabled={isExportingLudwig || ludwigExportMode === "strict_2d"}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>nkx</label>
+                      <input
+                        type="number"
+                        min={2}
+                        step={1}
+                        value={ludwigNkxInput}
+                        onChange={(e) => setLudwigNkxInput(e.target.value)}
+                        disabled={isExportingLudwig}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>nky</label>
+                      <input
+                        type="number"
+                        min={2}
+                        step={1}
+                        value={ludwigNkyInput}
+                        onChange={(e) => setLudwigNkyInput(e.target.value)}
+                        disabled={isExportingLudwig}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Chemical Potential</label>
+                      <select
+                        value={ludwigChemicalPotentialMode}
+                        onChange={(e) => setLudwigChemicalPotentialMode(e.target.value as LudwigChemicalPotentialMode)}
+                        disabled={isExportingLudwig}
+                      >
+                        <option value="saved">Use Saved Fermi Energy</option>
+                        <option value="override">Override Manually</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Chemical Potential Override (eV)</label>
+                      <input
+                        type="number"
+                        step="0.001"
+                        value={ludwigChemicalPotentialInput}
+                        onChange={(e) => setLudwigChemicalPotentialInput(e.target.value)}
+                        disabled={isExportingLudwig || ludwigChemicalPotentialMode !== "override"}
+                      />
+                    </div>
+                    <p className="project-archive-hint">
+                      QCortado will export a Ludwig-ready band bundle from the saved Wannier artifacts, then Ludwig can build
+                      its own mesh and collision operator externally.
+                    </p>
+                    <p className="warning-text">
+                      Ludwig remains a 2D code. Quasi-2D export here means a fixed reciprocal-space slice, not a full
+                      kz-integrated transport calculation.
+                    </p>
+                  </div>
+                </div>
+                <div className="dialog-footer">
+                  <button
+                    className="dialog-btn cancel"
+                    onClick={closeLudwigExportDialog}
+                    disabled={isExportingLudwig}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn save"
+                    onClick={() => {
+                      void handleExportLudwigBundle();
+                    }}
+                    disabled={isExportingLudwig}
+                  >
+                    {isExportingLudwig ? "Exporting..." : "Export Bundle"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Delete Project Dialog */}
           {showDeleteDialog && renderDeleteDialog()}
