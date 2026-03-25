@@ -84,6 +84,9 @@ interface OrbitalElementOption {
   groups: BandProjectionGroup[];
 }
 
+const BAND_GAP_TOLERANCE_EV = 0.01;
+const DIRECT_GAP_K_TOLERANCE = 0.01;
+
 // Format high-symmetry point labels (handle Greek letters)
 function formatLabel(label: string): string {
   const greekMap: Record<string, string> = {
@@ -102,6 +105,10 @@ function clamp01(value: number): number {
   if (value <= 0) return 0;
   if (value >= 1) return 1;
   return value;
+}
+
+function clampToRange(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function rgbString(r: number, g: number, b: number): string {
@@ -176,6 +183,70 @@ function formatAxisInputValue(value: number): string {
 function isElectronicEFLabel(label: string): boolean {
   const normalized = label.replace(/\s+/g, "").replace(/−/g, "-").toLowerCase();
   return normalized === "e-e_f(ev)";
+}
+
+function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): BandGap | null {
+  if (energies.length === 0 || kPoints.length === 0) {
+    return null;
+  }
+
+  let vbmEnergy = Number.NEGATIVE_INFINITY;
+  let vbmK = 0;
+  let cbmEnergy = Number.POSITIVE_INFINITY;
+  let cbmK = 0;
+
+  for (const band of energies) {
+    const pointCount = Math.min(band.length, kPoints.length);
+    if (pointCount === 0) continue;
+
+    let bandMin = Number.POSITIVE_INFINITY;
+    let bandMax = Number.NEGATIVE_INFINITY;
+
+    for (let index = 0; index < pointCount; index += 1) {
+      const energy = band[index];
+      if (!Number.isFinite(energy)) continue;
+
+      if (energy < bandMin) bandMin = energy;
+      if (energy > bandMax) bandMax = energy;
+
+      if (energy <= BAND_GAP_TOLERANCE_EV && energy > vbmEnergy) {
+        vbmEnergy = energy;
+        vbmK = kPoints[index];
+      }
+
+      if (energy >= -BAND_GAP_TOLERANCE_EV && energy < cbmEnergy) {
+        cbmEnergy = energy;
+        cbmK = kPoints[index];
+      }
+    }
+
+    if (
+      Number.isFinite(bandMin) &&
+      Number.isFinite(bandMax) &&
+      bandMin < -BAND_GAP_TOLERANCE_EV &&
+      bandMax > BAND_GAP_TOLERANCE_EV
+    ) {
+      return null;
+    }
+  }
+
+  if (!Number.isFinite(vbmEnergy) || !Number.isFinite(cbmEnergy)) {
+    return null;
+  }
+
+  const gapValue = cbmEnergy - vbmEnergy;
+  if (!(gapValue > BAND_GAP_TOLERANCE_EV)) {
+    return null;
+  }
+
+  return {
+    value: gapValue,
+    is_direct: Math.abs(vbmK - cbmK) < DIRECT_GAP_K_TOLERANCE,
+    vbm_k: vbmK,
+    cbm_k: cbmK,
+    vbm_energy: vbmEnergy,
+    cbm_energy: cbmEnergy,
+  };
 }
 
 function createZeroWeightGrid(nBands: number, nKpoints: number): number[][] {
@@ -407,9 +478,11 @@ export function BandPlot({
 
   // Plot background toggle
   const [plotBgWhite, setPlotBgWhite] = useState(true);
+  const [showBandGapOverlay, setShowBandGapOverlay] = useState(true);
 
   // UI section toggles
   const [appearanceExpanded, setAppearanceExpanded] = useState(true);
+  const [bandGapExpanded, setBandGapExpanded] = useState(true);
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
 
@@ -457,6 +530,11 @@ export function BandPlot({
       data.energy_range[1] - fermiEnergy,
     ];
   }, [data.energy_range, fermiEnergy]);
+
+  const displayedBandGap = useMemo(() => {
+    if (viewerType !== "electronic") return null;
+    return calculateDisplayedBandGap(shiftedEnergies, data.k_points);
+  }, [data.k_points, shiftedEnergies, viewerType]);
 
   const yDomain = useMemo((): [number, number] => {
     if (yMin !== null && yMax !== null) {
@@ -567,6 +645,59 @@ export function BandPlot({
       ),
     [shiftedEnergies, colorMode, singleBandColor, rainbowPalette],
   );
+
+  const bandGapOverlay = useMemo(() => {
+    if (viewerType !== "electronic" || !displayedBandGap) {
+      return null;
+    }
+
+    const vbmX = scales.xScale(displayedBandGap.vbm_k);
+    const cbmX = scales.xScale(displayedBandGap.cbm_k);
+    const vbmY = scales.yScale(displayedBandGap.vbm_energy);
+    const cbmY = scales.yScale(displayedBandGap.cbm_energy);
+    const gapTopY = Math.min(vbmY, cbmY);
+    const gapBottomY = Math.max(vbmY, cbmY);
+    const gapMidY = (gapTopY + gapBottomY) / 2;
+    const gapMidX = (vbmX + cbmX) / 2;
+    const primaryLabel = `${displayedBandGap.value.toFixed(3)} eV`;
+    const secondaryLabel = displayedBandGap.is_direct ? "Direct gap" : "Indirect gap";
+    const gapColor = displayedBandGap.is_direct ? "#2e7d32" : "#00796b";
+    const labelFontSize = Math.max(10, 11 * plotTextScale);
+    const secondaryFontSize = Math.max(9, labelFontSize - 1);
+    const edgeLabelFontSize = Math.max(9, 10 * plotTextScale);
+    const approxCharWidth = labelFontSize * 0.58;
+    const labelWidth = Math.max(
+      118,
+      Math.max(primaryLabel.length, secondaryLabel.length) * approxCharWidth + 18,
+    );
+    const labelHeight = labelFontSize + secondaryFontSize + 18;
+    const labelX = clampToRange(gapMidX - labelWidth / 2, 8, plotWidth - labelWidth - 8);
+    const labelY = clampToRange(gapMidY - labelHeight / 2, 8, plotHeight - labelHeight - 8);
+
+    return {
+      vbmX,
+      cbmX,
+      vbmY,
+      cbmY,
+      gapTopY,
+      gapBottomY,
+      gapMidX,
+      gapMidY,
+      labelX,
+      labelY,
+      labelWidth,
+      labelHeight,
+      labelFontSize,
+      secondaryFontSize,
+      edgeLabelFontSize,
+      primaryLabel,
+      secondaryLabel,
+      gapColor,
+    };
+  }, [displayedBandGap, plotHeight, plotTextScale, plotWidth, scales, viewerType]);
+
+  const bandGapOverlayVisible =
+    viewerType === "electronic" && displayedBandGap !== null && showBandGapOverlay;
 
   const hasProjectionData = useMemo(() => {
     const atomCount = data.projections?.atom_groups?.length ?? 0;
@@ -1106,6 +1237,37 @@ export function BandPlot({
 
               {/* Band lines + fat points */}
               <g clipPath={`url(#${clipPathId})`}>
+                {bandGapOverlayVisible && bandGapOverlay && (
+                  <g opacity={1} pointerEvents="none">
+                    <rect
+                      x={0}
+                      y={bandGapOverlay.gapTopY}
+                      width={plotWidth}
+                      height={Math.max(1.5, bandGapOverlay.gapBottomY - bandGapOverlay.gapTopY)}
+                      fill={bandGapOverlay.gapColor}
+                      opacity={0.1}
+                    />
+                    <line
+                      x1={0}
+                      x2={plotWidth}
+                      y1={bandGapOverlay.gapTopY}
+                      y2={bandGapOverlay.gapTopY}
+                      stroke={bandGapOverlay.gapColor}
+                      strokeOpacity={0.35}
+                      strokeDasharray="5,4"
+                    />
+                    <line
+                      x1={0}
+                      x2={plotWidth}
+                      y1={bandGapOverlay.gapBottomY}
+                      y2={bandGapOverlay.gapBottomY}
+                      stroke={bandGapOverlay.gapColor}
+                      strokeOpacity={0.35}
+                      strokeDasharray="5,4"
+                    />
+                  </g>
+                )}
+
                 {drawBandLines &&
                   shiftedEnergies.map((band, bandIdx) => (
                     <path
@@ -1129,6 +1291,105 @@ export function BandPlot({
                       opacity={point.opacity}
                     />
                   ))}
+
+                {bandGapOverlayVisible && bandGapOverlay && (
+                  <g pointerEvents="none">
+                    <line
+                      x1={bandGapOverlay.vbmX}
+                      y1={bandGapOverlay.vbmY}
+                      x2={bandGapOverlay.cbmX}
+                      y2={bandGapOverlay.cbmY}
+                      stroke={bandGapOverlay.gapColor}
+                      strokeWidth={displayedBandGap?.is_direct ? 2.5 : 2}
+                      strokeDasharray={displayedBandGap?.is_direct ? undefined : "7,5"}
+                      strokeLinecap="round"
+                      opacity={0.9}
+                    />
+                    <circle
+                      cx={bandGapOverlay.vbmX}
+                      cy={bandGapOverlay.vbmY}
+                      r={4.5}
+                      fill="#2e7d32"
+                      stroke={svgBgFill}
+                      strokeWidth={1.5}
+                    />
+                    <circle
+                      cx={bandGapOverlay.cbmX}
+                      cy={bandGapOverlay.cbmY}
+                      r={4.5}
+                      fill="#ef6c00"
+                      stroke={svgBgFill}
+                      strokeWidth={1.5}
+                    />
+                    <text
+                      x={bandGapOverlay.vbmX}
+                      y={Math.max(
+                        bandGapOverlay.edgeLabelFontSize + 2,
+                        bandGapOverlay.vbmY - 9,
+                      )}
+                      textAnchor="middle"
+                      fill="#2e7d32"
+                      fontSize={bandGapOverlay.edgeLabelFontSize}
+                      fontWeight={600}
+                      stroke={svgBgFill}
+                      strokeWidth={3}
+                      paintOrder="stroke"
+                    >
+                      VBM
+                    </text>
+                    <text
+                      x={bandGapOverlay.cbmX}
+                      y={Math.min(
+                        plotHeight - 4,
+                        bandGapOverlay.cbmY + bandGapOverlay.edgeLabelFontSize + 10,
+                      )}
+                      textAnchor="middle"
+                      fill="#ef6c00"
+                      fontSize={bandGapOverlay.edgeLabelFontSize}
+                      fontWeight={600}
+                      stroke={svgBgFill}
+                      strokeWidth={3}
+                      paintOrder="stroke"
+                    >
+                      CBM
+                    </text>
+                    <rect
+                      x={bandGapOverlay.labelX}
+                      y={bandGapOverlay.labelY}
+                      width={bandGapOverlay.labelWidth}
+                      height={bandGapOverlay.labelHeight}
+                      rx={7}
+                      fill={plotBgWhite ? "rgba(255,255,255,0.96)" : colors.tooltip}
+                      stroke={bandGapOverlay.gapColor}
+                      strokeOpacity={0.8}
+                    />
+                    <text
+                      x={bandGapOverlay.labelX + bandGapOverlay.labelWidth / 2}
+                      y={bandGapOverlay.labelY + bandGapOverlay.labelFontSize + 4}
+                      textAnchor="middle"
+                      fill={colors.text}
+                      fontSize={bandGapOverlay.labelFontSize}
+                      fontWeight={700}
+                    >
+                      {bandGapOverlay.primaryLabel}
+                    </text>
+                    <text
+                      x={bandGapOverlay.labelX + bandGapOverlay.labelWidth / 2}
+                      y={
+                        bandGapOverlay.labelY +
+                        bandGapOverlay.labelFontSize +
+                        bandGapOverlay.secondaryFontSize +
+                        10
+                      }
+                      textAnchor="middle"
+                      fill={bandGapOverlay.gapColor}
+                      fontSize={bandGapOverlay.secondaryFontSize}
+                      fontWeight={600}
+                    >
+                      {bandGapOverlay.secondaryLabel}
+                    </text>
+                  </g>
+                )}
               </g>
 
               {/* Hover point */}
@@ -1251,6 +1512,15 @@ export function BandPlot({
           {showFermiLevel && (
             <span>
               E_F ({activeFermiSourceLabel}) = {activeFermiDisplay}
+            </span>
+          )}
+          {viewerType === "electronic" && (
+            <span className={displayedBandGap ? "band-gap-info" : "metal-info"}>
+              {displayedBandGap
+                ? `${displayedBandGap.value.toFixed(3)} eV ${
+                  displayedBandGap.is_direct ? "direct" : "indirect"
+                } gap`
+                : "No gap detected at current E_F"}
             </span>
           )}
           {showProjectionSummary && (
@@ -1439,6 +1709,53 @@ export function BandPlot({
               </div>
             )}
           </div>
+
+          {viewerType === "electronic" && (
+            <div className="band-control-section">
+              <button
+                type="button"
+                className="band-control-header"
+                onClick={() => setBandGapExpanded((prev) => !prev)}
+              >
+                <span className={`collapse-icon ${bandGapExpanded ? "expanded" : ""}`}>▶</span>
+                Band Gap
+              </button>
+              {bandGapExpanded && (
+                <div className="band-control-grid">
+                  <div className="band-control-row">
+                    <label>Show Gap Overlay</label>
+                    <input
+                      type="checkbox"
+                      checked={bandGapOverlayVisible}
+                      disabled={!displayedBandGap}
+                      onChange={(event) => setShowBandGapOverlay(event.target.checked)}
+                    />
+                  </div>
+
+                  {displayedBandGap ? (
+                    <>
+                      <div className="band-control-readout">
+                        <span>Gap Value</span>
+                        <strong>{displayedBandGap.value.toFixed(3)} eV</strong>
+                      </div>
+                      <div className="band-control-readout">
+                        <span>Gap Type</span>
+                        <strong>{displayedBandGap.is_direct ? "Direct" : "Indirect"}</strong>
+                      </div>
+                      <div className="band-control-note">
+                        Referenced to the current {activeFermiSourceLabel.toLowerCase()} Fermi
+                        level.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="band-control-warning">
+                      No band gap was detected for the current Fermi reference.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {viewerType === "electronic" && (
             <div className="band-control-section">

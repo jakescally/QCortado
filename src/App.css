@@ -7429,6 +7429,30 @@ html[data-theme="dark"] .band-control-tech-name {
   padding: 0.5rem 0.6rem;
 }
 
+.band-control-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #4a5568;
+  font-size: 0.8rem;
+}
+
+.band-control-readout strong {
+  color: #1f2937;
+  font-size: 0.82rem;
+}
+
+.band-control-note {
+  font-size: 0.78rem;
+  color: #718096;
+  line-height: 1.45;
+}
+
 .band-plot-info {
   display: flex;
   flex-wrap: wrap;
@@ -7438,6 +7462,20 @@ html[data-theme="dark"] .band-control-tech-name {
 }
 
 html[data-theme="dark"] .band-plot-info {
+  color: #a6adc8;
+}
+
+html[data-theme="dark"] .band-control-readout {
+  background: #252738;
+  border-color: #45475a;
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .band-control-readout strong {
+  color: #f5f7ff;
+}
+
+html[data-theme="dark"] .band-control-note {
   color: #a6adc8;
 }
 
