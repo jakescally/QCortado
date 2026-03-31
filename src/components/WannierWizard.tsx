@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -28,9 +28,12 @@ import {
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { useTaskContext } from "../lib/TaskContext";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
   buildHpcLauncherCommand,
@@ -370,6 +373,7 @@ export function WannierWizard({
   const [progress, setProgress] = useState<ProgressState>(defaultProgressState("Wannier90"));
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [result, setResult] = useState<WannierResult | null>(null);
   const [calcStartTime, setCalcStartTime] = useState<string>("");
   const [isSaved, setIsSaved] = useState(false);
@@ -381,12 +385,18 @@ export function WannierWizard({
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
     defaultResourcesForProfile(activeHpcProfile),
   );
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
   const handleScfSortModeChange = useCallback((mode: ScfSortMode) => {
     setScfSortMode(mode);
     setStoredSortMode(mode);
   }, []);
+
+  useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
 
   useEffect(() => {
     if (!isHpcMode) return;
@@ -419,7 +429,10 @@ export function WannierWizard({
   useEffect(() => {
     const task = activeTask;
     if (!task) return;
-    setOutput(task.output.join("\n"));
+    if (task.outputLineCount > 0 || task.status !== "running") {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     if (task.status === "completed" && task.result) {
       const nextResult = task.result as WannierResult;
@@ -439,13 +452,6 @@ export function WannierWizard({
       setError("Wannier calculation cancelled.");
     }
   }, [activeTask]);
-
-  useEffect(() => {
-    if (!followOutputRef.current) return;
-    const el = outputRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
 
   useEffect(() => {
     if (!selectedScf) return;
@@ -682,13 +688,6 @@ export function WannierWizard({
       ? params.selected_pseudos as Record<string, string>
       : {};
   }, [selectedScf]);
-
-  const handleOutputScroll = useCallback(() => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  }, []);
 
   const addProjection = useCallback(() => {
     const firstElement = getBaseElement(crystalData.atom_sites[0]?.type_symbol || "X");
@@ -1025,6 +1024,7 @@ export function WannierWizard({
     setIsSaved(false);
     setShowOutput(true);
     setOutput("");
+    setOutputLineCount(0);
     setProgress(defaultProgressState("Wannier90"));
     setStep("run");
     const startedAt = new Date().toISOString();
@@ -1040,8 +1040,10 @@ export function WannierWizard({
       }
       const nextResult = finalTask.result as WannierResult;
       const outputText = finalTask.output.join("\n");
+      const visibleTask = taskContext.getTask(taskId);
       setResult(nextResult);
-      setOutput(outputText);
+      setOutput(visibleTask?.outputText ?? outputText);
+      setOutputLineCount(visibleTask?.outputLineCount ?? countVisibleOutputLines(outputText));
       setIsRunning(false);
       setStep("results");
       const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")
@@ -1608,12 +1610,13 @@ export function WannierWizard({
         )}
 
         <div className="run-layout">
-          <div className="output-panel">
-            <h3>{isRunning ? "Running..." : "Output"}</h3>
-            <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
-              {output || "Starting calculation..."}
-            </pre>
-          </div>
+          <LiveOutputPanel
+            title={isRunning ? "Running..." : "Output"}
+            output={output}
+            placeholder="Starting calculation..."
+            totalLineCount={outputLineCount}
+            visibleLineCount={visibleOutputLineCount}
+          />
         </div>
       </div>
     );

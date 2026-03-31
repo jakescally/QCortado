@@ -8,8 +8,12 @@
 //! - Output parsing and result extraction
 //! - Project management
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use flate2::read::GzDecoder;
+use regex::Regex;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -26,19 +30,19 @@ pub mod symmetry;
 use process_manager::ProcessManager;
 
 use qe::{
-    add_phonon_symmetry_markers, generate_dos_input, generate_matdyn_bands_input,
-    generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_ph_output,
-    export_ludwig_bundle, parse_wannier_hamiltonian, prepare_wannier_nscf_calculation,
+    add_phonon_symmetry_markers, export_ludwig_bundle, generate_dos_input,
+    generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_q2r_input,
+    parse_ph_output, parse_wannier_hamiltonian, prepare_wannier_nscf_calculation,
     read_phonon_dispersion_file, read_phonon_dos_file, read_wannier_result,
     validate_wannier_config, DosCalculation, LudwigExportConfig, LudwigExportResult,
-    MatdynCalculation, PhononPipelineConfig, PhononResult, Pw2Wannier90Config,
-    Q2RCalculation, QPathPoint, WannierCalculationConfig, WannierResult,
+    MatdynCalculation, PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation,
+    QPathPoint, WannierCalculationConfig, WannierResult,
 };
 use qe::{
-    generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input,
-    generate_pw_input, generate_wannier90_win, parse_dos_file,
-    parse_projwfc_projection_groups, parse_pw_output, read_bands_gnu_file, BandData,
-    BandsXConfig, KPathPoint, ProjwfcConfig, QECalculation, QEResult, QERunner,
+    generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input, generate_pw_input,
+    generate_wannier90_win, parse_dos_file, parse_projwfc_projection_groups_aligned,
+    parse_pw_output, read_bands_gnu_file, BandData, BandsXConfig, KPathPoint, ProjwfcConfig,
+    QECalculation, QEResult, QERunner,
 };
 
 /// Application state shared across commands.
@@ -202,7 +206,8 @@ fn build_hpc_logged_qe_step_command(
     input_file: &str,
     output_file: &str,
 ) -> String {
-    let qe_cmd = build_hpc_qe_input_command(profile, executable, extra_args, input_file, output_file);
+    let qe_cmd =
+        build_hpc_qe_input_command(profile, executable, extra_args, input_file, output_file);
     format!(
         "echo \"[QCortado] {step} started at $(date -u +%Y-%m-%dT%H:%M:%SZ)\"; \
 __qcortado_step_start=$(date +%s); \
@@ -621,8 +626,7 @@ async fn list_recoverable_remote_phonon_runs_for_profile(
 
     let workspace_scan_cmd =
         build_recoverable_remote_phonon_scan_cmd(&workspace_root, Some("qcortado_hpc_bundle_*"));
-    let workspace_output =
-        hpc::ssh::run_ssh_command(profile, secret, &workspace_scan_cmd).await?;
+    let workspace_output = hpc::ssh::run_ssh_command(profile, secret, &workspace_scan_cmd).await?;
     let workspace_runs =
         parse_recoverable_remote_phonon_runs(&workspace_output, &profile.id, "workspace");
 
@@ -2159,14 +2163,11 @@ test -x \"$tool\" && echo ok || echo missing",
             remote_wannier90
         )
     };
-    let wannier90_available = hpc::ssh::run_ssh_command(
-        &profile,
-        secret.as_deref(),
-        &wannier90_check,
-    )
-    .await
-    .map(|value| value.contains("ok"))
-    .unwrap_or(false);
+    let wannier90_available =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &wannier90_check)
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
     if !wannier90_available {
         messages.push(format!(
             "wannier90.x not found/executable at {}",
@@ -2448,6 +2449,67 @@ done | LC_ALL=C sort -u",
 
     pseudos.sort();
     Ok(pseudos)
+}
+
+/// Lists remote pseudopotentials and parses SOC/cutoff metadata from their headers.
+#[tauri::command]
+async fn hpc_list_remote_pseudopotential_metadata(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<PseudopotentialMetadata>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let list_cmd = format!(
+        "dir={dir}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+for file in \"$dir\"/*.UPF \"$dir\"/*.upf; do \
+  if [ ! -f \"$file\" ]; then \
+    continue; \
+  fi; \
+  name=$(basename \"$file\"); \
+  stem=${{name%.*}}; \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE__:upf_b64:$name\"; \
+  head -n 200 \"$file\" | base64; \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+  if [ -f \"$dir/$stem.djrepo\" ]; then \
+    echo \"__QCORTADO_REMOTE_METADATA_FILE__:djrepo_b64:$stem.djrepo\"; \
+    base64 < \"$dir/$stem.djrepo\"; \
+    echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+  elif [ -f \"$dir/$stem.djrepo.gz\" ]; then \
+    echo \"__QCORTADO_REMOTE_METADATA_FILE__:djrepo_gz_b64:$stem.djrepo.gz\"; \
+    gzip -dc \"$dir/$stem.djrepo.gz\" | base64; \
+    echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+  fi; \
+done",
+        dir = shell_single_quote_local(&remote_pseudo_dir)
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &list_cmd).await?;
+    parse_remote_pseudopotential_metadata_output(&output)
 }
 
 /// Loads remote SSSP JSON data from the configured remote pseudo directory.
@@ -2826,9 +2888,12 @@ async fn hpc_list_recoverable_remote_phonon_runs(
     )?;
 
     let resolved_limit = limit.unwrap_or(30).clamp(1, 200) as usize;
-    let runs =
-        list_recoverable_remote_phonon_runs_for_profile(&profile, secret.as_deref(), resolved_limit)
-            .await?;
+    let runs = list_recoverable_remote_phonon_runs_for_profile(
+        &profile,
+        secret.as_deref(),
+        resolved_limit,
+    )
+    .await?;
     eprintln!(
         "[remote-phonon-recovery] list profile={} limit={} recoverable_runs={}",
         profile.id,
@@ -2876,10 +2941,8 @@ async fn hpc_debug_remote_phonon_recovery(
     .to_string();
     let project_phonon_root = format!("{}/phonon", project_root);
 
-    let workspace_probe_cmd = build_remote_phonon_debug_probe_scan_cmd(
-        &workspace_root,
-        Some("qcortado_hpc_bundle_*"),
-    );
+    let workspace_probe_cmd =
+        build_remote_phonon_debug_probe_scan_cmd(&workspace_root, Some("qcortado_hpc_bundle_*"));
     let project_probe_cmd = build_remote_phonon_debug_probe_scan_cmd(&project_phonon_root, None);
     let workspace_probe_output =
         hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &workspace_probe_cmd).await?;
@@ -2930,10 +2993,7 @@ async fn hpc_recover_remote_phonon_calculation(
     q_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<projects::CalculationRun, String> {
-    let normalized_remote_workdir = remote_workdir
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
+    let normalized_remote_workdir = remote_workdir.trim().trim_end_matches('/').to_string();
     if normalized_remote_workdir.is_empty() {
         return Err("Remote working directory is required.".to_string());
     }
@@ -2951,10 +3011,8 @@ async fn hpc_recover_remote_phonon_calculation(
     );
 
     let recovery_id = uuid::Uuid::new_v4().to_string();
-    let local_sync_dir = std::env::temp_dir().join(format!(
-        "qcortado_remote_phonon_recovery_{}",
-        recovery_id
-    ));
+    let local_sync_dir =
+        std::env::temp_dir().join(format!("qcortado_remote_phonon_recovery_{}", recovery_id));
     std::fs::create_dir_all(&local_sync_dir).map_err(|e| {
         format!(
             "Failed to create temporary recovery directory {}: {}",
@@ -2990,9 +3048,7 @@ async fn hpc_recover_remote_phonon_calculation(
                 report.skipped_bytes,
                 report.mode
             );
-            let remote_storage_bytes = report
-                .downloaded_bytes
-                .saturating_add(report.skipped_bytes);
+            let remote_storage_bytes = report.downloaded_bytes.saturating_add(report.skipped_bytes);
             let recovered = projects::recover_phonon_calculation(
                 app.clone(),
                 project_id.clone(),
@@ -3451,6 +3507,690 @@ fn get_project_dir(state: State<AppState>) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Metadata extracted from a pseudopotential header.
+#[derive(serde::Serialize, Clone)]
+pub struct PseudopotentialMetadata {
+    pub filename: String,
+    pub supports_soc: bool,
+    pub pseudo_type: Option<String>,
+    pub relativistic: Option<String>,
+    pub cutoff_wfc: Option<f64>,
+    pub cutoff_rho: Option<f64>,
+    pub cutoff_wfc_source: Option<String>,
+    pub cutoff_rho_source: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct DjrepoCutoffHint {
+    ecut: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct DjrepoHints {
+    low: Option<DjrepoCutoffHint>,
+    normal: Option<DjrepoCutoffHint>,
+    high: Option<DjrepoCutoffHint>,
+}
+
+#[derive(serde::Deserialize)]
+struct DjrepoMetadata {
+    hints: Option<DjrepoHints>,
+}
+
+fn parse_upf_attr_map(attrs: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let attr_re =
+        Regex::new(r#"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#)
+            .expect("valid UPF attribute regex");
+
+    for cap in attr_re.captures_iter(attrs) {
+        let key = cap.get(1).map(|m| m.as_str().to_string());
+        let value = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .or_else(|| cap.get(4))
+            .map(|m| m.as_str().trim().to_string());
+        if let (Some(key), Some(value)) = (key, value) {
+            map.insert(key, value);
+        }
+    }
+
+    map
+}
+
+fn parse_upf_bool(value: Option<&String>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_lowercase()),
+        Some(ref v) if v == "true" || v == ".true." || v == "t" || v == "1"
+    )
+}
+
+fn parse_upf_f64(value: Option<&String>) -> Option<f64> {
+    value
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+}
+
+fn capture_xml_value(text: &str, tag: &str) -> Option<String> {
+    let pattern = format!(
+        r"(?is)<{}\b[^>]*>\s*([^<]+?)\s*</{}>",
+        regex::escape(tag),
+        regex::escape(tag)
+    );
+    capture_group(text, &pattern).map(|value| value.trim().to_string())
+}
+
+fn capture_group(text: &str, pattern: &str) -> Option<String> {
+    let re = Regex::new(pattern).ok()?;
+    re.captures(text)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn parse_upf_cutoff(text: &str, label: &str) -> Option<f64> {
+    let pattern = format!(
+        r"(?im){}\s*:\s*([-+]?\d*\.?\d+(?:[Ee][-+]?\d+)?)",
+        regex::escape(label),
+    );
+    capture_group(text, &pattern)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+}
+
+fn parse_djrepo_wavefunction_cutoff_ry(text: &str) -> Option<f64> {
+    let metadata: DjrepoMetadata = serde_json::from_str(text).ok()?;
+    let hints = metadata.hints?;
+    let ecut_ha = hints
+        .normal
+        .as_ref()
+        .and_then(|hint| hint.ecut)
+        .or_else(|| hints.high.as_ref().and_then(|hint| hint.ecut))
+        .or_else(|| hints.low.as_ref().and_then(|hint| hint.ecut))
+        .filter(|value| *value > 0.0)?;
+    Some(ecut_ha * 2.0)
+}
+
+fn is_hamann_oncv_lone_rho_wavefunction_hint(
+    generated: Option<&str>,
+    pseudo_type: Option<&str>,
+    has_wfc: bool,
+    cutoff_wfc: Option<f64>,
+    cutoff_rho: Option<f64>,
+    info_text: &str,
+) -> bool {
+    let generated_lower = generated.unwrap_or_default().to_lowercase();
+    let info_lower = info_text.to_lowercase();
+    let pseudo_type = pseudo_type.unwrap_or_default();
+
+    cutoff_wfc.is_none()
+        && cutoff_rho.is_some()
+        && !has_wfc
+        && pseudo_type.eq_ignore_ascii_case("nc")
+        && (generated_lower.contains("oncvpsp code by d. r. hamann")
+            || info_lower.contains("oncvpsp")
+            || info_lower.contains("d. r. hamann"))
+}
+
+fn parse_pseudopotential_metadata_from_content(
+    filename: String,
+    content: &str,
+) -> PseudopotentialMetadata {
+    let header_block =
+        capture_group(content, r"(?is)<PP_HEADER\b[^>]*>(.*?)</PP_HEADER>").unwrap_or_default();
+    let header_attrs = capture_group(content, r"(?is)<PP_HEADER\b([^>]*)>")
+        .map(|attrs| parse_upf_attr_map(&attrs))
+        .unwrap_or_default();
+    let info_text = capture_group(content, r"(?is)<PP_INFO>(.*?)</PP_INFO>")
+        .unwrap_or_else(|| content.lines().take(200).collect::<Vec<_>>().join("\n"));
+    let info_lower = info_text.to_lowercase();
+    let lower_content = content.to_lowercase();
+    let header_has_so_xml = capture_xml_value(&header_block, "has_so");
+    let header_has_wfc_xml = capture_xml_value(&header_block, "has_wfc");
+    let generated = header_attrs
+        .get("generated")
+        .cloned()
+        .or_else(|| capture_xml_value(&header_block, "generated"));
+
+    let pseudo_type = header_attrs
+        .get("pseudo_type")
+        .cloned()
+        .or_else(|| capture_xml_value(&header_block, "pseudo_type"))
+        .or_else(|| capture_group(&info_text, r"(?im)Pseudopotential type:\s*([^\r\n<]+)"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let relativistic = header_attrs
+        .get("relativistic")
+        .cloned()
+        .or_else(|| capture_xml_value(&header_block, "relativistic"))
+        .or_else(|| {
+            capture_group(
+                &info_text,
+                r"(?im)((?:non-|scalar-|fully-)?relativistic pseudopotential)",
+            )
+        });
+
+    let has_so = parse_upf_bool(header_attrs.get("has_so"))
+        || parse_upf_bool(header_has_so_xml.as_ref())
+        || lower_content.contains("<pp_spin_orb")
+        || info_lower.contains("fully-relativistic")
+        || info_lower.contains("spin-orbit");
+    let has_wfc =
+        parse_upf_bool(header_attrs.get("has_wfc")) || parse_upf_bool(header_has_wfc_xml.as_ref());
+
+    let (raw_cutoff_wfc, raw_cutoff_wfc_source) =
+        if let Some(value) = parse_upf_f64(header_attrs.get("wfc_cutoff")) {
+            (Some(value), Some("upf"))
+        } else if let Some(value) = capture_xml_value(&header_block, "wfc_cutoff")
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 0.0)
+        {
+            (Some(value), Some("upf"))
+        } else if let Some(value) = parse_upf_f64(header_attrs.get("ecutwfc")) {
+            (Some(value), Some("upf"))
+        } else if let Some(value) =
+            parse_upf_cutoff(&info_text, "Suggested minimum cutoff for wavefunctions")
+        {
+            (Some(value), Some("upf_info"))
+        } else {
+            (None, None)
+        };
+    let (raw_cutoff_rho, raw_cutoff_rho_source) =
+        if let Some(value) = parse_upf_f64(header_attrs.get("rho_cutoff")) {
+            (Some(value), Some("upf"))
+        } else if let Some(value) = capture_xml_value(&header_block, "rho_cutoff")
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 0.0)
+        {
+            (Some(value), Some("upf"))
+        } else if let Some(value) = parse_upf_f64(header_attrs.get("ecutrho")) {
+            (Some(value), Some("upf"))
+        } else if let Some(value) =
+            parse_upf_cutoff(&info_text, "Suggested minimum cutoff for charge density")
+        {
+            (Some(value), Some("upf_info"))
+        } else {
+            (None, None)
+        };
+    let lone_rho_is_hartree_wfc = is_hamann_oncv_lone_rho_wavefunction_hint(
+        generated.as_deref(),
+        pseudo_type.as_deref(),
+        has_wfc,
+        raw_cutoff_wfc,
+        raw_cutoff_rho,
+        &info_text,
+    );
+    let cutoff_wfc = if lone_rho_is_hartree_wfc {
+        raw_cutoff_rho.map(|value| value * 2.0)
+    } else {
+        raw_cutoff_wfc
+    };
+    let cutoff_wfc_source = if lone_rho_is_hartree_wfc {
+        raw_cutoff_rho.map(|_| "upf_fallback".to_string())
+    } else {
+        raw_cutoff_wfc_source.map(str::to_string)
+    };
+    let cutoff_rho = if lone_rho_is_hartree_wfc {
+        None
+    } else {
+        raw_cutoff_rho
+    };
+    let cutoff_rho_source = if lone_rho_is_hartree_wfc {
+        None
+    } else {
+        raw_cutoff_rho_source.map(str::to_string)
+    };
+
+    PseudopotentialMetadata {
+        filename,
+        supports_soc: has_so
+            || matches!(relativistic.as_deref(), Some(value) if value.eq_ignore_ascii_case("full")),
+        pseudo_type,
+        relativistic,
+        cutoff_wfc,
+        cutoff_rho,
+        cutoff_wfc_source,
+        cutoff_rho_source,
+    }
+}
+
+fn parse_pseudopotential_metadata_from_sources(
+    filename: String,
+    content: &str,
+    djrepo_text: Option<&str>,
+) -> PseudopotentialMetadata {
+    let mut metadata = parse_pseudopotential_metadata_from_content(filename, content);
+    if let Some(djrepo_text) = djrepo_text {
+        if let Some(cutoff_wfc) = parse_djrepo_wavefunction_cutoff_ry(djrepo_text) {
+            metadata.cutoff_wfc = Some(cutoff_wfc);
+            metadata.cutoff_rho = None;
+            metadata.cutoff_wfc_source = Some("djrepo".to_string());
+            metadata.cutoff_rho_source = None;
+        }
+    }
+    metadata
+}
+
+fn decode_remote_metadata_payload(kind: &str, payload: &str) -> Result<String, String> {
+    if !matches!(kind, "upf_b64" | "djrepo_b64" | "djrepo_gz_b64") {
+        return Ok(payload.to_string());
+    }
+
+    let compact_payload = payload.lines().map(str::trim).collect::<String>();
+    let decoded = BASE64_STANDARD
+        .decode(compact_payload.as_bytes())
+        .map_err(|e| format!("Failed to decode remote {} payload: {}", kind, e))?;
+    Ok(String::from_utf8_lossy(&decoded).into_owned())
+}
+
+fn parse_remote_pseudopotential_metadata_output(
+    output: &str,
+) -> Result<Vec<PseudopotentialMetadata>, String> {
+    let mut upf_contents: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut djrepo_contents: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut current_kind: Option<String> = None;
+    let mut current_filename: Option<String> = None;
+    let mut current_content: Vec<String> = Vec::new();
+
+    let flush_current = |kind: &mut Option<String>,
+                         filename: &mut Option<String>,
+                         content: &mut Vec<String>,
+                         upf_contents: &mut std::collections::HashMap<String, String>,
+                         djrepo_contents: &mut std::collections::HashMap<String, String>|
+     -> Result<(), String> {
+        if let (Some(kind), Some(name)) = (kind.take(), filename.take()) {
+            let joined = content.join("\n");
+            let decoded = decode_remote_metadata_payload(&kind, &joined)?;
+            match kind.as_str() {
+                "upf" | "upf_b64" => {
+                    upf_contents.insert(name, decoded);
+                }
+                "djrepo" | "djrepo_gz" | "djrepo_b64" | "djrepo_gz_b64" => {
+                    djrepo_contents.insert(name, decoded);
+                }
+                _ => {}
+            }
+        }
+        content.clear();
+        Ok(())
+    };
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
+        }
+        if let Some(rest) = trimmed.strip_prefix("__QCORTADO_REMOTE_METADATA_FILE__:") {
+            flush_current(
+                &mut current_kind,
+                &mut current_filename,
+                &mut current_content,
+                &mut upf_contents,
+                &mut djrepo_contents,
+            )?;
+            if let Some((kind, name)) = rest.split_once(':') {
+                current_kind = Some(kind.to_string());
+                current_filename = Some(name.to_string());
+            }
+            continue;
+        }
+        if trimmed == "__QCORTADO_REMOTE_METADATA_FILE_END__" {
+            flush_current(
+                &mut current_kind,
+                &mut current_filename,
+                &mut current_content,
+                &mut upf_contents,
+                &mut djrepo_contents,
+            )?;
+            continue;
+        }
+        if current_kind.is_some() {
+            current_content.push(line.to_string());
+        }
+    }
+
+    flush_current(
+        &mut current_kind,
+        &mut current_filename,
+        &mut current_content,
+        &mut upf_contents,
+        &mut djrepo_contents,
+    )?;
+
+    let mut pseudos = Vec::new();
+    let mut upf_paths = upf_contents.keys().cloned().collect::<Vec<_>>();
+    upf_paths.sort();
+    for upf_path in upf_paths {
+        let Some(content) = upf_contents.get(&upf_path) else {
+            continue;
+        };
+        let stem = upf_path
+            .rsplit_once('.')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(upf_path.as_str());
+        let djrepo_path = format!("{}.djrepo", stem);
+        let djrepo_gz_path = format!("{}.djrepo.gz", stem);
+        let djrepo_text = djrepo_contents
+            .get(&djrepo_path)
+            .or_else(|| djrepo_contents.get(&djrepo_gz_path))
+            .map(String::as_str);
+        pseudos.push(parse_pseudopotential_metadata_from_sources(
+            upf_path,
+            content,
+            djrepo_text,
+        ));
+    }
+    pseudos.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(pseudos)
+}
+
+fn read_optional_djrepo_companion(path: &Path) -> Result<Option<String>, String> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+
+    let plain_path = parent.join(format!("{}.djrepo", stem));
+    if plain_path.exists() {
+        return std::fs::read_to_string(&plain_path).map(Some).map_err(|e| {
+            format!(
+                "Failed to read companion metadata {}: {}",
+                plain_path.display(),
+                e
+            )
+        });
+    }
+
+    let gz_path = parent.join(format!("{}.djrepo.gz", stem));
+    if gz_path.exists() {
+        let file = std::fs::File::open(&gz_path).map_err(|e| {
+            format!(
+                "Failed to open companion metadata {}: {}",
+                gz_path.display(),
+                e
+            )
+        })?;
+        let mut decoder = GzDecoder::new(file);
+        let mut content = String::new();
+        decoder.read_to_string(&mut content).map_err(|e| {
+            format!(
+                "Failed to read companion metadata {}: {}",
+                gz_path.display(),
+                e
+            )
+        })?;
+        return Ok(Some(content));
+    }
+
+    Ok(None)
+}
+
+fn read_pseudopotential_metadata(path: &Path) -> Result<PseudopotentialMetadata, String> {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Invalid pseudopotential file name: {}", path.display()))?
+        .to_string();
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open pseudopotential {}: {}", filename, e))?;
+    let mut buffer = Vec::new();
+    file.take(131_072)
+        .read_to_end(&mut buffer)
+        .map_err(|e| format!("Failed to read pseudopotential {}: {}", filename, e))?;
+    let content = String::from_utf8_lossy(&buffer).into_owned();
+    let djrepo_content = read_optional_djrepo_companion(path)?;
+    Ok(parse_pseudopotential_metadata_from_sources(
+        filename,
+        &content,
+        djrepo_content.as_deref(),
+    ))
+}
+
+fn is_upf_name(name: &str) -> bool {
+    name.ends_with(".UPF") || name.ends_with(".upf")
+}
+
+#[cfg(test)]
+mod pseudopotential_metadata_tests {
+    use base64::Engine as _;
+
+    use super::{
+        parse_djrepo_wavefunction_cutoff_ry, parse_pseudopotential_metadata_from_content,
+        parse_pseudopotential_metadata_from_sources, parse_remote_pseudopotential_metadata_output,
+        BASE64_STANDARD,
+    };
+
+    #[test]
+    fn parses_v201_header_attributes() {
+        let content = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    Suggested minimum cutoff for wavefunctions: 60 Ry
+    Suggested minimum cutoff for charge density: 480 Ry
+  </PP_INFO>
+  <PP_HEADER element="Bi" pseudo_type="US" relativistic="full" has_so="T" wfc_cutoff="60.0" rho_cutoff="480.0"></PP_HEADER>
+</UPF>
+"#;
+
+        let metadata =
+            parse_pseudopotential_metadata_from_content("Bi.rel-pbe.UPF".to_string(), content);
+        assert!(metadata.supports_soc);
+        assert_eq!(metadata.pseudo_type.as_deref(), Some("US"));
+        assert_eq!(metadata.relativistic.as_deref(), Some("full"));
+        assert_eq!(metadata.cutoff_wfc, Some(60.0));
+        assert_eq!(metadata.cutoff_rho, Some(480.0));
+        assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("upf"));
+        assert_eq!(metadata.cutoff_rho_source.as_deref(), Some("upf"));
+    }
+
+    #[test]
+    fn parses_xml_subtags_for_newer_header_style() {
+        let content = r#"
+<upf version="3.0.0">
+  <pp_header>
+    <pseudo_type>PAW</pseudo_type>
+    <relativistic>full</relativistic>
+    <has_so>true</has_so>
+    <wfc_cutoff>45</wfc_cutoff>
+    <rho_cutoff>360</rho_cutoff>
+  </pp_header>
+  <pp_spin_orb />
+</upf>
+"#;
+
+        let metadata =
+            parse_pseudopotential_metadata_from_content("Pt.rel-pbe.UPF".to_string(), content);
+        assert!(metadata.supports_soc);
+        assert_eq!(metadata.pseudo_type.as_deref(), Some("PAW"));
+        assert_eq!(metadata.relativistic.as_deref(), Some("full"));
+        assert_eq!(metadata.cutoff_wfc, Some(45.0));
+        assert_eq!(metadata.cutoff_rho, Some(360.0));
+        assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("upf"));
+        assert_eq!(metadata.cutoff_rho_source.as_deref(), Some("upf"));
+    }
+
+    #[test]
+    fn interprets_lone_hamann_oncv_rho_cutoff_as_hartree_wavefunction_hint() {
+        let content = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    This pseudopotential file has been produced using the code
+    ONCVPSP  (Optimized Norm-Conservinng Vanderbilt PSeudopotential)
+    fully-relativistic version 3.3.0 08/16/2017 by D. R. Hamann
+  </PP_INFO>
+  <PP_HEADER
+    generated="Generated using ONCVPSP code by D. R. Hamann"
+    element="Ag"
+    pseudo_type="NC"
+    relativistic="full"
+    has_so="T"
+    has_wfc="F"
+    rho_cutoff="1.53700000000E+01">
+  </PP_HEADER>
+</UPF>
+"#;
+
+        let metadata = parse_pseudopotential_metadata_from_content("Ag.upf".to_string(), content);
+        assert!(metadata.supports_soc);
+        assert_eq!(metadata.pseudo_type.as_deref(), Some("NC"));
+        assert_eq!(metadata.relativistic.as_deref(), Some("full"));
+        let cutoff_wfc = metadata
+            .cutoff_wfc
+            .expect("expected converted wavefunction cutoff");
+        assert!((cutoff_wfc - 30.74).abs() < 1e-9);
+        assert_eq!(metadata.cutoff_rho, None);
+        assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("upf_fallback"));
+        assert_eq!(metadata.cutoff_rho_source, None);
+    }
+
+    #[test]
+    fn parses_pseudodojo_djrepo_normal_hint_as_ry_wavefunction_cutoff() {
+        let djrepo = r#"
+{
+  "hints": {
+    "high": { "ecut": 47.0 },
+    "low": { "ecut": 37.0 },
+    "normal": { "ecut": 41.0 }
+  }
+}
+"#;
+
+        let cutoff_wfc = parse_djrepo_wavefunction_cutoff_ry(djrepo)
+            .expect("expected djrepo wavefunction cutoff");
+        assert!((cutoff_wfc - 82.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prefers_djrepo_cutoffs_over_embedded_upf_cutoff_hints() {
+        let content = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    This pseudopotential file has been produced using the code
+    ONCVPSP  (Optimized Norm-Conservinng Vanderbilt PSeudopotential)
+    fully-relativistic version 3.3.0 08/16/2017 by D. R. Hamann
+  </PP_INFO>
+  <PP_HEADER
+    generated="Generated using ONCVPSP code by D. R. Hamann"
+    element="Ag"
+    pseudo_type="NC"
+    relativistic="full"
+    has_so="T"
+    has_wfc="F"
+    rho_cutoff="1.53700000000E+01">
+  </PP_HEADER>
+</UPF>
+"#;
+        let djrepo = r#"
+{
+  "hints": {
+    "normal": { "ecut": 41.0 }
+  }
+}
+"#;
+
+        let metadata = parse_pseudopotential_metadata_from_sources(
+            "Ag.upf".to_string(),
+            content,
+            Some(djrepo),
+        );
+        let cutoff_wfc = metadata
+            .cutoff_wfc
+            .expect("expected djrepo wavefunction cutoff");
+        assert!((cutoff_wfc - 82.0).abs() < 1e-9);
+        assert_eq!(metadata.cutoff_rho, None);
+        assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("djrepo"));
+        assert_eq!(metadata.cutoff_rho_source, None);
+    }
+
+    #[test]
+    fn pairs_remote_djrepo_companions_even_with_banner_noise() {
+        let output = r#"
+Welcome to the cluster.
+Authorized use only.
+__QCORTADO_REMOTE_METADATA_FILE__:djrepo:Ag.djrepo
+{
+  "hints": {
+    "normal": { "ecut": 41.0 }
+  }
+}
+__QCORTADO_REMOTE_METADATA_FILE_END__
+__QCORTADO_REMOTE_METADATA_FILE__:upf:Ag.upf
+<UPF version="2.0.1">
+  <PP_INFO>
+    This pseudopotential file has been produced using the code
+    ONCVPSP  (Optimized Norm-Conservinng Vanderbilt PSeudopotential)
+    fully-relativistic version 3.3.0 08/16/2017 by D. R. Hamann
+  </PP_INFO>
+  <PP_HEADER
+    generated="Generated using ONCVPSP code by D. R. Hamann"
+    element="Ag"
+    pseudo_type="NC"
+    relativistic="full"
+    has_so="T"
+    has_wfc="F"
+    rho_cutoff="1.53700000000E+01">
+  </PP_HEADER>
+</UPF>
+__QCORTADO_REMOTE_METADATA_FILE_END__
+"#;
+
+        let pseudos =
+            parse_remote_pseudopotential_metadata_output(output).expect("expected parsed metadata");
+        assert_eq!(pseudos.len(), 1);
+        assert_eq!(pseudos[0].filename, "Ag.upf");
+        assert!((pseudos[0].cutoff_wfc.expect("expected djrepo cutoff") - 82.0).abs() < 1e-9);
+        assert_eq!(pseudos[0].cutoff_rho, None);
+        assert_eq!(pseudos[0].cutoff_wfc_source.as_deref(), Some("djrepo"));
+        assert_eq!(pseudos[0].cutoff_rho_source, None);
+    }
+
+    #[test]
+    fn parses_base64_remote_metadata_payloads_for_djrepo_companions() {
+        let djrepo = r#"{
+  "hints": {
+    "normal": { "ecut": 41.0 }
+  }
+}"#;
+        let upf = r#"<UPF version="2.0.1">
+  <PP_INFO>
+    This pseudopotential file has been produced using the code
+    ONCVPSP  (Optimized Norm-Conservinng Vanderbilt PSeudopotential)
+    fully-relativistic version 3.3.0 08/16/2017 by D. R. Hamann
+  </PP_INFO>
+  <PP_HEADER
+    generated="Generated using ONCVPSP code by D. R. Hamann"
+    element="Ag"
+    pseudo_type="NC"
+    relativistic="full"
+    has_so="T"
+    has_wfc="F"
+    rho_cutoff="1.53700000000E+01">
+  </PP_HEADER>
+</UPF>"#;
+        let output = format!(
+            "Welcome to the cluster.\n__QCORTADO_REMOTE_METADATA_FILE__:djrepo_b64:Ag.djrepo\n{}\n__QCORTADO_REMOTE_METADATA_FILE_END__\n__QCORTADO_REMOTE_METADATA_FILE__:upf_b64:Ag.upf\n{}\n__QCORTADO_REMOTE_METADATA_FILE_END__\n",
+            BASE64_STANDARD.encode(djrepo.as_bytes()),
+            BASE64_STANDARD.encode(upf.as_bytes()),
+        );
+
+        let pseudos = parse_remote_pseudopotential_metadata_output(&output)
+            .expect("expected parsed metadata");
+        assert_eq!(pseudos.len(), 1);
+        assert_eq!(pseudos[0].filename, "Ag.upf");
+        assert!((pseudos[0].cutoff_wfc.expect("expected djrepo cutoff") - 82.0).abs() < 1e-9);
+        assert_eq!(pseudos[0].cutoff_rho, None);
+        assert_eq!(pseudos[0].cutoff_wfc_source.as_deref(), Some("djrepo"));
+        assert_eq!(pseudos[0].cutoff_rho_source, None);
+    }
+}
+
 /// Lists available pseudopotentials in a directory.
 #[tauri::command]
 fn list_pseudopotentials(pseudo_dir: String) -> Result<Vec<String>, String> {
@@ -3462,12 +4202,43 @@ fn list_pseudopotentials(pseudo_dir: String) -> Result<Vec<String>, String> {
     let mut pseudos = Vec::new();
     for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.path().is_file() {
+            continue;
+        }
+
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".UPF") || name.ends_with(".upf") {
+        if is_upf_name(&name) {
             pseudos.push(name);
         }
     }
     pseudos.sort();
+    Ok(pseudos)
+}
+
+/// Lists pseudopotentials and parses SOC/cutoff metadata from their headers.
+#[tauri::command]
+fn list_pseudopotential_metadata(
+    pseudo_dir: String,
+) -> Result<Vec<PseudopotentialMetadata>, String> {
+    let path = PathBuf::from(&pseudo_dir);
+    if !path.exists() {
+        return Err(format!("Directory not found: {}", pseudo_dir));
+    }
+
+    let mut pseudos = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_path = entry.path();
+        if !file_path.is_file() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_upf_name(&name) {
+            pseudos.push(read_pseudopotential_metadata(&file_path)?);
+        }
+    }
+    pseudos.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(pseudos)
 }
 
@@ -3780,13 +4551,6 @@ fn resolve_hpc_scf_dependency_stage(
             local_bundle_copy: Some(scf_tmp_dir),
             remote_hydration_commands: Vec::new(),
         });
-    }
-
-    if scf_tmp_dir.exists() {
-        return Err(format!(
-            "SCF dependency {} is missing required .save data locally and has no remote archive path metadata. Download the full SCF bundle or rerun SCF on HPC.",
-            scf_calc_id
-        ));
     }
 
     Err(missing_scf_tmp_error(&scf_tmp_dir))
@@ -4191,14 +4955,11 @@ fn export_wannier_for_ludwig(
         return Err("Destination directory is required for Ludwig export.".to_string());
     }
 
-    let project = projects::get_project(app.clone(), config.project_id.clone())?;
-    let calculation = project
-        .cif_variants
-        .iter()
-        .flat_map(|variant| variant.calculations.iter())
-        .find(|calc| calc.id == config.calculation_id)
-        .cloned()
-        .ok_or_else(|| format!("Calculation not found: {}", config.calculation_id))?;
+    let calculation = projects::get_project_calculation(
+        app.clone(),
+        config.project_id.clone(),
+        config.calculation_id.clone(),
+    )?;
 
     if calculation.calc_type != "wannier" {
         return Err(format!(
@@ -4255,8 +5016,12 @@ fn export_wannier_for_ludwig(
         None
     };
 
-    let hamiltonian =
-        parse_wannier_hamiltonian(&seedname, &win_content, &hr_content, wsvec_content.as_deref())?;
+    let hamiltonian = parse_wannier_hamiltonian(
+        &seedname,
+        &win_content,
+        &hr_content,
+        wsvec_content.as_deref(),
+    )?;
     let chemical_potential_ev = config
         .chemical_potential_ev
         .or_else(|| calculation.result.as_ref().and_then(|result| result.fermi_energy))
@@ -4780,10 +5545,9 @@ async fn run_bands_calculation(
                         "WARNING: projwfc output was empty. Continuing without projections.",
                     );
                 } else {
-                    match parse_projwfc_projection_groups(
+                    match parse_projwfc_projection_groups_aligned(
                         &projection_text,
-                        band_data.n_bands,
-                        band_data.n_kpoints,
+                        &band_data.energies,
                     ) {
                         Ok(projections) => {
                             let atom_count = projections.atom_groups.len();
@@ -5979,7 +6743,8 @@ async fn run_bands_hpc_background(
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
     )?;
-    if !dependency_stage.remote_hydration_commands.is_empty() {
+    let has_remote_hydration = !dependency_stage.remote_hydration_commands.is_empty();
+    if has_remote_hydration {
         let hydrate_line =
             "[QCortado] Remote SCF dependency hydration is enabled for this run.".to_string();
         let _ = app.emit(&format!("task-output:{}", task_id), &hydrate_line);
@@ -6015,7 +6780,10 @@ async fn run_bands_hpc_background(
             "projwfc.in",
             "projwfc.out",
         );
-        commands.push(format!("{} || echo \"WARNING: projwfc.x failed\"", projwfc_cmd));
+        commands.push(format!(
+            "{} || echo \"WARNING: projwfc.x failed\"",
+            projwfc_cmd
+        ));
     }
 
     let mut bundle_files = vec![
@@ -6090,11 +6858,9 @@ async fn run_bands_hpc_background(
             }
         };
         if !projection_text.trim().is_empty() {
-            if let Ok(projections) = parse_projwfc_projection_groups(
-                &projection_text,
-                band_data.n_bands,
-                band_data.n_kpoints,
-            ) {
+            if let Ok(projections) =
+                parse_projwfc_projection_groups_aligned(&projection_text, &band_data.energies)
+            {
                 band_data.projections = Some(projections);
             }
         }
@@ -6584,10 +7350,9 @@ async fn run_bands_background(
                             .to_string()
                     );
                 } else {
-                    match parse_projwfc_projection_groups(
+                    match parse_projwfc_projection_groups_aligned(
                         &projection_text,
-                        band_data.n_bands,
-                        band_data.n_kpoints,
+                        &band_data.energies,
                     ) {
                         Ok(projections) => {
                             let atom_count = projections.atom_groups.len();
@@ -6689,7 +7454,8 @@ async fn start_wannier_calculation(
                 }
                 Err(e) => {
                     pm.fail(&tid, e.clone()).await;
-                    let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
                 }
             }
         });
@@ -6728,8 +7494,7 @@ async fn start_wannier_calculation(
 
         match result {
             Ok(wannier_result) => {
-                let json =
-                    serde_json::to_value(&wannier_result).unwrap_or(serde_json::Value::Null);
+                let json = serde_json::to_value(&wannier_result).unwrap_or(serde_json::Value::Null);
                 pm.complete(&tid, json).await;
                 let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
             }
@@ -6821,11 +7586,17 @@ async fn run_wannier_background(
     };
     let win_content = generate_wannier90_win(&config, &kpoints)?;
     let nscf_input = generate_pw_input(&nscf_calc);
-    let pw2_config = config.pw2wannier90.clone().unwrap_or_else(Pw2Wannier90Config::default);
+    let pw2_config = config
+        .pw2wannier90
+        .clone()
+        .unwrap_or_else(Pw2Wannier90Config::default);
     let pw2wan_input = generate_pw2wannier90_input(&config, &pw2_config);
 
-    std::fs::write(work_path.join(format!("{}.win", config.seedname)), &win_content)
-        .map_err(|e| format!("Failed to write Wannier .win file: {}", e))?;
+    std::fs::write(
+        work_path.join(format!("{}.win", config.seedname)),
+        &win_content,
+    )
+    .map_err(|e| format!("Failed to write Wannier .win file: {}", e))?;
     std::fs::write(work_path.join("nscf.in"), &nscf_input)
         .map_err(|e| format!("Failed to write nscf.in: {}", e))?;
     std::fs::write(work_path.join("pw2wan.in"), &pw2wan_input)
@@ -6987,7 +7758,10 @@ async fn run_wannier_hpc_background(
     };
     let win_content = generate_wannier90_win(&config, &kpoints)?;
     let nscf_input = generate_pw_input(&nscf_calc);
-    let pw2_config = config.pw2wannier90.clone().unwrap_or_else(Pw2Wannier90Config::default);
+    let pw2_config = config
+        .pw2wannier90
+        .clone()
+        .unwrap_or_else(Pw2Wannier90Config::default);
     let pw2wan_input = generate_pw2wannier90_input(&config, &pw2_config);
 
     let dependency_stage = resolve_hpc_scf_dependency_stage(
@@ -7266,6 +8040,10 @@ async fn run_dos_hpc_background(
     commands.push(build_hpc_qe_input_command(
         &profile, "dos.x", None, "dos.in", "dos.out",
     ));
+    let bundle_files = vec![
+        ("nscf.in".to_string(), nscf_input),
+        ("dos.in".to_string(), dos_input),
+    ];
     let work_path = run_hpc_bundle_task(
         app,
         pm,
@@ -7277,10 +8055,7 @@ async fn run_dos_hpc_background(
         resources,
         &working_dir,
         commands,
-        vec![
-            ("nscf.in".to_string(), nscf_input),
-            ("dos.in".to_string(), dos_input),
-        ],
+        bundle_files,
         bundle_copies,
         cancel_flag,
     )
@@ -7793,6 +8568,10 @@ async fn run_fermi_surface_hpc_background(
         "if [ -d ./tmp ]; then find ./tmp -type f \\( -iname '*.frmsf' -o -iname '*.bxsf' \\) -exec cp -n {} . \\; || true; rm -rf ./tmp; fi"
             .to_string(),
     );
+    let bundle_files = vec![
+        ("nscf.in".to_string(), nscf_input),
+        ("fermi_velocity.in".to_string(), fermi_input),
+    ];
     let work_path = run_hpc_bundle_task(
         app,
         pm,
@@ -7804,10 +8583,7 @@ async fn run_fermi_surface_hpc_background(
         resources,
         &working_dir,
         commands,
-        vec![
-            ("nscf.in".to_string(), nscf_input),
-            ("fermi_velocity.in".to_string(), fermi_input),
-        ],
+        bundle_files,
         bundle_copies,
         cancel_flag,
     )
@@ -8009,7 +8785,10 @@ async fn run_fermi_surface_background(
             .map_err(|e| format!("Failed to write NSCF input: {}", e))?;
     }
 
-    let nscf_stdout = nscf_child.stdout.take().ok_or("Failed to capture pw.x stdout")?;
+    let nscf_stdout = nscf_child
+        .stdout
+        .take()
+        .ok_or("Failed to capture pw.x stdout")?;
     let mut nscf_reader = BufReader::new(nscf_stdout).lines();
     let mut nscf_output = String::new();
 
@@ -9467,6 +10246,7 @@ pub fn run() {
         projects::list_projects,
         projects::list_project_folders,
         projects::get_project,
+        projects::get_project_calculation,
         projects::set_last_opened_cif,
         projects::get_cif_crystal_data,
         projects::get_cif_content,
@@ -9506,6 +10286,7 @@ pub fn run() {
         hpc_get_cluster_snapshot,
         hpc_sample_utilization,
         hpc_list_remote_pseudopotentials,
+        hpc_list_remote_pseudopotential_metadata,
         hpc_load_remote_sssp_data,
         hpc_preview_slurm_script,
         hpc_open_activity_window,
@@ -9533,6 +10314,7 @@ pub fn run() {
         set_project_dir,
         get_project_dir,
         list_pseudopotentials,
+        list_pseudopotential_metadata,
         load_sssp_data,
         // Background task commands
         start_scf_calculation,
@@ -9553,6 +10335,7 @@ pub fn run() {
         projects::create_project,
         projects::create_project_folder,
         projects::get_project,
+        projects::get_project_calculation,
         projects::update_project_metadata,
         projects::rename_project_folder,
         projects::delete_project_folder,

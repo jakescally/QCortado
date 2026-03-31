@@ -73,7 +73,18 @@ export interface CrystalData {
   anisotropic_params: AnisotropicParams[];
 }
 
-export type SCFPreset = "standard" | "phonon" | "relax";
+export type SCFPreset = "standard" | "phonon" | "relax" | "soc";
+
+export interface PseudopotentialMetadata {
+  filename: string;
+  supports_soc: boolean;
+  pseudo_type?: string | null;
+  relativistic?: string | null;
+  cutoff_wfc?: number | null;
+  cutoff_rho?: number | null;
+  cutoff_wfc_source?: string | null;
+  cutoff_rho_source?: string | null;
+}
 
 export type ExecutionMode = "local" | "hpc";
 export type HpcAuthMethod = "ssh_key" | "password";

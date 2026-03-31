@@ -363,9 +363,10 @@ fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<Ce
         PositionUnits::Angstrom => 1.0,
         PositionUnits::Bohr => BOHR_TO_ANGSTROM,
         PositionUnits::Alat => {
-            let celldm = system
-                .celldm
-                .ok_or_else(|| "CELL_PARAMETERS in alat units require celldm(1) to convert to angstrom.".to_string())?;
+            let celldm = system.celldm.ok_or_else(|| {
+                "CELL_PARAMETERS in alat units require celldm(1) to convert to angstrom."
+                    .to_string()
+            })?;
             let alat_bohr = celldm[0];
             if alat_bohr <= 0.0 {
                 return Err("Invalid celldm(1) for alat cell conversion.".to_string());
@@ -373,7 +374,10 @@ fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<Ce
             alat_bohr * BOHR_TO_ANGSTROM
         }
         PositionUnits::Crystal => {
-            return Err("CELL_PARAMETERS in crystal units cannot be exported to Wannier90 unit_cell_cart.".to_string());
+            return Err(
+                "CELL_PARAMETERS in crystal units cannot be exported to Wannier90 unit_cell_cart."
+                    .to_string(),
+            );
         }
     };
 
@@ -401,7 +405,10 @@ fn parse_win_bool_assignment(content: &str, key: &str) -> Option<bool> {
     let prefix = format!("{} =", key);
     content.lines().find_map(|line| {
         let trimmed = line.trim();
-        if !trimmed.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+        if !trimmed
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+        {
             return None;
         }
         let (_, raw_value) = trimmed.split_once('=')?;
@@ -429,12 +436,10 @@ fn parse_win_unit_cell_angstrom(content: &str) -> Result<CellMatrix, String> {
             let scale = match unit.as_str() {
                 "ang" | "angstrom" => 1.0,
                 "bohr" => BOHR_TO_ANGSTROM,
-                "alat" => {
-                    return Err(
-                        "Wannier .win files written in alat units are not supported for Ludwig export."
-                            .to_string(),
-                    )
-                }
+                "alat" => return Err(
+                    "Wannier .win files written in alat units are not supported for Ludwig export."
+                        .to_string(),
+                ),
                 _ => {
                     return Err(format!(
                         "Unsupported unit_cell_cart unit '{}' in Wannier .win file.",
@@ -463,7 +468,10 @@ fn parse_win_unit_cell_angstrom(content: &str) -> Result<CellMatrix, String> {
     Err("Could not find begin unit_cell_cart block in Wannier .win file.".to_string())
 }
 
-fn embed_in_plane_lattice(lattice_vectors_angstrom: &CellMatrix, in_plane_axes: [u8; 2]) -> Result<[[f64; 2]; 2], String> {
+fn embed_in_plane_lattice(
+    lattice_vectors_angstrom: &CellMatrix,
+    in_plane_axes: [u8; 2],
+) -> Result<[[f64; 2]; 2], String> {
     let axis0 = usize::from(in_plane_axes[0]);
     let axis1 = usize::from(in_plane_axes[1]);
     if axis0 >= 3 || axis1 >= 3 || axis0 == axis1 {
@@ -556,11 +564,15 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
     }
 
     let source = config.source_metadata.as_ref();
-    let source_nspin = source.and_then(|value| value.nspin).unwrap_or(config.base_calculation.system.nspin);
-    let source_noncolin =
-        source.and_then(|value| value.noncolin).unwrap_or(config.base_calculation.system.noncolin);
-    let source_lspinorb =
-        source.and_then(|value| value.lspinorb).unwrap_or(config.base_calculation.system.lspinorb);
+    let source_nspin = source
+        .and_then(|value| value.nspin)
+        .unwrap_or(config.base_calculation.system.nspin);
+    let source_noncolin = source
+        .and_then(|value| value.noncolin)
+        .unwrap_or(config.base_calculation.system.noncolin);
+    let source_lspinorb = source
+        .and_then(|value| value.lspinorb)
+        .unwrap_or(config.base_calculation.system.lspinorb);
     if source_nspin != 1 || source_noncolin || source_lspinorb {
         return Err(
             "Scalar Wannier v1 requires a source SCF with nspin = 1, noncolin = false, and lspinorb = false."
@@ -601,8 +613,7 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
         .unwrap_or(false)
     {
         return Err(
-            "Scalar Wannier v1 does not certify vdW-corrected source calculations."
-                .to_string(),
+            "Scalar Wannier v1 does not certify vdW-corrected source calculations.".to_string(),
         );
     }
 
@@ -639,14 +650,18 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
             (disentanglement.dis_win_min, disentanglement.dis_froz_min)
         {
             if froz_min < win_min {
-                return Err("Frozen window must lie inside the outer disentanglement window.".to_string());
+                return Err(
+                    "Frozen window must lie inside the outer disentanglement window.".to_string(),
+                );
             }
         }
         if let (Some(win_max), Some(froz_max)) =
             (disentanglement.dis_win_max, disentanglement.dis_froz_max)
         {
             if froz_max > win_max {
-                return Err("Frozen window must lie inside the outer disentanglement window.".to_string());
+                return Err(
+                    "Frozen window must lie inside the outer disentanglement window.".to_string(),
+                );
             }
         }
     }
@@ -696,7 +711,12 @@ fn normalize_wannier_nscf_occupations(
             } else {
                 nscf_calc.system.occupations = Occupations::Smearing;
                 nscf_calc.system.smearing = SmearingType::Gaussian;
-                if nscf_calc.system.degauss.map(|value| value <= 0.0).unwrap_or(true) {
+                if nscf_calc
+                    .system
+                    .degauss
+                    .map(|value| value <= 0.0)
+                    .unwrap_or(true)
+                {
                     nscf_calc.system.degauss = Some(0.02);
                 }
                 notes.push(
@@ -714,7 +734,12 @@ fn normalize_wannier_nscf_occupations(
                     "Using fixed occupations for the isolated Wannier NSCF because num_bands = num_wann, avoiding unnecessary Fermi-level bracketing on an isolated manifold."
                         .to_string(),
                 );
-            } else if nscf_calc.system.degauss.map(|value| value <= 0.0).unwrap_or(true) {
+            } else if nscf_calc
+                .system
+                .degauss
+                .map(|value| value <= 0.0)
+                .unwrap_or(true)
+            {
                 nscf_calc.system.degauss = Some(0.02);
                 notes.push(
                     "Applied default degauss = 0.02 Ry for the Wannier NSCF smearing run."
@@ -778,7 +803,9 @@ fn format_projection(spec: &WannierProjectionSpec) -> Result<String, String> {
                 .as_deref()
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| "Element-targeted Wannier projections require a symbol.".to_string())?;
+                .ok_or_else(|| {
+                    "Element-targeted Wannier projections require a symbol.".to_string()
+                })?;
             Ok(format!("{}:{}", symbol, orbital))
         }
         WannierProjectionTargetType::Site => {
@@ -797,7 +824,11 @@ fn format_exclude_bands(exclude_bands: &[u32]) -> Option<String> {
     if exclude_bands.is_empty() {
         return None;
     }
-    let mut values: Vec<u32> = exclude_bands.iter().copied().filter(|value| *value > 0).collect();
+    let mut values: Vec<u32> = exclude_bands
+        .iter()
+        .copied()
+        .filter(|value| *value > 0)
+        .collect();
     values.sort_unstable();
     values.dedup();
     if values.is_empty() {
@@ -828,7 +859,10 @@ fn format_exclude_bands(exclude_bands: &[u32]) -> Option<String> {
     Some(chunks.join(", "))
 }
 
-pub fn generate_wannier90_win(config: &WannierCalculationConfig, kpoints: &[KPoint]) -> Result<String, String> {
+pub fn generate_wannier90_win(
+    config: &WannierCalculationConfig,
+    kpoints: &[KPoint],
+) -> Result<String, String> {
     validate_wannier_config(config)?;
     let system = &config.base_calculation.system;
     let cell = convert_cell_matrix_to_angstrom(system)?;
@@ -892,12 +926,7 @@ pub fn generate_wannier90_win(config: &WannierCalculationConfig, kpoints: &[KPoi
     writeln!(output, "begin unit_cell_cart").unwrap();
     writeln!(output, "angstrom").unwrap();
     for row in &cell {
-        writeln!(
-            output,
-            "{:16.10} {:16.10} {:16.10}",
-            row[0], row[1], row[2]
-        )
-        .unwrap();
+        writeln!(output, "{:16.10} {:16.10} {:16.10}", row[0], row[1], row[2]).unwrap();
     }
     writeln!(output, "end unit_cell_cart").unwrap();
     writeln!(output).unwrap();
@@ -968,31 +997,51 @@ pub fn generate_pw2wannier90_input(
     writeln!(
         output,
         "  write_amn = .{}.,",
-        if pw2_config.write_amn { "true" } else { "false" }
+        if pw2_config.write_amn {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
         output,
         "  write_mmn = .{}.,",
-        if pw2_config.write_mmn { "true" } else { "false" }
+        if pw2_config.write_mmn {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
         output,
         "  write_spn = .{}.,",
-        if pw2_config.write_spn { "true" } else { "false" }
+        if pw2_config.write_spn {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
         output,
         "  write_unk = .{}.,",
-        if pw2_config.write_unk { "true" } else { "false" }
+        if pw2_config.write_unk {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
         output,
         "  write_dmn = .{}.,",
-        if pw2_config.write_dmn { "true" } else { "false" }
+        if pw2_config.write_dmn {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
@@ -1004,28 +1053,36 @@ pub fn generate_pw2wannier90_input(
     writeln!(
         output,
         "  scdm_proj = .{}.,",
-        if pw2_config.scdm_proj { "true" } else { "false" }
+        if pw2_config.scdm_proj {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(
         output,
         "  atom_proj = .{}.,",
-        if pw2_config.atom_proj { "true" } else { "false" }
+        if pw2_config.atom_proj {
+            "true"
+        } else {
+            "false"
+        }
     )
     .unwrap();
     writeln!(output, "/").unwrap();
     output
 }
 
-pub fn parse_wannier_wout(content: &str) -> Result<(Vec<WannierSpread>, WannierConvergenceData), String> {
+pub fn parse_wannier_wout(
+    content: &str,
+) -> Result<(Vec<WannierSpread>, WannierConvergenceData), String> {
     let spread_re = Regex::new(
         r"WF centre and spread\s+(\d+)\s+\(\s*([-\d.Ee+]+)\s*,\s*([-\d.Ee+]+)\s*,\s*([-\d.Ee+]+)\s*\)\s*([-\d.Ee+]+)",
     )
     .map_err(|e| format!("Failed to compile Wannier spread regex: {}", e))?;
-    let omega_re = Regex::new(
-        r"Omega\s+(I|D|OD|Total)\s*=\s*([-\d.Ee+]+)",
-    )
-    .map_err(|e| format!("Failed to compile Wannier omega regex: {}", e))?;
+    let omega_re = Regex::new(r"Omega\s+(I|D|OD|Total)\s*=\s*([-\d.Ee+]+)")
+        .map_err(|e| format!("Failed to compile Wannier omega regex: {}", e))?;
     let iter_re = Regex::new(r"^\s*(\d+)\s+[-\d.Ee+]+\s+[-\d.Ee+]+\s+[-\d.Ee+]+")
         .map_err(|e| format!("Failed to compile Wannier iteration regex: {}", e))?;
 
@@ -1075,9 +1132,7 @@ pub fn parse_wannier_wout(content: &str) -> Result<(Vec<WannierSpread>, WannierC
 
         if line.contains("<-- CONV") {
             if let Some(caps) = iter_re.captures(line) {
-                convergence.iterations = caps
-                    .get(1)
-                    .and_then(|m| m.as_str().parse::<u32>().ok());
+                convergence.iterations = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
             }
             convergence.converged = true;
         }
@@ -1241,7 +1296,10 @@ pub fn read_wannier_result(
     let wout_path = work_path.join(format!("{}.wout", config.seedname));
     let band_path = work_path.join(format!("{}_band.dat", config.seedname));
     if !wout_path.exists() {
-        return Err(format!("Wannier output file not found: {}", wout_path.display()));
+        return Err(format!(
+            "Wannier output file not found: {}",
+            wout_path.display()
+        ));
     }
     if !band_path.exists() {
         return Err(format!(
@@ -1288,7 +1346,10 @@ pub fn read_wannier_result(
 }
 
 fn parse_wannier_hr(content: &str) -> Result<(u32, Vec<WannierHrTerm>), String> {
-    let mut lines = content.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let _header = lines
         .next()
         .ok_or_else(|| "Wannier hr.dat file is empty.".to_string())?;
@@ -1331,9 +1392,9 @@ fn parse_wannier_hr(content: &str) -> Result<(u32, Vec<WannierHrTerm>), String> 
 
     let mut terms = Vec::with_capacity(expected_terms);
     for term_index in 0..expected_terms {
-        let line = lines
-            .next()
-            .ok_or_else(|| "Unexpected end of hr.dat while reading Hamiltonian terms.".to_string())?;
+        let line = lines.next().ok_or_else(|| {
+            "Unexpected end of hr.dat while reading Hamiltonian terms.".to_string()
+        })?;
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 7 {
             return Err(format!("Malformed hr.dat term line: '{}'.", line));
@@ -1391,20 +1452,23 @@ fn parse_wannier_wsvec(content: &str) -> Result<HashMap<String, Vec<[i32; 3]>>, 
         let n = parse_usize_token(header_parts[4], "wsvec n")?
             .checked_sub(1)
             .ok_or_else(|| "wsvec orbital indices must start at 1.".to_string())?;
-        let count_line = lines
-            .next()
-            .ok_or_else(|| "Unexpected end of wsvec.dat while reading translation count.".to_string())?;
+        let count_line = lines.next().ok_or_else(|| {
+            "Unexpected end of wsvec.dat while reading translation count.".to_string()
+        })?;
         let count = count_line
             .parse::<usize>()
             .map_err(|_| format!("Invalid wsvec multiplicity '{}'.", count_line))?;
         let mut translations = Vec::with_capacity(count);
         for _ in 0..count {
-            let vector_line = lines
-                .next()
-                .ok_or_else(|| "Unexpected end of wsvec.dat while reading translation vectors.".to_string())?;
+            let vector_line = lines.next().ok_or_else(|| {
+                "Unexpected end of wsvec.dat while reading translation vectors.".to_string()
+            })?;
             let parts: Vec<&str> = vector_line.split_whitespace().collect();
             if parts.len() < 3 {
-                return Err(format!("Malformed wsvec translation line: '{}'.", vector_line));
+                return Err(format!(
+                    "Malformed wsvec translation line: '{}'.",
+                    vector_line
+                ));
             }
             translations.push([
                 parse_i32_token(parts[0], "wsvec T1")?,
@@ -1561,7 +1625,9 @@ pub fn export_ludwig_bundle(
         return Err("Ludwig export axes must each be one of 0, 1, 2.".to_string());
     }
     if axis_a == axis_b || axis_a == slice_axis || axis_b == slice_axis {
-        return Err("Ludwig export requires a permutation of three distinct reciprocal axes.".to_string());
+        return Err(
+            "Ludwig export requires a permutation of three distinct reciprocal axes.".to_string(),
+        );
     }
 
     let slice_coordinate = config.slice_coordinate.rem_euclid(1.0);
@@ -1633,8 +1699,11 @@ pub fn export_ludwig_bundle(
         band_count: hamiltonian.num_wann,
         lattice_vectors_angstrom: hamiltonian.lattice_vectors_angstrom,
         in_plane_lattice_angstrom,
-        fractional_domain: "0 <= kx_frac, ky_frac < 1 in the selected reciprocal-basis directions".to_string(),
-        energy_reference: "Band energies are shifted by the exported chemical potential so Ludwig sees EF = 0.".to_string(),
+        fractional_domain: "0 <= kx_frac, ky_frac < 1 in the selected reciprocal-basis directions"
+            .to_string(),
+        energy_reference:
+            "Band energies are shifted by the exported chemical potential so Ludwig sees EF = 0."
+                .to_string(),
         provenance_files: copied_provenance,
     };
 
@@ -1670,8 +1739,8 @@ pub fn export_ludwig_bundle(
 mod tests {
     use super::*;
     use crate::qe::types::{
-        Atom, AtomicSpecies, BravaisLattice, CalculationType, KPoints, Occupations,
-        PositionUnits, QESystem, QECalculation, SmearingType,
+        Atom, AtomicSpecies, BravaisLattice, CalculationType, KPoints, Occupations, PositionUnits,
+        QECalculation, QESystem, SmearingType,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1956,7 +2025,9 @@ mod tests {
         assert_eq!(nscf.system.occupations, Occupations::Smearing);
         assert_eq!(nscf.system.smearing, SmearingType::Gaussian);
         assert_eq!(nscf.system.degauss, Some(0.02));
-        assert!(notes.iter().any(|note| note.contains("tetrahedra occupations")));
+        assert!(notes
+            .iter()
+            .any(|note| note.contains("tetrahedra occupations")));
     }
 
     #[test]
@@ -2177,7 +2248,12 @@ written by qcortado test
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("qcortado_{}_{}_{}", label, std::process::id(), nanos))
+        std::env::temp_dir().join(format!(
+            "qcortado_{}_{}_{}",
+            label,
+            std::process::id(),
+            nanos
+        ))
     }
 
     #[test]
@@ -2205,11 +2281,21 @@ written by qcortado test
         let temp_dir = unique_temp_dir("wannier_artifacts");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let seedname = "toy";
-        std::fs::write(temp_dir.join(format!("{}_wsvec.dat", seedname)), sample_wsvec_content()).unwrap();
-        std::fs::write(temp_dir.join(format!("{}_hr.dat", seedname)), sample_hr_content()).unwrap();
+        std::fs::write(
+            temp_dir.join(format!("{}_wsvec.dat", seedname)),
+            sample_wsvec_content(),
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.join(format!("{}_hr.dat", seedname)),
+            sample_hr_content(),
+        )
+        .unwrap();
 
         let artifacts = collect_wannier_artifacts(&temp_dir, seedname);
-        assert!(artifacts.iter().any(|entry| entry.file_name == "toy_wsvec.dat"));
+        assert!(artifacts
+            .iter()
+            .any(|entry| entry.file_name == "toy_wsvec.dat"));
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }
@@ -2253,18 +2339,28 @@ written by qcortado test
             &hamiltonian,
             &config,
             1.5,
-            &[win_path.clone(), hr_path.clone(), wsvec_path.clone(), wout_path.clone()],
+            &[
+                win_path.clone(),
+                hr_path.clone(),
+                wsvec_path.clone(),
+                wout_path.clone(),
+            ],
         )
         .unwrap();
 
-        let metadata = std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("metadata.json")).unwrap();
-        let bands = std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("bands.csv")).unwrap();
+        let metadata =
+            std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("metadata.json"))
+                .unwrap();
+        let bands =
+            std::fs::read_to_string(PathBuf::from(&result.bundle_path).join("bands.csv")).unwrap();
 
         assert!(metadata.contains("\"slice_coordinate\": 0.25"));
         assert!(metadata.contains("\"band_count\": 1"));
         assert!(bands.lines().next().unwrap().contains("band_1"));
         assert!(bands.contains("-5.500000000000"));
-        assert!(PathBuf::from(&result.bundle_path).join("toy_wsvec.dat").exists());
+        assert!(PathBuf::from(&result.bundle_path)
+            .join("toy_wsvec.dat")
+            .exists());
 
         let _ = std::fs::remove_dir_all(root_dir);
         let _ = std::fs::remove_dir_all(provenance_dir);

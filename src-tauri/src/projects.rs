@@ -974,6 +974,134 @@ fn calculate_directory_size(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+fn calculation_json_path(project_dir: &Path, calc_id: &str) -> PathBuf {
+    project_dir.join("calculations").join(calc_id).join("calc.json")
+}
+
+fn read_project_json(project_json_path: &Path) -> Result<Project, String> {
+    let content = fs::read_to_string(project_json_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))
+}
+
+fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
+    let Some(result) = calc.result.as_ref() else {
+        return false;
+    };
+
+    !result.raw_output.is_empty()
+        || result.eigenvalues.is_some()
+        || result.band_data.is_some()
+        || result.dos_data.is_some()
+        || result.phonon_data.is_some()
+        || result.wannier_data.is_some()
+}
+
+fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
+    QEResult {
+        converged: result.converged,
+        total_energy: result.total_energy,
+        fermi_energy: result.fermi_energy,
+        total_magnetization: result.total_magnetization,
+        forces: None,
+        stress: None,
+        n_scf_steps: result.n_scf_steps,
+        wall_time_seconds: result.wall_time_seconds,
+        eigenvalues: None,
+        raw_output: String::new(),
+        band_data: None,
+        phonon_data: None,
+        dos_data: None,
+        wannier_data: None,
+    }
+}
+
+fn summarize_calculation_for_project(calc: &CalculationRun) -> CalculationRun {
+    let mut summary = calc.clone();
+    summary.result = summary
+        .result
+        .as_ref()
+        .map(summarize_qe_result_for_project);
+    summary
+}
+
+fn summarize_project_for_storage(project: &Project) -> Project {
+    let mut summary = project.clone();
+    for variant in &mut summary.cif_variants {
+        variant.calculations = variant
+            .calculations
+            .iter()
+            .map(summarize_calculation_for_project)
+            .collect();
+    }
+    summary
+}
+
+fn write_project_json_summary(project_json_path: &Path, project: &Project) -> Result<(), String> {
+    let summary = summarize_project_for_storage(project);
+    let serialized = serde_json::to_string_pretty(&summary)
+        .map_err(|e| format!("Failed to serialize project: {}", e))?;
+    fs::write(project_json_path, serialized)
+        .map_err(|e| format!("Failed to write project.json: {}", e))
+}
+
+fn load_full_calculation_from_disk(
+    project_dir: &Path,
+    calc_id: &str,
+) -> Result<Option<CalculationRun>, String> {
+    let calc_json_path = calculation_json_path(project_dir, calc_id);
+    if !calc_json_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&calc_json_path)
+        .map_err(|e| format!("Failed to read calc.json: {}", e))?;
+    let calculation = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse calc.json: {}", e))?;
+    Ok(Some(calculation))
+}
+
+fn merge_summary_into_full_calculation(full: &mut CalculationRun, summary: &CalculationRun) {
+    full.calc_type = summary.calc_type.clone();
+    full.parameters = summary.parameters.clone();
+    full.started_at = summary.started_at.clone();
+    full.completed_at = summary.completed_at.clone();
+    full.tags = summary.tags.clone();
+    full.storage_bytes = summary.storage_bytes;
+
+    if let Some(summary_result) = summary.result.as_ref() {
+        match full.result.as_mut() {
+            Some(full_result) => {
+                full_result.converged = summary_result.converged;
+                full_result.total_energy = summary_result.total_energy;
+                full_result.fermi_energy = summary_result.fermi_energy;
+                full_result.total_magnetization = summary_result.total_magnetization;
+                full_result.n_scf_steps = summary_result.n_scf_steps;
+                full_result.wall_time_seconds = summary_result.wall_time_seconds;
+            }
+            None => {
+                full.result = Some(summary_result.clone());
+            }
+        }
+    }
+}
+
+fn write_calculation_json(project_dir: &Path, calculation: &CalculationRun) -> Result<(), String> {
+    let calc_json_path = calculation_json_path(project_dir, &calculation.id);
+    if !calc_json_path.exists() {
+        return Ok(());
+    }
+
+    let mut full_calculation = load_full_calculation_from_disk(project_dir, &calculation.id)?
+        .unwrap_or_else(|| calculation.clone());
+    merge_summary_into_full_calculation(&mut full_calculation, calculation);
+
+    let serialized = serde_json::to_string_pretty(&full_calculation)
+        .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+    fs::write(&calc_json_path, serialized)
+        .map_err(|e| format!("Failed to write calc.json: {}", e))
+}
+
 /// Fills missing `storage_bytes` values for legacy calculations.
 fn hydrate_missing_calculation_sizes(
     project: &mut Project,
@@ -1220,20 +1348,14 @@ pub fn delete_project_folder(
             continue;
         }
 
-        let content = fs::read_to_string(&project_json_path)
-            .map_err(|e| format!("Failed to read project.json: {}", e))?;
-        let mut project: Project = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+        let mut project = read_project_json(&project_json_path)?;
 
         if project.folder_id.as_deref() != Some(normalized_folder_id) {
             continue;
         }
 
         project.folder_id = None;
-        let serialized = serde_json::to_string_pretty(&project)
-            .map_err(|e| format!("Failed to serialize project: {}", e))?;
-        fs::write(&project_json_path, serialized)
-            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+        write_project_json_summary(&project_json_path, &project)?;
         moved_projects_to_root += 1;
     }
 
@@ -1273,17 +1395,11 @@ pub fn move_project_to_folder(
     }
 
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     project.folder_id = normalized_folder_id;
 
-    let serialized = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, serialized)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
     Ok(project)
@@ -1311,10 +1427,16 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             continue;
         }
 
-        let content = fs::read_to_string(&project_json)
-            .map_err(|e| format!("Failed to read project.json: {}", e))?;
-        let project: Project = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+        let mut project = read_project_json(&project_json)?;
+        if project
+            .cif_variants
+            .iter()
+            .flat_map(|variant| variant.calculations.iter())
+            .any(calculation_has_embedded_project_detail)
+        {
+            write_project_json_summary(&project_json, &project)?;
+            project = summarize_project_for_storage(&project);
+        }
 
         // Calculate summary info
         let mut calculation_count = 0usize;
@@ -1422,10 +1544,7 @@ pub fn create_project(
     };
 
     // Save project.json
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(project_dir.join("project.json"), project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_dir.join("project.json"), &project)?;
 
     queue_viewer_library_publish(&app);
     Ok(project)
@@ -1442,20 +1561,47 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     }
 
     let project_json = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut project = read_project_json(&project_json)?;
+    let has_embedded_detail = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .any(calculation_has_embedded_project_detail);
 
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
-
-    if hydrate_missing_calculation_sizes(&mut project, &project_dir)? {
-        let updated_project = serde_json::to_string_pretty(&project)
-            .map_err(|e| format!("Failed to serialize project: {}", e))?;
-        fs::write(&project_json, updated_project)
-            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail {
+        write_project_json_summary(&project_json, &project)?;
     }
 
-    Ok(project)
+    Ok(summarize_project_for_storage(&project))
+}
+
+/// Loads a full saved calculation record from disk.
+#[tauri::command]
+pub fn get_project_calculation(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+) -> Result<CalculationRun, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    if let Some(calculation) = load_full_calculation_from_disk(&project_dir, &calc_id)? {
+        return Ok(calculation);
+    }
+
+    let project_json = project_dir.join("project.json");
+    let project = read_project_json(&project_json)?;
+    project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == calc_id)
+        .cloned()
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))
 }
 
 /// Refreshes local storage size for a saved calculation and persists artifact sync metadata.
@@ -1476,10 +1622,7 @@ pub fn refresh_calculation_artifact_metadata(
     let local_storage_bytes = calculate_directory_size(&calc_dir)?;
 
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     let calculation = project
         .cif_variants
@@ -1521,18 +1664,8 @@ pub fn refresh_calculation_artifact_metadata(
 
     let updated_calculation = calculation.clone();
 
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
-
-    let calc_json_path = calc_dir.join("calc.json");
-    if calc_json_path.exists() {
-        let calc_json = serde_json::to_string_pretty(&updated_calculation)
-            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
-        fs::write(&calc_json_path, calc_json)
-            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
-    }
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated_calculation)?;
 
     Ok(local_storage_bytes)
 }
@@ -1564,19 +1697,13 @@ pub fn update_project_metadata(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     project.name = trimmed_name.to_string();
     project.description = normalized_description;
 
     // Save updated project
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
     Ok(project)
@@ -1599,10 +1726,7 @@ pub fn add_cif_to_project(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     // Create CIF variant
     let cif_id = generate_id();
@@ -1635,10 +1759,7 @@ pub fn add_cif_to_project(
     // Add to project and save
     project.cif_variants.push(variant.clone());
 
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
     Ok(variant)
@@ -1667,10 +1788,7 @@ pub fn save_calculation(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     // Find the CIF variant
     let variant = project
@@ -1785,12 +1903,10 @@ pub fn save_calculation(
         .map_err(|e| format!("Failed to write calc.json: {}", e))?;
 
     // Add to variant and save project
-    variant.calculations.push(calc_run.clone());
-
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    variant
+        .calculations
+        .push(summarize_calculation_for_project(&calc_run));
+    write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
     Ok(calc_run)
@@ -2372,10 +2488,7 @@ pub async fn export_project_archive(
         }
 
         let project_json_path = project_dir.join("project.json");
-        let project_json = fs::read_to_string(&project_json_path)
-            .map_err(|e| format!("Failed to read project.json: {}", e))?;
-        let project: Project = serde_json::from_str(&project_json)
-            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+        let project = read_project_json(&project_json_path)?;
 
         emit_project_export_progress(&app_handle, &export_id, &project_id, "scanning", 0, 0);
         let compression_temp_root =
@@ -2785,10 +2898,7 @@ pub async fn import_project_archive(
                 );
             }
 
-            let project_json = fs::read_to_string(&project_json_path)
-                .map_err(|e| format!("Failed to read imported project.json: {}", e))?;
-            let mut project: Project = serde_json::from_str(&project_json)
-                .map_err(|e| format!("Failed to parse imported project.json: {}", e))?;
+            let mut project = read_project_json(&project_json_path)?;
 
             let original_id = project.id.trim().to_string();
             let mut resolved_id = if original_id.is_empty() {
@@ -2804,9 +2914,7 @@ pub async fn import_project_archive(
 
             if project.id != resolved_id {
                 project.id = resolved_id.clone();
-                let updated = serde_json::to_string_pretty(&project)
-                    .map_err(|e| format!("Failed to serialize imported project: {}", e))?;
-                fs::write(&project_json_path, updated)
+                write_project_json_summary(&project_json_path, &project)
                     .map_err(|e| format!("Failed to update imported project.json: {}", e))?;
             }
 
@@ -3053,10 +3161,7 @@ pub async fn delete_calculation(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     // Find the CIF variant and remove the calculation
     let variant = project
@@ -3082,10 +3187,7 @@ pub async fn delete_calculation(
     variant.calculations.remove(calc_index);
 
     // Save updated project
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_json_path, &project)?;
 
     // Delete calculation directory
     let calc_dir = project_dir.join("calculations").join(&calc_id);
@@ -3123,10 +3225,7 @@ pub fn set_calculation_tag(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     // Find calculation and update tags
     let variant = project
@@ -3150,22 +3249,8 @@ pub fn set_calculation_tag(
     let updated_calculation = calculation.clone();
 
     // Save updated project
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
-
-    // Keep calc.json in sync when it exists
-    let calc_json_path = project_dir
-        .join("calculations")
-        .join(&calc_id)
-        .join("calc.json");
-    if calc_json_path.exists() {
-        let calc_json = serde_json::to_string_pretty(&updated_calculation)
-            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
-        fs::write(&calc_json_path, calc_json)
-            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
-    }
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated_calculation)?;
 
     queue_viewer_library_publish(&app);
     Ok(())
@@ -3187,10 +3272,7 @@ pub fn set_last_opened_cif(
 
     // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let mut project = read_project_json(&project_json_path)?;
 
     // Verify CIF exists
     if !project.cif_variants.iter().any(|v| v.id == cif_id) {
@@ -3200,10 +3282,7 @@ pub fn set_last_opened_cif(
     // Update and save
     project.last_opened_cif_id = Some(cif_id);
 
-    let project_json = serde_json::to_string_pretty(&project)
-        .map_err(|e| format!("Failed to serialize project: {}", e))?;
-    fs::write(&project_json_path, project_json)
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    write_project_json_summary(&project_json_path, &project)?;
 
     Ok(())
 }
@@ -3274,139 +3353,106 @@ pub fn get_saved_phonon_data(
         return Err(format!("Project not found: {}", project_id));
     }
 
-    // Load existing project
     let project_json_path = project_dir.join("project.json");
-    let content = fs::read_to_string(&project_json_path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    let mut project: Project = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    let project = read_project_json(&project_json_path)?;
+    let summary_calc = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == calc_id)
+        .cloned()
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+    if summary_calc.calc_type != "phonon" {
+        return Err(format!(
+            "Calculation {} is not a phonon calculation",
+            calc_id
+        ));
+    }
 
-    let mut found_calc = false;
+    let mut calculation = load_full_calculation_from_disk(&project_dir, &calc_id)?
+        .unwrap_or(summary_calc);
     let mut did_recover = false;
-    let mut response: Option<serde_json::Value> = None;
+    let mut dos_data = calculation
+        .result
+        .as_ref()
+        .and_then(|result| result.phonon_data.as_ref())
+        .and_then(|phonon| phonon.get("dos_data"))
+        .cloned();
+    let mut dispersion_data = calculation
+        .result
+        .as_ref()
+        .and_then(|result| result.phonon_data.as_ref())
+        .and_then(|phonon| phonon.get("dispersion_data"))
+        .cloned();
 
-    'outer: for variant in project.cif_variants.iter_mut() {
-        for calc in variant.calculations.iter_mut() {
-            if calc.id != calc_id {
-                continue;
+    let tmp_dir = project_dir.join("calculations").join(&calc_id).join("tmp");
+
+    let dos_missing = match dos_data.as_ref() {
+        Some(v) => v.is_null(),
+        None => true,
+    };
+    if dos_missing {
+        let dos_file = tmp_dir.join("phonon_dos");
+        if dos_file.exists() {
+            if let Ok(dos) = read_phonon_dos_file(&dos_file) {
+                dos_data = Some(serde_json::to_value(dos).map_err(|e| {
+                    format!("Failed to serialize recovered DOS data: {}", e)
+                })?);
+                did_recover = true;
             }
-            found_calc = true;
-
-            if calc.calc_type != "phonon" {
-                return Err(format!(
-                    "Calculation {} is not a phonon calculation",
-                    calc_id
-                ));
-            }
-
-            let mut dos_data = calc
-                .result
-                .as_ref()
-                .and_then(|result| result.phonon_data.as_ref())
-                .and_then(|phonon| phonon.get("dos_data"))
-                .cloned();
-            let mut dispersion_data = calc
-                .result
-                .as_ref()
-                .and_then(|result| result.phonon_data.as_ref())
-                .and_then(|phonon| phonon.get("dispersion_data"))
-                .cloned();
-
-            let tmp_dir = project_dir.join("calculations").join(&calc_id).join("tmp");
-
-            let dos_missing = match dos_data.as_ref() {
-                Some(v) => v.is_null(),
-                None => true,
-            };
-            if dos_missing {
-                let dos_file = tmp_dir.join("phonon_dos");
-                if dos_file.exists() {
-                    if let Ok(dos) = read_phonon_dos_file(&dos_file) {
-                        dos_data = Some(serde_json::to_value(dos).map_err(|e| {
-                            format!("Failed to serialize recovered DOS data: {}", e)
-                        })?);
-                        did_recover = true;
-                    }
-                }
-            }
-
-            let dispersion_missing = match dispersion_data.as_ref() {
-                Some(v) => v.is_null(),
-                None => true,
-            };
-            if dispersion_missing {
-                let dispersion_gp_file = tmp_dir.join("phonon_freq.gp");
-                let dispersion_file = tmp_dir.join("phonon_freq");
-                let source_file = if dispersion_gp_file.exists() {
-                    Some(dispersion_gp_file)
-                } else if dispersion_file.exists() {
-                    Some(dispersion_file)
-                } else {
-                    None
-                };
-                if let Some(source_file) = source_file {
-                    if let Ok(dispersion) = read_phonon_dispersion_file(&source_file) {
-                        dispersion_data = Some(serde_json::to_value(dispersion).map_err(|e| {
-                            format!("Failed to serialize recovered dispersion data: {}", e)
-                        })?);
-                        did_recover = true;
-                    }
-                }
-            }
-
-            let merged = serde_json::json!({
-                "dos_data": dos_data.unwrap_or(serde_json::Value::Null),
-                "dispersion_data": dispersion_data.unwrap_or(serde_json::Value::Null),
-            });
-
-            if did_recover {
-                if let Some(result) = calc.result.as_mut() {
-                    result.phonon_data = Some(merged.clone());
-                }
-            }
-
-            response = Some(merged);
-            break 'outer;
         }
     }
 
-    if !found_calc {
-        return Err(format!("Calculation not found: {}", calc_id));
+    let dispersion_missing = match dispersion_data.as_ref() {
+        Some(v) => v.is_null(),
+        None => true,
+    };
+    if dispersion_missing {
+        let dispersion_gp_file = tmp_dir.join("phonon_freq.gp");
+        let dispersion_file = tmp_dir.join("phonon_freq");
+        let source_file = if dispersion_gp_file.exists() {
+            Some(dispersion_gp_file)
+        } else if dispersion_file.exists() {
+            Some(dispersion_file)
+        } else {
+            None
+        };
+        if let Some(source_file) = source_file {
+            if let Ok(dispersion) = read_phonon_dispersion_file(&source_file) {
+                dispersion_data = Some(serde_json::to_value(dispersion).map_err(|e| {
+                    format!("Failed to serialize recovered dispersion data: {}", e)
+                })?);
+                did_recover = true;
+            }
+        }
     }
+
+    let merged = serde_json::json!({
+        "dos_data": dos_data.unwrap_or(serde_json::Value::Null),
+        "dispersion_data": dispersion_data.unwrap_or(serde_json::Value::Null),
+    });
 
     if did_recover {
-        // Persist recovered phonon data into project and calc JSON
-        let project_json = serde_json::to_string_pretty(&project)
-            .map_err(|e| format!("Failed to serialize project: {}", e))?;
-        fs::write(&project_json_path, project_json)
-            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+        let result = calculation.result.get_or_insert_with(QEResult::default);
+        result.phonon_data = Some(merged.clone());
 
-        let calc_json_path = project_dir
-            .join("calculations")
-            .join(&calc_id)
-            .join("calc.json");
-        if calc_json_path.exists() {
-            let calc = project
-                .cif_variants
-                .iter()
-                .flat_map(|variant| variant.calculations.iter())
-                .find(|calc| calc.id == calc_id)
-                .ok_or_else(|| {
-                    format!("Calculation not found while writing calc.json: {}", calc_id)
-                })?;
-            let calc_json = serde_json::to_string_pretty(calc)
-                .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
-            fs::write(&calc_json_path, calc_json)
-                .map_err(|e| format!("Failed to write calc.json: {}", e))?;
+        let calc_json_path = calculation_json_path(&project_dir, &calc_id);
+        if let Some(parent) = calc_json_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create calculation directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
         }
+        let calc_json = serde_json::to_string_pretty(&calculation)
+            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+        fs::write(&calc_json_path, calc_json)
+            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
     }
 
-    Ok(response.unwrap_or_else(|| {
-        serde_json::json!({
-            "dos_data": serde_json::Value::Null,
-            "dispersion_data": serde_json::Value::Null,
-        })
-    }))
+    Ok(merged)
 }
 
 #[cfg(test)]

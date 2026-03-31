@@ -5,6 +5,7 @@ import {
   HpcLauncher,
   HpcProfile,
   HpcResourceMode,
+  PseudopotentialMetadata,
   SlurmResourceRequest,
 } from "./types";
 
@@ -309,6 +310,16 @@ export async function listRemotePseudopotentials(
   profileId?: string | null,
 ): Promise<string[]> {
   return invoke<string[]>("hpc_list_remote_pseudopotentials", {
+    profileId: profileId ?? null,
+    pseudoDir: pseudoDir ?? null,
+  });
+}
+
+export async function listRemotePseudopotentialMetadata(
+  pseudoDir?: string | null,
+  profileId?: string | null,
+): Promise<PseudopotentialMetadata[]> {
+  return invoke<PseudopotentialMetadata[]>("hpc_list_remote_pseudopotential_metadata", {
     profileId: profileId ?? null,
     pseudoDir: pseudoDir ?? null,
   });

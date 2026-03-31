@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -9,12 +9,18 @@ import {
 } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
+import { resolveSavedScfStructure } from "../lib/optimizedStructure";
+import { analyzeCrystalSymmetry } from "../lib/symmetryTransform";
+import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { ElectronicDOSData } from "./ElectronicDOSPlot";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -221,8 +227,7 @@ export function ElectronicDOSWizard({
 
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -248,6 +253,14 @@ export function ElectronicDOSWizard({
   const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
   const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
   const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
+
+  useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
 
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
   const hpcCommandLines = useMemo(
@@ -328,13 +341,6 @@ export function ElectronicDOSWizard({
     }
   }
 
-  const handleOutputScroll = () => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  };
-
   useEffect(() => {
     async function init() {
       try {
@@ -368,12 +374,6 @@ export function ElectronicDOSWizard({
 
     void init();
   }, [crystalData, qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
-
-  useEffect(() => {
-    const el = outputRef.current;
-    if (!el || !followOutputRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
 
   useEffect(() => {
     if (!isHpcMode || step !== "run") {
@@ -460,7 +460,10 @@ export function ElectronicDOSWizard({
     }
 
     setIsRunning(task.status === "running");
-    setOutput(task.output.join("\n") + (task.output.length > 0 ? "\n" : ""));
+    if (task.outputLineCount > 0 || task.status !== "running") {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setCalcStartTime(task.startedAt);
 
@@ -479,7 +482,10 @@ export function ElectronicDOSWizard({
     const task = taskContext.getTask(activeTaskId);
     if (!task) return;
 
-    setOutput(task.output.join("\n") + (task.output.length > 0 ? "\n" : ""));
+    if (task.outputLineCount > 0) {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setIsRunning(task.status === "running");
   }, [
@@ -489,7 +495,7 @@ export function ElectronicDOSWizard({
     taskContext.getTask(activeTaskId ?? "")?.status,
   ]);
 
-  function buildDosTaskPlan(): DosTaskPlan {
+  async function buildDosTaskPlan(): Promise<DosTaskPlan> {
     if (!selectedScf) {
       throw new Error("No source SCF calculation selected");
     }
@@ -504,10 +510,38 @@ export function ElectronicDOSWizard({
     }
 
     const scfParams = selectedScf.parameters || {};
+    const sourceStructure = resolveSavedScfStructure(scfParams);
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
+    let structureForNscf = sourceStructure;
+    if (sourceUsesPrimitive) {
+      try {
+        const resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        if (resolvedSymmetry.standardizedPrimitiveAtoms.length === 0) {
+          throw new Error("Primitive cell data is unavailable.");
+        }
+        structureForNscf = {
+          position_units: "crystal",
+          cell_units: "angstrom",
+          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
+          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+            symbol: getBaseElement(atom.symbol),
+            position: atom.position,
+          })),
+        };
+      } catch (err) {
+        throw new Error(
+          `Selected SCF was run in a primitive cell, but matching primitive structure data could not be reconstructed: ${err}`,
+        );
+      }
+    }
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
       ? scfParams.selected_pseudos as Record<string, string>
       : {};
-    const elements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
+    const elements = [...new Set(
+      structureForNscf
+        ? structureForNscf.atoms.map((atom) => getBaseElement(atom.symbol))
+        : crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)),
+    )];
     const resolvedPseudos: Record<string, string> = {};
     for (const element of elements) {
       const savedPseudo = savedPseudoMap[element];
@@ -566,7 +600,7 @@ export function ElectronicDOSWizard({
         mass: ELEMENT_MASSES[element] || 1.0,
         pseudopotential: resolvedPseudos[element],
       })),
-      position_units: "crystal",
+      position_units: structureForNscf?.position_units || "crystal",
       ecutwfc,
       ecutrho,
       nspin,
@@ -577,7 +611,20 @@ export function ElectronicDOSWizard({
       degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
     };
 
-    const systemConfig = primitiveCell
+    const systemConfig = structureForNscf
+      ? {
+        ...commonSystemFields,
+        ibrav: "free" as const,
+        celldm: null,
+        cell_parameters: structureForNscf.cell_parameters,
+        cell_units: structureForNscf.cell_units || "angstrom",
+        atoms: structureForNscf.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true] as [boolean, boolean, boolean],
+        })),
+      }
+      : primitiveCell
       ? {
         ...commonSystemFields,
         ibrav: primitiveCell.ibrav,
@@ -704,8 +751,8 @@ export function ElectronicDOSWizard({
       return;
     }
     setIsRunning(true);
-    followOutputRef.current = true;
     setOutput("");
+    setOutputLineCount(0);
     setError(null);
     setDosData(null);
     setIsSaved(false);
@@ -722,7 +769,7 @@ export function ElectronicDOSWizard({
     }
 
     try {
-      const plan = buildDosTaskPlan();
+      const plan = await buildDosTaskPlan();
       const taskId = await taskContext.startTask("dos", plan.taskParams, plan.taskLabel);
       setActiveTaskId(taskId);
 
@@ -802,7 +849,7 @@ export function ElectronicDOSWizard({
     }
   }
 
-  function queueCalculation() {
+  async function queueCalculation() {
     if (isHpcMode) {
       setError("Queueing is unavailable in HPC mode. Submit directly to Andromeda.");
       return;
@@ -812,7 +859,7 @@ export function ElectronicDOSWizard({
       return;
     }
     try {
-      const plan = buildDosTaskPlan();
+      const plan = await buildDosTaskPlan();
       setError(null);
       taskContext.enqueueTask(
         "dos",
@@ -1178,12 +1225,13 @@ export function ElectronicDOSWizard({
       )}
 
       <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
-        <div className="output-panel">
-          <h3>{isRunning ? "Running..." : "Output"}</h3>
-          <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
-            {output || "Starting calculation..."}
-          </pre>
-        </div>
+        <LiveOutputPanel
+          title={isRunning ? "Running..." : "Output"}
+          output={output}
+          placeholder="Starting calculation..."
+          totalLineCount={outputLineCount}
+          visibleLineCount={visibleOutputLineCount}
+        />
 
         {isHpcMode && (
           <div className="telemetry-panel">

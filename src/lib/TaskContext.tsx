@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "./optimizedStructure";
+import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
@@ -17,6 +18,8 @@ export interface TaskState {
   status: TaskStatus;
   progress: ProgressState;
   output: string[];
+  outputText: string;
+  outputLineCount: number;
   result: any | null;
   error: string | null;
   hpc: HpcTaskMeta;
@@ -163,6 +166,86 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     remote_project_path: info.remote_project_path ?? null,
     remote_storage_bytes: info.remote_storage_bytes ?? null,
     local_sync_dir: info.local_sync_dir ?? null,
+  };
+}
+
+function progressFromOutput(taskType: TaskType, output: string[], status: TaskStatus): ProgressState {
+  let progress = defaultProgressState("Starting...");
+  for (const line of output) {
+    progress = progressReducer(taskType, line, progress);
+  }
+
+  if (status === "completed") {
+    return {
+      status: "complete",
+      percent: 100,
+      phase: "Complete",
+    };
+  }
+
+  if (status === "cancelled") {
+    return {
+      status: "error",
+      percent: progress.percent,
+      phase: "Cancelled",
+    };
+  }
+
+  if (status === "failed") {
+    return {
+      status: "error",
+      percent: progress.percent,
+      phase: "Failed",
+    };
+  }
+
+  return progress;
+}
+
+function buildTaskState(
+  taskId: string,
+  taskType: TaskType,
+  label: string,
+  startedAt: string,
+  status: TaskStatus,
+  output: string[],
+  result: any | null,
+  error: string | null,
+  hpc: HpcTaskMeta,
+  visibleOnly = true,
+): TaskState {
+  const visibleOutput = visibleOnly
+    ? buildVisibleOutputWindow(output)
+    : {
+      lines: output,
+      text: output.join("\n"),
+      totalLineCount: output.length,
+    };
+
+  return {
+    taskId,
+    taskType,
+    label,
+    startedAt,
+    status,
+    progress: progressFromOutput(taskType, output, status),
+    output: visibleOutput.lines,
+    outputText: visibleOutput.text,
+    outputLineCount: visibleOutput.totalLineCount,
+    result,
+    error,
+    hpc,
+  };
+}
+
+function appendVisibleTaskOutput(task: TaskState, taskType: TaskType, line: string): TaskState {
+  const visibleOutput = buildVisibleOutputWindow([...task.output, line]);
+  return {
+    ...task,
+    progress: progressReducer(taskType, line, task.progress),
+    output: visibleOutput.lines,
+    outputText: visibleOutput.text,
+    outputLineCount: task.outputLineCount + 1,
   };
 }
 
@@ -401,35 +484,18 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         setTasks((prev) => {
           const task = prev.get(taskId);
           if (!task) return prev;
-
-          let nextProgress = defaultProgressState("Starting...");
-          for (const line of output) {
-            nextProgress = progressReducer(taskType, line, nextProgress);
-          }
-
-          const nextStatus = info?.status ?? task.status;
-          if (nextStatus !== "running") {
-            nextProgress = {
-              status: nextStatus === "completed" ? "complete" : "error",
-              percent: nextStatus === "completed" ? 100 : nextProgress.percent,
-              phase: nextStatus === "completed"
-                ? "Complete"
-                : nextStatus === "cancelled"
-                  ? "Cancelled"
-                  : "Failed",
-            };
-          }
-
           const next = new Map(prev);
-          next.set(taskId, {
-            ...task,
-            status: nextStatus,
+          next.set(taskId, buildTaskState(
+            taskId,
+            task.taskType,
+            task.label,
+            task.startedAt,
+            info?.status ?? task.status,
             output,
-            progress: nextProgress,
-            result: info?.result ?? task.result,
-            error: info?.error ?? task.error,
-            hpc: info ? taskInfoToHpcMeta(info) : task.hpc,
-          });
+            info?.result ?? task.result,
+            info?.error ?? task.error,
+            info ? taskInfoToHpcMeta(info) : task.hpc,
+          ));
           return next;
         });
       } catch (e) {
@@ -442,12 +508,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         const task = prev.get(taskId);
         if (!task) return prev;
         const next = new Map(prev);
-        const newProgress = progressReducer(taskType, event.payload, task.progress);
-        next.set(taskId, {
-          ...task,
-          output: [...task.output, event.payload],
-          progress: newProgress,
-        });
+        next.set(taskId, appendVisibleTaskOutput(task, taskType, event.payload));
         return next;
       });
     }).then((fn) => fns.push(fn));
@@ -524,6 +585,8 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         status: "running",
         progress: defaultProgressState("Starting..."),
         output: [],
+        outputText: "",
+        outputLineCount: 0,
         result: null,
         error: null,
         hpc: {},
@@ -650,40 +713,47 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
   const reconnectToTask = useCallback(async (taskId: string) => {
     try {
       const info = await invoke<TaskInfo>("get_task_info", { taskId });
-      const output = await invoke<string[]>("get_task_output", { taskId });
-
       const taskType = normalizeTaskType(info.task_type);
-      let progress = defaultProgressState("Starting...");
-      for (const line of output) {
-        progress = progressReducer(taskType, line, progress);
-      }
+      const hasSubscription = unlistenRefs.current.has(taskId);
+      const localTask = tasksRef.current.get(taskId);
+      const shouldLoadFullOutput = info.status !== "running" || !localTask || localTask.status !== "running" || !hasSubscription;
 
-      if (info.status !== "running") {
-        progress = {
-          status: info.status === "completed" ? "complete" : "error",
-          percent: info.status === "completed" ? 100 : progress.percent,
-          phase: info.status === "completed" ? "Complete" : "Failed",
-        };
-      }
-
-      setTasks((prev) => {
-        const next = new Map(prev);
-        next.set(taskId, {
-          taskId,
-          taskType,
-          label: info.label,
-          startedAt: info.started_at,
-          status: info.status,
-          progress,
-          output,
-          result: info.result,
-          error: info.error,
-          hpc: taskInfoToHpcMeta(info),
+      if (shouldLoadFullOutput) {
+        const output = await invoke<string[]>("get_task_output", { taskId });
+        setTasks((prev) => {
+          const next = new Map(prev);
+          next.set(taskId, buildTaskState(
+            taskId,
+            taskType,
+            info.label,
+            info.started_at,
+            info.status,
+            output,
+            info.result,
+            info.error,
+            taskInfoToHpcMeta(info),
+          ));
+          return next;
         });
-        return next;
-      });
+      } else {
+        setTasks((prev) => {
+          const current = prev.get(taskId);
+          if (!current) return prev;
+          const next = new Map(prev);
+          next.set(taskId, {
+            ...current,
+            label: info.label,
+            startedAt: info.started_at,
+            status: info.status,
+            result: info.result ?? current.result,
+            error: info.error ?? current.error,
+            hpc: taskInfoToHpcMeta(info),
+          });
+          return next;
+        });
+      }
 
-      if (info.status === "running" && !unlistenRefs.current.has(taskId)) {
+      if (info.status === "running" && !hasSubscription) {
         subscribeToTask(taskId, taskType);
       }
     } catch (e) {
@@ -702,44 +772,20 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           const output = await invoke<string[]>("get_task_output", { taskId: summary.task_id })
             .catch(() => []);
           const taskType = normalizeTaskType(summary.task_type);
-          let progress = defaultProgressState("Starting...");
-          for (const line of output) {
-            progress = progressReducer(taskType, line, progress);
-          }
-          if (info.status === "completed") {
-            progress = {
-              status: "complete",
-              percent: 100,
-              phase: "Complete",
-            };
-          } else if (info.status === "cancelled") {
-            progress = {
-              status: "error",
-              percent: progress.percent,
-              phase: "Cancelled",
-            };
-          } else {
-            progress = {
-              status: "error",
-              percent: progress.percent,
-              phase: "Failed",
-            };
-          }
 
           setTasks((prev) => {
             const next = new Map(prev);
-            next.set(summary.task_id, {
-              taskId: summary.task_id,
+            next.set(summary.task_id, buildTaskState(
+              summary.task_id,
               taskType,
-              label: summary.label,
-              startedAt: summary.started_at,
-              status: info.status,
-              progress,
+              summary.label,
+              summary.started_at,
+              info.status,
               output,
-              result: info.result,
-              error: info.error,
-              hpc: taskInfoToHpcMeta(info),
-            });
+              info.result,
+              info.error,
+              taskInfoToHpcMeta(info),
+            ));
             return next;
           });
         }
@@ -785,7 +831,44 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     while (true) {
       const local = tasksRef.current.get(taskId);
       if (local && local.status !== "running") {
-        return local;
+        try {
+          const [info, output] = await Promise.all([
+            invoke<TaskInfo>("get_task_info", { taskId }),
+            invoke<string[]>("get_task_output", { taskId }),
+          ]);
+          const taskType = normalizeTaskType(info.task_type);
+          const fullTask = buildTaskState(
+            taskId,
+            taskType,
+            info.label,
+            info.started_at,
+            info.status,
+            output,
+            info.result,
+            info.error,
+            taskInfoToHpcMeta(info),
+            false,
+          );
+          setTasks((prev) => {
+            const next = new Map(prev);
+            next.set(taskId, buildTaskState(
+              taskId,
+              taskType,
+              info.label,
+              info.started_at,
+              info.status,
+              output,
+              info.result,
+              info.error,
+              taskInfoToHpcMeta(info),
+            ));
+            return next;
+          });
+          return fullTask;
+        } catch (e) {
+          console.error("Failed to hydrate completed task output:", e);
+          return local;
+        }
       }
 
       try {
@@ -793,40 +876,32 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         if (info.status !== "running") {
           const output = await invoke<string[]>("get_task_output", { taskId });
           const taskType = normalizeTaskType(info.task_type);
-          let progress = defaultProgressState("Starting...");
-          for (const line of output) {
-            progress = progressReducer(taskType, line, progress);
-          }
-          if (info.status === "completed") {
-            progress = {
-              status: "complete",
-              percent: 100,
-              phase: "Complete",
-            };
-          } else {
-            progress = {
-              status: "error",
-              percent: progress.percent,
-              phase: info.status === "cancelled" ? "Cancelled" : "Failed",
-            };
-          }
-
-          const reconstructed: TaskState = {
+          const reconstructed = buildTaskState(
             taskId,
             taskType,
-            label: info.label,
-            startedAt: info.started_at,
-            status: info.status,
-            progress,
+            info.label,
+            info.started_at,
+            info.status,
             output,
-            result: info.result,
-            error: info.error,
-            hpc: taskInfoToHpcMeta(info),
-          };
+            info.result,
+            info.error,
+            taskInfoToHpcMeta(info),
+            false,
+          );
 
           setTasks((prev) => {
             const next = new Map(prev);
-            next.set(taskId, reconstructed);
+            next.set(taskId, buildTaskState(
+              taskId,
+              taskType,
+              info.label,
+              info.started_at,
+              info.status,
+              output,
+              info.result,
+              info.error,
+              taskInfoToHpcMeta(info),
+            ));
             return next;
           });
 
@@ -844,9 +919,8 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     const spec = item.saveSpec;
     if (!spec) return;
 
-    const outputLines = task.output.length > 0
-      ? task.output
-      : await invoke<string[]>("get_task_output", { taskId: task.taskId });
+    const outputLines = await invoke<string[]>("get_task_output", { taskId: task.taskId })
+      .catch(() => task.output);
     const outputText = outputLines.join("\n");
     const nowIso = new Date().toISOString();
     const taskResult = task.result;

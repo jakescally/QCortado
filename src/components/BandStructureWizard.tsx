@@ -33,10 +33,13 @@ import {
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -495,8 +498,7 @@ export function BandStructureWizard({
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [autoSaveLogEnabled, setAutoSaveLogEnabled] = useState(
     () => storedBandWizardSettings?.autoSaveLogEnabled ?? false,
   );
@@ -505,13 +507,14 @@ export function BandStructureWizard({
   );
   const [isSavingLog, setIsSavingLog] = useState(false);
   const [logSaveStatus, setLogSaveStatus] = useState<string | null>(null);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
+  useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
 
-  const handleOutputScroll = () => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  };
   const toggleSection = (section: string) => {
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
@@ -787,13 +790,6 @@ export function BandStructureWizard({
     setKPathRhombohedralConvention(undefined);
   }, [crystalData]);
 
-  // Auto-scroll output only if user is at the bottom
-  useEffect(() => {
-    const el = outputRef.current;
-    if (!el || !followOutputRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
-
   useEffect(() => {
     if (!isHpcMode || step !== "run") {
       return;
@@ -880,7 +876,10 @@ export function BandStructureWizard({
     }
 
     setIsRunning(task.status === "running");
-    setOutput(task.output.join("\n") + "\n");
+    if (task.outputLineCount > 0 || task.status !== "running") {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setCalcStartTime(task.startedAt);
 
@@ -900,7 +899,10 @@ export function BandStructureWizard({
     const task = taskContext.getTask(activeTaskId);
     if (!task) return;
 
-    setOutput(task.output.join("\n") + "\n");
+    if (task.outputLineCount > 0) {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setIsRunning(task.status === "running");
   }, [
@@ -1275,8 +1277,8 @@ export function BandStructureWizard({
       return;
     }
     setIsRunning(true);
-    followOutputRef.current = true;
     setOutput("");
+    setOutputLineCount(0);
     setError(null);
     setBandData(null);
     setIsSaved(false);
@@ -2217,12 +2219,13 @@ export function BandStructureWizard({
         )}
 
         <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
-          <div className="output-panel">
-            <h3>{isRunning ? "Running..." : "Output"}</h3>
-            <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
-              {output || "Starting calculation..."}
-            </pre>
-          </div>
+          <LiveOutputPanel
+            title={isRunning ? "Running..." : "Output"}
+            output={output}
+            placeholder="Starting calculation..."
+            totalLineCount={outputLineCount}
+            visibleLineCount={visibleOutputLineCount}
+          />
 
           {isHpcMode && (
             <div className="telemetry-panel">

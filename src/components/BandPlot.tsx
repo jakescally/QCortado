@@ -739,6 +739,33 @@ export function BandPlot({
 
   const hasElementResolvedOrbitals = orbitalElementOptions.length > 0;
 
+  const allElementProjectionGroups = useMemo(() => {
+    const atomGroups = data.projections?.atom_groups ?? [];
+    return aggregateElementProjectionGroups(atomGroups, data.n_bands, data.n_kpoints);
+  }, [data.n_bands, data.n_kpoints, data.projections]);
+
+  const allElementOrbitalTotalGroups = useMemo(() => {
+    if (!hasElementResolvedOrbitals) return [];
+
+    return orbitalElementOptions
+      .map((option) =>
+        buildTotalProjectionGroup(
+          option.groups,
+          `element-orbital-total-${option.key}`,
+          `${option.label} total (all orbitals)`,
+          data.n_bands,
+          data.n_kpoints,
+          "element_orbital",
+        ),
+      )
+      .filter((group): group is BandProjectionGroup => group !== null);
+  }, [
+    data.n_bands,
+    data.n_kpoints,
+    hasElementResolvedOrbitals,
+    orbitalElementOptions,
+  ]);
+
   const orbitalProjectionGroups = useMemo(() => {
     if (projectionMode !== "orbital") return [];
     if (!hasElementResolvedOrbitals) {
@@ -781,14 +808,11 @@ export function BandPlot({
   const projectionGroups = useMemo(() => {
     if (!hasProjectionData) return [];
     if (projectionMode === "atom") {
-      const atomGroups = data.projections?.atom_groups ?? [];
-      return aggregateElementProjectionGroups(atomGroups, data.n_bands, data.n_kpoints);
+      return allElementProjectionGroups;
     }
     return orbitalProjectionGroups;
   }, [
-    data.projections,
-    data.n_bands,
-    data.n_kpoints,
+    allElementProjectionGroups,
     hasProjectionData,
     orbitalProjectionGroups,
     projectionMode,
@@ -835,12 +859,40 @@ export function BandPlot({
     return projectionGroups.find((group) => group.id === selectedProjectionId) || null;
   }, [projectionGroups, selectedProjectionId]);
 
+  const projectionNormalizationGroups = useMemo(() => {
+    if (!selectedProjectionGroup) return [];
+
+    if (projectionMode === "atom") {
+      return allElementProjectionGroups;
+    }
+
+    if (hasElementResolvedOrbitals) {
+      if (selectedProjectionGroup.id.startsWith("element-orbital-total-")) {
+        return allElementOrbitalTotalGroups;
+      }
+      return data.projections?.element_orbital_groups ?? [];
+    }
+
+    if (selectedProjectionGroup.id === "orbital-total") {
+      return projectionGroups.filter((group) => group.id === "orbital-total");
+    }
+
+    return data.projections?.orbital_groups ?? [];
+  }, [
+    allElementOrbitalTotalGroups,
+    allElementProjectionGroups,
+    data.projections,
+    hasElementResolvedOrbitals,
+    projectionGroups,
+    projectionMode,
+    selectedProjectionGroup,
+  ]);
+
   const normalizedProjectionWeights = useMemo(() => {
     const weights = selectedProjectionGroup?.weights;
     if (!weights || weights.length === 0) return null;
 
-    const normalizationGroups =
-      projectionMode === "atom" ? projectionGroups : selectedProjectionGroup ? [selectedProjectionGroup] : [];
+    const normalizationGroups = projectionNormalizationGroups;
     if (normalizationGroups.length === 0) return null;
 
     if (projectionNormalizeMode === "band") {
@@ -877,7 +929,7 @@ export function BandPlot({
     return weights.map((bandWeights) =>
       bandWeights.map((value) => clamp01((Number.isFinite(value) ? value : 0) / denom)),
     );
-  }, [projectionGroups, projectionMode, selectedProjectionGroup, projectionNormalizeMode]);
+  }, [projectionNormalizationGroups, selectedProjectionGroup, projectionNormalizeMode]);
 
   const fatBandsActive =
     viewerType === "electronic" &&
@@ -1855,10 +1907,22 @@ export function BandPlot({
                           }
                         >
                           <option value="global">
-                            {projectionMode === "atom" ? "Global (all elements)" : "Global"}
+                            {projectionMode === "atom"
+                              ? "Global (all elements)"
+                              : hasElementResolvedOrbitals
+                                ? selectedProjectionId.startsWith("element-orbital-total-")
+                                  ? "Global (all element totals)"
+                                  : "Global (all element orbitals)"
+                                : "Global (all orbitals)"}
                           </option>
                           <option value="band">
-                            {projectionMode === "atom" ? "Per band (all elements)" : "Per band"}
+                            {projectionMode === "atom"
+                              ? "Per band (all elements)"
+                              : hasElementResolvedOrbitals
+                                ? selectedProjectionId.startsWith("element-orbital-total-")
+                                  ? "Per band (all element totals)"
+                                  : "Per band (all element orbitals)"
+                                : "Per band (all orbitals)"}
                           </option>
                         </select>
                       </div>

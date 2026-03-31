@@ -1,6 +1,6 @@
 // SCF Calculation Wizard - Import CIF, configure, and run SCF calculations
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
@@ -10,6 +10,7 @@ import {
   ExecutionMode,
   HpcProfile,
   OptimizedStructureOption,
+  PseudopotentialMetadata,
   QePositionUnit,
   SavedCellSummary,
   SavedStructureData,
@@ -26,16 +27,19 @@ import {
 } from "../lib/symmetryTransform";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
   loadRemoteSsspData,
-  listRemotePseudopotentials,
+  listRemotePseudopotentialMetadata,
   sampleHpcUtilization,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -155,6 +159,24 @@ interface ScfTaskPlan {
   sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string };
 }
 
+type CutoffStatusKind = "parsed" | "inferred" | "missing";
+type CutoffStatus = "idle" | CutoffStatusKind;
+type CutoffProvenance = "sssp" | "djrepo" | "upf" | "upf_info" | "upf_fallback" | "unknown" | "missing";
+type CutoffDerivation = "direct" | "from_wfc" | "from_rho" | "missing";
+
+interface ResolvedPseudoCutoffs {
+  wfc: number | null;
+  rho: number | null;
+  wfcStatus: CutoffStatusKind;
+  rhoStatus: CutoffStatusKind;
+  wfcProvenance: CutoffProvenance;
+  rhoProvenance: CutoffProvenance;
+  wfcDerivation: CutoffDerivation;
+  rhoDerivation: CutoffDerivation;
+  wfcRatio: number | null;
+  rhoRatio: number | null;
+}
+
 export function SCFWizard({
   onBack,
   qePath,
@@ -185,7 +207,7 @@ export function SCFWizard({
   const [projectContext, setProjectContext] = useState<{ projectId: string; cifId: string } | null>(
     initialCif ? { projectId: initialCif.projectId, cifId: initialCif.cifId } : null
   );
-  const [pseudopotentials, setPseudopotentials] = useState<string[]>([]);
+  const [pseudopotentials, setPseudopotentials] = useState<PseudopotentialMetadata[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
 
   const WORK_DIR = "/tmp/qcortado_work";
@@ -202,17 +224,6 @@ export function SCFWizard({
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
-
-  // Ref for output auto-follow (only when user is at the bottom)
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
-
-  const handleOutputScroll = () => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  };
 
   const activeQueueItem = useMemo(
     () => (activeTaskId ? taskContext.queueItems.find((item) => item.taskId === activeTaskId) ?? null : null),
@@ -253,7 +264,7 @@ export function SCFWizard({
     constrained_magnetization: "none",
 
     // SCF Convergence
-    conv_thr: 1e-6,
+    conv_thr: 1e-12,
     electron_maxstep: 1000,
     mixing_mode: "plain",
     mixing_beta: 0.7,
@@ -303,7 +314,10 @@ export function SCFWizard({
           return {
             ...prev,
             calculation: "scf",
-            conv_thr: 1e-6,
+            conv_thr: 1e-12,
+            nspin: prev.nspin === 4 ? 1 : prev.nspin,
+            noncolin: prev.nspin === 4 ? false : prev.noncolin,
+            lspinorb: false,
             disk_io: "low",
           };
         case "phonon":
@@ -311,26 +325,40 @@ export function SCFWizard({
             ...prev,
             calculation: "scf",
             conv_thr: 1e-12,
+            nspin: prev.nspin === 4 ? 1 : prev.nspin,
+            noncolin: prev.nspin === 4 ? false : prev.noncolin,
+            lspinorb: false,
             disk_io: "medium",
           };
         case "relax":
           return {
             ...prev,
             calculation: "vcrelax",
+            conv_thr: 1e-12,
+            nspin: prev.nspin === 4 ? 1 : prev.nspin,
+            noncolin: prev.nspin === 4 ? false : prev.noncolin,
+            lspinorb: false,
             forc_conv_thr: 1e-4,
             etot_conv_thr: 1e-5,
             press: 0,
             tprnfor: true,
             tstress: true,
           };
+        case "soc":
+          return {
+            ...prev,
+            calculation: "scf",
+            conv_thr: 1e-12,
+            noncolin: true,
+            nspin: 4,
+            lspinorb: true,
+          };
         default:
           return prev;
       }
     });
-    if (preset === "phonon") {
+    if (preset === "phonon" || preset === "relax" || preset === "standard" || preset === "soc") {
       setConvThrInput("1e-12");
-    } else if (preset === "standard") {
-      setConvThrInput("1e-6");
     }
   }, [phononPresetDisabled]);
 
@@ -359,7 +387,10 @@ export function SCFWizard({
 
     // Sync wizard state from task
     setIsRunning(activeTask.status === "running");
-    setOutput(activeTask.output.join("\n") + "\n");
+    if (activeTask.outputLineCount > 0 || activeTask.status !== "running") {
+      setOutput(activeTask.outputText);
+      setOutputLineCount(activeTask.outputLineCount);
+    }
     if (activeTask.status === "completed" && activeQueueItem?.saveSpec) {
       if (activeQueueItem.status === "completed") {
         setProgress({
@@ -402,12 +433,11 @@ export function SCFWizard({
   // When active task updates, sync output/progress
   useEffect(() => {
     if (!activeTask || activeTask.status !== "running") return;
-    setOutput(activeTask.output.join("\n") + "\n");
-    setProgress(activeTask.progress);
-
-    if (followOutputRef.current && outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    if (activeTask.outputLineCount > 0) {
+      setOutput(activeTask.outputText);
+      setOutputLineCount(activeTask.outputLineCount);
     }
+    setProgress(activeTask.progress);
   }, [activeTask]);
 
   useEffect(() => {
@@ -452,10 +482,12 @@ export function SCFWizard({
   const lockedPreset = presetLock && initialPreset ? initialPreset : null;
   const isOptimizationWizard = lockedPreset === "relax";
   const wizardTitle = isOptimizationWizard ? "Structure Optimization Wizard" : "SCF Calculation Wizard";
-  const showPresetRow = !lockedPreset || lockedPreset === "relax";
+  const showPresetRow = !lockedPreset || lockedPreset === "relax" || lockedPreset === "soc";
   const showStandardPreset = !lockedPreset || lockedPreset === "standard";
   const showPhononPreset = !lockedPreset || lockedPreset === "phonon";
   const showRelaxPreset = lockedPreset === "relax";
+  const showSocPreset = !lockedPreset || lockedPreset === "soc";
+  const socPresetSelected = selectedPreset === "soc";
   const conventionalCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
     if (!crystalData) return null;
     return {
@@ -514,10 +546,11 @@ export function SCFWizard({
   };
 
   // Local string state for conv_thr input (to allow typing scientific notation)
-  const [convThrInput, setConvThrInput] = useState("1e-6");
+  const [convThrInput, setConvThrInput] = useState("1e-12");
 
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState<string>("");
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [result, setResult] = useState<any>(null);
   const [pseudoDir, setPseudoDir] = useState<string>("");
   const [pseudoError, setPseudoError] = useState<string | null>(null);
@@ -538,6 +571,11 @@ export function SCFWizard({
   }
   const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
   const [ssspMissing, setSsspMissing] = useState(false);
+  const hasPseudoCutoffMetadata = useMemo(
+    () => pseudopotentials.some((pseudo) => pseudo.cutoff_wfc != null || pseudo.cutoff_rho != null)
+      || Boolean(ssspData && Object.keys(ssspData).length > 0),
+    [pseudopotentials, ssspData],
+  );
 
   // MPI settings
   const [mpiEnabled, setMpiEnabled] = useState(false);
@@ -554,6 +592,14 @@ export function SCFWizard({
   const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
   const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
   const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
+
+  useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
 
   useEffect(() => {
     if (!isHpcMode) return;
@@ -600,8 +646,8 @@ export function SCFWizard({
         }
 
         const pseudos = isHpcMode
-          ? await listRemotePseudopotentials(configuredPseudoDir, activeHpcProfile?.id ?? null)
-          : await invoke<string[]>("list_pseudopotentials", { pseudoDir: fallbackPseudoDir });
+          ? await listRemotePseudopotentialMetadata(configuredPseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<PseudopotentialMetadata[]>("list_pseudopotential_metadata", { pseudoDir: fallbackPseudoDir });
         setPseudopotentials(pseudos);
         setPseudoError(null);
 
@@ -625,6 +671,8 @@ export function SCFWizard({
         console.error("Failed to load pseudopotentials:", e);
         setPseudoError(String(e));
         setPseudopotentials([]);
+        setSsspData(null);
+        setSsspMissing(true);
       } finally {
         if (!cancelled) {
           setIsPseudoLoading(false);
@@ -636,13 +684,6 @@ export function SCFWizard({
       cancelled = true;
     };
   }, [qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
-
-  // Auto-scroll output only if user is at the bottom
-  useEffect(() => {
-    const el = outputRef.current;
-    if (!el || !followOutputRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
 
   useEffect(() => {
     if (!isHpcMode || step !== "run") {
@@ -757,52 +798,388 @@ export function SCFWizard({
     );
   }
 
-  // Auto-select pseudopotentials and set cutoffs when structure source or SSSP data changes
-  useEffect(() => {
-    if (pseudopotentials.length > 0) {
-      const selected: Record<string, string> = {};
-      const elements = getUniqueElements();
-      if (elements.length === 0) return;
+  function isSocCapablePseudo(pseudo: PseudopotentialMetadata): boolean {
+    return pseudo.supports_soc;
+  }
 
-      let maxWfc = 0;
-      let maxRho = 0;
+  function getPseudoCutoffRatio(pseudo: PseudopotentialMetadata | undefined): number {
+    const pseudoType = (pseudo?.pseudo_type || "").toUpperCase();
+    if (pseudoType.includes("US")) {
+      return 8;
+    }
+    return 4;
+  }
 
-      for (const element of elements) {
-        // First, try to use SSSP recommended pseudopotential
-        if (ssspData && ssspData[element]) {
-          const ssspEntry = ssspData[element];
-          // Check if the SSSP recommended file exists in our pseudopotentials
-          if (pseudopotentials.some((p) => p.toLowerCase() === ssspEntry.filename.toLowerCase())) {
-            selected[element] = ssspEntry.filename;
-            maxWfc = Math.max(maxWfc, ssspEntry.cutoff_wfc);
-            maxRho = Math.max(maxRho, ssspEntry.cutoff_rho);
-            continue;
-          }
+  function inferChargeDensityCutoff(
+    pseudo: PseudopotentialMetadata | undefined,
+    wavefunctionCutoff: number | null,
+  ): number | null {
+    if (!pseudo || wavefunctionCutoff == null || !Number.isFinite(wavefunctionCutoff) || wavefunctionCutoff <= 0) {
+      return null;
+    }
+
+    return wavefunctionCutoff * getPseudoCutoffRatio(pseudo);
+  }
+
+  function inferWavefunctionCutoff(
+    pseudo: PseudopotentialMetadata | undefined,
+    chargeDensityCutoff: number | null,
+  ): number | null {
+    if (!pseudo || chargeDensityCutoff == null || !Number.isFinite(chargeDensityCutoff) || chargeDensityCutoff <= 0) {
+      return null;
+    }
+
+    return chargeDensityCutoff / getPseudoCutoffRatio(pseudo);
+  }
+
+  function normalizeCutoff(value: number | null | undefined): number | null {
+    return Number.isFinite(value) && (value ?? 0) > 0 ? value as number : null;
+  }
+
+  function normalizeCutoffProvenance(value: string | null | undefined): CutoffProvenance {
+    switch (value) {
+      case "djrepo":
+      case "upf":
+      case "upf_info":
+      case "upf_fallback":
+        return value;
+      default:
+        return value ? "unknown" : "missing";
+    }
+  }
+
+  function classifyPreferredCutoffStatus(provenance: CutoffProvenance): CutoffStatusKind {
+    return provenance === "upf_fallback" ? "inferred" : "parsed";
+  }
+
+  function resolvePseudoCutoffs(
+    pseudo: PseudopotentialMetadata | undefined,
+    ssspEntry?: SSSPElementData | null,
+  ): ResolvedPseudoCutoffs {
+    const ssspMatchesPseudo = Boolean(
+      pseudo
+      && ssspEntry
+      && pseudo.filename.toLowerCase() === ssspEntry.filename.toLowerCase(),
+    );
+    const preferredWfc = normalizeCutoff((ssspMatchesPseudo ? ssspEntry?.cutoff_wfc : null) ?? pseudo?.cutoff_wfc ?? null);
+    const preferredRho = normalizeCutoff((ssspMatchesPseudo ? ssspEntry?.cutoff_rho : null) ?? pseudo?.cutoff_rho ?? null);
+    const preferredWfcProvenance = ssspMatchesPseudo && normalizeCutoff(ssspEntry?.cutoff_wfc) != null
+      ? "sssp"
+      : normalizeCutoffProvenance(pseudo?.cutoff_wfc_source);
+    const preferredRhoProvenance = ssspMatchesPseudo && normalizeCutoff(ssspEntry?.cutoff_rho) != null
+      ? "sssp"
+      : normalizeCutoffProvenance(pseudo?.cutoff_rho_source);
+    const wfc = preferredWfc ?? inferWavefunctionCutoff(pseudo, preferredRho);
+    const rho = preferredRho ?? inferChargeDensityCutoff(pseudo, preferredWfc);
+    return {
+      wfc,
+      rho,
+      wfcStatus: preferredWfc != null
+        ? classifyPreferredCutoffStatus(preferredWfcProvenance)
+        : wfc != null ? "inferred" : "missing",
+      rhoStatus: preferredRho != null
+        ? classifyPreferredCutoffStatus(preferredRhoProvenance)
+        : rho != null ? "inferred" : "missing",
+      wfcProvenance: preferredWfc != null
+        ? preferredWfcProvenance
+        : wfc != null ? preferredRhoProvenance : "missing",
+      rhoProvenance: preferredRho != null
+        ? preferredRhoProvenance
+        : rho != null ? preferredWfcProvenance : "missing",
+      wfcDerivation: preferredWfc != null
+        ? "direct"
+        : wfc != null ? "from_rho" : "missing",
+      rhoDerivation: preferredRho != null
+        ? "direct"
+        : rho != null ? "from_wfc" : "missing",
+      wfcRatio: preferredWfc != null || wfc == null ? null : getPseudoCutoffRatio(pseudo),
+      rhoRatio: preferredRho != null || rho == null ? null : getPseudoCutoffRatio(pseudo),
+    };
+  }
+
+  function cutoffStatusRank(status: CutoffStatusKind): number {
+    switch (status) {
+      case "parsed":
+        return 2;
+      case "inferred":
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  function cutoffProvenanceRank(provenance: CutoffProvenance): number {
+    switch (provenance) {
+      case "sssp":
+        return 6;
+      case "djrepo":
+        return 5;
+      case "upf_info":
+        return 4;
+      case "upf":
+        return 3;
+      case "upf_fallback":
+        return 2;
+      case "unknown":
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  function cutoffProvenanceLabel(provenance: CutoffProvenance): string {
+    switch (provenance) {
+      case "sssp":
+        return "SSSP";
+      case "djrepo":
+        return "PseudoDojo";
+      case "upf_info":
+        return "UPF info";
+      case "upf":
+        return "UPF";
+      case "upf_fallback":
+        return "UPF fallback";
+      case "unknown":
+        return "metadata";
+      default:
+        return "";
+    }
+  }
+
+  function cutoffStatusLabel(
+    status: CutoffStatus,
+    provenance: CutoffProvenance,
+    derivation: CutoffDerivation,
+    ratio: number | null,
+  ): string {
+    switch (status) {
+      case "parsed":
+        return provenance === "sssp"
+          ? "SSSP"
+          : `Parsed • ${cutoffProvenanceLabel(provenance)}`;
+      case "inferred":
+        if (derivation === "from_wfc" && ratio != null) {
+          return provenance === "missing"
+            ? `Auto x${ratio}`
+            : `Auto x${ratio} • ${cutoffProvenanceLabel(provenance)}`;
         }
+        if (derivation === "from_rho" && ratio != null) {
+          return provenance === "missing"
+            ? `Auto /${ratio}`
+            : `Auto /${ratio} • ${cutoffProvenanceLabel(provenance)}`;
+        }
+        return provenance === "missing"
+          ? "Autocalculated"
+          : `Auto • ${cutoffProvenanceLabel(provenance)}`;
+      case "missing":
+        return "Missing";
+      default:
+        return "";
+    }
+  }
 
-        // Fallback: find a matching pseudopotential by element name
-        const matches = pseudopotentials.filter((p) =>
-          pseudoMatchesElement(p, element)
-        );
-        if (matches.length > 0) {
-          // Prefer PBE pseudopotentials
-          const pbe = matches.find((m) => m.toLowerCase().includes("pbe"));
-          selected[element] = pbe || matches[0];
+  const selectedPseudoCutoffSummary = useMemo(() => {
+    if (pseudopotentials.length === 0) {
+      return {
+        maxWfc: 0,
+        maxRho: 0,
+        wfcStatus: "idle" as const,
+        rhoStatus: "idle" as const,
+        wfcProvenance: "missing" as const,
+        rhoProvenance: "missing" as const,
+        wfcDerivation: "missing" as const,
+        rhoDerivation: "missing" as const,
+        wfcRatio: null,
+        rhoRatio: null,
+        hasInferredCutoff: false,
+        hasMissingCutoff: false,
+      };
+    }
+
+    const elements = getUniqueElements();
+    if (elements.length === 0) {
+      return {
+        maxWfc: 0,
+        maxRho: 0,
+        wfcStatus: "idle" as const,
+        rhoStatus: "idle" as const,
+        wfcProvenance: "missing" as const,
+        rhoProvenance: "missing" as const,
+        wfcDerivation: "missing" as const,
+        rhoDerivation: "missing" as const,
+        wfcRatio: null,
+        rhoRatio: null,
+        hasInferredCutoff: false,
+        hasMissingCutoff: false,
+      };
+    }
+
+    let selectedCount = 0;
+    let maxWfc = 0;
+    let maxRho = 0;
+    let maxWfcStatus: CutoffStatusKind = "missing";
+    let maxRhoStatus: CutoffStatusKind = "missing";
+    let maxWfcProvenance: CutoffProvenance = "missing";
+    let maxRhoProvenance: CutoffProvenance = "missing";
+    let maxWfcDerivation: CutoffDerivation = "missing";
+    let maxRhoDerivation: CutoffDerivation = "missing";
+    let maxWfcRatio: number | null = null;
+    let maxRhoRatio: number | null = null;
+    let hasInferredCutoff = false;
+    let hasMissingCutoff = false;
+
+    for (const element of elements) {
+      const selectedFilename = selectedPseudos[element];
+      if (!selectedFilename) {
+        continue;
+      }
+
+      const selectedPseudo = pseudopotentials.find((pseudo) => pseudo.filename === selectedFilename);
+      if (!selectedPseudo) {
+        continue;
+      }
+
+      selectedCount += 1;
+      const {
+        wfc,
+        rho,
+        wfcStatus,
+        rhoStatus,
+        wfcProvenance,
+        rhoProvenance,
+        wfcDerivation,
+        rhoDerivation,
+        wfcRatio,
+        rhoRatio,
+      } = resolvePseudoCutoffs(selectedPseudo, ssspData?.[element] ?? null);
+      if (wfc != null) {
+        if (
+          wfc > maxWfc
+          || (
+            wfc === maxWfc
+            && (
+              cutoffStatusRank(wfcStatus) > cutoffStatusRank(maxWfcStatus)
+              || (
+                cutoffStatusRank(wfcStatus) === cutoffStatusRank(maxWfcStatus)
+                && cutoffProvenanceRank(wfcProvenance) > cutoffProvenanceRank(maxWfcProvenance)
+              )
+            )
+          )
+        ) {
+          maxWfc = wfc;
+          maxWfcStatus = wfcStatus;
+          maxWfcProvenance = wfcProvenance;
+          maxWfcDerivation = wfcDerivation;
+          maxWfcRatio = wfcRatio;
+        }
+      }
+      if (rho != null) {
+        if (
+          rho > maxRho
+          || (
+            rho === maxRho
+            && (
+              cutoffStatusRank(rhoStatus) > cutoffStatusRank(maxRhoStatus)
+              || (
+                cutoffStatusRank(rhoStatus) === cutoffStatusRank(maxRhoStatus)
+                && cutoffProvenanceRank(rhoProvenance) > cutoffProvenanceRank(maxRhoProvenance)
+              )
+            )
+          )
+        ) {
+          maxRho = rho;
+          maxRhoStatus = rhoStatus;
+          maxRhoProvenance = rhoProvenance;
+          maxRhoDerivation = rhoDerivation;
+          maxRhoRatio = rhoRatio;
         }
       }
 
-      setSelectedPseudos(selected);
-
-      // Update cutoffs if we got SSSP values
-      if (maxWfc > 0 && maxRho > 0) {
-        setConfig((prev) => ({
-          ...prev,
-          ecutwfc: maxWfc,
-          ecutrho: maxRho,
-        }));
+      if (wfcStatus === "inferred" || rhoStatus === "inferred") {
+        hasInferredCutoff = true;
+      }
+      if (wfcStatus === "missing" || rhoStatus === "missing") {
+        hasMissingCutoff = true;
       }
     }
-  }, [crystalData, pseudopotentials, ssspData, structureSource, optimizedStructures]);
+
+    return {
+      maxWfc,
+      maxRho,
+      wfcStatus: selectedCount === 0 ? "idle" as const : maxWfc > 0 ? maxWfcStatus : "missing" as const,
+      rhoStatus: selectedCount === 0 ? "idle" as const : maxRho > 0 ? maxRhoStatus : "missing" as const,
+      wfcProvenance: maxWfc > 0 ? maxWfcProvenance : "missing" as const,
+      rhoProvenance: maxRho > 0 ? maxRhoProvenance : "missing" as const,
+      wfcDerivation: maxWfc > 0 ? maxWfcDerivation : "missing" as const,
+      rhoDerivation: maxRho > 0 ? maxRhoDerivation : "missing" as const,
+      wfcRatio: maxWfc > 0 ? maxWfcRatio : null,
+      rhoRatio: maxRho > 0 ? maxRhoRatio : null,
+      hasInferredCutoff,
+      hasMissingCutoff,
+    };
+  }, [crystalData, optimizedStructures, pseudopotentials, selectedPseudos, ssspData, structureSource]);
+
+  // Auto-select pseudopotentials when structure source, preset, or metadata changes.
+  useEffect(() => {
+    if (pseudopotentials.length === 0) return;
+
+    const elements = getUniqueElements();
+    if (elements.length === 0) return;
+
+    const selected: Record<string, string> = {};
+
+    for (const element of elements) {
+      const elementPseudos = pseudopotentials.filter((pseudo) => pseudoMatchesElement(pseudo.filename, element));
+      const filteredPseudos = socPresetSelected
+        ? elementPseudos.filter(isSocCapablePseudo)
+        : elementPseudos;
+      if (filteredPseudos.length === 0) {
+        continue;
+      }
+
+      const ssspEntry = ssspData?.[element] ?? null;
+      const preferredFilename = ssspEntry ? ssspEntry.filename.toLowerCase() : null;
+      const ssspMatch = preferredFilename
+        ? filteredPseudos.find((pseudo) => pseudo.filename.toLowerCase() === preferredFilename)
+        : undefined;
+      const pbeMatch = filteredPseudos.find((pseudo) => pseudo.filename.toLowerCase().includes("pbe"));
+      const chosenPseudo = ssspMatch || pbeMatch || filteredPseudos[0];
+
+      selected[element] = chosenPseudo.filename;
+    }
+
+    setSelectedPseudos(selected);
+  }, [crystalData, pseudopotentials, ssspData, structureSource, optimizedStructures, selectedPreset]);
+
+  // Keep cutoffs aligned with the currently selected pseudopotentials, including manual changes.
+  useEffect(() => {
+    if (pseudopotentials.length === 0) return;
+
+    setConfig((prev) => {
+      let nextEcutwfc = prev.ecutwfc;
+      let nextEcutrho = prev.ecutrho;
+      let changed = false;
+
+      if (selectedPseudoCutoffSummary.maxWfc > 0 && prev.ecutwfc !== selectedPseudoCutoffSummary.maxWfc) {
+        nextEcutwfc = selectedPseudoCutoffSummary.maxWfc;
+        changed = true;
+      }
+
+      if (selectedPseudoCutoffSummary.maxRho > 0 && prev.ecutrho !== selectedPseudoCutoffSummary.maxRho) {
+        nextEcutrho = selectedPseudoCutoffSummary.maxRho;
+        changed = true;
+      }
+
+      if (changed) {
+        return {
+          ...prev,
+          ecutwfc: nextEcutwfc,
+          ecutrho: nextEcutrho,
+        };
+      }
+      return prev;
+    });
+  }, [pseudopotentials, selectedPseudoCutoffSummary]);
 
   useEffect(() => {
     if (!crystalData || structureSource !== "cif") {
@@ -917,6 +1294,8 @@ export function SCFWizard({
     }));
 
     // Build system configuration based on cell type
+    const normalizedInputDft = config.input_dft.trim();
+
     const systemConfig: any = {
       // Common properties
       species: speciesList,
@@ -943,7 +1322,7 @@ export function SCFWizard({
       // Isolated systems
       assume_isolated: config.assume_isolated !== "none" ? config.assume_isolated : undefined,
       // XC functional override
-      input_dft: config.input_dft || undefined,
+      input_dft: normalizedInputDft || undefined,
     };
 
     // Add cell-specific properties
@@ -1055,8 +1434,8 @@ export function SCFWizard({
     }
 
     setIsRunning(true);
-    followOutputRef.current = true;
     setOutput("");
+    setOutputLineCount(0);
     setResult(null);
     setResultSaved(false);
     setProgress(defaultProgressState("SCF iterations"));
@@ -1746,6 +2125,12 @@ export function SCFWizard({
                     Pseudopotentials
                     <Tooltip text="Pseudopotentials approximate the effect of core electrons (those tightly bound to the nucleus) so the calculation only needs to explicitly handle valence electrons. This dramatically reduces computation cost while maintaining accuracy for chemical bonding and material properties. Each element needs its own pseudopotential file, typically generated with a specific exchange-correlation functional (like PBE)." />
                   </h3>
+                  {socPresetSelected && (
+                    <p className="pseudo-hint">
+                      SOC preset filters this list to fully relativistic pseudopotentials only. Files without
+                      `has_so = true` or `relativistic = "full"` in the UPF header are hidden.
+                    </p>
+                  )}
                   <p className="pseudo-dir-info">
                     Directory: <code>{pseudoDir}</code>
                     {pseudopotentials.length > 0 && (
@@ -1763,13 +2148,21 @@ export function SCFWizard({
                   )}
                   <div className="pseudo-list">
                     {getUniqueElements().map((el) => {
-                      const matchingPseudos = pseudopotentials.filter((p) =>
-                        pseudoMatchesElement(p, el)
+                      const matchingPseudos = pseudopotentials.filter((pseudo) =>
+                        pseudoMatchesElement(pseudo.filename, el)
                       );
-                      const selectedValue = selectedPseudos[el] || "";
-                      const dropdownOptions = selectedValue && !matchingPseudos.includes(selectedValue)
-                        ? [selectedValue, ...matchingPseudos]
+                      const availablePseudos = socPresetSelected
+                        ? matchingPseudos.filter(isSocCapablePseudo)
                         : matchingPseudos;
+                      const selectedValue = selectedPseudos[el] || "";
+                      const selectedPseudo = selectedValue
+                        ? pseudopotentials.find((pseudo) => pseudo.filename === selectedValue)
+                        : undefined;
+                      const dropdownOptions = !socPresetSelected
+                        && selectedPseudo
+                        && !availablePseudos.some((pseudo) => pseudo.filename === selectedValue)
+                        ? [selectedPseudo, ...availablePseudos]
+                        : availablePseudos;
                       return (
                         <div key={el} className="pseudo-row">
                           <label>{el}</label>
@@ -1785,12 +2178,14 @@ export function SCFWizard({
                           >
                             <option value="">
                               {dropdownOptions.length === 0
-                                ? `No ${el} pseudopotentials found`
+                                ? socPresetSelected
+                                  ? `No SOC-capable ${el} pseudopotentials found`
+                                  : `No ${el} pseudopotentials found`
                                 : "Select..."}
                             </option>
-                            {dropdownOptions.map((p) => (
-                              <option key={p} value={p}>
-                                {p}
+                            {dropdownOptions.map((pseudo) => (
+                              <option key={pseudo.filename} value={pseudo.filename}>
+                                {pseudo.filename}
                               </option>
                             ))}
                           </select>
@@ -1798,10 +2193,10 @@ export function SCFWizard({
                       );
                     })}
                   </div>
-                  {getUniqueElements().some(
-                    (el) =>
-                      !pseudopotentials.some((p) => pseudoMatchesElement(p, el))
-                  ) && (
+                  {getUniqueElements().some((el) => {
+                    const matches = pseudopotentials.filter((pseudo) => pseudoMatchesElement(pseudo.filename, el));
+                    return socPresetSelected ? !matches.some(isSocCapablePseudo) : matches.length === 0;
+                  }) && (
                     <p className="pseudo-hint">
                       Missing pseudopotentials? Download them from the{" "}
                       <a
@@ -1811,7 +2206,7 @@ export function SCFWizard({
                       >
                         SSSP Precision Library
                       </a>{" "}
-                      and place them in your QE pseudo directory.
+                      and place them in your QE pseudo directory. SOC runs require fully relativistic files.
                     </p>
                   )}
                 </section>
@@ -1864,6 +2259,16 @@ export function SCFWizard({
                                 title="Variable-cell relaxation for structure optimization"
                               >
                                 Optimize Structure
+                              </button>
+                            )}
+                            {showSocPreset && (
+                              <button
+                                type="button"
+                                className={`preset-btn ${selectedPreset === "soc" ? "active" : ""}`}
+                                onClick={() => applyPreset("soc")}
+                                title="SOC-enabled SCF calculation"
+                              >
+                                SOC
                               </button>
                             )}
                           </div>
@@ -1974,22 +2379,58 @@ export function SCFWizard({
                           <Tooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher = more accurate but slower. Typical: 30-80 Ry." />
                         </label>
                         <div className="param-input-group">
-                          <input type="number" value={config.ecutwfc}
+                          <input
+                            type="number"
+                            className={selectedPseudoCutoffSummary.wfcStatus === "idle" ? "" : `cutoff-input cutoff-input-${selectedPseudoCutoffSummary.wfcStatus}`}
+                            value={config.ecutwfc}
                             onChange={(e) => setConfig((prev) => ({ ...prev, ecutwfc: parseFloat(e.target.value) }))} />
                           <span className="param-unit">Ry</span>
+                          {selectedPseudoCutoffSummary.wfcStatus !== "idle" && (
+                            <span className={`cutoff-status cutoff-status-${selectedPseudoCutoffSummary.wfcStatus}`}>
+                              {cutoffStatusLabel(
+                                selectedPseudoCutoffSummary.wfcStatus,
+                                selectedPseudoCutoffSummary.wfcProvenance,
+                                selectedPseudoCutoffSummary.wfcDerivation,
+                                selectedPseudoCutoffSummary.wfcRatio,
+                              )}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className="param-row">
                         <label>
                           Charge Density Cutoff
-                          <Tooltip text="Energy cutoff for charge density (in Rydberg). Use 4x ecutwfc for NC, 8-12x for US/PAW pseudopotentials." />
+                          <Tooltip text="Energy cutoff for charge density (in Rydberg). Typical fallback is 4x ecutwfc for NC/PAW and 8x for US pseudopotentials." />
                         </label>
                         <div className="param-input-group">
-                          <input type="number" value={config.ecutrho}
+                          <input
+                            type="number"
+                            className={selectedPseudoCutoffSummary.rhoStatus === "idle" ? "" : `cutoff-input cutoff-input-${selectedPseudoCutoffSummary.rhoStatus}`}
+                            value={config.ecutrho}
                             onChange={(e) => setConfig((prev) => ({ ...prev, ecutrho: parseFloat(e.target.value) }))} />
                           <span className="param-unit">Ry</span>
+                          {selectedPseudoCutoffSummary.rhoStatus !== "idle" && (
+                            <span className={`cutoff-status cutoff-status-${selectedPseudoCutoffSummary.rhoStatus}`}>
+                              {cutoffStatusLabel(
+                                selectedPseudoCutoffSummary.rhoStatus,
+                                selectedPseudoCutoffSummary.rhoProvenance,
+                                selectedPseudoCutoffSummary.rhoDerivation,
+                                selectedPseudoCutoffSummary.rhoRatio,
+                              )}
+                            </span>
+                          )}
                         </div>
                       </div>
+                      {selectedPseudoCutoffSummary.hasInferredCutoff && (
+                        <div className="cutoff-metadata-warning">
+                          QCortado autocalculated missing cutoff values from the companion cutoff when needed using 4x for NC/PAW and 8x for US pseudopotentials. Verify these values with a convergence test.
+                        </div>
+                      )}
+                      {selectedPseudoCutoffSummary.hasMissingCutoff && (
+                        <div className="cutoff-metadata-warning cutoff-metadata-warning-missing">
+                          Some selected pseudopotentials do not embed enough cutoff metadata for QCortado to determine every recommended value.
+                        </div>
+                      )}
                       <div className="param-row">
                         <label>
                           K-point Grid
@@ -2026,12 +2467,12 @@ export function SCFWizard({
                   )}
                   {ssspMissing && expandedSections.basic && (
                     <p className="sssp-hint">
-                      Cutoff values are defaults. For optimized values, download the{" "}
+                      Cutoff values are defaults unless the pseudopotential header supplies recommendations. For optimized values, download the{" "}
                       <a href="https://www.materialscloud.org/discover/sssp/table/precision" target="_blank" rel="noopener noreferrer">SSSP library</a>.
                     </p>
                   )}
-                  {!ssspMissing && ssspData && expandedSections.basic && (
-                    <p className="sssp-success">Cutoffs auto-configured from SSSP library.</p>
+                  {hasPseudoCutoffMetadata && expandedSections.basic && (
+                    <p className="sssp-success">Cutoffs auto-configured from pseudopotential metadata when available, with SSSP used as a fallback.</p>
                   )}
                 </section>
 
@@ -2213,7 +2654,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Convergence Threshold
-                          <Tooltip text="SCF stops when energy change falls below this value (Ry). 1e-6 for most cases, 1e-8+ for phonons." />
+                          <Tooltip text="SCF stops when energy change falls below this value (Ry). 1e-12 is the default for the built-in presets, and 1e-12+ remains appropriate for phonons." />
                         </label>
                         <div className="param-input-group">
                           <input type="text" value={convThrInput}
@@ -2585,10 +3026,13 @@ export function SCFWizard({
               </div>
             </div>
             <div className={`run-layout ${isHpcMode && !result ? "run-layout-hpc-telemetry" : ""}`}>
-              <div className="output-panel">
-                <h3>{isRunning ? "Running..." : "Output"}</h3>
-                <pre className="output-text" ref={outputRef} onScroll={handleOutputScroll}>{output}</pre>
-              </div>
+              <LiveOutputPanel
+                title={isRunning ? "Running..." : "Output"}
+                output={output}
+                placeholder="Starting calculation..."
+                totalLineCount={outputLineCount}
+                visibleLineCount={visibleOutputLineCount}
+              />
 
               {isHpcMode && !result && (
                 <div className="telemetry-panel">

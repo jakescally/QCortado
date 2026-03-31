@@ -489,8 +489,7 @@ pub async fn sync_remote_artifacts(
                 &request.task_id,
                 format!(
                     "[QCortado] Minimal sync selected {} files ({} skipped as heavy/scratch).",
-                    total_candidates,
-                    report.skipped_files
+                    total_candidates, report.skipped_files
                 ),
             )
             .await;

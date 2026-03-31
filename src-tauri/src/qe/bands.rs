@@ -7,6 +7,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 use std::path::Path;
@@ -371,6 +372,12 @@ struct ProjectionGroupIndices {
     element_orbital_group_idx: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedProjwfcProjectionData {
+    data: BandProjectionData,
+    band_energies: Vec<Vec<Option<f64>>>,
+}
+
 fn commit_projection_buffer(
     current_k: Option<usize>,
     current_band: Option<usize>,
@@ -408,14 +415,11 @@ fn commit_projection_buffer(
     committed
 }
 
-/// Parse projwfc projection text (from `filproj` output) into element-total and orbital groups.
-///
-/// The parser is intentionally tolerant to formatting differences across QE versions.
-pub fn parse_projwfc_projection_groups(
+fn parse_projwfc_projection_groups_internal(
     content: &str,
     n_bands: usize,
     n_kpoints: usize,
-) -> Result<BandProjectionData, String> {
+) -> Result<ParsedProjwfcProjectionData, String> {
     if content.trim().is_empty() {
         return Err("Projection output is empty".to_string());
     }
@@ -427,7 +431,7 @@ pub fn parse_projwfc_projection_groups(
         .map_err(|e| format!("Failed to build angular-momentum regex: {}", e))?;
     let k_re = Regex::new(r"^\s*k\s*=\s*[-\d.Ee+]+\s+[-\d.Ee+]+\s+[-\d.Ee+]+")
         .map_err(|e| format!("Failed to build k-point regex: {}", e))?;
-    let band_re = Regex::new(r"e\(\s*(\d+)\s*\)\s*=\s*[-\d.Ee+]+\s*eV")
+    let band_re = Regex::new(r"e\(\s*(\d+)\s*\)\s*=\s*([-\d.Ee+]+)\s*eV")
         .map_err(|e| format!("Failed to build band regex: {}", e))?;
     let coeff_re = Regex::new(
         r"(?:\(\s*([-\d.Ee+]+)\s*,\s*([-\d.Ee+]+)\s*\)|([-\d.Ee+]+))\s*\*\s*\[#\s*(\d+)\s*\]",
@@ -557,6 +561,7 @@ pub fn parse_projwfc_projection_groups(
     let mut current_band: Option<usize> = None;
     let mut coefficient_buffer: Vec<(usize, f64)> = Vec::new();
     let mut committed_blocks = 0usize;
+    let mut band_energies = vec![vec![None; n_kpoints]; n_bands];
 
     for line in content.lines() {
         if k_re.is_match(line) {
@@ -596,6 +601,15 @@ pub fn parse_projwfc_projection_groups(
                 .get(1)
                 .and_then(|m| m.as_str().parse::<usize>().ok())
                 .map(|value| value.saturating_sub(1));
+            if let (Some(k_idx), Some(band_idx), Some(energy)) = (
+                current_k,
+                current_band,
+                caps.get(2).and_then(|m| m.as_str().parse::<f64>().ok()),
+            ) {
+                if band_idx < n_bands && k_idx < n_kpoints {
+                    band_energies[band_idx][k_idx] = Some(energy);
+                }
+            }
             continue;
         }
 
@@ -644,12 +658,158 @@ pub fn parse_projwfc_projection_groups(
         );
     }
 
-    Ok(BandProjectionData {
-        source: "projwfc".to_string(),
-        atom_groups,
-        orbital_groups,
-        element_orbital_groups,
+    Ok(ParsedProjwfcProjectionData {
+        data: BandProjectionData {
+            source: "projwfc".to_string(),
+            atom_groups,
+            orbital_groups,
+            element_orbital_groups,
+        },
+        band_energies,
     })
+}
+
+fn sort_band_indices_by_energy<E>(energies: &[Vec<E>], k_idx: usize) -> Vec<usize>
+where
+    E: Copy + Into<Option<f64>>,
+{
+    let mut indices: Vec<usize> = (0..energies.len()).collect();
+    indices.sort_by(|left, right| {
+        let left_energy = energies[*left][k_idx].into();
+        let right_energy = energies[*right][k_idx].into();
+        match (left_energy, right_energy) {
+            (Some(a), Some(b)) => a
+                .partial_cmp(&b)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.cmp(right)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => left.cmp(right),
+        }
+    });
+    indices
+}
+
+fn remap_group_weights_to_band_order(
+    groups: &mut [BandProjectionGroup],
+    projection_band_energies: &[Vec<Option<f64>>],
+    target_band_energies: &[Vec<f64>],
+    n_kpoints: usize,
+) {
+    if groups.is_empty()
+        || projection_band_energies.is_empty()
+        || projection_band_energies.len() != target_band_energies.len()
+        || !projection_band_energies
+            .iter()
+            .all(|band| band.len() >= n_kpoints)
+        || !target_band_energies
+            .iter()
+            .all(|band| band.len() >= n_kpoints)
+    {
+        return;
+    }
+
+    let n_bands = target_band_energies.len();
+    let mut band_index_map: Vec<Vec<usize>> = vec![vec![usize::MAX; n_bands]; n_kpoints];
+
+    for k_idx in 0..n_kpoints {
+        let Some(max_delta) = ({
+            let projection_sorted = sort_band_indices_by_energy(projection_band_energies, k_idx);
+            let target_sorted = sort_band_indices_by_energy(target_band_energies, k_idx);
+
+            for rank in 0..n_bands {
+                band_index_map[k_idx][projection_sorted[rank]] = target_sorted[rank];
+            }
+
+            projection_sorted
+                .iter()
+                .zip(target_sorted.iter())
+                .filter_map(|(projection_band_idx, target_band_idx)| {
+                    let projection_energy = projection_band_energies[*projection_band_idx][k_idx]?;
+                    let target_energy = *target_band_energies.get(*target_band_idx)?.get(k_idx)?;
+                    Some((projection_energy - target_energy).abs())
+                })
+                .max_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+        }) else {
+            continue;
+        };
+
+        // If the projwfc energies at this k-point do not match the plotted energies closely,
+        // fall back to the original band indices instead of shuffling weights blindly.
+        if max_delta > 0.05 {
+            for band_idx in 0..n_bands {
+                band_index_map[k_idx][band_idx] = band_idx;
+            }
+        }
+    }
+
+    for group in groups.iter_mut() {
+        let mut remapped = vec![vec![0.0; n_kpoints]; n_bands];
+        for source_band_idx in 0..n_bands {
+            if source_band_idx >= group.weights.len() {
+                continue;
+            }
+            for k_idx in 0..n_kpoints {
+                let Some(&target_band_idx) = band_index_map
+                    .get(k_idx)
+                    .and_then(|row| row.get(source_band_idx))
+                else {
+                    continue;
+                };
+                if target_band_idx >= n_bands {
+                    continue;
+                }
+                let Some(weight) = group.weights[source_band_idx].get(k_idx).copied() else {
+                    continue;
+                };
+                remapped[target_band_idx][k_idx] = weight;
+            }
+        }
+        group.weights = remapped;
+    }
+}
+
+/// Parse projwfc projection text (from `filproj` output) into element-total and orbital groups.
+///
+/// The parser is intentionally tolerant to formatting differences across QE versions.
+pub fn parse_projwfc_projection_groups(
+    content: &str,
+    n_bands: usize,
+    n_kpoints: usize,
+) -> Result<BandProjectionData, String> {
+    Ok(parse_projwfc_projection_groups_internal(content, n_bands, n_kpoints)?.data)
+}
+
+/// Parse projwfc projection text and remap its band indices onto a target band-ordering.
+pub fn parse_projwfc_projection_groups_aligned(
+    content: &str,
+    target_band_energies: &[Vec<f64>],
+) -> Result<BandProjectionData, String> {
+    let n_bands = target_band_energies.len();
+    let n_kpoints = target_band_energies
+        .first()
+        .map(|band| band.len())
+        .unwrap_or(0);
+    let mut parsed = parse_projwfc_projection_groups_internal(content, n_bands, n_kpoints)?;
+    remap_group_weights_to_band_order(
+        &mut parsed.data.atom_groups,
+        &parsed.band_energies,
+        target_band_energies,
+        n_kpoints,
+    );
+    remap_group_weights_to_band_order(
+        &mut parsed.data.orbital_groups,
+        &parsed.band_energies,
+        target_band_energies,
+        n_kpoints,
+    );
+    remap_group_weights_to_band_order(
+        &mut parsed.data.element_orbital_groups,
+        &parsed.band_energies,
+        target_band_energies,
+        n_kpoints,
+    );
+    Ok(parsed.data)
 }
 
 /// Calculate band gap from band energies
@@ -906,5 +1066,36 @@ state #   2: atom   2 (Ni2) wfc  2 (l=2 m=2)
             .find(|group| group.id == "element-orbital-ni-d")
             .unwrap();
         assert!(ni_d.weights[0][0] > 1.2);
+    }
+
+    #[test]
+    fn test_parse_projwfc_projection_groups_aligned_reorders_weights_by_energy() {
+        let content = r#"
+state #   1: atom   1 (Ni ) wfc  1 (l=2 m=1)
+
+ k = 0.0000 0.0000 0.0000
+ e( 1 ) = 0.0000 eV
+ psi = 1.0*[# 1]
+ e( 2 ) = 1.0000 eV
+
+ k = 0.5000 0.0000 0.0000
+ e( 1 ) = 1.0000 eV
+ psi = 1.0*[# 1]
+ e( 2 ) = 0.0000 eV
+"#;
+
+        let target_band_energies = vec![vec![0.0, 0.0], vec![1.0, 1.0]];
+        let parsed =
+            parse_projwfc_projection_groups_aligned(content, &target_band_energies).unwrap();
+        let ni_total = parsed
+            .atom_groups
+            .iter()
+            .find(|group| group.id == "element-ni")
+            .unwrap();
+
+        assert!((ni_total.weights[0][0] - 1.0).abs() < 1e-9);
+        assert!((ni_total.weights[1][0] - 0.0).abs() < 1e-9);
+        assert!((ni_total.weights[0][1] - 0.0).abs() < 1e-9);
+        assert!((ni_total.weights[1][1] - 1.0).abs() < 1e-9);
     }
 }

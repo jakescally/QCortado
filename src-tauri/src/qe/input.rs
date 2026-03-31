@@ -117,7 +117,12 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
     if let Some(tot_charge) = sys.tot_charge {
         writeln!(out, "  tot_charge = {},", tot_charge).unwrap();
     }
-    if let Some(ref input_dft) = sys.input_dft {
+    if let Some(input_dft) = sys
+        .input_dft
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         writeln!(out, "  input_dft = '{}',", input_dft).unwrap();
     }
 
@@ -179,12 +184,7 @@ fn write_electrons_namelist(out: &mut String, calc: &QECalculation) {
         writeln!(out, "  mixing_ndim = {},", mixing_ndim).unwrap();
     }
     if let Some(ref diagonalization) = calc.diagonalization {
-        writeln!(
-            out,
-            "  diagonalization = '{}',",
-            diagonalization.as_str()
-        )
-        .unwrap();
+        writeln!(out, "  diagonalization = '{}',", diagonalization.as_str()).unwrap();
     }
     if let Some(ref startingpot) = calc.startingpot {
         writeln!(out, "  startingpot = '{}',", startingpot.as_str()).unwrap();
@@ -657,6 +657,148 @@ mod tests {
         assert!(input.contains("noncolin = .true."));
         assert!(input.contains("lspinorb = .true."));
         assert!(!input.contains("nspin = 4"));
+    }
+
+    #[test]
+    fn test_whitespace_only_input_dft_is_omitted() {
+        let calc = QECalculation {
+            calculation: CalculationType::Scf,
+            prefix: "whitespace-xc".to_string(),
+            outdir: "./tmp".to_string(),
+            pseudo_dir: "./pseudo".to_string(),
+            system: QESystem {
+                ibrav: BravaisLattice::CubicF,
+                celldm: Some([10.2, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                cell_parameters: None,
+                cell_units: None,
+                species: vec![AtomicSpecies {
+                    symbol: "Si".to_string(),
+                    mass: 28.086,
+                    pseudopotential: "Si.pz-vbc.UPF".to_string(),
+                }],
+                atoms: vec![
+                    Atom {
+                        symbol: "Si".to_string(),
+                        position: [0.0, 0.0, 0.0],
+                        if_pos: [true, true, true],
+                    },
+                    Atom {
+                        symbol: "Si".to_string(),
+                        position: [0.25, 0.25, 0.25],
+                        if_pos: [true, true, true],
+                    },
+                ],
+                position_units: PositionUnits::Crystal,
+                ecutwfc: 20.0,
+                ecutrho: Some(80.0),
+                nbnd: None,
+                tot_charge: None,
+                input_dft: Some("   ".to_string()),
+                nspin: 1,
+                noncolin: false,
+                lspinorb: false,
+                occupations: Occupations::Fixed,
+                smearing: SmearingType::default(),
+                degauss: None,
+                nosym: false,
+                noinv: false,
+            },
+            kpoints: KPoints::Automatic {
+                grid: [4, 4, 4],
+                offset: [1, 1, 1],
+            },
+            conv_thr: 1.0e-8,
+            electron_maxstep: None,
+            mixing_mode: None,
+            mixing_beta: 0.7,
+            mixing_ndim: None,
+            diagonalization: None,
+            startingpot: None,
+            startingwfc: None,
+            diago_full_acc: false,
+            tprnfor: false,
+            tstress: false,
+            forc_conv_thr: None,
+            etot_conv_thr: None,
+            press: None,
+            verbosity: None,
+            disk_io: None,
+        };
+
+        let input = generate_pw_input(&calc);
+
+        assert!(!input.contains("input_dft"));
+    }
+
+    #[test]
+    fn test_input_dft_is_trimmed_before_writing() {
+        let calc = QECalculation {
+            calculation: CalculationType::Scf,
+            prefix: "trimmed-xc".to_string(),
+            outdir: "./tmp".to_string(),
+            pseudo_dir: "./pseudo".to_string(),
+            system: QESystem {
+                ibrav: BravaisLattice::CubicF,
+                celldm: Some([10.2, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                cell_parameters: None,
+                cell_units: None,
+                species: vec![AtomicSpecies {
+                    symbol: "Si".to_string(),
+                    mass: 28.086,
+                    pseudopotential: "Si.pz-vbc.UPF".to_string(),
+                }],
+                atoms: vec![
+                    Atom {
+                        symbol: "Si".to_string(),
+                        position: [0.0, 0.0, 0.0],
+                        if_pos: [true, true, true],
+                    },
+                    Atom {
+                        symbol: "Si".to_string(),
+                        position: [0.25, 0.25, 0.25],
+                        if_pos: [true, true, true],
+                    },
+                ],
+                position_units: PositionUnits::Crystal,
+                ecutwfc: 20.0,
+                ecutrho: Some(80.0),
+                nbnd: None,
+                tot_charge: None,
+                input_dft: Some("  PBEsol  ".to_string()),
+                nspin: 1,
+                noncolin: false,
+                lspinorb: false,
+                occupations: Occupations::Fixed,
+                smearing: SmearingType::default(),
+                degauss: None,
+                nosym: false,
+                noinv: false,
+            },
+            kpoints: KPoints::Automatic {
+                grid: [4, 4, 4],
+                offset: [1, 1, 1],
+            },
+            conv_thr: 1.0e-8,
+            electron_maxstep: None,
+            mixing_mode: None,
+            mixing_beta: 0.7,
+            mixing_ndim: None,
+            diagonalization: None,
+            startingpot: None,
+            startingwfc: None,
+            diago_full_acc: false,
+            tprnfor: false,
+            tstress: false,
+            forc_conv_thr: None,
+            etot_conv_thr: None,
+            press: None,
+            verbosity: None,
+            disk_io: None,
+        };
+
+        let input = generate_pw_input(&calc);
+
+        assert!(input.contains("input_dft = 'PBEsol'"));
     }
 
     #[test]

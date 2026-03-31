@@ -183,6 +183,22 @@ export function isSavedStructureData(value: unknown): value is SavedStructureDat
   return true;
 }
 
+export function resolveSavedScfStructure(params: Record<string, unknown>): SavedStructureData | null {
+  const raw = params.source_structure;
+  if (!isSavedStructureData(raw)) return null;
+  if (!raw.cell_parameters || raw.atoms.length === 0) return null;
+
+  return {
+    position_units: raw.position_units,
+    cell_units: raw.cell_units,
+    cell_parameters: raw.cell_parameters,
+    atoms: raw.atoms.map((atom) => ({
+      symbol: getBaseElement(atom.symbol),
+      position: atom.position,
+    })),
+  };
+}
+
 export function extractOptimizedStructure(
   rawOutput: string,
   fallback: SavedStructureData | null,

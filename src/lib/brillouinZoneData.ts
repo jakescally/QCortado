@@ -104,8 +104,10 @@ export function getHighSymmetryPointId(point: Pick<HighSymmetryPoint, "id" | "la
   return normalizeHighSymmetryLabel(point.label);
 }
 
-export function defaultRhombohedralConventionForSetting(setting: "hexagonal" | "rhombohedral" | null | undefined): RhombohedralConvention {
-  return setting === "hexagonal" ? "bilbao_hex" : "sc_primitive";
+export function defaultRhombohedralConventionForSetting(_setting: "hexagonal" | "rhombohedral" | null | undefined): RhombohedralConvention {
+  // Default all wizard pickers to the Setyawan-Curtarolo primitive labels;
+  // users can still switch to the Bilbao/CDML HEX view explicitly.
+  return "sc_primitive";
 }
 
 function angleDegrees(u: Vec3, v: Vec3): number {

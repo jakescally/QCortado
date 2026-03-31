@@ -19,8 +19,8 @@ pub mod wannier;
 // Re-export commonly used items
 pub use bands::{
     generate_bands_x_input, generate_projwfc_input, parse_bands_gnu,
-    parse_projwfc_projection_groups, read_bands_gnu_file, BandData, BandProjectionData,
-    BandProjectionGroup, BandsXConfig, KPathPoint, ProjwfcConfig,
+    parse_projwfc_projection_groups, parse_projwfc_projection_groups_aligned, read_bands_gnu_file,
+    BandData, BandProjectionData, BandProjectionGroup, BandsXConfig, KPathPoint, ProjwfcConfig,
 };
 pub use input::{
     generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input,
@@ -40,7 +40,7 @@ pub use wannier::{
     prepare_wannier_nscf_calculation, read_wannier_result, validate_wannier_config,
     LudwigExportConfig, LudwigExportMetadata, LudwigExportMode, LudwigExportResult,
     Pw2Wannier90Config, WannierArtifact, WannierBandPathConfig, WannierCalculationConfig,
-    WannierCentreRecord, WannierConvergenceData, WannierDisentanglementConfig,
-    WannierHamiltonian, WannierProjectionSpec, WannierProjectionTargetType, WannierResult,
-    WannierSourceMetadata, WannierSpread,
+    WannierCentreRecord, WannierConvergenceData, WannierDisentanglementConfig, WannierHamiltonian,
+    WannierProjectionSpec, WannierProjectionTargetType, WannierResult, WannierSourceMetadata,
+    WannierSpread,
 };

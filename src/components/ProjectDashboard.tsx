@@ -13,6 +13,11 @@ import { isPhononReadyScf } from "../lib/phononReady";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
+import { detectBravaisLattice } from "../lib/brillouinZone";
+import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
+import type { BravaisLattice } from "../lib/brillouinZone";
+import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
+import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { EditProjectDialog } from "./EditProjectDialog";
 
 interface QEResult {
@@ -133,10 +138,80 @@ const RECIPROCAL_AXIS_OPTIONS = [
   { value: 2, label: "c*" },
 ] as const;
 
+const DISPLAY_CENTERING_BY_BRAVAIS: Record<BravaisLattice, CenteringType> = {
+  "cubic-P": "P",
+  "cubic-F": "F",
+  "cubic-I": "I",
+  "tetragonal-P": "P",
+  "tetragonal-I": "I",
+  "orthorhombic-P": "P",
+  "orthorhombic-C": "C",
+  "orthorhombic-I": "I",
+  "orthorhombic-F": "F",
+  "hexagonal": "P",
+  "trigonal-R": "R",
+  "monoclinic-P": "P",
+  "monoclinic-C": "C",
+  triclinic: "P",
+};
+
+interface OptimizationDisplayCellContext {
+  centering: CenteringType;
+  rhombohedralSetting?: RhombohedralSetting;
+}
+
 function findSliceAxis(primaryAxis: number, secondaryAxis: number): number | null {
   const selected = new Set([primaryAxis, secondaryAxis]);
   const remaining = RECIPROCAL_AXIS_OPTIONS.find((option) => !selected.has(option.value));
   return remaining ? remaining.value : null;
+}
+
+function coerceSpaceGroupNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 230) {
+    return null;
+  }
+  return parsed;
+}
+
+function normalizeSpaceGroupHM(value: string | undefined): string {
+  if (!value) return "";
+  return value
+    .toLowerCase()
+    .replace(/[−–—]/g, "-")
+    .replace(/[\s_:'"]/g, "");
+}
+
+function resolveOptimizationDisplayCellContext(
+  calc: CalculationRun,
+  crystalData: CrystalData | null,
+): OptimizationDisplayCellContext | null {
+  const storedSpaceGroup = coerceSpaceGroupNumber(calc.parameters?.symmetry_spacegroup);
+  const cifSpaceGroup = coerceSpaceGroupNumber(crystalData?.space_group_IT_number);
+  let centering: CenteringType | null = null;
+
+  const spaceGroup = storedSpaceGroup ?? cifSpaceGroup;
+  if (spaceGroup != null) {
+    centering = DISPLAY_CENTERING_BY_BRAVAIS[detectBravaisLattice(spaceGroup)] ?? "P";
+  } else {
+    const normalizedHM = normalizeSpaceGroupHM(crystalData?.space_group_HM);
+    if (normalizedHM.startsWith("r")) {
+      centering = "R";
+    }
+  }
+
+  if (!centering) return null;
+
+  return {
+    centering,
+    rhombohedralSetting:
+      centering === "R" && crystalData
+        ? detectRhombohedralSettingFromLattice(buildConventionalLatticeFromCrystalData(crystalData))
+        : undefined,
+  };
 }
 
 function isHpcCalculation(calc: CalculationRun): boolean {
@@ -771,39 +846,126 @@ function calculateVolumeFromVectors(
   return Math.abs(v1[0] * cross[0] + v1[1] * cross[1] + v1[2] * cross[2]);
 }
 
+function relativeApproximatelyEqual(a: number, b: number, tolerance = 0.35): boolean {
+  const scale = Math.max(1, Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) <= tolerance * scale;
+}
+
+function getCenteringMultiplicity(centering: CenteringType): number {
+  switch (centering) {
+    case "F":
+      return 4;
+    case "I":
+    case "A":
+    case "B":
+    case "C":
+      return 2;
+    case "R":
+      return 3;
+    case "P":
+    default:
+      return 1;
+  }
+}
+
+function isLikelyPrimitiveOptimizationCell(
+  calc: CalculationRun,
+  optimizedCell: CellMatrix,
+  displayContext: OptimizationDisplayCellContext | null,
+  crystalData: CrystalData | null,
+): boolean {
+  if (!displayContext || displayContext.centering === "P") {
+    return false;
+  }
+
+  const cellRepresentation = String(calc.parameters?.cell_representation || "").trim().toLowerCase();
+  if (cellRepresentation.startsWith("primitive")) {
+    return true;
+  }
+
+  if (displayContext.centering === "R" && displayContext.rhombohedralSetting === "hexagonal") {
+    if (detectRhombohedralSettingFromLattice(optimizedCell) === "rhombohedral") {
+      return true;
+    }
+  }
+
+  if (!crystalData) {
+    return false;
+  }
+
+  const conventionalCell = buildConventionalLatticeFromCrystalData(crystalData);
+  const conventionalVolume = calculateVolumeFromVectors(
+    conventionalCell[0],
+    conventionalCell[1],
+    conventionalCell[2],
+  );
+  const optimizedVolume = calculateVolumeFromVectors(
+    optimizedCell[0],
+    optimizedCell[1],
+    optimizedCell[2],
+  );
+  if (conventionalVolume <= 0 || optimizedVolume <= 0) {
+    return false;
+  }
+
+  return relativeApproximatelyEqual(
+    optimizedVolume * getCenteringMultiplicity(displayContext.centering),
+    conventionalVolume,
+  );
+}
+
 function convertPrimitiveToConventionalCell(
   primitiveCell: CellMatrix,
-  primitiveLatticeKind: "cubic_f" | "cubic_i" | "cubic_p" | null,
+  centering: CenteringType,
+  rhombohedralSetting?: RhombohedralSetting,
 ): CellMatrix | null {
-  if (!primitiveLatticeKind) return null;
-
   const [p1, p2, p3] = primitiveCell;
 
-  if (primitiveLatticeKind === "cubic_f") {
-    // Conventional vectors from FCC primitive basis:
-    // a = -p1 + p2 + p3, b = p1 - p2 + p3, c = p1 + p2 - p3
-    return [
-      [-p1[0] + p2[0] + p3[0], -p1[1] + p2[1] + p3[1], -p1[2] + p2[2] + p3[2]],
-      [p1[0] - p2[0] + p3[0], p1[1] - p2[1] + p3[1], p1[2] - p2[2] + p3[2]],
-      [p1[0] + p2[0] - p3[0], p1[1] + p2[1] - p3[1], p1[2] + p2[2] - p3[2]],
-    ];
+  switch (centering) {
+    case "P":
+      return primitiveCell;
+    case "F":
+      return [
+        [-p1[0] + p2[0] + p3[0], -p1[1] + p2[1] + p3[1], -p1[2] + p2[2] + p3[2]],
+        [p1[0] - p2[0] + p3[0], p1[1] - p2[1] + p3[1], p1[2] - p2[2] + p3[2]],
+        [p1[0] + p2[0] - p3[0], p1[1] + p2[1] - p3[1], p1[2] + p2[2] - p3[2]],
+      ];
+    case "I":
+      return [
+        [p2[0] + p3[0], p2[1] + p3[1], p2[2] + p3[2]],
+        [p1[0] + p3[0], p1[1] + p3[1], p1[2] + p3[2]],
+        [p1[0] + p2[0], p1[1] + p2[1], p1[2] + p2[2]],
+      ];
+    case "C":
+      return [
+        [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]],
+        [p1[0] + p2[0], p1[1] + p2[1], p1[2] + p2[2]],
+        p3,
+      ];
+    case "A":
+      return [
+        p1,
+        [p2[0] - p3[0], p2[1] - p3[1], p2[2] - p3[2]],
+        [p2[0] + p3[0], p2[1] + p3[1], p2[2] + p3[2]],
+      ];
+    case "B":
+      return [
+        [p1[0] - p3[0], p1[1] - p3[1], p1[2] - p3[2]],
+        p2,
+        [p1[0] + p3[0], p1[1] + p3[1], p1[2] + p3[2]],
+      ];
+    case "R":
+      if (rhombohedralSetting !== "hexagonal") {
+        return null;
+      }
+      return [
+        [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]],
+        [p2[0] - p3[0], p2[1] - p3[1], p2[2] - p3[2]],
+        [p1[0] + p2[0] + p3[0], p1[1] + p2[1] + p3[1], p1[2] + p2[2] + p3[2]],
+      ];
+    default:
+      return null;
   }
-
-  if (primitiveLatticeKind === "cubic_i") {
-    // Conventional vectors from BCC primitive basis:
-    // a = p1 + p3, b = p1 + p2, c = p2 + p3
-    return [
-      [p1[0] + p3[0], p1[1] + p3[1], p1[2] + p3[2]],
-      [p1[0] + p2[0], p1[1] + p2[1], p1[2] + p2[2]],
-      [p2[0] + p3[0], p2[1] + p3[1], p2[2] + p3[2]],
-    ];
-  }
-
-  if (primitiveLatticeKind === "cubic_p") {
-    return primitiveCell;
-  }
-
-  return null;
 }
 
 function asCellMatrix(value: unknown): CellMatrix | null {
@@ -877,6 +1039,7 @@ export function ProjectDashboard({
   const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
   const [downloadingCalcId, setDownloadingCalcId] = useState<string | null>(null);
   const [downloadProgressByCalcId, setDownloadProgressByCalcId] = useState<Record<string, HpcDownloadProgress>>({});
+  const [calculationDetailsById, setCalculationDetailsById] = useState<Record<string, CalculationRun>>({});
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -885,6 +1048,10 @@ export function ProjectDashboard({
   useEffect(() => {
     loadProject();
   }, [projectId, refreshToken]);
+
+  useEffect(() => {
+    setCalculationDetailsById({});
+  }, [projectId]);
 
   function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -931,6 +1098,7 @@ export function ProjectDashboard({
     try {
       const proj = await invoke<Project>("get_project", { projectId });
       setProject(proj);
+      setCalculationDetailsById({});
 
       // Determine which CIF to show
       if (proj.cif_variants.length > 0) {
@@ -976,6 +1144,57 @@ export function ProjectDashboard({
       setInfoMessage("Project refreshed.");
     }
     setIsRefreshingProject(false);
+  }
+
+  function getCalculationRecord(calc: CalculationRun): CalculationRun {
+    return calculationDetailsById[calc.id] ?? calc;
+  }
+
+  async function ensureCalculationDetails(calc: CalculationRun): Promise<CalculationRun> {
+    const cached = calculationDetailsById[calc.id];
+    if (cached) {
+      return cached;
+    }
+
+    const detail = await invoke<CalculationRun>("get_project_calculation", {
+      projectId,
+      calcId: calc.id,
+    });
+    setCalculationDetailsById((prev) => (
+      prev[calc.id]
+        ? prev
+        : {
+          ...prev,
+          [calc.id]: detail,
+        }
+    ));
+    return detail;
+  }
+
+  function updateCalculationRecords(
+    calcId: string,
+    updater: (calc: CalculationRun) => CalculationRun,
+  ) {
+    setProject((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        cif_variants: prev.cif_variants.map((variant) => ({
+          ...variant,
+          calculations: variant.calculations.map((calc) => (
+            calc.id === calcId ? updater(calc) : calc
+          )),
+        })),
+      };
+    });
+    setCalculationDetailsById((prev) => {
+      const existing = prev[calcId];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [calcId]: updater(existing),
+      };
+    });
   }
 
   async function selectCif(cifId: string) {
@@ -1222,9 +1441,25 @@ export function ProjectDashboard({
     }
   }
 
-  function getOptimizedStructureOptions(calculations: CalculationRun[]): OptimizedStructureOption[] {
-    return calculations
-      .filter((calc) => isOptimizationCalculation(calc))
+  async function getOptimizedStructureOptions(calculations: CalculationRun[]): Promise<OptimizedStructureOption[]> {
+    const optimizationCalcs = calculations.filter((calc) => isOptimizationCalculation(calc));
+    const resolvedCalcs = await Promise.all(optimizationCalcs.map(async (calc) => {
+      if (
+        isSavedStructureData(calc.parameters?.optimized_structure)
+        || isSavedStructureData(calc.parameters?.source_structure)
+        || (calc.result?.raw_output && calc.result.raw_output.trim().length > 0)
+      ) {
+        return calc;
+      }
+      try {
+        return await ensureCalculationDetails(calc);
+      } catch (e) {
+        console.warn("Failed to load optimization detail:", e);
+        return calc;
+      }
+    }));
+
+    return resolvedCalcs
       .map((calc) => {
         const storedOptimized = isSavedStructureData(calc.parameters?.optimized_structure)
           ? calc.parameters.optimized_structure
@@ -1260,10 +1495,11 @@ export function ProjectDashboard({
       .filter((opt): opt is OptimizedStructureOption => opt !== null);
   }
 
-  function handleRunSCF() {
+  async function handleRunSCF() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
+    const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
     onRunSCF(
       selectedCifId,
       crystalData,
@@ -1271,7 +1507,7 @@ export function ProjectDashboard({
       variant.filename,
       undefined,
       undefined,
-      getOptimizedStructureOptions(variant.calculations),
+      optimizedStructures,
     );
   }
 
@@ -1309,6 +1545,51 @@ export function ProjectDashboard({
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     onRunFermiSurface(selectedCifId, crystalData, variant.calculations);
+  }
+
+  async function handleViewBands(calc: CalculationRun) {
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const bandData = detail.result?.band_data ?? calc.result?.band_data ?? null;
+      if (!bandData) {
+        setError("Saved band data is unavailable for this calculation.");
+        return;
+      }
+      onViewBands(bandData, detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null);
+    } catch (e) {
+      console.error("Failed to load band data:", e);
+      setError(`Failed to load band data: ${e}`);
+    }
+  }
+
+  async function handleViewDos(calc: CalculationRun) {
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const dosData = detail.result?.dos_data ?? calc.result?.dos_data ?? null;
+      if (!dosData) {
+        setError("Saved DOS data is unavailable for this calculation.");
+        return;
+      }
+      onViewDos(dosData, detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null);
+    } catch (e) {
+      console.error("Failed to load DOS data:", e);
+      setError(`Failed to load DOS data: ${e}`);
+    }
+  }
+
+  async function handleViewWannier(calc: CalculationRun) {
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const wannierData = detail.result?.wannier_data ?? calc.result?.wannier_data ?? null;
+      if (!wannierData) {
+        setError("Saved Wannier data is unavailable for this calculation.");
+        return;
+      }
+      onViewWannier(wannierData, detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null);
+    } catch (e) {
+      console.error("Failed to load Wannier data:", e);
+      setError(`Failed to load Wannier data: ${e}`);
+    }
   }
 
   async function handleViewFermiSurface(calc: CalculationRun, surfaceFile: string | null) {
@@ -1452,27 +1733,17 @@ export function ProjectDashboard({
       setInfoMessage(
         `Downloaded ${report.downloaded_files} files (${formatBytes(report.downloaded_bytes)})${skippedSuffix}.`,
       );
-      setProject((prev) => {
-        if (!prev) return prev;
+      updateCalculationRecords(calc.id, (entry) => {
+        const nextParams = {
+          ...(entry.parameters || {}),
+          artifacts_downloaded_full: true,
+          artifact_sync_mode: "full",
+          artifact_synced_at: new Date().toISOString(),
+          remote_storage_bytes: remoteStorageBytes,
+        };
         return {
-          ...prev,
-          cif_variants: prev.cif_variants.map((variant) => ({
-            ...variant,
-            calculations: variant.calculations.map((entry) => {
-              if (entry.id !== calc.id) return entry;
-              const nextParams = {
-                ...(entry.parameters || {}),
-                artifacts_downloaded_full: true,
-                artifact_sync_mode: "full",
-                artifact_synced_at: new Date().toISOString(),
-                remote_storage_bytes: remoteStorageBytes,
-              };
-              return {
-                ...entry,
-                parameters: nextParams,
-              };
-            }),
-          })),
+          ...entry,
+          parameters: nextParams,
         };
       });
       downloadCompleted = true;
@@ -1571,6 +1842,25 @@ export function ProjectDashboard({
     basePhononData: { dos_data: any; dispersion_data: any },
   ) {
     let phononData = basePhononData;
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const detailResult = detail.result as any;
+      const detailPhononData = detailResult?.phonon_data
+        ?? ((detailResult?.dos_data != null || detailResult?.dispersion_data != null)
+          ? {
+            dos_data: detailResult?.dos_data ?? null,
+            dispersion_data: detailResult?.dispersion_data ?? null,
+          }
+          : null);
+      if (detailPhononData) {
+        phononData = {
+          dos_data: detailPhononData.dos_data ?? phononData.dos_data ?? null,
+          dispersion_data: detailPhononData.dispersion_data ?? phononData.dispersion_data ?? null,
+        };
+      }
+    } catch (e) {
+      console.warn("Failed to load phonon detail:", e);
+    }
     const needsDispersion = viewMode === "bands" && phononData.dispersion_data == null;
     const needsDos = viewMode === "dos" && phononData.dos_data == null;
 
@@ -1690,27 +1980,14 @@ export function ProjectDashboard({
       });
 
       // Keep local UI state in sync without reloading the whole dashboard.
-      setProject((prev) => {
-        if (!prev) return prev;
+      updateCalculationRecords(calcId, (calc) => {
+        const tags = Array.isArray(calc.tags) ? calc.tags.filter((tag) => tag !== PINNED_TAG) : [];
+        if (shouldBePinned) {
+          tags.push(PINNED_TAG);
+        }
         return {
-          ...prev,
-          cif_variants: prev.cif_variants.map((variant) => {
-            if (variant.id !== cifId) return variant;
-            return {
-              ...variant,
-              calculations: variant.calculations.map((calc) => {
-                if (calc.id !== calcId) return calc;
-                const tags = Array.isArray(calc.tags) ? calc.tags.filter((tag) => tag !== PINNED_TAG) : [];
-                if (shouldBePinned) {
-                  tags.push(PINNED_TAG);
-                }
-                return {
-                  ...calc,
-                  tags,
-                };
-              }),
-            };
-          }),
+          ...calc,
+          tags,
         };
       });
     } catch (e) {
@@ -1795,7 +2072,6 @@ export function ProjectDashboard({
     if (!crystalData) return null;
     return getPrimitiveCell(crystalData);
   }, [crystalData]);
-  const primitiveLatticeKind = primitiveCell?.ibrav ?? null;
   const conventionalCellMetrics = useMemo<DisplayCellMetrics | null>(() => {
     if (!crystalData) return null;
     return {
@@ -2235,7 +2511,8 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {scfCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
@@ -2367,7 +2644,8 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {bandCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
                 return (
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
@@ -2459,12 +2737,12 @@ export function ProjectDashboard({
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {calc.result?.band_data && (
+                          {calc.result && (
                             <button
                               className="view-bands-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onViewBands(calc.result?.band_data, calc.result?.fermi_energy ?? null);
+                                void handleViewBands(calc);
                               }}
                             >
                               View Bands
@@ -2499,8 +2777,8 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {dosCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
-                const dosData = calc.result?.dos_data ?? null;
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
                 const energyMin = Number(calc.parameters?.dos_emin);
                 const energyMax = Number(calc.parameters?.dos_emax);
                 return (
@@ -2603,12 +2881,12 @@ export function ProjectDashboard({
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {dosData && (
+                          {calc.result && (
                             <button
                               className="view-dos-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onViewDos(dosData, calc.result?.fermi_energy ?? null);
+                                void handleViewDos(calc);
                               }}
                             >
                               View DOS
@@ -2642,9 +2920,10 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {wannierCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
-                const wannierData = calc.result?.wannier_data ?? null;
-                const bandData = wannierData?.band_data ?? calc.result?.band_data ?? null;
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
+                const wannierData = calcData.result?.wannier_data ?? null;
+                const bandData = wannierData?.band_data ?? calcData.result?.band_data ?? null;
                 const totalSpread = Number(wannierData?.total_spread ?? calc.parameters?.total_spread);
                 return (
                   <div key={calc.id} className="calculation-item bands-item">
@@ -2755,12 +3034,12 @@ export function ProjectDashboard({
                         )}
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {wannierData && bandData && (
+                          {calc.result && (
                             <button
                               className="view-bands-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onViewWannier(wannierData, calc.result?.fermi_energy ?? null);
+                                void handleViewWannier(calc);
                               }}
                             >
                               View Wannier
@@ -2809,7 +3088,8 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {fermiSurfaceCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
                 const frmsfFiles = Array.isArray(calc.parameters?.frmsf_files)
                   ? calc.parameters.frmsf_files
                   : [];
@@ -2970,8 +3250,9 @@ export function ProjectDashboard({
             <div className="calculations-list">
               {phononCalculations.map((calc) => {
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
-                const resultData = calc.result as any;
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
+                const resultData = calcData.result as any;
                 const phononData = resultData?.phonon_data
                   ?? ((resultData?.dos_data != null || resultData?.dispersion_data != null)
                     ? {
@@ -3132,6 +3413,7 @@ export function ProjectDashboard({
             <h3>Optimizations</h3>
             <div className="calculations-list">
               {optimizationCalculations.map((calc) => {
+                const calcData = getCalculationRecord(calc);
                 const storedOptimizedStructure = isSavedStructureData(calc.parameters?.optimized_structure)
                   ? calc.parameters.optimized_structure
                   : null;
@@ -3139,7 +3421,7 @@ export function ProjectDashboard({
                   ? calc.parameters.source_structure
                   : null;
                 const parsedOptimizedStructure = extractOptimizedStructure(
-                  calc.result?.raw_output || "",
+                  calcData.result?.raw_output || "",
                   storedOptimizedStructure || storedSourceStructure,
                 );
                 const optimizedStructure = parsedOptimizedStructure || storedOptimizedStructure;
@@ -3148,13 +3430,13 @@ export function ProjectDashboard({
                   || null;
                 const optimizedCell = asCellMatrix(optimizedStructure?.cell_parameters);
                 const units = summary?.units || optimizedStructure?.cell_units || "angstrom";
-                const supportsConventionalTransform =
-                  primitiveLatticeKind === "cubic_f" ||
-                  primitiveLatticeKind === "cubic_i" ||
-                  primitiveLatticeKind === "cubic_p";
+                const displayCellContext = resolveOptimizationDisplayCellContext(calc, crystalData);
+                const likelyPrimitiveCell = optimizedCell
+                  ? isLikelyPrimitiveOptimizationCell(calc, optimizedCell, displayCellContext, crystalData)
+                  : false;
                 let displaySummary: SavedCellSummary | null = summary ? { ...summary } : null;
-                let cellBasisLabel = supportsConventionalTransform
-                  ? "Primitive (QE)"
+                let cellBasisLabel = likelyPrimitiveCell
+                  ? (displayCellContext?.centering === "R" ? "Rhombohedral primitive (QE output)" : "Primitive (QE output)")
                   : "Stored (QE output)";
 
                 if (!displaySummary && optimizedCell) {
@@ -3171,8 +3453,17 @@ export function ProjectDashboard({
                   };
                 }
 
-                if (cellViewMode === "conventional" && supportsConventionalTransform && optimizedCell) {
-                  const convertedCell = convertPrimitiveToConventionalCell(optimizedCell, primitiveLatticeKind);
+                if (
+                  cellViewMode === "conventional"
+                  && likelyPrimitiveCell
+                  && optimizedCell
+                  && displayCellContext
+                ) {
+                  const convertedCell = convertPrimitiveToConventionalCell(
+                    optimizedCell,
+                    displayCellContext.centering,
+                    displayCellContext.rhombohedralSetting,
+                  );
                   if (convertedCell) {
                     const metrics = calculateMetricsFromVectors(convertedCell[0], convertedCell[1], convertedCell[2]);
                     displaySummary = {
@@ -3186,8 +3477,6 @@ export function ProjectDashboard({
                       units,
                     };
                     cellBasisLabel = "Conventional (derived)";
-                  } else {
-                    cellBasisLabel = "Primitive (QE)";
                   }
                 }
 
@@ -3202,15 +3491,20 @@ export function ProjectDashboard({
                 const energyConvLabel = formatThreshold(calc.parameters?.etot_conv_thr);
                 const pressValue = Number(calc.parameters?.press);
                 const isPinned = pinnedCalcIds.has(calc.id);
-                const runtime = getCalculationRuntime(calc);
+                const runtime = getCalculationRuntime(calcData);
 
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => {
+                        if (expandedCalc !== calc.id) {
+                          void ensureCalculationDetails(calc).catch((e) => {
+                            console.warn("Failed to load optimization detail:", e);
+                          });
+                        }
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id);
+                      }}
                     >
                       <div className="calculation-info">
                         <span className="calc-type">OPT</span>

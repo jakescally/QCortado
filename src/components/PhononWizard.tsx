@@ -1,6 +1,6 @@
 // Phonon Calculation Wizard - Calculate phonon DOS and dispersion
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -13,10 +13,13 @@ import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import {
   createPathCoordinateConverters,
@@ -486,15 +489,7 @@ export function PhononWizard({
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
-
-  const handleOutputScroll = () => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  };
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -522,6 +517,8 @@ export function PhononWizard({
   const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
   const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
   const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
   const hpcCommandLines = useMemo(() => {
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
@@ -587,19 +584,18 @@ export function PhononWizard({
   }, [crystalData]);
 
   useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
+
+  useEffect(() => {
     if (!epwPreparationEnabled) return;
     if (!fildvscfEnabled) setFildvscfEnabled(true);
     if (electronPhononMode === "none") {
       setElectronPhononMode("interpolated");
     }
   }, [epwPreparationEnabled, fildvscfEnabled, electronPhononMode]);
-
-  // Auto-scroll output only if user is at the bottom
-  useEffect(() => {
-    const el = outputRef.current;
-    if (!el || !followOutputRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
 
   useEffect(() => {
     if (!isHpcMode || step !== "run") {
@@ -687,7 +683,10 @@ export function PhononWizard({
     }
 
     setIsRunning(task.status === "running");
-    setOutput(task.output.join("\n") + "\n");
+    if (task.outputLineCount > 0 || task.status !== "running") {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setCalcStartTime(task.startedAt);
 
@@ -707,7 +706,10 @@ export function PhononWizard({
     const task = taskContext.getTask(activeTaskId);
     if (!task) return;
 
-    setOutput(task.output.join("\n") + "\n");
+    if (task.outputLineCount > 0) {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setIsRunning(task.status === "running");
   }, [
@@ -991,8 +993,8 @@ export function PhononWizard({
     }
 
     setIsRunning(true);
-    followOutputRef.current = true;
     setOutput("");
+    setOutputLineCount(0);
     setError(null);
     setPhononResult(null);
     setIsSaved(false);
@@ -1194,7 +1196,8 @@ export function PhononWizard({
         {phononReadyScfs.length === 0 && (
           <div className="warning-banner">
             No phonon-ready SCF calculations found. Run an SCF on an optimized
-            structure with the "Phonon-Ready" preset (conv_thr = 1e-12).
+            structure with conv_thr &lt;= 1e-12. The SCF wizard presets now
+            default to 1e-12.
           </div>
         )}
 
@@ -2096,12 +2099,13 @@ export function PhononWizard({
         )}
 
         <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
-          <div className="output-panel">
-            <h3>{isRunning ? "Running..." : "Output"}</h3>
-            <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
-              {output || "Starting calculation..."}
-            </pre>
-          </div>
+          <LiveOutputPanel
+            title={isRunning ? "Running..." : "Output"}
+            output={output}
+            placeholder="Starting calculation..."
+            totalLineCount={outputLineCount}
+            visibleLineCount={visibleOutputLineCount}
+          />
 
           {isHpcMode && (
             <div className="telemetry-panel">

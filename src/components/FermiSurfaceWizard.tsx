@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -10,14 +10,17 @@ import {
 } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
-import { isSavedStructureData } from "../lib/optimizedStructure";
+import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { analyzeCrystalSymmetry } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
+import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -177,22 +180,6 @@ function getBaseElement(symbol: string): string {
   return symbol.replace(/[\d+-]+$/, "");
 }
 
-function resolveScfSourceStructure(params: Record<string, unknown>): SavedStructureData | null {
-  const raw = params.source_structure;
-  if (!isSavedStructureData(raw)) return null;
-  if (!raw.cell_parameters || raw.atoms.length === 0) return null;
-
-  return {
-    position_units: raw.position_units,
-    cell_units: raw.cell_units,
-    cell_parameters: raw.cell_parameters,
-    atoms: raw.atoms.map((atom) => ({
-      symbol: getBaseElement(atom.symbol),
-      position: atom.position,
-    })),
-  };
-}
-
 function pseudoMatchesElement(filename: string, element: string): boolean {
   const lowerFile = filename.toLowerCase();
   const lowerEl = getBaseElement(element).toLowerCase();
@@ -298,8 +285,7 @@ export function FermiSurfaceWizard({
 
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
-  const outputRef = useRef<HTMLPreElement>(null);
-  const followOutputRef = useRef(true);
+  const [outputLineCount, setOutputLineCount] = useState(0);
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -325,6 +311,8 @@ export function FermiSurfaceWizard({
   const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
   const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
   const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
+  const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
+  useViewportScrollLock(step === "run");
 
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
   const hpcCommandLines = useMemo(
@@ -347,12 +335,11 @@ export function FermiSurfaceWizard({
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
-  const handleOutputScroll = () => {
-    const el = outputRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followOutputRef.current = distanceToBottom <= 16;
-  };
+  useEffect(() => {
+    if (visibleOutputLineCount > outputLineCount) {
+      setOutputLineCount(visibleOutputLineCount);
+    }
+  }, [outputLineCount, visibleOutputLineCount]);
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
@@ -515,12 +502,6 @@ export function FermiSurfaceWizard({
   }, [crystalData, qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
 
   useEffect(() => {
-    const el = outputRef.current;
-    if (!el || !followOutputRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [output]);
-
-  useEffect(() => {
     if (!isHpcMode || step !== "run") {
       return;
     }
@@ -605,7 +586,10 @@ export function FermiSurfaceWizard({
     }
 
     setIsRunning(task.status === "running");
-    setOutput(task.output.join("\n") + (task.output.length > 0 ? "\n" : ""));
+    if (task.outputLineCount > 0 || task.status !== "running") {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setCalcStartTime(task.startedAt);
 
@@ -624,7 +608,10 @@ export function FermiSurfaceWizard({
     const task = taskContext.getTask(activeTaskId);
     if (!task) return;
 
-    setOutput(task.output.join("\n") + (task.output.length > 0 ? "\n" : ""));
+    if (task.outputLineCount > 0) {
+      setOutput(task.outputText);
+      setOutputLineCount(task.outputLineCount);
+    }
     setProgress(task.progress);
     setIsRunning(task.status === "running");
   }, [
@@ -661,7 +648,7 @@ export function FermiSurfaceWizard({
       : parseOptionalPositiveInt(String(fermiNbnd), "number of bands");
 
     const scfParams = selectedScf.parameters || {};
-    const sourceStructure = resolveScfSourceStructure(scfParams);
+    const sourceStructure = resolveSavedScfStructure(scfParams);
     const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
     let structureForNscf: SavedStructureData | null = sourceStructure;
     if (sourceUsesPrimitive) {
@@ -892,8 +879,8 @@ export function FermiSurfaceWizard({
     }
 
     setIsRunning(true);
-    followOutputRef.current = true;
     setOutput("");
+    setOutputLineCount(0);
     setError(null);
     setFermiData(null);
     setIsSaved(false);
@@ -1523,12 +1510,13 @@ export function FermiSurfaceWizard({
       )}
 
       <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
-        <div className="output-panel">
-          <h3>{isRunning ? "Running..." : "Output"}</h3>
-          <pre ref={outputRef} className="output-text" onScroll={handleOutputScroll}>
-            {output || "Starting calculation..."}
-          </pre>
-        </div>
+        <LiveOutputPanel
+          title={isRunning ? "Running..." : "Output"}
+          output={output}
+          placeholder="Starting calculation..."
+          totalLineCount={outputLineCount}
+          visibleLineCount={visibleOutputLineCount}
+        />
 
         {isHpcMode && (
           <div className="telemetry-panel">
