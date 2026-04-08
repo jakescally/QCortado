@@ -20,6 +20,8 @@ import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
+import { BandsMultiview } from "./components/BandsMultiview";
+import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
@@ -117,7 +119,7 @@ const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 const DEFAULT_WANNIER90_PATH = "/usr/local/bin/wannier90.x";
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
 
 interface SCFContext {
   cifId: string;
@@ -329,6 +331,8 @@ function AppInner() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
+  const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
+    useState<BandsMultiviewCalculation[] | undefined>(undefined);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showQueueMenu, setShowQueueMenu] = useState(false);
   const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("home");
@@ -2985,6 +2989,25 @@ function AppInner() {
             setProjectBrowserFolderId(folderId);
             setCurrentView("project-dashboard");
           }}
+          onOpenBandsMultiview={(initialCalculations) => {
+            setBandsMultiviewInitialCalculations(initialCalculations);
+            setCurrentView("bands-multiview");
+          }}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "bands-multiview") {
+    return (
+      <>
+        <BandsMultiview
+          onBack={() => {
+            setBandsMultiviewInitialCalculations(undefined);
+            setCurrentView("project-browser");
+          }}
+          initialCalculations={bandsMultiviewInitialCalculations}
         />
         {appChrome}
       </>

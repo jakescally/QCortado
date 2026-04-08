@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
+import type { BandsMultiviewCalculation, BandsMultiviewScanProgress } from "./BandsMultiview";
 
 interface ProjectSummary {
   id: string;
@@ -118,6 +119,7 @@ interface ProjectBrowserProps {
   onBack: () => void;
   onSelectProject?: (projectId: string, folderId: string | null) => void;
   onProjectsChanged?: () => void;
+  onOpenBandsMultiview?: (initialCalculations: BandsMultiviewCalculation[]) => void;
   initialActiveFolderId?: string | null;
   readOnly?: boolean;
 }
@@ -172,10 +174,18 @@ interface DeleteProjectFolderResult {
 
 const DELETE_CONFIRM_TEXT = "DELETE";
 
+function createBandsMultiviewProgressEventId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `bands-multiview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function ProjectBrowser({
   onBack,
   onSelectProject,
   onProjectsChanged,
+  onOpenBandsMultiview,
   initialActiveFolderId = null,
   readOnly = false,
 }: ProjectBrowserProps) {
@@ -208,8 +218,12 @@ export function ProjectBrowser({
   const [activeProjectFilters, setActiveProjectFilters] = useState<ProjectCalculationType[]>([]);
   const [exportProgress, setExportProgress] = useState<ProjectArchiveExportProgress | null>(null);
   const [importProgress, setImportProgress] = useState<ProjectArchiveImportProgress | null>(null);
+  const [isOpeningBandsMultiview, setIsOpeningBandsMultiview] = useState(false);
+  const [bandsMultiviewProgress, setBandsMultiviewProgress] =
+    useState<BandsMultiviewScanProgress | null>(null);
   const activeExportIdRef = useRef<string | null>(null);
   const activeImportIdRef = useRef<string | null>(null);
+  const activeMultiviewScanIdRef = useRef<string | null>(null);
 
   const folderById = useMemo<Map<string, ProjectFolder>>(
     () => new Map(folders.map((folder) => [folder.id, folder])),
@@ -336,6 +350,27 @@ export function ProjectBrowser({
   }, []);
 
   useEffect(() => {
+    const unlistenPromise = listen<BandsMultiviewScanProgress>(
+      "multiview-bands-progress",
+      (event) => {
+        const payload = event.payload;
+        if (
+          !activeMultiviewScanIdRef.current
+          || payload.progress_event_id !== activeMultiviewScanIdRef.current
+        ) {
+          return;
+        }
+        setBandsMultiviewProgress(payload);
+      },
+    );
+
+    return () => {
+      activeMultiviewScanIdRef.current = null;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
     if (!activeFolderId) return;
     if (!folderById.has(activeFolderId)) {
       setActiveFolderId(null);
@@ -385,6 +420,48 @@ export function ProjectBrowser({
     } finally {
       if (showLoadingState) {
         setIsLoading(false);
+      }
+    }
+  }
+
+  async function handleOpenBandsMultiview() {
+    if (!onOpenBandsMultiview || isOpeningBandsMultiview) {
+      return;
+    }
+
+    const progressEventId = createBandsMultiviewProgressEventId();
+    activeMultiviewScanIdRef.current = progressEventId;
+    setError(null);
+    setStatusMessage(null);
+    setIsOpeningBandsMultiview(true);
+    setBandsMultiviewProgress({
+      progress_event_id: progressEventId,
+      phase: "loading",
+      found_count: 0,
+      scanned_projects: 0,
+      total_projects: 0,
+    });
+
+    try {
+      const calculations = await invoke<BandsMultiviewCalculation[]>(
+        "list_multiview_band_calculations",
+        { progressEventId },
+      );
+      if (activeMultiviewScanIdRef.current !== progressEventId) {
+        return;
+      }
+      onOpenBandsMultiview(calculations);
+    } catch (e) {
+      if (activeMultiviewScanIdRef.current !== progressEventId) {
+        return;
+      }
+      console.error("Failed to open bands multiview:", e);
+      setError(`Failed to load saved band calculations: ${e}`);
+    } finally {
+      if (activeMultiviewScanIdRef.current === progressEventId) {
+        activeMultiviewScanIdRef.current = null;
+        setIsOpeningBandsMultiview(false);
+        setBandsMultiviewProgress(null);
       }
     }
   }
@@ -895,13 +972,58 @@ export function ProjectBrowser({
     : 0;
 
   return (
-    <div className="browser-container">
+    <div className={`browser-container ${isOpeningBandsMultiview ? "browser-container-multiview-loading" : ""}`}>
+      {isOpeningBandsMultiview && <div className="browser-multiview-loading-backdrop" />}
       <div className="browser-header">
         <button className="back-btn" onClick={onBack}>
           ← Back
         </button>
         <h2>Projects</h2>
         <div className="browser-actions">
+          {onOpenBandsMultiview && (
+            <div className="browser-multiview-launcher">
+              <button
+                className="secondary-project-btn"
+                type="button"
+                onClick={handleOpenBandsMultiview}
+                disabled={
+                  isLoading
+                  || isImporting
+                  || isExporting
+                  || isOpeningBandsMultiview
+                  || projects.length === 0
+                }
+              >
+                Bands Multiview
+              </button>
+              {isOpeningBandsMultiview && (
+                <div
+                  className="browser-multiview-launch-tile"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div className="bands-multiview-loading-state browser-multiview-loading-card">
+                    <div className="bands-multiview-loading-spinner" aria-hidden="true" />
+                    <div className="bands-multiview-loading-copy">
+                      <h3>
+                        Found {bandsMultiviewProgress?.found_count ?? 0} band calculation
+                        {(bandsMultiviewProgress?.found_count ?? 0) !== 1 ? "s" : ""}
+                        ...
+                      </h3>
+                      <p>
+                        {(bandsMultiviewProgress?.total_projects ?? 0) > 0
+                          ? `Scanned ${Math.min(
+                            bandsMultiviewProgress?.scanned_projects ?? 0,
+                            bandsMultiviewProgress?.total_projects ?? 0,
+                          )} of ${bandsMultiviewProgress?.total_projects ?? 0} saved projects.`
+                          : "Scanning saved projects for completed band calculations."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {!readOnly && (
             <>
               <button

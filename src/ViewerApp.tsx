@@ -12,6 +12,8 @@ import { ThemeProvider } from "./lib/ThemeContext";
 import { getActiveHpcProfileId, listHpcProfiles } from "./lib/hpcConfig";
 import { HpcProfile } from "./lib/types";
 import { useWindowSize } from "./lib/useWindowSize";
+import { BandsMultiview } from "./components/BandsMultiview";
+import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
 
 interface ViewerSyncStatus {
   last_synced_at?: string | null;
@@ -27,7 +29,7 @@ interface ViewerSyncResult {
   total_projects: number;
 }
 
-type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "dos-viewer" | "wannier-viewer" | "phonon-viewer";
+type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "bands-multiview" | "dos-viewer" | "wannier-viewer" | "phonon-viewer";
 type PhononViewMode = "bands" | "dos";
 
 interface PhononData {
@@ -65,6 +67,8 @@ function ViewerAppInner() {
   const [currentView, setCurrentView] = useState<ViewerView>("home");
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
+  const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
+    useState<BandsMultiviewCalculation[] | undefined>(undefined);
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
 
@@ -203,6 +207,25 @@ function ViewerAppInner() {
             setProjectBrowserFolderId(folderId);
             setCurrentView("project-dashboard");
           }}
+          onOpenBandsMultiview={(initialCalculations) => {
+            setBandsMultiviewInitialCalculations(initialCalculations);
+            setCurrentView("bands-multiview");
+          }}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "bands-multiview") {
+    return (
+      <>
+        <BandsMultiview
+          onBack={() => {
+            setBandsMultiviewInitialCalculations(undefined);
+            setCurrentView("project-browser");
+          }}
+          initialCalculations={bandsMultiviewInitialCalculations}
         />
         {appChrome}
       </>

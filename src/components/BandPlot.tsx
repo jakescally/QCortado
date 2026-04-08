@@ -59,6 +59,11 @@ interface BandPlotProps {
   scrollHint?: string;
   yClampRange?: [number, number] | null;
   viewerType?: "electronic" | "phonon";
+  sharedSettings?: BandPlotSharedSettings | null;
+  showSidebar?: boolean;
+  projectionSelection?: string | null;
+  enableWheelRangeControl?: boolean;
+  enableHoverScrollLock?: boolean;
 }
 
 interface HoveredPoint {
@@ -71,17 +76,39 @@ interface HoveredPoint {
   projectionWeightNormalized?: number;
 }
 
-type ColorMode = "single" | "rainbow";
-type RainbowPalette = "jet" | "sinebow";
+export type ColorMode = "single" | "rainbow";
+export type RainbowPalette = "jet" | "sinebow";
 type ProjectionMode = "atom" | "orbital";
 type ProjectionNormalizeMode = "global" | "band";
 type FatColorMode = "accent" | "band";
-type FermiReferenceMode = "scf" | "bands";
+export type FermiReferenceMode = "scf" | "bands";
+
+export interface BandPlotSharedSettings {
+  fermiReferenceMode: FermiReferenceMode;
+  lineWidth: number;
+  lineOpacity: number;
+  plotTextScale: number;
+  colorMode: ColorMode;
+  singleBandColor: string;
+  rainbowPalette: RainbowPalette;
+  plotBgWhite: boolean;
+  showBandGapOverlay: boolean;
+}
+
+export interface BandPlotProjectionOption {
+  value: string;
+  label: string;
+}
 
 interface OrbitalElementOption {
   key: string;
   label: string;
   groups: BandProjectionGroup[];
+}
+
+interface ProjectionSelectionEntry extends BandPlotProjectionOption {
+  mode: ProjectionMode;
+  elementKey?: string;
 }
 
 const BAND_GAP_TOLERANCE_EV = 0.01;
@@ -183,6 +210,70 @@ function formatAxisInputValue(value: number): string {
 function isElectronicEFLabel(label: string): boolean {
   const normalized = label.replace(/\s+/g, "").replace(/−/g, "-").toLowerCase();
   return normalized === "e-e_f(ev)";
+}
+
+export function resolveBandPlotFermiContext(
+  data: BandData,
+  scfFermiEnergy?: number | null,
+  requestedMode: FermiReferenceMode = "bands",
+): {
+  fermiEnergy: number;
+  mode: FermiReferenceMode;
+  hasScfFermi: boolean;
+  hasBandsFermi: boolean;
+} {
+  const hasScfFermi = scfFermiEnergy != null && Number.isFinite(scfFermiEnergy);
+  const hasBandsFermi = Number.isFinite(data.fermi_energy);
+
+  let mode: FermiReferenceMode;
+  if (requestedMode === "scf" && hasScfFermi) {
+    mode = "scf";
+  } else if (requestedMode === "bands" && hasBandsFermi) {
+    mode = "bands";
+  } else if (hasBandsFermi) {
+    mode = "bands";
+  } else if (hasScfFermi) {
+    mode = "scf";
+  } else {
+    mode = "bands";
+  }
+
+  const fermiEnergy = mode === "scf" && hasScfFermi
+    ? (scfFermiEnergy as number)
+    : hasBandsFermi
+      ? data.fermi_energy
+      : hasScfFermi
+        ? (scfFermiEnergy as number)
+        : 0;
+
+  return {
+    fermiEnergy,
+    mode,
+    hasScfFermi,
+    hasBandsFermi,
+  };
+}
+
+export function getDefaultBandPlotEnergyRange(
+  data: BandData,
+  scfFermiEnergy?: number | null,
+  requestedMode: FermiReferenceMode = "bands",
+): [number, number] {
+  const { fermiEnergy } = resolveBandPlotFermiContext(data, scfFermiEnergy, requestedMode);
+  let eMin = data.energy_range[0] - fermiEnergy;
+  let eMax = data.energy_range[1] - fermiEnergy;
+  const span = Math.max(eMax - eMin, 1e-6);
+  const padding = span * 0.1;
+  eMin -= padding;
+  eMax += padding;
+
+  const maxRange = 20;
+  if (eMax - eMin > maxRange * 2) {
+    eMin = -maxRange;
+    eMax = maxRange;
+  }
+
+  return [eMin, eMax];
 }
 
 function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): BandGap | null {
@@ -391,6 +482,142 @@ function orbitalSortRank(group: BandProjectionGroup): number {
   return 98;
 }
 
+function formatProjectionOrbitalLabel(orbitalKey: string): string {
+  return orbitalKey.trim().toLowerCase() || "other";
+}
+
+function formatGlobalOrbitalLabel(group: BandProjectionGroup): string {
+  const idMatch = group.id.match(/(?:^|-)orbital-([a-z0-9_+\-]+)$/i);
+  if (idMatch) {
+    return formatProjectionOrbitalLabel(idMatch[1]);
+  }
+
+  const labelMatch = group.label.trim().match(/^([A-Za-z0-9_+\-]+)\s+orbitals$/i);
+  if (labelMatch) {
+    return formatProjectionOrbitalLabel(labelMatch[1]);
+  }
+
+  return group.label.trim() || group.id;
+}
+
+function buildProjectionSelectionEntries(data: BandData): ProjectionSelectionEntry[] {
+  const hasElementResolvedOrbitals = (data.projections?.element_orbital_groups?.length ?? 0) > 0;
+  const elementSelections = new Map<string, {
+    elementKey: string;
+    elementLabel: string;
+    fullSelectionValue: string | null;
+    fullSelectionMode: ProjectionMode;
+    orbitalGroups: BandProjectionGroup[];
+  }>();
+
+  for (const group of data.projections?.atom_groups ?? []) {
+    const element = parseElementIdentityFromGroup(group);
+    const existing = elementSelections.get(element.key);
+    if (existing) {
+      if (!existing.fullSelectionValue) {
+        existing.fullSelectionValue = `element-${element.key}`;
+        existing.fullSelectionMode = "atom";
+      }
+      continue;
+    }
+
+    elementSelections.set(element.key, {
+      elementKey: element.key,
+      elementLabel: element.display,
+      fullSelectionValue: `element-${element.key}`,
+      fullSelectionMode: "atom",
+      orbitalGroups: [],
+    });
+  }
+
+  for (const group of data.projections?.element_orbital_groups ?? []) {
+    const parsed = parseElementOrbitalIdentity(group);
+    const existing = elementSelections.get(parsed.elementKey);
+    if (existing) {
+      existing.orbitalGroups.push(group);
+      if (!existing.fullSelectionValue) {
+        existing.fullSelectionValue = `element-orbital-total-${parsed.elementKey}`;
+        existing.fullSelectionMode = "orbital";
+      }
+      continue;
+    }
+
+    elementSelections.set(parsed.elementKey, {
+      elementKey: parsed.elementKey,
+      elementLabel: parsed.elementLabel,
+      fullSelectionValue: `element-orbital-total-${parsed.elementKey}`,
+      fullSelectionMode: "orbital",
+      orbitalGroups: [group],
+    });
+  }
+
+  const entries: ProjectionSelectionEntry[] = [];
+  const sortedElements = Array.from(elementSelections.values()).sort((a, b) =>
+    a.elementLabel.localeCompare(b.elementLabel),
+  );
+  for (const element of sortedElements) {
+    if (element.fullSelectionValue) {
+      entries.push({
+        value: element.fullSelectionValue,
+        label: element.elementLabel,
+        mode: element.fullSelectionMode,
+        elementKey: element.fullSelectionMode === "orbital" ? element.elementKey : undefined,
+      });
+    }
+
+    const sortedOrbitalGroups = [...element.orbitalGroups].sort((a, b) => {
+      const rankDiff = orbitalSortRank(a) - orbitalSortRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      return a.label.localeCompare(b.label);
+    });
+    for (const group of sortedOrbitalGroups) {
+      const orbital = parseElementOrbitalIdentity(group);
+      entries.push({
+        value: group.id,
+        label: `${element.elementLabel}-${formatProjectionOrbitalLabel(orbital.orbitalKey)}`,
+        mode: "orbital",
+        elementKey: orbital.elementKey,
+      });
+    }
+  }
+
+  if (entries.length > 0 && hasElementResolvedOrbitals) {
+    return entries;
+  }
+
+  const globalOrbitalGroups = [...(data.projections?.orbital_groups ?? [])].sort((a, b) => {
+    const rankDiff = orbitalSortRank(a) - orbitalSortRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    return a.label.localeCompare(b.label);
+  });
+  if (globalOrbitalGroups.length === 0) {
+    return [];
+  }
+
+  return [
+    ...entries,
+    {
+      value: "orbital-total",
+      label: "all orbitals",
+      mode: "orbital",
+      elementKey: "",
+    },
+    ...globalOrbitalGroups.map((group) => ({
+      value: group.id,
+      label: formatGlobalOrbitalLabel(group),
+      mode: "orbital" as const,
+      elementKey: "",
+    })),
+  ];
+}
+
+export function buildBandPlotProjectionOptions(data: BandData): BandPlotProjectionOption[] {
+  return [
+    { value: "none", label: "none" },
+    ...buildProjectionSelectionEntries(data).map(({ value, label }) => ({ value, label })),
+  ];
+}
+
 export function BandPlot({
   data,
   width = 700,
@@ -408,6 +635,11 @@ export function BandPlot({
   scrollHint = "Scroll: zoom Y | Shift+Scroll: pan energy",
   yClampRange = [-25, 25],
   viewerType = "electronic",
+  sharedSettings = null,
+  showSidebar = true,
+  projectionSelection,
+  enableWheelRangeControl = true,
+  enableHoverScrollLock = true,
 }: BandPlotProps) {
   const { isDark } = useTheme();
   const colors = useMemo(() => isDark
@@ -486,13 +718,20 @@ export function BandPlot({
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
 
-  const hasScfFermi = scfFermiEnergy != null && Number.isFinite(scfFermiEnergy);
-  const hasBandsFermi = Number.isFinite(data.fermi_energy);
+  const requestedFermiReferenceMode = sharedSettings?.fermiReferenceMode ?? null;
+  const fallbackFermiReferenceMode = (
+    scfFermiEnergy != null && Number.isFinite(scfFermiEnergy)
+  ) ? "scf" : "bands";
   const [fermiReferenceMode, setFermiReferenceMode] = useState<FermiReferenceMode>(
-    hasScfFermi ? "scf" : "bands",
+    requestedFermiReferenceMode ?? fallbackFermiReferenceMode,
   );
 
   useEffect(() => {
+    if (sharedSettings) {
+      return;
+    }
+    const hasScfFermi = scfFermiEnergy != null && Number.isFinite(scfFermiEnergy);
+    const hasBandsFermi = Number.isFinite(data.fermi_energy);
     if (fermiReferenceMode === "scf" && !hasScfFermi) {
       setFermiReferenceMode("bands");
       return;
@@ -500,36 +739,39 @@ export function BandPlot({
     if (fermiReferenceMode === "bands" && !hasBandsFermi && hasScfFermi) {
       setFermiReferenceMode("scf");
     }
-  }, [fermiReferenceMode, hasBandsFermi, hasScfFermi]);
+  }, [data.fermi_energy, fermiReferenceMode, scfFermiEnergy, sharedSettings]);
 
-  const fermiEnergy = useMemo(() => {
-    if (fermiReferenceMode === "scf" && hasScfFermi) {
-      return scfFermiEnergy as number;
-    }
-    if (hasBandsFermi) {
-      return data.fermi_energy;
-    }
-    if (hasScfFermi) {
-      return scfFermiEnergy as number;
-    }
-    return 0;
-  }, [data.fermi_energy, fermiReferenceMode, hasBandsFermi, hasScfFermi, scfFermiEnergy]);
+  const {
+    fermiEnergy,
+    mode: resolvedFermiReferenceMode,
+    hasScfFermi,
+    hasBandsFermi,
+  } = useMemo(
+    () =>
+      resolveBandPlotFermiContext(
+        data,
+        scfFermiEnergy,
+        requestedFermiReferenceMode ?? fermiReferenceMode,
+      ),
+    [data, fermiReferenceMode, requestedFermiReferenceMode, scfFermiEnergy],
+  );
 
-  const activeFermiSourceLabel = fermiReferenceMode === "scf" ? "SCF" : "Bands run";
+  const effectiveLineWidth = sharedSettings?.lineWidth ?? lineWidth;
+  const effectiveLineOpacity = sharedSettings?.lineOpacity ?? lineOpacity;
+  const effectivePlotTextScale = sharedSettings?.plotTextScale ?? plotTextScale;
+  const effectiveColorMode = sharedSettings?.colorMode ?? colorMode;
+  const effectiveSingleBandColor = sharedSettings?.singleBandColor ?? singleBandColor;
+  const effectiveRainbowPalette = sharedSettings?.rainbowPalette ?? rainbowPalette;
+  const effectivePlotBgWhite = sharedSettings?.plotBgWhite ?? plotBgWhite;
+  const effectiveShowBandGapOverlay = sharedSettings?.showBandGapOverlay ?? showBandGapOverlay;
+
+  const activeFermiSourceLabel = resolvedFermiReferenceMode === "scf" ? "SCF" : "Bands run";
   const activeFermiDisplay = Number.isFinite(fermiEnergy) ? `${fermiEnergy.toFixed(3)} eV` : "N/A";
 
   // Shift all energies relative to Fermi level (E - E_F)
   const shiftedEnergies = useMemo(() => {
     return data.energies.map((band) => band.map((e) => e - fermiEnergy));
   }, [data.energies, fermiEnergy]);
-
-  // Calculate shifted energy range
-  const shiftedEnergyRange: [number, number] = useMemo(() => {
-    return [
-      data.energy_range[0] - fermiEnergy,
-      data.energy_range[1] - fermiEnergy,
-    ];
-  }, [data.energy_range, fermiEnergy]);
 
   const displayedBandGap = useMemo(() => {
     if (viewerType !== "electronic") return null;
@@ -543,30 +785,31 @@ export function BandPlot({
     if (energyRange) {
       return energyRange;
     }
-
-    let [eMin, eMax] = shiftedEnergyRange;
-    const span = Math.max(eMax - eMin, 1e-6);
-    const padding = span * 0.1;
-    eMin -= padding;
-    eMax += padding;
-
-    // Clamp to reasonable range around Fermi level (now at 0) if too wide
-    const maxRange = 20; // eV
-    if (eMax - eMin > maxRange * 2) {
-      eMin = -maxRange;
-      eMax = maxRange;
-    }
-
-    return [eMin, eMax];
-  }, [energyRange, shiftedEnergyRange, yMax, yMin]);
+    return getDefaultBandPlotEnergyRange(
+      data,
+      scfFermiEnergy,
+      requestedFermiReferenceMode ?? fermiReferenceMode,
+    );
+  }, [
+    data,
+    energyRange,
+    fermiReferenceMode,
+    requestedFermiReferenceMode,
+    scfFermiEnergy,
+    yMax,
+    yMin,
+  ]);
 
   useEffect(() => {
+    if (!showSidebar) {
+      return;
+    }
     setManualYMinInput(formatAxisInputValue(yDomain[0]));
     setManualYMaxInput(formatAxisInputValue(yDomain[1]));
-  }, [yDomain[0], yDomain[1]]);
+  }, [showSidebar, yDomain[0], yDomain[1]]);
 
-  const axisTickFontSize = Math.max(8, 11 * plotTextScale);
-  const axisLabelFontSize = Math.max(10, 14 * plotTextScale);
+  const axisTickFontSize = Math.max(8, 11 * effectivePlotTextScale);
+  const axisLabelFontSize = Math.max(10, 14 * effectivePlotTextScale);
   const symmetryLabelFontSize = axisLabelFontSize;
   const symmetryLabelYOffset = Math.max(20, symmetryLabelFontSize * 1.35);
   const yTickLabelYOffset = axisTickFontSize * 0.35;
@@ -638,12 +881,17 @@ export function BandPlot({
         bandColorForIndex(
           idx,
           shiftedEnergies.length,
-          colorMode,
-          singleBandColor,
-          rainbowPalette,
+          effectiveColorMode,
+          effectiveSingleBandColor,
+          effectiveRainbowPalette,
         ),
       ),
-    [shiftedEnergies, colorMode, singleBandColor, rainbowPalette],
+    [
+      shiftedEnergies,
+      effectiveColorMode,
+      effectiveSingleBandColor,
+      effectiveRainbowPalette,
+    ],
   );
 
   const bandGapOverlay = useMemo(() => {
@@ -662,9 +910,9 @@ export function BandPlot({
     const primaryLabel = `${displayedBandGap.value.toFixed(3)} eV`;
     const secondaryLabel = displayedBandGap.is_direct ? "Direct gap" : "Indirect gap";
     const gapColor = displayedBandGap.is_direct ? "#2e7d32" : "#00796b";
-    const labelFontSize = Math.max(10, 11 * plotTextScale);
+    const labelFontSize = Math.max(10, 11 * effectivePlotTextScale);
     const secondaryFontSize = Math.max(9, labelFontSize - 1);
-    const edgeLabelFontSize = Math.max(9, 10 * plotTextScale);
+    const edgeLabelFontSize = Math.max(9, 10 * effectivePlotTextScale);
     const approxCharWidth = labelFontSize * 0.58;
     const labelWidth = Math.max(
       118,
@@ -694,10 +942,10 @@ export function BandPlot({
       secondaryLabel,
       gapColor,
     };
-  }, [displayedBandGap, plotHeight, plotTextScale, plotWidth, scales, viewerType]);
+  }, [displayedBandGap, effectivePlotTextScale, plotHeight, plotWidth, scales, viewerType]);
 
   const bandGapOverlayVisible =
-    viewerType === "electronic" && displayedBandGap !== null && showBandGapOverlay;
+    viewerType === "electronic" && displayedBandGap !== null && effectiveShowBandGapOverlay;
 
   const hasProjectionData = useMemo(() => {
     const atomCount = data.projections?.atom_groups?.length ?? 0;
@@ -705,6 +953,11 @@ export function BandPlot({
     const elementOrbitalCount = data.projections?.element_orbital_groups?.length ?? 0;
     return atomCount > 0 || orbitalCount > 0 || elementOrbitalCount > 0;
   }, [data.projections]);
+
+  const projectionSelectionEntries = useMemo(
+    () => buildProjectionSelectionEntries(data),
+    [data],
+  );
 
   const orbitalElementOptions = useMemo((): OrbitalElementOption[] => {
     const groups = data.projections?.element_orbital_groups ?? [];
@@ -853,6 +1106,34 @@ export function BandPlot({
       setFatBandsEnabled(false);
     }
   }, [hasProjectionData]);
+
+  useEffect(() => {
+    if (projectionSelection === undefined) {
+      return;
+    }
+
+    if (!hasProjectionData || projectionSelection == null || projectionSelection === "none") {
+      setFatBandsEnabled(false);
+      return;
+    }
+
+    const selectedEntry = projectionSelectionEntries.find(
+      (entry) => entry.value === projectionSelection,
+    );
+    if (!selectedEntry) {
+      setFatBandsEnabled(false);
+      return;
+    }
+
+    setFatBandsEnabled(true);
+    setProjectionMode(selectedEntry.mode);
+    if (selectedEntry.mode === "orbital") {
+      setSelectedOrbitalElementKey(selectedEntry.elementKey ?? "");
+    } else {
+      setSelectedOrbitalElementKey("");
+    }
+    setSelectedProjectionId(selectedEntry.value);
+  }, [hasProjectionData, projectionSelection, projectionSelectionEntries]);
 
   const selectedProjectionGroup = useMemo(() => {
     if (!selectedProjectionId) return null;
@@ -1088,6 +1369,9 @@ export function BandPlot({
   // Handle scroll to adjust Y-axis range
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
+      if (!enableWheelRangeControl) {
+        return;
+      }
       e.preventDefault();
 
       const currentMin = yMin ?? scales.eMin;
@@ -1133,7 +1417,7 @@ export function BandPlot({
       setYMax(newMax);
       setManualRangeError(null);
     },
-    [yMin, yMax, scales, yClampRange],
+    [enableWheelRangeControl, yMin, yMax, scales, yClampRange],
   );
 
   const applyManualRange = useCallback(() => {
@@ -1175,6 +1459,7 @@ export function BandPlot({
 
   // Prevent page scroll while interacting with the plot area.
   useEffect(() => {
+    if (!enableHoverScrollLock) return;
     if (!isHoveringPlot || typeof document === "undefined") return;
 
     const { body, documentElement } = document;
@@ -1188,13 +1473,13 @@ export function BandPlot({
       body.style.overflow = prevBodyOverflow;
       documentElement.style.overflow = prevHtmlOverflow;
     };
-  }, [isHoveringPlot]);
+  }, [enableHoverScrollLock, isHoveringPlot]);
 
   const drawBandLines = !fatBandsActive || showLinesWithFat;
   const projectionLabel = selectedProjectionGroup?.label || "None";
   const showProjectionSummary = fatBandsActive && selectedProjectionGroup !== null;
 
-  const svgBgFill = plotBgWhite ? "#ffffff" : colors.bg;
+  const svgBgFill = effectivePlotBgWhite ? "#ffffff" : colors.bg;
 
   return (
     <div className="band-plot-layout">
@@ -1327,8 +1612,8 @@ export function BandPlot({
                       d={bandToPath(band, data.k_points)}
                       fill="none"
                       stroke={bandColors[bandIdx]}
-                      strokeWidth={lineWidth}
-                      opacity={lineOpacity}
+                      strokeWidth={effectiveLineWidth}
+                      opacity={effectiveLineOpacity}
                     />
                   ))}
 
@@ -1411,7 +1696,7 @@ export function BandPlot({
                       width={bandGapOverlay.labelWidth}
                       height={bandGapOverlay.labelHeight}
                       rx={7}
-                      fill={plotBgWhite ? "rgba(255,255,255,0.96)" : colors.tooltip}
+                      fill={effectivePlotBgWhite ? "rgba(255,255,255,0.96)" : colors.tooltip}
                       stroke={bandGapOverlay.gapColor}
                       strokeOpacity={0.8}
                     />
@@ -1583,7 +1868,8 @@ export function BandPlot({
         </div>
       </div>
 
-      <div className="band-plot-sidebar">
+      {showSidebar && (
+        <div className="band-plot-sidebar">
         <div className="band-plot-controls">
           <button onClick={resetView} className="band-plot-reset">
             Reset View
@@ -1992,7 +2278,8 @@ export function BandPlot({
             </div>
           )}
         </div>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

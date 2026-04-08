@@ -21,7 +21,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::config::{self, SaveSizeMode};
-use crate::qe::{read_phonon_dispersion_file, read_phonon_dos_file, QEResult};
+use crate::qe::{read_phonon_dispersion_file, read_phonon_dos_file, BandData, QEResult};
 
 // ============================================================================
 // Types
@@ -163,6 +163,41 @@ pub struct ProjectArchiveImportResult {
     pub imported_with_new_id: bool,
 }
 
+/// Saved band-structure calculation data used by the multiview browser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandsMultiviewCalculation {
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    #[serde(default)]
+    pub folder_name: Option<String>,
+    pub project_id: String,
+    pub project_name: String,
+    pub cif_id: String,
+    pub cif_filename: String,
+    pub cif_formula: String,
+    pub calc_id: String,
+    pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub started_at: String,
+    pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_bytes: Option<u64>,
+    pub band_data: BandData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scf_fermi_energy: Option<f64>,
+}
+
+/// Progress payload emitted while scanning saved band calculations for multiview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandsMultiviewScanProgress {
+    pub progress_event_id: String,
+    pub phase: String,
+    pub found_count: usize,
+    pub scanned_projects: usize,
+    pub total_projects: usize,
+}
+
 const PROJECT_ARCHIVE_MAGIC: &[u8; 7] = b"QCPROJ1";
 const PROJECT_ARCHIVE_VERSION: u32 = 2;
 const ARCHIVE_ENTRY_DIR: u8 = 0;
@@ -178,6 +213,7 @@ const EXPORT_COPY_BUFFER_SIZE: usize = 256 * 1024;
 const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
+const MULTIVIEW_BANDS_PROGRESS_EVENT: &str = "multiview-bands-progress";
 const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 7] = [
     "scf",
     "bands",
@@ -338,6 +374,29 @@ fn emit_project_import_progress(
     };
 
     let _ = app.emit("project-import-progress", payload);
+}
+
+fn emit_multiview_band_progress(
+    app: &AppHandle,
+    progress_event_id: Option<&str>,
+    phase: &str,
+    found_count: usize,
+    scanned_projects: usize,
+    total_projects: usize,
+) {
+    let Some(progress_event_id) = progress_event_id else {
+        return;
+    };
+
+    let payload = BandsMultiviewScanProgress {
+        progress_event_id: progress_event_id.to_string(),
+        phase: phase.to_string(),
+        found_count,
+        scanned_projects,
+        total_projects,
+    };
+
+    let _ = app.emit(MULTIVIEW_BANDS_PROGRESS_EVENT, payload);
 }
 
 fn write_u32_le<W: Write>(writer: &mut W, value: u32) -> Result<(), String> {
@@ -1510,6 +1569,165 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
     summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
 
     Ok(summaries)
+}
+
+/// Lists saved, completed band-structure calculations with the full plot payload
+/// needed by the multiview viewer.
+#[tauri::command]
+pub async fn list_multiview_band_calculations(
+    app: AppHandle,
+    progress_event_id: Option<String>,
+) -> Result<Vec<BandsMultiviewCalculation>, String> {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let projects_dir = ensure_projects_dir(&app_handle)?;
+        let folder_name_by_id: HashMap<String, String> = load_project_folders(&app_handle)?
+            .into_iter()
+            .map(|folder| (folder.id, folder.name))
+            .collect();
+
+        let mut calculations = Vec::new();
+        let entries = fs::read_dir(&projects_dir)
+            .map_err(|e| format!("Failed to read projects directory: {}", e))?;
+        let mut project_dirs = Vec::new();
+
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+
+            let project_json = project_dir.join("project.json");
+            if !project_json.exists() {
+                continue;
+            }
+
+            project_dirs.push(project_dir);
+        }
+
+        let total_projects = project_dirs.len();
+        emit_multiview_band_progress(
+            &app_handle,
+            progress_event_id.as_deref(),
+            "loading",
+            0,
+            0,
+            total_projects,
+        );
+
+        for (project_index, project_dir) in project_dirs.into_iter().enumerate() {
+            let project_json = project_dir.join("project.json");
+            let mut project = read_project_json(&project_json)?;
+            let has_embedded_detail = project
+                .cif_variants
+                .iter()
+                .flat_map(|variant| variant.calculations.iter())
+                .any(calculation_has_embedded_project_detail);
+            if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail {
+                write_project_json_summary(&project_json, &project)?;
+            }
+
+            let project_id = project.id.clone();
+            let project_name = project.name.clone();
+            let folder_id = project.folder_id.clone();
+            let folder_name = folder_id
+                .as_ref()
+                .and_then(|id| folder_name_by_id.get(id))
+                .cloned();
+
+            for variant in &project.cif_variants {
+                for summary_calc in &variant.calculations {
+                    if normalize_summary_calc_type(&summary_calc.calc_type) != Some("bands") {
+                        continue;
+                    }
+                    let Some(completed_at) = summary_calc.completed_at.as_ref() else {
+                        continue;
+                    };
+
+                    let mut full_calc =
+                        match load_full_calculation_from_disk(&project_dir, &summary_calc.id)? {
+                            Some(calc) => calc,
+                            None => continue,
+                        };
+                    merge_summary_into_full_calculation(&mut full_calc, summary_calc);
+
+                    let Some(result) = full_calc.result.as_ref() else {
+                        continue;
+                    };
+                    let Some(raw_band_data) = result.band_data.clone() else {
+                        continue;
+                    };
+                    let band_data: BandData =
+                        serde_json::from_value(raw_band_data).map_err(|e| {
+                            format!(
+                                "Failed to parse saved band data for {}: {}",
+                                full_calc.id, e
+                            )
+                        })?;
+
+                    calculations.push(BandsMultiviewCalculation {
+                        folder_id: folder_id.clone(),
+                        folder_name: folder_name.clone(),
+                        project_id: project_id.clone(),
+                        project_name: project_name.clone(),
+                        cif_id: variant.id.clone(),
+                        cif_filename: variant.filename.clone(),
+                        cif_formula: variant.formula.clone(),
+                        calc_id: full_calc.id.clone(),
+                        parameters: full_calc.parameters.clone(),
+                        tags: full_calc.tags.clone(),
+                        started_at: full_calc.started_at.clone(),
+                        completed_at: completed_at.clone(),
+                        storage_bytes: full_calc.storage_bytes,
+                        band_data,
+                        scf_fermi_energy: result.fermi_energy,
+                    });
+
+                    emit_multiview_band_progress(
+                        &app_handle,
+                        progress_event_id.as_deref(),
+                        "loading",
+                        calculations.len(),
+                        project_index + 1,
+                        total_projects,
+                    );
+                }
+            }
+
+            emit_multiview_band_progress(
+                &app_handle,
+                progress_event_id.as_deref(),
+                "loading",
+                calculations.len(),
+                project_index + 1,
+                total_projects,
+            );
+        }
+
+        calculations.sort_by(|a, b| {
+            let a_folder = a.folder_name.as_deref().unwrap_or("");
+            let b_folder = b.folder_name.as_deref().unwrap_or("");
+            a_folder
+                .cmp(b_folder)
+                .then_with(|| a.project_name.cmp(&b.project_name))
+                .then_with(|| a.cif_filename.cmp(&b.cif_filename))
+                .then_with(|| b.completed_at.cmp(&a.completed_at))
+        });
+
+        emit_multiview_band_progress(
+            &app_handle,
+            progress_event_id.as_deref(),
+            "done",
+            calculations.len(),
+            total_projects,
+            total_projects,
+        );
+
+        Ok(calculations)
+    })
+    .await
+    .map_err(|e| format!("Multiview scan task failed to join: {}", e))?
 }
 
 /// Creates a new project

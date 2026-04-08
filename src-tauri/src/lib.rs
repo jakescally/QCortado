@@ -10245,6 +10245,7 @@ pub fn run() {
         shutdown_and_close,
         projects::list_projects,
         projects::list_project_folders,
+        projects::list_multiview_band_calculations,
         projects::get_project,
         projects::get_project_calculation,
         projects::set_last_opened_cif,
@@ -10332,6 +10333,7 @@ pub fn run() {
         // Project management commands
         projects::list_projects,
         projects::list_project_folders,
+        projects::list_multiview_band_calculations,
         projects::create_project,
         projects::create_project_folder,
         projects::get_project,
