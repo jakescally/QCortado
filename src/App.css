@@ -1019,6 +1019,10 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   box-sizing: border-box;
 }
 
+.run-layout-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .run-layout-hpc-telemetry {
   grid-template-columns: minmax(0, 2fr) minmax(360px, 1.4fr);
 }

@@ -966,7 +966,7 @@ export function TransportWizard({
         </>
       )}
 
-      <div className="run-layout">
+      <div className="run-layout run-layout-single">
         <LiveOutputPanel
           title={isRunning ? "Running..." : "Output"}
           output={output}
