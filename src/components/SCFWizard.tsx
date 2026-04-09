@@ -209,6 +209,16 @@ export function SCFWizard({
   );
   const [pseudopotentials, setPseudopotentials] = useState<PseudopotentialMetadata[]>([]);
   const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+  const selectedPseudoMetadata = useMemo(() => {
+    const next: Record<string, PseudopotentialMetadata> = {};
+    for (const [element, filename] of Object.entries(selectedPseudos)) {
+      const metadata = pseudopotentials.find((pseudo) => pseudo.filename === filename);
+      if (metadata) {
+        next[element] = metadata;
+      }
+    }
+    return next;
+  }, [pseudopotentials, selectedPseudos]);
 
   const WORK_DIR = "/tmp/qcortado_work";
 
@@ -1942,6 +1952,7 @@ export function SCFWizard({
         conv_thr: config.conv_thr,
         mixing_beta: config.mixing_beta,
         selected_pseudos: selectedPseudos,
+        selected_pseudo_metadata: selectedPseudoMetadata,
         structure_source: sourceDescriptor,
         source_structure: sourceStructure,
         cell_representation:

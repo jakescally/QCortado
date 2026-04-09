@@ -6,7 +6,12 @@ import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOS
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
-import { CalculationRun, ProjectDashboard } from "./components/ProjectDashboard";
+import {
+  CalculationRun,
+  ProjectDashboard,
+  WannierBandOverlayOption,
+} from "./components/ProjectDashboard";
+import { TransportPlot } from "./components/TransportPlot";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider } from "./lib/ThemeContext";
 import { getActiveHpcProfileId, listHpcProfiles } from "./lib/hpcConfig";
@@ -14,6 +19,7 @@ import { HpcProfile } from "./lib/types";
 import { useWindowSize } from "./lib/useWindowSize";
 import { BandsMultiview } from "./components/BandsMultiview";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
 
 interface ViewerSyncStatus {
   last_synced_at?: string | null;
@@ -29,7 +35,7 @@ interface ViewerSyncResult {
   total_projects: number;
 }
 
-type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "bands-multiview" | "dos-viewer" | "wannier-viewer" | "phonon-viewer";
+type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "bands-multiview" | "dos-viewer" | "wannier-viewer" | "transport-viewer" | "phonon-viewer";
 type PhononViewMode = "bands" | "dos";
 
 interface PhononData {
@@ -85,7 +91,12 @@ function ViewerAppInner() {
 
   const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
   const [viewDosData, setViewDosData] = useState<{ dosData: ElectronicDOSData; fermiEnergy: number | null } | null>(null);
-  const [viewWannierData, setViewWannierData] = useState<{ result: any; fermiEnergy: number | null } | null>(null);
+  const [viewWannierData, setViewWannierData] = useState<{
+    result: any;
+    fermiEnergy: number | null;
+    overlayOptions: WannierBandOverlayOption[];
+  } | null>(null);
+  const [viewTransportData, setViewTransportData] = useState<{ data: any } | null>(null);
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
 
   const activeHpcProfile = useMemo(
@@ -177,6 +188,7 @@ function ViewerAppInner() {
     _optimizedStructures?: any[],
   ) => undefined;
   const viewOnlyNoopCalc = (_cifId: string, _crystalData: any, _scfCalculations: CalculationRun[]) => undefined;
+  const viewOnlyNoopTransport = (_cifId: string, _crystalData: any, _wannierCalculations: CalculationRun[]) => undefined;
 
   const appChrome = (
     <HpcSetupWizard
@@ -258,9 +270,14 @@ function ViewerAppInner() {
             setCurrentView("dos-viewer");
           }}
           onRunWannier={viewOnlyNoopCalc}
-          onViewWannier={(wannierData, fermiEnergy) => {
-            setViewWannierData({ result: wannierData, fermiEnergy });
+          onViewWannier={(wannierData, fermiEnergy, overlayOptions = []) => {
+            setViewWannierData({ result: wannierData, fermiEnergy, overlayOptions });
             setCurrentView("wannier-viewer");
+          }}
+          onRunTransport={viewOnlyNoopTransport}
+          onViewTransport={(transportData) => {
+            setViewTransportData({ data: transportData });
+            setCurrentView("transport-viewer");
           }}
           onRunFermiSurface={viewOnlyNoopCalc}
           onRunPhonons={viewOnlyNoopCalc}
@@ -335,6 +352,7 @@ function ViewerAppInner() {
 
   if (currentView === "wannier-viewer" && viewWannierData) {
     const result = viewWannierData.result;
+    const wannierIssues = getWannierQualityIssues(result, null, viewWannierData.fermiEnergy ?? null);
     return (
       <>
         <div className="bands-viewer-container">
@@ -350,13 +368,24 @@ function ViewerAppInner() {
             </button>
             <h2>Wannier90</h2>
           </div>
-          <div className="bands-viewer-content" style={{ display: "block" }}>
-            <BandPlot
-              data={result.band_data}
-              scfFermiEnergy={viewWannierData.fermiEnergy ?? undefined}
-              viewerType="electronic"
-            />
-            <div className="details-grid" style={{ marginTop: "1.25rem" }}>
+          <div className="bands-viewer-content bands-viewer-content-stacked">
+            <div className="bands-viewer-plot-region">
+              <BandPlot
+                data={result.band_data}
+                scfFermiEnergy={viewWannierData.fermiEnergy ?? undefined}
+                viewerType="electronic"
+                comparisonOptions={viewWannierData.overlayOptions}
+                comparisonTitle="Saved Band Overlay"
+                comparisonNoneLabel="No overlay"
+              />
+            </div>
+            <div className="bands-viewer-details-region">
+              {wannierIssues.length > 0 && (
+                <div className="warning-banner">
+                  {wannierIssues.map((issue) => issue.message).join(" ")}
+                </div>
+              )}
+              <div className="details-grid">
               <div className="detail-item">
                 <label>seedname</label>
                 <span>{result.seedname || "N/A"}</span>
@@ -381,7 +410,41 @@ function ViewerAppInner() {
                 <label>Iterations</label>
                 <span>{result.convergence?.iterations ?? "N/A"}</span>
               </div>
+              <div className="detail-item">
+                <label>Minimization</label>
+                <span>{formatWannierConvergenceFlag(result.convergence?.minimization_converged)}</span>
+              </div>
+              <div className="detail-item">
+                <label>Disentanglement</label>
+                <span>{formatWannierConvergenceFlag(result.convergence?.disentanglement_converged)}</span>
+              </div>
             </div>
+            </div>
+          </div>
+        </div>
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "transport-viewer" && viewTransportData) {
+    return (
+      <>
+        <div className="bands-viewer-container">
+          <div className="bands-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewTransportData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>BoltzWann Transport</h2>
+          </div>
+          <div className="bands-viewer-content" style={{ display: "block" }}>
+            <TransportPlot data={viewTransportData.data} />
           </div>
         </div>
         {appChrome}

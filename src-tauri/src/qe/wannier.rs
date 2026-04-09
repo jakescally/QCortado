@@ -1,6 +1,8 @@
 //! Wannier90 input generation and result parsing helpers.
 
-use super::bands::{add_symmetry_markers, parse_bands_gnu, BandData, KPathPoint};
+use super::bands::{
+    add_symmetry_markers, parse_bands_gnu, BandData, BandGap, HighSymmetryMarker, KPathPoint,
+};
 use super::types::{
     CalculationType, CellMatrix, KPoint, KPoints, Occupations, PositionUnits, QECalculation,
     SmearingType, StartingPotential,
@@ -94,6 +96,8 @@ pub struct WannierBandPathConfig {
     pub k_path: Vec<KPathPoint>,
     #[serde(default = "default_bands_num_points")]
     pub bands_num_points: u32,
+    #[serde(default)]
+    pub total_k_points_target: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +213,12 @@ pub struct WannierConvergenceData {
     #[serde(default)]
     pub iterations: Option<u32>,
     #[serde(default)]
+    pub minimization_converged: Option<bool>,
+    #[serde(default)]
+    pub disentanglement_converged: Option<bool>,
+    #[serde(default)]
+    pub max_iterations_reached: bool,
+    #[serde(default)]
     pub omega_i: Option<f64>,
     #[serde(default)]
     pub omega_d: Option<f64>,
@@ -216,6 +226,39 @@ pub struct WannierConvergenceData {
     pub omega_od: Option<f64>,
     #[serde(default)]
     pub omega_total: Option<f64>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub failure_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WannierIssueSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WannierQualityIssue {
+    pub code: String,
+    pub severity: WannierIssueSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WannierFermiAlignment {
+    #[serde(default)]
+    pub source_brackets_fermi: Option<bool>,
+    #[serde(default)]
+    pub wannier_brackets_fermi: bool,
+    #[serde(default)]
+    pub source_min_distance_ev: Option<f64>,
+    pub wannier_min_distance_ev: f64,
+    #[serde(default)]
+    pub source_energy_range_ev: Option<[f64; 2]>,
+    pub wannier_energy_range_ev: [f64; 2],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +288,10 @@ pub struct WannierResult {
     pub centres: Vec<WannierCentreRecord>,
     #[serde(default)]
     pub convergence: WannierConvergenceData,
+    #[serde(default)]
+    pub fermi_alignment: Option<WannierFermiAlignment>,
+    #[serde(default)]
+    pub quality_issues: Vec<WannierQualityIssue>,
     #[serde(default)]
     pub artifact_manifest: Vec<WannierArtifact>,
 }
@@ -390,6 +437,647 @@ fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<Ce
     Ok(converted)
 }
 
+fn cross_product(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot_product(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn scale_vector(v: [f64; 3], scalar: f64) -> [f64; 3] {
+    [v[0] * scalar, v[1] * scalar, v[2] * scalar]
+}
+
+fn vector_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn reciprocal_lattice_vectors(lattice_vectors_angstrom: &CellMatrix) -> Result<CellMatrix, String> {
+    let [a1, a2, a3] = *lattice_vectors_angstrom;
+    let volume = dot_product(a1, cross_product(a2, a3));
+    if volume.abs() < 1.0e-12 {
+        return Err("Cannot compute reciprocal lattice for a degenerate Wannier cell.".to_string());
+    }
+    let factor = TWO_PI / volume;
+    Ok([
+        scale_vector(cross_product(a2, a3), factor),
+        scale_vector(cross_product(a3, a1), factor),
+        scale_vector(cross_product(a1, a2), factor),
+    ])
+}
+
+fn reciprocal_fractional_to_cartesian(
+    fractional: [f64; 3],
+    reciprocal_lattice: &CellMatrix,
+) -> [f64; 3] {
+    let [b1, b2, b3] = *reciprocal_lattice;
+    [
+        fractional[0] * b1[0] + fractional[1] * b2[0] + fractional[2] * b3[0],
+        fractional[0] * b1[1] + fractional[1] * b2[1] + fractional[2] * b3[1],
+        fractional[0] * b1[2] + fractional[1] * b2[2] + fractional[2] * b3[2],
+    ]
+}
+
+fn parse_wannier_band_kpt(content: &str) -> Result<Vec<[f64; 3]>, String> {
+    let mut coordinates = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if line_index == 0 && parts.len() == 1 && parts[0].parse::<usize>().is_ok() {
+            continue;
+        }
+        if parts.len() < 3 {
+            return Err(format!(
+                "Malformed Wannier band k-point line {}: '{}'.",
+                line_index + 1,
+                trimmed
+            ));
+        }
+        coordinates.push([
+            parse_f64_token(parts[0], "Wannier band kx")?,
+            parse_f64_token(parts[1], "Wannier band ky")?,
+            parse_f64_token(parts[2], "Wannier band kz")?,
+        ]);
+    }
+
+    if coordinates.is_empty() {
+        return Err("Wannier band k-point file did not contain any coordinates.".to_string());
+    }
+
+    Ok(coordinates)
+}
+
+fn cumulative_k_path_distances(
+    fractional_kpoints: &[[f64; 3]],
+    lattice_vectors_angstrom: &CellMatrix,
+) -> Result<Vec<f64>, String> {
+    let reciprocal_lattice = reciprocal_lattice_vectors(lattice_vectors_angstrom)?;
+    let mut distances = Vec::with_capacity(fractional_kpoints.len());
+    let mut total = 0.0;
+    let mut previous = reciprocal_fractional_to_cartesian(fractional_kpoints[0], &reciprocal_lattice);
+    distances.push(0.0);
+
+    for fractional in fractional_kpoints.iter().skip(1) {
+        let current = reciprocal_fractional_to_cartesian(*fractional, &reciprocal_lattice);
+        total += vector_distance(current, previous);
+        distances.push(total);
+        previous = current;
+    }
+
+    Ok(distances)
+}
+
+fn override_wannier_band_distances_from_kpt(
+    data: &mut BandData,
+    kpt_content: &str,
+    lattice_vectors_angstrom: &CellMatrix,
+) -> Result<(), String> {
+    let coordinates = parse_wannier_band_kpt(kpt_content)?;
+    if coordinates.len() != data.k_points.len() {
+        return Err(format!(
+            "Wannier band.kpt contains {} points, but band data contains {} points.",
+            coordinates.len(),
+            data.k_points.len()
+        ));
+    }
+    data.k_points = cumulative_k_path_distances(&coordinates, lattice_vectors_angstrom)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct WannierPathSegment {
+    from_index: usize,
+    to_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct WannierPathSampling {
+    segments: Vec<WannierPathSegment>,
+    segment_point_counts: Vec<usize>,
+    print_start_points: Vec<bool>,
+    total_points: usize,
+}
+
+fn collect_wannier_path_segments(k_path: &[KPathPoint]) -> Vec<WannierPathSegment> {
+    let mut segments = Vec::new();
+    for index in 0..k_path.len().saturating_sub(1) {
+        if k_path[index].npoints > 0 {
+            segments.push(WannierPathSegment {
+                from_index: index,
+                to_index: index + 1,
+            });
+        }
+    }
+    if segments.is_empty() && k_path.len() >= 2 {
+        for index in 0..k_path.len() - 1 {
+            segments.push(WannierPathSegment {
+                from_index: index,
+                to_index: index + 1,
+            });
+        }
+    }
+    segments
+}
+
+fn wannier_segment_lengths(
+    k_path: &[KPathPoint],
+    lattice_vectors_angstrom: &CellMatrix,
+) -> Result<(Vec<WannierPathSegment>, Vec<f64>), String> {
+    let reciprocal_lattice = reciprocal_lattice_vectors(lattice_vectors_angstrom)?;
+    let segments = collect_wannier_path_segments(k_path);
+    if segments.is_empty() {
+        return Err("Wannier interpolation path requires at least one connected segment.".to_string());
+    }
+
+    let mut lengths = Vec::with_capacity(segments.len());
+    for segment in &segments {
+        let from = reciprocal_fractional_to_cartesian(k_path[segment.from_index].coords, &reciprocal_lattice);
+        let to = reciprocal_fractional_to_cartesian(k_path[segment.to_index].coords, &reciprocal_lattice);
+        let dx = to[0] - from[0];
+        let dy = to[1] - from[1];
+        let dz = to[2] - from[2];
+        let length = (dx * dx + dy * dy + dz * dz).sqrt();
+        lengths.push(if length > 1.0e-12 { length } else { 1.0e-12 });
+    }
+
+    Ok((segments, lengths))
+}
+
+fn nint_like_fortran(value: f64) -> usize {
+    value.round().max(0.0) as usize
+}
+
+fn derive_wannier_path_sampling(
+    k_path: &[KPathPoint],
+    lattice_vectors_angstrom: &CellMatrix,
+    bands_num_points: u32,
+) -> Result<WannierPathSampling, String> {
+    if bands_num_points == 0 {
+        return Err("Wannier bands_num_points must be positive.".to_string());
+    }
+
+    let (segments, lengths) = wannier_segment_lengths(k_path, lattice_vectors_angstrom)?;
+    let first_length = lengths[0];
+    if !first_length.is_finite() || first_length <= 0.0 {
+        return Err("Wannier interpolation path has a degenerate first segment.".to_string());
+    }
+
+    let mut segment_point_counts = Vec::with_capacity(segments.len());
+    let mut print_start_points = Vec::with_capacity(segments.len());
+    let mut total_points = 0usize;
+
+    for (segment_index, segment) in segments.iter().enumerate() {
+        let count = if segment_index == 0 {
+            bands_num_points as usize
+        } else {
+            nint_like_fortran((bands_num_points as f64) * (lengths[segment_index] / first_length))
+        };
+        segment_point_counts.push(count);
+
+        let should_print_start = if segment_index == 0 {
+            true
+        } else {
+            let previous_end = &k_path[segments[segment_index - 1].to_index];
+            let current_start = &k_path[segment.from_index];
+            let labels_differ = previous_end.label.trim() != current_start.label.trim();
+            let coords_differ = previous_end
+                .coords
+                .iter()
+                .zip(current_start.coords.iter())
+                .any(|(left, right)| (left - right).abs() > 1.0e-6);
+            labels_differ || coords_differ
+        };
+        print_start_points.push(should_print_start);
+        total_points += count + usize::from(should_print_start);
+    }
+
+    Ok(WannierPathSampling {
+        segments,
+        segment_point_counts,
+        print_start_points,
+        total_points,
+    })
+}
+
+fn derive_wannier_bands_num_points_for_total_target(
+    k_path: &[KPathPoint],
+    lattice_vectors_angstrom: &CellMatrix,
+    total_k_points_target: u32,
+) -> Result<u32, String> {
+    if total_k_points_target == 0 {
+        return Err("Total Wannier interpolation k-points must be positive.".to_string());
+    }
+
+    let mut best_bands_num_points = 1u32;
+    let mut best_abs_diff = usize::MAX;
+    let mut best_total_points = usize::MAX;
+
+    for candidate in 1..=total_k_points_target {
+        let sampling = derive_wannier_path_sampling(k_path, lattice_vectors_angstrom, candidate)?;
+        let diff = sampling.total_points.abs_diff(total_k_points_target as usize);
+        if diff < best_abs_diff
+            || (diff == best_abs_diff && sampling.total_points < best_total_points)
+            || (diff == best_abs_diff
+                && sampling.total_points == best_total_points
+                && candidate < best_bands_num_points)
+        {
+            best_abs_diff = diff;
+            best_total_points = sampling.total_points;
+            best_bands_num_points = candidate;
+        }
+        if diff == 0 {
+            break;
+        }
+    }
+
+    Ok(best_bands_num_points)
+}
+
+fn resolve_wannier_bands_num_points(
+    band_path: &WannierBandPathConfig,
+    lattice_vectors_angstrom: &CellMatrix,
+) -> Result<u32, String> {
+    if let Some(total_target) = band_path.total_k_points_target {
+        derive_wannier_bands_num_points_for_total_target(
+            &band_path.k_path,
+            lattice_vectors_angstrom,
+            total_target,
+        )
+    } else if band_path.bands_num_points > 0 {
+        Ok(band_path.bands_num_points)
+    } else {
+        Err("Wannier bands_num_points must be positive.".to_string())
+    }
+}
+
+fn build_wannier_symmetry_markers_from_sampling(
+    data: &mut BandData,
+    k_path: &[KPathPoint],
+    sampling: &WannierPathSampling,
+) -> Result<(), String> {
+    if data.k_points.is_empty() {
+        data.high_symmetry_points.clear();
+        return Ok(());
+    }
+    if sampling.total_points != data.k_points.len() {
+        return Err(format!(
+            "Wannier path sampling predicts {} points, but band data contains {} points.",
+            sampling.total_points,
+            data.k_points.len()
+        ));
+    }
+
+    let mut point_indices = vec![None; k_path.len()];
+    let mut current_index = 0usize;
+    let mut started = false;
+
+    for (segment_index, segment) in sampling.segments.iter().enumerate() {
+        if sampling.print_start_points[segment_index] {
+            if started {
+                current_index += 1;
+            }
+            point_indices[segment.from_index] = Some(current_index);
+            started = true;
+        } else if point_indices[segment.from_index].is_none() {
+            point_indices[segment.from_index] = Some(current_index);
+        }
+
+        current_index += sampling.segment_point_counts[segment_index];
+        point_indices[segment.to_index] = Some(current_index);
+    }
+
+    let markers = k_path
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point)| {
+            let marker_index = point_indices[index]?;
+            let distance = data.k_points.get(marker_index).copied()?;
+            Some(HighSymmetryMarker {
+                k_distance: distance,
+                label: point.label.clone(),
+            })
+        })
+        .collect();
+    data.high_symmetry_points = markers;
+    Ok(())
+}
+
+fn parse_wannier_band_labelinfo_markers(
+    content: &str,
+    data: &BandData,
+) -> Result<Vec<HighSymmetryMarker>, String> {
+    let mut markers = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Err(format!(
+                "Malformed Wannier labelinfo line {}: '{}'.",
+                line_index + 1,
+                trimmed
+            ));
+        }
+        let marker_index = parts[1]
+            .parse::<usize>()
+            .map_err(|_| format!("Invalid Wannier labelinfo index on line {}.", line_index + 1))?;
+        let zero_based_index = marker_index.saturating_sub(1);
+        let k_distance = data
+            .k_points
+            .get(zero_based_index)
+            .copied()
+            .or_else(|| parts.get(2).and_then(|value| value.parse::<f64>().ok()))
+            .ok_or_else(|| {
+                format!(
+                    "Wannier labelinfo index {} is out of range for {} k-points.",
+                    marker_index,
+                    data.k_points.len()
+                )
+            })?;
+        markers.push(HighSymmetryMarker {
+            k_distance,
+            label: parts[0].to_string(),
+        });
+    }
+    if markers.is_empty() {
+        return Err("Wannier labelinfo file did not contain any high-symmetry markers.".to_string());
+    }
+    Ok(markers)
+}
+
+fn rebuild_wannier_band_markers_from_workdir(
+    data: &mut BandData,
+    work_path: &Path,
+    seedname: &str,
+    k_path: &[KPathPoint],
+    lattice_vectors_angstrom: &CellMatrix,
+    bands_num_points: u32,
+) -> Result<(), String> {
+    let labelinfo_path = work_path.join(format!("{}_band.labelinfo.dat", seedname));
+    if labelinfo_path.exists() {
+        let labelinfo_content = std::fs::read_to_string(&labelinfo_path)
+            .map_err(|e| format!("Failed to read {}: {}", labelinfo_path.display(), e))?;
+        data.high_symmetry_points = parse_wannier_band_labelinfo_markers(&labelinfo_content, data)?;
+        return Ok(());
+    }
+
+    let sampling = derive_wannier_path_sampling(k_path, lattice_vectors_angstrom, bands_num_points)?;
+    build_wannier_symmetry_markers_from_sampling(data, k_path, &sampling)
+}
+
+fn recalculate_band_gap(data: &BandData) -> Option<BandGap> {
+    let mut vbm = f64::MIN;
+    let mut vbm_k = 0.0;
+    let mut cbm = f64::MAX;
+    let mut cbm_k = 0.0;
+
+    for band in &data.energies {
+        let band_max = band.iter().copied().fold(f64::MIN, f64::max);
+        let band_min = band.iter().copied().fold(f64::MAX, f64::min);
+
+        if band_max <= data.fermi_energy + 0.01 {
+            for (k_index, energy) in band.iter().enumerate() {
+                if *energy > vbm {
+                    vbm = *energy;
+                    vbm_k = data.k_points[k_index];
+                }
+            }
+        }
+
+        if band_min >= data.fermi_energy - 0.01 && band_max > data.fermi_energy {
+            for (k_index, energy) in band.iter().enumerate() {
+                if *energy < cbm && *energy > data.fermi_energy - 0.01 {
+                    cbm = *energy;
+                    cbm_k = data.k_points[k_index];
+                }
+            }
+        }
+    }
+
+    if vbm > f64::MIN / 2.0 && cbm < f64::MAX / 2.0 && cbm > vbm {
+        let gap = cbm - vbm;
+        if gap > 0.01 {
+            return Some(BandGap {
+                value: gap,
+                is_direct: (vbm_k - cbm_k).abs() < 0.01,
+                vbm_k,
+                cbm_k,
+                vbm_energy: vbm,
+                cbm_energy: cbm,
+            });
+        }
+    }
+
+    None
+}
+
+fn parse_wannier_eig_energies(content: &str) -> Result<Vec<f64>, String> {
+    let mut energies = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(format!(
+                "Malformed Wannier eig line {}: '{}'.",
+                line_index + 1,
+                trimmed
+            ));
+        }
+        energies.push(parse_f64_token(parts[2], "Wannier eig energy")?);
+    }
+    if energies.is_empty() {
+        return Err("Wannier eig file did not contain any energies.".to_string());
+    }
+    Ok(energies)
+}
+
+fn analyze_fermi_bracketing(values: &[f64], fermi_energy: f64) -> (bool, Option<f64>, Option<[f64; 2]>) {
+    if values.is_empty() {
+        return (false, None, None);
+    }
+
+    let mut energy_min = f64::INFINITY;
+    let mut energy_max = f64::NEG_INFINITY;
+    let mut nearest_distance = f64::INFINITY;
+    let mut max_below = f64::NEG_INFINITY;
+    let mut min_above = f64::INFINITY;
+
+    for value in values {
+        if *value < energy_min {
+            energy_min = *value;
+        }
+        if *value > energy_max {
+            energy_max = *value;
+        }
+        nearest_distance = nearest_distance.min((value - fermi_energy).abs());
+        if *value <= fermi_energy && *value > max_below {
+            max_below = *value;
+        }
+        if *value >= fermi_energy && *value < min_above {
+            min_above = *value;
+        }
+    }
+
+    let tolerance = 0.1;
+    let brackets = max_below.is_finite()
+        && min_above.is_finite()
+        && (fermi_energy - max_below) <= tolerance
+        && (min_above - fermi_energy) <= tolerance;
+
+    (
+        brackets,
+        if nearest_distance.is_finite() {
+            Some(nearest_distance)
+        } else {
+            None
+        },
+        if energy_min.is_finite() && energy_max.is_finite() {
+            Some([energy_min, energy_max])
+        } else {
+            None
+        },
+    )
+}
+
+fn analyze_wannier_band_fermi_alignment(
+    band_data: &BandData,
+    source_eig_content: Option<&str>,
+    fermi_energy: f64,
+) -> Option<WannierFermiAlignment> {
+    let flat_band_energies: Vec<f64> = band_data
+        .energies
+        .iter()
+        .flat_map(|band| band.iter().copied())
+        .collect();
+    let (wannier_brackets_fermi, wannier_min_distance_ev, wannier_range) =
+        analyze_fermi_bracketing(&flat_band_energies, fermi_energy);
+    let (source_brackets_fermi, source_min_distance_ev, source_energy_range_ev) =
+        if let Some(content) = source_eig_content {
+            if let Ok(source_energies) = parse_wannier_eig_energies(content) {
+                let (brackets, distance, range) = analyze_fermi_bracketing(&source_energies, fermi_energy);
+                (Some(brackets), distance, range)
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
+    let wannier_energy_range_ev = wannier_range.unwrap_or(band_data.energy_range);
+    Some(WannierFermiAlignment {
+        source_brackets_fermi,
+        wannier_brackets_fermi,
+        source_min_distance_ev,
+        wannier_min_distance_ev: wannier_min_distance_ev.unwrap_or(f64::INFINITY),
+        source_energy_range_ev,
+        wannier_energy_range_ev,
+    })
+}
+
+fn push_unique_line(lines: &mut Vec<String>, value: &str) {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    if !lines.iter().any(|entry| entry.eq_ignore_ascii_case(normalized)) {
+        lines.push(normalized.to_string());
+    }
+}
+
+fn push_quality_issue(
+    issues: &mut Vec<WannierQualityIssue>,
+    code: &str,
+    severity: WannierIssueSeverity,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if issues
+        .iter()
+        .any(|issue| issue.code == code && issue.message == message)
+    {
+        return;
+    }
+    issues.push(WannierQualityIssue {
+        code: code.to_string(),
+        severity,
+        message,
+    });
+}
+
+fn build_wannier_quality_issues(
+    convergence: &WannierConvergenceData,
+    fermi_alignment: Option<&WannierFermiAlignment>,
+) -> Vec<WannierQualityIssue> {
+    let mut issues = Vec::new();
+
+    for reason in &convergence.failure_reasons {
+        push_quality_issue(
+            &mut issues,
+            "nonconverged",
+            WannierIssueSeverity::Error,
+            reason.clone(),
+        );
+    }
+    for warning in &convergence.warnings {
+        push_quality_issue(
+            &mut issues,
+            "warning",
+            WannierIssueSeverity::Warning,
+            warning.clone(),
+        );
+    }
+
+    if let Some(alignment) = fermi_alignment {
+        if alignment.source_brackets_fermi == Some(true) && !alignment.wannier_brackets_fermi {
+            let distance = alignment.wannier_min_distance_ev;
+            push_quality_issue(
+                &mut issues,
+                "misses_source_fermi",
+                WannierIssueSeverity::Error,
+                if distance.is_finite() {
+                    format!(
+                        "Interpolated Wannier manifold misses source states near E_F; nearest Wannier band stays {:.3} eV away.",
+                        distance
+                    )
+                } else {
+                    "Interpolated Wannier manifold misses source states near E_F.".to_string()
+                },
+            );
+        } else if !alignment.wannier_brackets_fermi
+            && alignment.wannier_min_distance_ev.is_finite()
+            && alignment.wannier_min_distance_ev > 0.25
+        {
+            push_quality_issue(
+                &mut issues,
+                "far_from_fermi",
+                WannierIssueSeverity::Warning,
+                format!(
+                    "Interpolated Wannier manifold does not reach E_F; nearest Wannier band is {:.3} eV away.",
+                    alignment.wannier_min_distance_ev
+                ),
+            );
+        }
+    }
+
+    issues
+}
+
 fn wsvec_key(r: [i32; 3], m: usize, n: usize) -> String {
     format!(
         "{}:{}:{}:{}:{}",
@@ -516,8 +1204,11 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
     if config.band_path.k_path.len() < 2 {
         return Err("Wannier interpolation path requires at least two k-points.".to_string());
     }
-    if config.band_path.bands_num_points == 0 {
-        return Err("bands_num_points must be positive.".to_string());
+    let lattice_vectors_angstrom = convert_cell_matrix_to_angstrom(&config.base_calculation.system)?;
+    let resolved_bands_num_points =
+        resolve_wannier_bands_num_points(&config.band_path, &lattice_vectors_angstrom)?;
+    if resolved_bands_num_points == 0 {
+        return Err("Wannier bands_num_points must be positive.".to_string());
     }
 
     let projected_wann = config.projections.iter().try_fold(0u32, |sum, spec| {
@@ -866,6 +1557,7 @@ pub fn generate_wannier90_win(
     validate_wannier_config(config)?;
     let system = &config.base_calculation.system;
     let cell = convert_cell_matrix_to_angstrom(system)?;
+    let bands_num_points = resolve_wannier_bands_num_points(&config.band_path, &cell)?;
 
     let mut output = String::new();
     writeln!(output, "num_wann = {}", config.num_wann).unwrap();
@@ -892,12 +1584,7 @@ pub fn generate_wannier90_win(
     writeln!(output, "write_xyz = {}", render_bool(config.write_xyz)).unwrap();
     writeln!(output, "bands_plot = {}", render_bool(config.bands_plot)).unwrap();
     writeln!(output, "bands_plot_format = gnuplot").unwrap();
-    writeln!(
-        output,
-        "bands_num_points = {}",
-        config.band_path.bands_num_points
-    )
-    .unwrap();
+    writeln!(output, "bands_num_points = {}", bands_num_points).unwrap();
     writeln!(output, "conv_window = {}", config.conv_window).unwrap();
     writeln!(output, "conv_tol = {:.1e}", config.conv_tol).unwrap();
     writeln!(output, "num_iter = {}", config.num_iter).unwrap();
@@ -963,9 +1650,9 @@ pub fn generate_wannier90_win(
     writeln!(output).unwrap();
 
     writeln!(output, "begin kpoint_path").unwrap();
-    for window in config.band_path.k_path.windows(2) {
-        let from = &window[0];
-        let to = &window[1];
+    for segment in collect_wannier_path_segments(&config.band_path.k_path) {
+        let from = &config.band_path.k_path[segment.from_index];
+        let to = &config.band_path.k_path[segment.to_index];
         writeln!(
             output,
             "{} {:16.10} {:16.10} {:16.10} {} {:16.10} {:16.10} {:16.10}",
@@ -1088,7 +1775,14 @@ pub fn parse_wannier_wout(
 
     let mut spreads = Vec::new();
     let mut convergence = WannierConvergenceData::default();
+    let mut saw_disentanglement_section = false;
     for line in content.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("disentang") {
+            saw_disentanglement_section = true;
+        }
+
         if let Some(caps) = spread_re.captures(line) {
             let index = caps
                 .get(1)
@@ -1135,11 +1829,89 @@ pub fn parse_wannier_wout(
                 convergence.iterations = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
             }
             convergence.converged = true;
+            convergence.minimization_converged = Some(true);
+            continue;
+        }
+
+        if lower.contains("maximum number of disentanglement iterations reached") {
+            convergence.max_iterations_reached = true;
+            convergence.disentanglement_converged = Some(false);
+            push_unique_line(
+                &mut convergence.failure_reasons,
+                "Maximum number of disentanglement iterations reached.",
+            );
+            continue;
+        }
+
+        if lower.contains("disentanglement convergence criteria not satisfied") {
+            convergence.disentanglement_converged = Some(false);
+            push_unique_line(
+                &mut convergence.failure_reasons,
+                "Disentanglement convergence criteria not satisfied.",
+            );
+            continue;
+        }
+
+        if lower.contains("maximum number of wannierisation iterations reached")
+            || lower.contains("maximum number of wannierization iterations reached")
+            || (lower.contains("maximum number of iterations reached")
+                && !lower.contains("disentang"))
+        {
+            convergence.max_iterations_reached = true;
+            convergence.minimization_converged = Some(false);
+            push_unique_line(
+                &mut convergence.failure_reasons,
+                if trimmed.is_empty() {
+                    "Maximum number of minimization iterations reached."
+                } else {
+                    trimmed
+                },
+            );
+            continue;
+        }
+
+        if lower.contains("convergence criteria not satisfied") || lower.contains("failed to converge")
+        {
+            if lower.contains("disentang") {
+                convergence.disentanglement_converged = Some(false);
+            } else {
+                convergence.minimization_converged = Some(false);
+            }
+            push_unique_line(
+                &mut convergence.failure_reasons,
+                if trimmed.is_empty() {
+                    "Wannier90 convergence criteria not satisfied."
+                } else {
+                    trimmed
+                },
+            );
+            continue;
+        }
+
+        if lower.starts_with("warning")
+            || lower.starts_with("warn:")
+            || lower.contains(" warning:")
+            || lower.contains(" warning ")
+        {
+            push_unique_line(&mut convergence.warnings, trimmed);
         }
     }
 
     if convergence.omega_total.is_none() && !spreads.is_empty() {
         convergence.omega_total = Some(spreads.iter().map(|entry| entry.spread).sum());
+    }
+
+    if convergence.disentanglement_converged == Some(false)
+        || convergence.minimization_converged == Some(false)
+    {
+        convergence.converged = false;
+    } else if convergence.converged {
+        if convergence.minimization_converged.is_none() {
+            convergence.minimization_converged = Some(true);
+        }
+        if saw_disentanglement_section && convergence.disentanglement_converged.is_none() {
+            convergence.disentanglement_converged = Some(true);
+        }
     }
 
     if spreads.is_empty() {
@@ -1263,6 +2035,7 @@ pub fn collect_wannier_artifacts(work_path: &Path, seedname: &str) -> Vec<Wannie
         format!("{}_centres.xyz", seedname),
         format!("{}_band.dat", seedname),
         format!("{}_band.kpt", seedname),
+        format!("{}_band.labelinfo.dat", seedname),
         "nscf.in".to_string(),
         "nscf.out".to_string(),
         "pw2wan.in".to_string(),
@@ -1313,8 +2086,65 @@ pub fn read_wannier_result(
     let band_content = std::fs::read_to_string(&band_path)
         .map_err(|e| format!("Failed to read {}: {}", band_path.display(), e))?;
 
-    let (spreads, convergence) = parse_wannier_wout(&wout_content)?;
-    let band_data = parse_wannier_band_data(&band_content, fermi_energy, &config.band_path.k_path)?;
+    let (spreads, mut convergence) = parse_wannier_wout(&wout_content)?;
+    let mut band_data = parse_wannier_band_data(&band_content, fermi_energy, &config.band_path.k_path)?;
+    if let Ok(lattice_vectors_angstrom) = convert_cell_matrix_to_angstrom(&config.base_calculation.system) {
+        let band_kpt_path = work_path.join(format!("{}_band.kpt", config.seedname));
+        if band_kpt_path.exists() {
+            match std::fs::read_to_string(&band_kpt_path)
+                .map_err(|e| format!("Failed to read {}: {}", band_kpt_path.display(), e))
+                .and_then(|content| {
+                    override_wannier_band_distances_from_kpt(
+                        &mut band_data,
+                        &content,
+                        &lattice_vectors_angstrom,
+                    )
+                })
+            {
+                Ok(()) => {
+                    band_data.band_gap = recalculate_band_gap(&band_data);
+                    match resolve_wannier_bands_num_points(&config.band_path, &lattice_vectors_angstrom)
+                        .and_then(|bands_num_points| {
+                            rebuild_wannier_band_markers_from_workdir(
+                                &mut band_data,
+                                work_path,
+                                &config.seedname,
+                                &config.band_path.k_path,
+                                &lattice_vectors_angstrom,
+                                bands_num_points,
+                            )
+                        })
+                    {
+                        Ok(()) => {}
+                        Err(err) => {
+                            add_symmetry_markers(&mut band_data, &config.band_path.k_path);
+                            push_unique_line(
+                                &mut convergence.warnings,
+                                &format!(
+                                    "Failed to reconstruct Wannier high-symmetry markers from the saved path: {}",
+                                    err
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(err) => push_unique_line(
+                    &mut convergence.warnings,
+                    &format!("Failed to reconstruct k-path spacing from _band.kpt: {}", err),
+                ),
+            }
+        }
+    }
+
+    let eig_path = work_path.join(format!("{}.eig", config.seedname));
+    let eig_content = if eig_path.exists() {
+        std::fs::read_to_string(&eig_path).ok()
+    } else {
+        None
+    };
+    let fermi_alignment =
+        analyze_wannier_band_fermi_alignment(&band_data, eig_content.as_deref(), fermi_energy);
+    let quality_issues = build_wannier_quality_issues(&convergence, fermi_alignment.as_ref());
     let centres_path = work_path.join(format!("{}_centres.xyz", config.seedname));
     let centres = if centres_path.exists() {
         std::fs::read_to_string(&centres_path)
@@ -1341,6 +2171,8 @@ pub fn read_wannier_result(
         spreads,
         centres,
         convergence,
+        fermi_alignment,
+        quality_issues,
         artifact_manifest: collect_wannier_artifacts(work_path, &config.seedname),
     })
 }
@@ -1854,6 +2686,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: None,
             pw2wannier90: None,
@@ -1888,6 +2721,116 @@ mod tests {
     }
 
     #[test]
+    fn win_writer_skips_disconnected_path_jumps() {
+        let mut config = WannierCalculationConfig {
+            base_calculation: sample_base_calculation(),
+            k_grid: [2, 2, 2],
+            num_wann: 4,
+            num_bands: 8,
+            seedname: "si_mlwf".to_string(),
+            projections: vec![sample_site_projection()],
+            band_path: WannierBandPathConfig {
+                k_path: vec![
+                    KPathPoint {
+                        label: "G".to_string(),
+                        coords: [0.0, 0.0, 0.0],
+                        npoints: 20,
+                    },
+                    KPathPoint {
+                        label: "X".to_string(),
+                        coords: [0.5, 0.0, 0.5],
+                        npoints: 0,
+                    },
+                    KPathPoint {
+                        label: "L".to_string(),
+                        coords: [0.5, 0.5, 0.5],
+                        npoints: 20,
+                    },
+                    KPathPoint {
+                        label: "W".to_string(),
+                        coords: [0.5, 0.25, 0.75],
+                        npoints: 0,
+                    },
+                ],
+                bands_num_points: 100,
+                total_k_points_target: None,
+            },
+            disentanglement: None,
+            pw2wannier90: None,
+            project_id: None,
+            scf_calc_id: None,
+            source_metadata: None,
+            guiding_centres: true,
+            use_ws_distance: true,
+            write_hr: true,
+            write_xyz: true,
+            bands_plot: true,
+            conv_window: 5,
+            conv_tol: 1.0e-10,
+            num_iter: 100,
+        };
+
+        let win = generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
+        assert!(win.lines().any(|line| line.trim_start().starts_with("G ") && line.contains(" X ")));
+        assert!(win.lines().any(|line| line.trim_start().starts_with("L ") && line.contains(" W ")));
+        assert!(!win.lines().any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
+
+        config.band_path.k_path[1].npoints = 20;
+        let connected_win =
+            generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
+        assert!(connected_win.lines().any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
+    }
+
+    #[test]
+    fn total_k_point_target_maps_to_wannier_bands_num_points() {
+        let config = WannierCalculationConfig {
+            base_calculation: sample_base_calculation(),
+            k_grid: [2, 2, 2],
+            num_wann: 4,
+            num_bands: 8,
+            seedname: "si_mlwf".to_string(),
+            projections: vec![sample_site_projection()],
+            band_path: WannierBandPathConfig {
+                k_path: vec![
+                    KPathPoint {
+                        label: "G".to_string(),
+                        coords: [0.0, 0.0, 0.0],
+                        npoints: 100,
+                    },
+                    KPathPoint {
+                        label: "X".to_string(),
+                        coords: [0.5, 0.0, 0.0],
+                        npoints: 100,
+                    },
+                    KPathPoint {
+                        label: "M".to_string(),
+                        coords: [0.5, 0.5, 0.0],
+                        npoints: 0,
+                    },
+                ],
+                bands_num_points: 0,
+                total_k_points_target: Some(201),
+            },
+            disentanglement: None,
+            pw2wannier90: None,
+            project_id: None,
+            scf_calc_id: None,
+            source_metadata: None,
+            guiding_centres: true,
+            use_ws_distance: true,
+            write_hr: true,
+            write_xyz: true,
+            bands_plot: true,
+            conv_window: 5,
+            conv_tol: 1.0e-10,
+            num_iter: 100,
+        };
+
+        let win = generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
+        assert!(win.contains("bands_num_points = 100"));
+    }
+
+    #[test]
     fn wout_parser_extracts_spreads() {
         let content = r#"
  Final State
@@ -1905,6 +2848,125 @@ mod tests {
         assert!(convergence.converged);
         assert_eq!(convergence.iterations, Some(12));
         assert_eq!(convergence.omega_total, Some(3.23456789));
+    }
+
+    #[test]
+    fn wout_parser_detects_disentanglement_nonconvergence() {
+        let content = r#"
+ Final State
+  WF centre and spread    1  (   0.000000,   0.000000,   0.000000 )     1.23456789
+  Omega Total =      1.23456789
+  Maximum number of disentanglement iterations reached
+  Disentanglement convergence criteria not satisfied
+"#;
+        let (_spreads, convergence) = parse_wannier_wout(content).unwrap();
+        assert!(!convergence.converged);
+        assert_eq!(convergence.disentanglement_converged, Some(false));
+        assert!(convergence.max_iterations_reached);
+        assert!(convergence
+            .failure_reasons
+            .iter()
+            .any(|reason| reason.contains("disentanglement")));
+    }
+
+    #[test]
+    fn band_kpt_override_uses_cartesian_distances() {
+        let band_content = r#"
+0.0 0.0
+0.5 0.2
+1.0 0.4
+
+0.0 1.0
+0.5 1.2
+1.0 1.4
+"#;
+        let mut data = parse_wannier_band_data(
+            band_content,
+            0.0,
+            &[
+                KPathPoint {
+                    label: "G".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 1,
+                },
+                KPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.0],
+                    npoints: 1,
+                },
+                KPathPoint {
+                    label: "M".to_string(),
+                    coords: [0.5, 0.5, 0.0],
+                    npoints: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let band_kpt = "3\n0.0 0.0 0.0\n0.5 0.0 0.0\n0.5 0.5 0.0\n";
+
+        override_wannier_band_distances_from_kpt(
+            &mut data,
+            band_kpt,
+            &[
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        )
+        .unwrap();
+        add_symmetry_markers(
+            &mut data,
+            &[
+                KPathPoint {
+                    label: "G".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 1,
+                },
+                KPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.0],
+                    npoints: 1,
+                },
+                KPathPoint {
+                    label: "M".to_string(),
+                    coords: [0.5, 0.5, 0.0],
+                    npoints: 0,
+                },
+            ],
+        );
+
+        assert!((data.k_points[1] - std::f64::consts::PI).abs() < 1.0e-9);
+        assert!((data.k_points[2] - 2.0 * std::f64::consts::PI).abs() < 1.0e-9);
+        assert!((data.high_symmetry_points[1].k_distance - std::f64::consts::PI).abs() < 1.0e-9);
+        assert!((data.high_symmetry_points[2].k_distance - 2.0 * std::f64::consts::PI).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn quality_issues_flag_source_fermi_mismatch() {
+        let band_data = parse_wannier_band_data(
+            "0.0 6.0\n0.5 6.2\n\n0.0 7.0\n0.5 7.2\n",
+            10.0,
+            &[
+                KPathPoint {
+                    label: "G".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 1,
+                },
+                KPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.0],
+                    npoints: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let source_eig = "1 1 9.98\n2 1 10.02\n";
+        let alignment =
+            analyze_wannier_band_fermi_alignment(&band_data, Some(source_eig), 10.0).unwrap();
+        let issues = build_wannier_quality_issues(&WannierConvergenceData::default(), Some(&alignment));
+        assert!(issues.iter().any(|issue| {
+            issue.code == "misses_source_fermi" && issue.severity == WannierIssueSeverity::Error
+        }));
     }
 
     #[test]
@@ -1935,6 +2997,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: None,
             pw2wannier90: None,
@@ -1997,6 +3060,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: Some(WannierDisentanglementConfig::default()),
             pw2wannier90: None,
@@ -2056,6 +3120,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: None,
             pw2wannier90: None,
@@ -2113,6 +3178,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: None,
             pw2wannier90: None,
@@ -2164,6 +3230,7 @@ mod tests {
                     },
                 ],
                 bands_num_points: 100,
+                total_k_points_target: None,
             },
             disentanglement: None,
             pw2wannier90: None,

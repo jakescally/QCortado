@@ -41,6 +41,12 @@ import {
   defaultResourcesForProfile,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
+import {
+  formatWannierConvergenceFlag,
+  getWannierQualityIssues,
+  WannierQualityIssue,
+} from "../lib/wannierQuality";
+import { getNeutralElectronConfiguration } from "../lib/electronConfigurations";
 
 interface CalculationRun {
   id: string;
@@ -71,10 +77,24 @@ interface WannierCentreRecord {
 interface WannierConvergenceData {
   converged: boolean;
   iterations?: number | null;
+  minimization_converged?: boolean | null;
+  disentanglement_converged?: boolean | null;
+  max_iterations_reached?: boolean | null;
   omega_i?: number | null;
   omega_d?: number | null;
   omega_od?: number | null;
   omega_total?: number | null;
+  warnings?: string[];
+  failure_reasons?: string[];
+}
+
+interface WannierFermiAlignment {
+  source_brackets_fermi?: boolean | null;
+  wannier_brackets_fermi: boolean;
+  source_min_distance_ev?: number | null;
+  wannier_min_distance_ev: number;
+  source_energy_range_ev?: [number, number] | null;
+  wannier_energy_range_ev?: [number, number] | null;
 }
 
 interface WannierArtifact {
@@ -92,6 +112,8 @@ interface WannierResult {
   spreads: WannierSpread[];
   centres: WannierCentreRecord[];
   convergence: WannierConvergenceData;
+  fermi_alignment?: WannierFermiAlignment | null;
+  quality_issues?: WannierQualityIssue[];
   artifact_manifest: WannierArtifact[];
 }
 
@@ -124,6 +146,15 @@ interface WannierWizardProps {
 
 const WANNIER_WORK_DIR = "/tmp/qcortado_wannier";
 const ORBITAL_OPTIONS: ProjectionOrbital[] = ["s", "p", "d", "f", "sp", "sp2", "sp3", "sp3d", "sp3d2"];
+
+function Tooltip({ text }: { text: string }) {
+  return (
+    <span className="tooltip-container">
+      <span className="tooltip-icon">?</span>
+      <span className="tooltip-text">{text}</span>
+    </span>
+  );
+}
 
 function getBaseElement(symbol: string): string {
   return symbol.replace(/[\d+-]+$/, "");
@@ -170,6 +201,33 @@ function orbitalTemplateCount(orbital: ProjectionOrbital): number {
     default:
       return 1;
   }
+}
+
+function renderElectronConfiguration(config: string) {
+  const tokens = config.split(/\s+/).filter(Boolean);
+  return (
+    <>
+      {tokens.map((token, index) => {
+        const subshellMatch = token.match(/^(\d)([spdf])(\d+)$/);
+        const spacer = index < tokens.length - 1 ? " " : "";
+        if (!subshellMatch) {
+          return <span key={`${token}-${index}`}>{token}{spacer}</span>;
+        }
+        return (
+          <span key={`${token}-${index}`}>
+            {subshellMatch[1]}
+            {subshellMatch[2]}
+            <sup>{subshellMatch[3]}</sup>
+            {spacer}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+function getNeutralElectronConfigSummary(symbol: string) {
+  return getNeutralElectronConfiguration(symbol);
 }
 
 function countMatchingElementSites(symbol: string, atomSymbols: string[]): number {
@@ -245,6 +303,86 @@ function parseExcludeBandsInput(raw: string): number[] {
     }
   }
   return [...new Set(values)].sort((a, b) => a - b);
+}
+
+const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
+const MAX_TOTAL_K_POINTS = 5000;
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function getConnectedSegmentIndices(path: KPathPoint[]): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < path.length - 1; i += 1) {
+    if (path[i].npoints > 0) {
+      indices.push(i);
+    }
+  }
+  return indices;
+}
+
+function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint[] {
+  const connectedSegmentIndices = getConnectedSegmentIndices(path);
+  if (path.length === 0 || connectedSegmentIndices.length === 0) {
+    return path.map((point) => ({
+      ...point,
+      npoints: 0,
+    }));
+  }
+
+  const safeTotal = clampInt(totalKPoints, connectedSegmentIndices.length, MAX_TOTAL_K_POINTS);
+  const remainingAfterBaseline = safeTotal - connectedSegmentIndices.length;
+  const lengths = connectedSegmentIndices.map((segmentIndex) => {
+    const from = path[segmentIndex];
+    const to = path[segmentIndex + 1];
+    const dx = to.coords[0] - from.coords[0];
+    const dy = to.coords[1] - from.coords[1];
+    const dz = to.coords[2] - from.coords[2];
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    return Number.isFinite(distance) && distance > 1e-9 ? distance : 1e-9;
+  });
+  const totalLength = lengths.reduce((sum, len) => sum + len, 0);
+  const rawExtras = lengths.map((length) =>
+    totalLength > 0
+      ? (length / totalLength) * remainingAfterBaseline
+      : remainingAfterBaseline / connectedSegmentIndices.length,
+  );
+  const extraPoints = rawExtras.map((value) => Math.floor(value));
+  const assignedExtra = extraPoints.reduce((sum, value) => sum + value, 0);
+  let leftovers = remainingAfterBaseline - assignedExtra;
+  const order = rawExtras
+    .map((value, idx) => ({
+      idx,
+      frac: value - Math.floor(value),
+      len: lengths[idx],
+    }))
+    .sort((a, b) => {
+      if (b.frac !== a.frac) return b.frac - a.frac;
+      if (b.len !== a.len) return b.len - a.len;
+      return a.idx - b.idx;
+    });
+
+  for (let i = 0; i < order.length && leftovers > 0; i += 1) {
+    extraPoints[order[i].idx] += 1;
+    leftovers -= 1;
+  }
+
+  const segmentPoints = new Map<number, number>();
+  for (let i = 0; i < connectedSegmentIndices.length; i += 1) {
+    segmentPoints.set(connectedSegmentIndices[i], 1 + extraPoints[i]);
+  }
+
+  return path.map((point, index) => {
+    if (index >= path.length - 1) {
+      return { ...point, npoints: 0 };
+    }
+    if (!segmentPoints.has(index)) {
+      return { ...point, npoints: 0 };
+    }
+    return { ...point, npoints: segmentPoints.get(index)! };
+  });
 }
 
 function getWannierSourceIssues(calc: CalculationRun): string[] {
@@ -357,7 +495,8 @@ export function WannierWizard({
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
   const [kGridInput, setKGridInput] = useState<[string, string, string]>(["4", "4", "4"]);
-  const [bandsNumPointsInput, setBandsNumPointsInput] = useState("100");
+  const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
+  const [totalKPointsInput, setTotalKPointsInput] = useState("120");
   const [numBandsInput, setNumBandsInput] = useState("");
   const [numBandsMode, setNumBandsMode] = useState<NumBandsMode>("auto");
   const [seednameInput, setSeednameInput] = useState("qcortado_wannier");
@@ -391,6 +530,41 @@ export function WannierWizard({
     setScfSortMode(mode);
     setStoredSortMode(mode);
   }, []);
+  const sourcePseudoMap = useMemo<Record<string, string>>(() => {
+    const params = selectedScf?.parameters || {};
+    return (params.selected_pseudos && typeof params.selected_pseudos === "object")
+      ? params.selected_pseudos as Record<string, string>
+      : {};
+  }, [selectedScf]);
+  const uniqueCrystalElements = useMemo(
+    () => [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))],
+    [crystalData],
+  );
+  const structureElectronConfigs = useMemo(
+    () => uniqueCrystalElements.map((element) => ({
+      element,
+      config: getNeutralElectronConfigSummary(element),
+    })),
+    [uniqueCrystalElements],
+  );
+
+  function getAllowedOrbitalOptionsForDraft(draft: ProjectionDraft): ProjectionOrbital[] {
+    void draft;
+    return ORBITAL_OPTIONS;
+  }
+
+  function getProjectionElement(draft: ProjectionDraft): string {
+    return draft.targetType === "site"
+      ? getBaseElement(crystalData.atom_sites[draft.siteIndex ?? 0]?.type_symbol || draft.symbol)
+      : getBaseElement(draft.symbol);
+  }
+
+  async function prepareSelectedScfSource(scf: CalculationRun): Promise<void> {
+    const params = scf.parameters || {};
+    if (sourceScfUsesPrimitiveCell(params)) {
+      await ensureSymmetryTransform();
+    }
+  }
 
   useEffect(() => {
     if (visibleOutputLineCount > outputLineCount) {
@@ -464,12 +638,13 @@ export function WannierWizard({
     if (projectionDrafts.length === 0) {
       const uniqueElements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
       if (uniqueElements.length === 1) {
+        const defaultOrbital = ORBITAL_OPTIONS[0];
         setProjectionDrafts([
           {
             id: makeProjectionId(),
             targetType: "element",
             symbol: uniqueElements[0],
-            orbital: "sp3",
+            orbital: defaultOrbital,
             siteIndex: null,
           },
         ]);
@@ -481,14 +656,6 @@ export function WannierWizard({
     setNumBandsMode("auto");
     setNumBandsInput("");
   }, [selectedScf?.id]);
-
-  useEffect(() => {
-    if (!selectedScf) return;
-    const params = selectedScf.parameters || {};
-    if (!sourceScfUsesPrimitiveCell(params)) return;
-    if (symmetryTransform || symmetryError) return;
-    void ensureSymmetryTransform();
-  }, [selectedScf, symmetryError, symmetryTransform]);
 
   const wannierCellAtomSymbols = useMemo(() => {
     const params = selectedScf?.parameters || {};
@@ -506,19 +673,27 @@ export function WannierWizard({
     () => scfCalculations.filter((calc) => calc.calc_type === "scf" && calc.result?.converged),
     [scfCalculations],
   );
-  const sortedScfs = useMemo(
-    () => sortScfByMode(validScfs, scfSortMode),
-    [validScfs, scfSortMode],
-  );
   const readyScfs = useMemo(
     () => validScfs.filter((calc) => getWannierSourceIssues(calc).length === 0),
     [validScfs],
+  );
+  const sortedReadyScfs = useMemo(
+    () => sortScfByMode(readyScfs, scfSortMode),
+    [readyScfs, scfSortMode],
   );
 
   const selectedIssues = useMemo(
     () => (selectedScf ? getWannierSourceIssues(selectedScf) : []),
     [selectedScf],
   );
+
+  useEffect(() => {
+    if (!selectedScf) return;
+    if (readyScfs.some((calc) => calc.id === selectedScf.id)) {
+      return;
+    }
+    setSelectedScf(null);
+  }, [readyScfs, selectedScf]);
 
   const derivedNumWann = useMemo(
     () => projectionDrafts.reduce(
@@ -592,10 +767,40 @@ export function WannierWizard({
     sourceElectronCount,
     sourceNbnd,
   ]);
+  const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
+    setKPath(applyTotalKPoints(newPath, totalKPointsTarget));
+  }, [totalKPointsTarget]);
+  useEffect(() => {
+    setKPath((prevPath) => applyTotalKPoints(prevPath, totalKPointsTarget));
+  }, [totalKPointsTarget]);
+  const kPathSegmentCount = useMemo(
+    () => getConnectedSegmentIndices(kPath).length,
+    [kPath],
+  );
   const totalInterpolatedPoints = useMemo(
     () => kPath.reduce((sum, point) => sum + (Number(point.npoints) || 0), 0),
     [kPath],
   );
+  const minimumTotalKPoints = Math.max(1, kPathSegmentCount);
+  const viewerPointsPerSegment = clampInt(
+    totalKPointsTarget / minimumTotalKPoints,
+    1,
+    MAX_VIEWER_POINTS_PER_SEGMENT,
+  );
+  useEffect(() => {
+    setTotalKPointsInput(String(totalKPointsTarget));
+  }, [totalKPointsTarget]);
+  const commitTotalKPointsInput = useCallback(() => {
+    const parsed = Number.parseInt(totalKPointsInput.trim(), 10);
+    const fallback = Number.isFinite(totalKPointsTarget)
+      ? totalKPointsTarget
+      : Math.max(120, minimumTotalKPoints);
+    const committed = Number.isFinite(parsed)
+      ? clampInt(parsed, minimumTotalKPoints, MAX_TOTAL_K_POINTS)
+      : clampInt(fallback, minimumTotalKPoints, MAX_TOTAL_K_POINTS);
+    setTotalKPointsTarget(committed);
+    setTotalKPointsInput(String(committed));
+  }, [minimumTotalKPoints, totalKPointsInput, totalKPointsTarget]);
   const parameterValidationError = useMemo(() => {
     if (!selectedScf) {
       return "Select a source SCF first.";
@@ -617,10 +822,13 @@ export function WannierWizard({
       const kx = parseOptionalPositiveInt(kGridInput[0], "k-grid x");
       const ky = parseOptionalPositiveInt(kGridInput[1], "k-grid y");
       const kz = parseOptionalPositiveInt(kGridInput[2], "k-grid z");
-      const bandsNumPoints = parseOptionalPositiveInt(bandsNumPointsInput, "bands_num_points");
+      const totalKPoints = parseOptionalPositiveInt(totalKPointsInput, "total interpolation k-points");
       const numBands = parseOptionalPositiveInt(effectiveNumBandsInput, "num_bands");
-      if (kx == null || ky == null || kz == null || bandsNumPoints == null || numBands == null) {
-        return "Use positive integers for the mesh, bands_num_points, and num_bands.";
+      if (kx == null || ky == null || kz == null || totalKPoints == null || numBands == null) {
+        return "Use positive integers for the mesh, total interpolation k-points, and num_bands.";
+      }
+      if (totalKPoints < minimumTotalKPoints) {
+        return `Total interpolation k-points must be at least ${minimumTotalKPoints} for the selected path.`;
       }
       if (minOccupiedBands != null && numBands < minOccupiedBands) {
         return `num_bands must be at least ${minOccupiedBands} for this scalar source (${sourceElectronCount} electrons => ${minOccupiedBands} occupied bands).`;
@@ -653,7 +861,6 @@ export function WannierWizard({
 
     return null;
   }, [
-    bandsNumPointsInput,
     derivedNumWann,
     disFrozMaxInput,
     disFrozMinInput,
@@ -666,8 +873,10 @@ export function WannierWizard({
     resolvedNumWann,
     selectedIssues,
     selectedScf,
+    minimumTotalKPoints,
     minOccupiedBands,
     sourceElectronCount,
+    totalKPointsInput,
   ]);
 
   const hpcCommandLines = useMemo(() => {
@@ -682,22 +891,21 @@ export function WannierWizard({
     ];
   }, [activeHpcProfile, seednameInput]);
 
-  const sourcePseudoMap = useMemo<Record<string, string>>(() => {
-    const params = selectedScf?.parameters || {};
-    return (params.selected_pseudos && typeof params.selected_pseudos === "object")
-      ? params.selected_pseudos as Record<string, string>
-      : {};
-  }, [selectedScf]);
+  const resultQualityIssues = useMemo(
+    () => getWannierQualityIssues(result, output, selectedScf?.result?.fermi_energy ?? null),
+    [output, result, selectedScf],
+  );
 
   const addProjection = useCallback(() => {
     const firstElement = getBaseElement(crystalData.atom_sites[0]?.type_symbol || "X");
+    const defaultOrbital = ORBITAL_OPTIONS[0];
     setProjectionDrafts((prev) => [
       ...prev,
       {
         id: makeProjectionId(),
         targetType: "element",
         symbol: firstElement,
-        orbital: "s",
+        orbital: defaultOrbital,
         siteIndex: null,
       },
     ]);
@@ -749,9 +957,12 @@ export function WannierWizard({
       parseOptionalPositiveInt(kGridInput[1], "k-grid y") ?? 0,
       parseOptionalPositiveInt(kGridInput[2], "k-grid z") ?? 0,
     ] as [number, number, number];
-    const bandsNumPoints = parseOptionalPositiveInt(bandsNumPointsInput, "bands_num_points") ?? 0;
+    const totalKPoints = parseOptionalPositiveInt(totalKPointsInput, "total interpolation k-points") ?? 0;
     const numBands = parseOptionalPositiveInt(effectiveNumBandsInput, "num_bands") ?? 0;
     const seedname = sanitizeSeedname(seednameInput);
+    if (totalKPoints < minimumTotalKPoints) {
+      throw new Error(`Total interpolation k-points must be at least ${minimumTotalKPoints} for the selected path.`);
+    }
     if (minOccupiedBands != null && numBands < minOccupiedBands) {
       throw new Error(
         `num_bands must be at least ${minOccupiedBands} for this scalar source (${sourceElectronCount} electrons => ${minOccupiedBands} occupied bands).`,
@@ -960,7 +1171,8 @@ export function WannierWizard({
           projections: projectionSpecs,
           band_path: {
             k_path: transformedPath,
-            bands_num_points: bandsNumPoints,
+            bands_num_points: 0,
+            total_k_points_target: totalKPoints,
           },
           disentanglement,
           project_id: projectId,
@@ -997,7 +1209,7 @@ export function WannierWizard({
         dis_froz_min: disentanglement?.dis_froz_min ?? null,
         dis_froz_max: disentanglement?.dis_froz_max ?? null,
         k_path: kPath.map((point) => point.label).join(" → "),
-        bands_num_points: bandsNumPoints,
+        total_k_points_target: totalKPoints,
         scf_fermi_energy: selectedScf.result?.fermi_energy ?? null,
         cell_representation: canUseSymmetryPrimitive ? "primitive_spglib" : "conventional_input",
         ecutwfc: params.ecutwfc,
@@ -1139,8 +1351,7 @@ export function WannierWizard({
         )}
 
         <div className="scf-list">
-          {sortedScfs.map((scf) => {
-            const issues = getWannierSourceIssues(scf);
+          {sortedReadyScfs.map((scf) => {
             return (
               <div
                 key={scf.id}
@@ -1177,11 +1388,6 @@ export function WannierWizard({
                       {tag.label}
                     </span>
                   ))}
-                  {issues.map((issue) => (
-                    <span key={issue} className="calc-tag calc-tag-feature">
-                      {issue}
-                    </span>
-                  ))}
                 </div>
               </div>
             );
@@ -1195,7 +1401,12 @@ export function WannierWizard({
           <button
             className="primary-button"
             disabled={!selectedScf}
-            onClick={() => setStep("mesh")}
+            onClick={() => {
+              if (!selectedScf) return;
+              void prepareSelectedScfSource(selectedScf)
+                .then(() => setStep("mesh"))
+                .catch((err) => setError(String(err)));
+            }}
           >
             Next: K-Mesh
           </button>
@@ -1234,16 +1445,30 @@ export function WannierWizard({
               </div>
             </div>
             <div className="param-row">
-              <label>bands_num_points</label>
+              <label>
+                Total interpolated k-points
+                <Tooltip text="QCortado target for the full interpolation path. QCortado converts this to Wannier90 input `bands_num_points` internally; because Wannier90 scales each segment by relative length, the final plotted total may differ slightly from the requested target." />
+              </label>
               <input
                 type="number"
-                min={1}
-                value={bandsNumPointsInput}
-                onChange={(event) => setBandsNumPointsInput(event.target.value)}
+                min={minimumTotalKPoints}
+                max={MAX_TOTAL_K_POINTS}
+                value={totalKPointsInput}
+                onChange={(event) => setTotalKPointsInput(event.target.value)}
+                onBlur={commitTotalKPointsInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitTotalKPointsInput();
+                  }
+                }}
               />
             </div>
             <div className="param-row">
-              <label>seedname</label>
+              <label>
+                Calculation file prefix
+                <Tooltip text="Wannier90 input: `seedname`. QCortado uses this prefix when writing the `.win`, `.wout`, `_band.dat`, and related Wannier files." />
+              </label>
               <input
                 type="text"
                 value={seednameInput}
@@ -1256,9 +1481,9 @@ export function WannierWizard({
 
         <BrillouinZoneViewer
           crystalData={crystalData}
-          onPathChange={setKPath}
+          onPathChange={handleKPathChange}
           initialPath={kPath}
-          pointsPerSegment={Math.max(1, Number.parseInt(bandsNumPointsInput, 10) || 100)}
+          pointsPerSegment={viewerPointsPerSegment}
           symmetryTransform={symmetryTransform}
           rhombohedralConvention={kPathRhombohedralConvention}
           onRhombohedralConventionChange={setKPathRhombohedralConvention}
@@ -1280,15 +1505,15 @@ export function WannierWizard({
             <span>{kGridInput.join("×")}</span>
           </div>
           <div className="summary-row">
-            <span>bands_num_points:</span>
-            <span>{bandsNumPointsInput || "100"}</span>
+            <span>Total k-point target:</span>
+            <span>{totalKPointsTarget}</span>
           </div>
           <div className="summary-row">
             <span>Path nodes:</span>
             <span>{kPath.map((point) => point.label).join(" → ") || "Not selected"}</span>
           </div>
           <div className="summary-row">
-            <span>Interpolated k-points:</span>
+            <span>Distributed path points:</span>
             <span>{totalInterpolatedPoints}</span>
           </div>
         </div>
@@ -1319,10 +1544,32 @@ export function WannierWizard({
         <div className="info-banner">
           Element projections apply to every matching atom in the Wannier cell. Use site-targeted projections if you want only one atom.
         </div>
+        <details className="wannier-guidance">
+          <summary>How to choose transport-ready projections</summary>
+          <div className="guidance-body">
+            <p>Start from the orbitals whose source bands actually cross or sit close to E_F. If the interpolated Wannier manifold misses E_F, BoltzWann transport will collapse toward zero.</p>
+            <p>For simple isolated manifolds, keep `num_bands = num_wann`. For entangled metallic manifolds, increase `num_bands`, then use `dis_win_*` to capture the full target space and `dis_froz_*` to pin the bands you must reproduce near E_F.</p>
+            <p>QCortado shows each element's neutral-atom electron configuration as a reference only. It does not restrict the orbital templates you can choose.</p>
+          </div>
+        </details>
+        {structureElectronConfigs.length > 0 && (
+          <div className="info-banner">
+            Neutral atom references:&nbsp;
+            {structureElectronConfigs.map(({ element, config }, index) => (
+              <span key={element}>
+                <strong>{element}</strong>: {config ? renderElectronConfiguration(config.compact) : "unavailable"}
+                {index < structureElectronConfigs.length - 1 ? "; " : ""}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="param-section">
           <div className="source-step-header">
-            <h4>Initial Projections</h4>
+            <h4>
+              Initial Projections
+              <Tooltip text="Choose orbitals that span the bands you want the Wannier interpolation to reproduce. For transport, prioritize orbitals contributing near the source SCF Fermi level." />
+            </h4>
             <button className="secondary-button" type="button" onClick={addProjection}>
               Add Projection
             </button>
@@ -1334,10 +1581,17 @@ export function WannierWizard({
             </div>
           )}
 
-          {projectionDrafts.map((item) => (
+          {projectionDrafts.map((item) => {
+            const allowedOrbitalOptions = getAllowedOrbitalOptionsForDraft(item);
+            const projectionElement = getProjectionElement(item);
+            const electronConfig = getNeutralElectronConfigSummary(projectionElement);
+            return (
             <div key={item.id} className="param-grid" style={{ marginBottom: "1rem" }}>
               <div className="param-row">
-                <label>Target</label>
+                <label>
+                  Target
+                  <Tooltip text="Element targets apply the chosen template to every matching atom. Site targets apply it to one specific atomic site." />
+                </label>
                 <select
                   value={item.targetType}
                   onChange={(event) => updateProjection(item.id, {
@@ -1356,7 +1610,7 @@ export function WannierWizard({
                     value={item.symbol}
                     onChange={(event) => updateProjection(item.id, { symbol: event.target.value })}
                   >
-                    {[...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))].map((element) => (
+                    {uniqueCrystalElements.map((element) => (
                       <option key={element} value={element}>{element}</option>
                     ))}
                   </select>
@@ -1377,15 +1631,22 @@ export function WannierWizard({
                 </div>
               )}
               <div className="param-row">
-                <label>Orbital template</label>
+                <label>
+                  Orbital template
+                  <Tooltip text="QCortado leaves all Wannier projection templates available. Use the neutral-atom reference below as a reminder of the element's baseline shell filling, not as a hard rule for transport-ready choices." />
+                </label>
                 <select
                   value={item.orbital}
                   onChange={(event) => updateProjection(item.id, { orbital: event.target.value as ProjectionOrbital })}
                 >
-                  {ORBITAL_OPTIONS.map((orbital) => (
+                  {allowedOrbitalOptions.map((orbital) => (
                     <option key={orbital} value={orbital}>{orbital}</option>
                   ))}
                 </select>
+                <span className="param-hint">
+                  Neutral atom reference for {projectionElement}:{" "}
+                  {electronConfig ? renderElectronConfiguration(electronConfig.compact) : "unavailable"}
+                </span>
               </div>
               <div className="param-row">
                 <label>Contribution</label>
@@ -1398,14 +1659,18 @@ export function WannierWizard({
                 </button>
               </div>
             </div>
-          ))}
+          );
+          })}
         </div>
 
         <div className="param-section">
           <h4>Wannier Subspace</h4>
           <div className="param-grid">
             <div className="param-row">
-              <label>num_wann override</label>
+              <label>
+                Total Wannier functions
+                <Tooltip text="Wannier90 input: `num_wann`. QCortado derives this from the selected projections. Override it only if you are deliberately matching that same total by hand." />
+              </label>
               <input
                 type="number"
                 min={1}
@@ -1415,7 +1680,10 @@ export function WannierWizard({
               />
             </div>
             <div className="param-row">
-              <label>num_bands</label>
+              <label>
+                Bands included in Wannierization
+                <Tooltip text="Wannier90 input: `num_bands`. Increase this above `num_wann` when the target bands are entangled. This enlarges the space that Wannier90 may disentangle before constructing the final subspace." />
+              </label>
               <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
                 <input
                   type="number"
@@ -1453,10 +1721,16 @@ export function WannierWizard({
         </div>
 
         <div className="param-section">
-          <h4>Disentanglement Controls</h4>
+          <h4>
+            Disentanglement Controls
+            <Tooltip text="Wannier90 inputs: `exclude_bands`, `dis_win_min`, `dis_win_max`, `dis_froz_min`, and `dis_froz_max`. Use the outer window to include all bands that may mix into the target space, and the frozen window to enforce an exact match for the bands you care about most, usually near E_F." />
+          </h4>
           <div className="param-grid">
             <div className="param-row">
-              <label>exclude_bands</label>
+              <label>
+                Excluded source bands
+                <Tooltip text="Wannier90 input: `exclude_bands`. Exclude low-lying semicore or otherwise irrelevant bands from the disentanglement pool. Use QE/Wannier band plots to identify them first." />
+              </label>
               <input
                 type="text"
                 value={excludeBandsInput}
@@ -1465,19 +1739,31 @@ export function WannierWizard({
               />
             </div>
             <div className="param-row">
-              <label>dis_win_min (eV)</label>
+              <label>
+                Outer window minimum (eV)
+                <Tooltip text="Wannier90 input: `dis_win_min`. This is the lower edge of the outer disentanglement window in absolute eV. Set it low enough to include every band that may contribute to the target manifold." />
+              </label>
               <input value={disWinMinInput} onChange={(event) => setDisWinMinInput(event.target.value)} />
             </div>
             <div className="param-row">
-              <label>dis_win_max (eV)</label>
+              <label>
+                Outer window maximum (eV)
+                <Tooltip text="Wannier90 input: `dis_win_max`. This is the upper edge of the outer disentanglement window in absolute eV and should cover the full band manifold you want to interpolate." />
+              </label>
               <input value={disWinMaxInput} onChange={(event) => setDisWinMaxInput(event.target.value)} />
             </div>
             <div className="param-row">
-              <label>dis_froz_min (eV)</label>
+              <label>
+                Frozen window minimum (eV)
+                <Tooltip text="Wannier90 input: `dis_froz_min`. This is the lower edge of the frozen window. Bands inside the frozen window are reproduced as exactly as possible and should usually include the transport-relevant region." />
+              </label>
               <input value={disFrozMinInput} onChange={(event) => setDisFrozMinInput(event.target.value)} />
             </div>
             <div className="param-row">
-              <label>dis_froz_max (eV)</label>
+              <label>
+                Frozen window maximum (eV)
+                <Tooltip text="Wannier90 input: `dis_froz_max`. This is the upper edge of the frozen window. Keep the frozen window inside the outer window, and choose it to cover the part of the spectrum you trust most." />
+              </label>
               <input value={disFrozMaxInput} onChange={(event) => setDisFrozMaxInput(event.target.value)} />
             </div>
           </div>
@@ -1641,6 +1927,12 @@ export function WannierWizard({
           Calculation complete. Open the main Wannier viewer for interactive band plotting.
         </p>
 
+        {resultQualityIssues.length > 0 && (
+          <div className="warning-banner">
+            {resultQualityIssues.map((issue) => issue.message).join(" ")}
+          </div>
+        )}
+
         <div className="results-summary">
           <div className="summary-grid">
             <div className="summary-item">
@@ -1669,8 +1961,28 @@ export function WannierWizard({
               <span className="label">Iterations:</span>
               <span className="value">{result.convergence?.iterations ?? "N/A"}</span>
             </div>
+            <div className="summary-item">
+              <span className="label">Minimization:</span>
+              <span className="value">{formatWannierConvergenceFlag(result.convergence?.minimization_converged)}</span>
+            </div>
+            <div className="summary-item">
+              <span className="label">Disentanglement:</span>
+              <span className="value">{formatWannierConvergenceFlag(result.convergence?.disentanglement_converged)}</span>
+            </div>
           </div>
         </div>
+
+        {(result.convergence?.failure_reasons?.length || result.convergence?.warnings?.length) ? (
+          <div className="detail-item parameters">
+            <label>Quality Checks</label>
+            <pre>
+              {[
+                ...(result.convergence?.failure_reasons || []).map((entry) => `Error: ${entry}`),
+                ...(result.convergence?.warnings || []).map((entry) => `Warning: ${entry}`),
+              ].join("\n")}
+            </pre>
+          </div>
+        ) : null}
 
         {result.spreads.length > 0 && (
           <div className="detail-item parameters">

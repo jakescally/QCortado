@@ -35,6 +35,7 @@ function makeDefaultProfile(): HpcProfile {
     ssh_key_path: "~/.ssh/id_rsa",
     remote_qe_bin_dir: "~/qe/bin",
     remote_wannier90_path: "wannier90.x",
+    remote_postw90_path: "postw90.x",
     remote_pseudo_dir: "~/qe/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
@@ -127,6 +128,7 @@ export function HpcSetupWizard({
         if (!validation.qe_pw_available) detail.push("`pw.x` is not executable at configured QE path.");
         if (!validation.qe_pw2wannier_available) detail.push("`pw2wannier90.x` is not executable at configured QE path.");
         if (!validation.wannier90_available) detail.push("`wannier90.x` is not executable at configured path or on `PATH`.");
+        if (!validation.postw90_available) detail.push("`postw90.x` is not executable at configured path or on `PATH`.");
         if (!validation.workspace_writable) detail.push("Remote workspace is not writable.");
         detail.push(...validation.messages);
 
@@ -138,6 +140,7 @@ export function HpcSetupWizard({
           && validation.qe_pw_available
           && validation.qe_pw2wannier_available
           && validation.wannier90_available
+          && validation.postw90_available
           && validation.workspace_writable
         ) {
           setValidationMessage("Validation succeeded.");
@@ -340,6 +343,16 @@ export function HpcSetupWizard({
               />
               <p className="settings-menu-hint">
                 Leave as <code>wannier90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
+              </p>
+              <label className="settings-menu-label">Remote postw90 Executable</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_postw90_path || ""}
+                onChange={(event) => setProfile((prev) => ({ ...prev, remote_postw90_path: event.target.value || null }))}
+                placeholder="postw90.x or /path/to/postw90.x"
+              />
+              <p className="settings-menu-hint">
+                Leave as <code>postw90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
               </p>
               <label className="settings-menu-label">Remote Pseudopotential Directory</label>
               <input

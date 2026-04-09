@@ -32,11 +32,12 @@ use process_manager::ProcessManager;
 use qe::{
     add_phonon_symmetry_markers, export_ludwig_bundle, generate_dos_input,
     generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_q2r_input,
-    parse_ph_output, parse_wannier_hamiltonian, prepare_wannier_nscf_calculation,
-    read_phonon_dispersion_file, read_phonon_dos_file, read_wannier_result,
-    validate_wannier_config, DosCalculation, LudwigExportConfig, LudwigExportResult,
-    MatdynCalculation, PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation,
-    QPathPoint, WannierCalculationConfig, WannierResult,
+    build_transport_win, parse_ph_output, parse_transport_result, parse_wannier_hamiltonian,
+    prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
+    read_wannier_result, validate_transport_config, validate_wannier_config, DosCalculation,
+    LudwigExportConfig, LudwigExportResult, MatdynCalculation, PhononPipelineConfig,
+    PhononResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint,
+    TransportCalculationConfig, TransportResult, WannierCalculationConfig, WannierResult,
 };
 use qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input, generate_pw_input,
@@ -53,6 +54,8 @@ pub struct AppState {
     pub fermi_surfer_path: Mutex<Option<PathBuf>>,
     /// Path to Wannier90 executable
     pub wannier90_path: Mutex<Option<PathBuf>>,
+    /// Path to postw90.x executable
+    pub postw90_path: Mutex<Option<PathBuf>>,
     /// Optional command prefix prepended before all QE launches
     pub execution_prefix: Mutex<Option<String>>,
     /// Optional global MPI defaults used by calculation wizards
@@ -87,6 +90,7 @@ impl Default for AppState {
             qe_bin_dir: Mutex::new(None),
             fermi_surfer_path: Mutex::new(None),
             wannier90_path: Mutex::new(None),
+            postw90_path: Mutex::new(None),
             execution_prefix: Mutex::new(None),
             mpi_defaults: Mutex::new(None),
             save_size_mode: Mutex::new(config::SaveSizeMode::Large),
@@ -133,6 +137,47 @@ fn normalize_optional_path(path: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn derive_postw90_path_from_wannier90_path(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    Some(parent.join("postw90.x"))
+}
+
+fn resolve_local_postw90_path(state: &AppState) -> Result<PathBuf, String> {
+    if let Some(path) = state.postw90_path.lock().unwrap().as_ref() {
+        return Ok(path.clone());
+    }
+
+    if let Some(wannier90_path) = state.wannier90_path.lock().unwrap().as_ref() {
+        if let Some(candidate) = derive_postw90_path_from_wannier90_path(wannier90_path) {
+            return Ok(candidate);
+        }
+    }
+
+    Err("postw90.x path not configured. Set postw90.x directly or configure Wannier90 first.".to_string())
+}
+
+fn derive_remote_postw90_path(remote_wannier90_path: Option<&str>) -> String {
+    let remote_wannier90 = remote_wannier90_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("wannier90.x");
+
+    if remote_wannier90.contains('/') || remote_wannier90.starts_with('~') {
+        let path = Path::new(remote_wannier90);
+        if let Some(parent) = path.parent() {
+            if parent.as_os_str().is_empty() || parent == Path::new(".") {
+                "postw90.x".to_string()
+            } else {
+                parent.join("postw90.x").to_string_lossy().to_string()
+            }
+        } else {
+            "postw90.x".to_string()
+        }
+    } else {
+        "postw90.x".to_string()
+    }
 }
 
 fn normalize_hpc_text(input: &str, field: &str) -> Result<String, String> {
@@ -260,6 +305,7 @@ fn sanitize_hpc_profile(
     profile.remote_qe_bin_dir =
         normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
     profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
+    profile.remote_postw90_path = sanitize_optional_hpc_field(profile.remote_postw90_path);
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_workspace_root =
@@ -1088,6 +1134,49 @@ fn get_wannier90_path(state: State<AppState>) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Sets the path to the postw90.x executable.
+#[tauri::command]
+fn set_postw90_path(
+    app: AppHandle,
+    path: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let normalized = normalize_optional_path(path);
+
+    let validated_path = if let Some(path_str) = normalized.clone() {
+        let path_buf = PathBuf::from(&path_str);
+        if !path_buf.exists() {
+            return Err(format!(
+                "postw90.x executable not found at {}",
+                path_buf.display()
+            ));
+        }
+        if !path_buf.is_file() {
+            return Err(format!(
+                "postw90.x path is not a file: {}",
+                path_buf.display()
+            ));
+        }
+        Some(path_buf)
+    } else {
+        None
+    };
+
+    *state.postw90_path.lock().unwrap() = validated_path;
+    config::update_postw90_path(&app, normalized)
+}
+
+/// Gets the current postw90.x executable path.
+#[tauri::command]
+fn get_postw90_path(state: State<AppState>) -> Option<String> {
+    state
+        .postw90_path
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 /// Sets a command prefix prepended to all QE launches (e.g. "mpirun").
 #[tauri::command]
 fn set_execution_prefix(
@@ -1194,7 +1283,14 @@ struct HpcRemotePhononRecoveryDebugReport {
 const HPC_PRESET_BUNDLE_KIND: &str = "qcortado_hpc_presets";
 const HPC_PRESET_BUNDLE_VERSION: u32 = 1;
 const IMPORTED_HPC_USERNAME_PLACEHOLDER: &str = "CHANGE_ME";
-const HPC_REMOTE_PROJECT_TASK_KINDS: [&str; 5] = ["scf", "bands", "dos", "fermi_surface", "phonon"];
+const HPC_REMOTE_PROJECT_TASK_KINDS: [&str; 6] = [
+    "scf",
+    "bands",
+    "dos",
+    "fermi_surface",
+    "phonon",
+    "transport",
+];
 
 fn default_hpc_preset_bundle_kind() -> String {
     HPC_PRESET_BUNDLE_KIND.to_string()
@@ -1221,6 +1317,8 @@ struct HpcPresetBundleProfile {
     remote_qe_bin_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_wannier90_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_postw90_path: Option<String>,
     remote_pseudo_dir: String,
     remote_workspace_root: String,
     remote_project_root: String,
@@ -1461,6 +1559,7 @@ fn hpc_export_preset_bundle(
                 host: profile.host,
                 remote_qe_bin_dir: profile.remote_qe_bin_dir,
                 remote_wannier90_path: profile.remote_wannier90_path,
+                remote_postw90_path: profile.remote_postw90_path,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
                 remote_workspace_root: profile.remote_workspace_root,
                 remote_project_root: profile.remote_project_root,
@@ -1600,6 +1699,7 @@ fn hpc_import_preset_bundle(
                 ssh_key_path: existing_profile.ssh_key_path.clone(),
                 remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
+                remote_postw90_path: imported_profile.remote_postw90_path,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
                 remote_workspace_root: imported_profile.remote_workspace_root,
                 remote_project_root: imported_profile.remote_project_root,
@@ -1645,6 +1745,7 @@ fn hpc_import_preset_bundle(
             ssh_key_path: None,
             remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
             remote_wannier90_path: imported_profile.remote_wannier90_path,
+            remote_postw90_path: imported_profile.remote_postw90_path,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
             remote_workspace_root: imported_profile.remote_workspace_root,
             remote_project_root: imported_profile.remote_project_root,
@@ -2175,6 +2276,37 @@ test -x \"$tool\" && echo ok || echo missing",
         ));
     }
 
+    let remote_postw90 = profile
+        .remote_postw90_path
+        .as_deref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| derive_remote_postw90_path(profile.remote_wannier90_path.as_deref()));
+    let postw90_check = if remote_postw90.contains('/') || remote_postw90.starts_with('~') {
+        format!(
+            "tool={}; \
+if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
+test -x \"$tool\" && echo ok || echo missing",
+            shell_single_quote_local(&remote_postw90)
+        )
+    } else {
+        format!(
+            "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
+            remote_postw90
+        )
+    };
+    let postw90_available =
+        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &postw90_check)
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
+    if !postw90_available {
+        messages.push(format!(
+            "postw90.x not found/executable at {}",
+            remote_postw90
+        ));
+    }
+
     let probe_file = format!(
         "{}/.qcortado_probe_{}",
         profile.remote_workspace_root.trim_end_matches('/'),
@@ -2208,6 +2340,7 @@ test -x \"$tool\" && echo ok || echo missing",
         qe_pw_available,
         qe_pw2wannier_available,
         wannier90_available,
+        postw90_available,
         workspace_writable,
         messages,
     })
@@ -3518,6 +3651,10 @@ pub struct PseudopotentialMetadata {
     pub cutoff_rho: Option<f64>,
     pub cutoff_wfc_source: Option<String>,
     pub cutoff_rho_source: Option<String>,
+    #[serde(default)]
+    pub available_angular_momenta: Vec<u8>,
+    pub available_angular_momenta_source: Option<String>,
+    pub max_angular_momentum: Option<u8>,
 }
 
 #[derive(serde::Deserialize)]
@@ -3597,6 +3734,116 @@ fn parse_upf_cutoff(text: &str, label: &str) -> Option<f64> {
         .filter(|value| *value > 0.0)
 }
 
+fn insert_valid_angular_channel(
+    channels: &mut std::collections::BTreeSet<u8>,
+    raw: &str,
+) {
+    if let Ok(value) = raw.trim().parse::<i32>() {
+        if (0..=6).contains(&value) {
+            channels.insert(value as u8);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AngularMomentumParseDetails {
+    source: Option<&'static str>,
+    max_angular_momentum: Option<u8>,
+}
+
+fn parse_upf_max_angular_momentum(content: &str) -> Option<u8> {
+    capture_group(content, r#"(?is)<PP_HEADER\b[^>]*\bl_max\s*=\s*["']?([0-9]+)"#)
+        .or_else(|| capture_group(content, r"(?im)^\s*([0-9]+)\s+Max angular momentum component\s*$"))
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .filter(|value| *value <= 6)
+}
+
+fn parse_upf_angular_momentum_details(
+    content: &str,
+    info_text: &str,
+) -> (Vec<u8>, AngularMomentumParseDetails) {
+    let mut channels = std::collections::BTreeSet::new();
+    let mut source: Option<&'static str> = None;
+    let max_angular_momentum = parse_upf_max_angular_momentum(content);
+
+    if let Ok(tag_re) = Regex::new(r#"(?is)<PP_(?:BETA|CHI|PSWFC|AEWFC)\b([^>]*)>"#) {
+        for caps in tag_re.captures_iter(content) {
+            let attrs = caps
+                .get(1)
+                .map(|m| parse_upf_attr_map(m.as_str()))
+                .unwrap_or_default();
+            if let Some(value) = attrs
+                .get("angular_momentum")
+                .or_else(|| attrs.get("l"))
+                .or_else(|| attrs.get("lll"))
+            {
+                insert_valid_angular_channel(&mut channels, value);
+            }
+        }
+        if !channels.is_empty() {
+            source = Some("upf_tags");
+        }
+    }
+
+    if channels.is_empty() {
+        if let Ok(info_re) = Regex::new(r"(?im)\bl(?:\(\d+\))?\s*=\s*([0-9]+)") {
+            for caps in info_re.captures_iter(info_text) {
+                if let Some(value) = caps.get(1) {
+                    insert_valid_angular_channel(&mut channels, value.as_str());
+                }
+            }
+        }
+        if !channels.is_empty() {
+            source = Some("upf_info_l_lines");
+        }
+    }
+
+    if channels.is_empty() {
+        if let Ok(orbital_row_re) = Regex::new(
+            r"(?i)^\s*(\d+[spdfghi])(?:\s+(\d+))?(?:\s+(\d+))?(?:\s+[-+0-9.eed]+){1,}.*$",
+        ) {
+            for line in info_text.lines().chain(content.lines().take(240)) {
+                if let Some(caps) = orbital_row_re.captures(line) {
+                    if let Some(third) = caps.get(3) {
+                        insert_valid_angular_channel(&mut channels, third.as_str());
+                        continue;
+                    }
+                    if let Some(second) = caps.get(2) {
+                        insert_valid_angular_channel(&mut channels, second.as_str());
+                    }
+                }
+            }
+        }
+        if !channels.is_empty() {
+            source = Some("upf_info_orbital_rows");
+        }
+    }
+
+    if channels.is_empty() {
+        if let Some(max_l) = max_angular_momentum {
+            for channel in 0..=max_l {
+                channels.insert(channel);
+            }
+            if !channels.is_empty() {
+                source = Some("upf_l_max_fallback");
+            }
+        }
+    }
+
+    (
+        channels.into_iter().collect(),
+        AngularMomentumParseDetails {
+            source,
+            max_angular_momentum,
+        },
+    )
+}
+
+#[cfg(test)]
+fn parse_upf_available_angular_momenta(content: &str, info_text: &str) -> Vec<u8> {
+    parse_upf_angular_momentum_details(content, info_text).0
+}
+
 fn parse_djrepo_wavefunction_cutoff_ry(text: &str) -> Option<f64> {
     let metadata: DjrepoMetadata = serde_json::from_str(text).ok()?;
     let hints = metadata.hints?;
@@ -3669,6 +3916,8 @@ fn parse_pseudopotential_metadata_from_content(
                 r"(?im)((?:non-|scalar-|fully-)?relativistic pseudopotential)",
             )
         });
+    let (available_angular_momenta, angular_momentum_details) =
+        parse_upf_angular_momentum_details(content, &info_text);
 
     let has_so = parse_upf_bool(header_attrs.get("has_so"))
         || parse_upf_bool(header_has_so_xml.as_ref())
@@ -3751,6 +4000,11 @@ fn parse_pseudopotential_metadata_from_content(
         cutoff_rho,
         cutoff_wfc_source,
         cutoff_rho_source,
+        available_angular_momenta,
+        available_angular_momenta_source: angular_momentum_details
+            .source
+            .map(str::to_string),
+        max_angular_momentum: angular_momentum_details.max_angular_momentum,
     }
 }
 
@@ -3769,6 +4023,102 @@ fn parse_pseudopotential_metadata_from_sources(
         }
     }
     metadata
+}
+
+#[cfg(test)]
+mod upf_angular_momentum_tests {
+    use super::parse_upf_available_angular_momenta;
+
+    #[test]
+    fn parses_old_style_upf_info_tables() {
+        let content = r#"
+<PP_INFO>
+Generated using Vanderbilt code
+nl pn  l   occ               Rcut            Rcut US             E pseu
+3S  3  0  2.00      0.00000000000      1.44000000000     -9.60941084200
+3P  3  1  6.00      0.00000000000      1.55000000000     -6.69550237500
+3D  3  2  8.00      0.00000000000      1.50000000000     -2.08482978100
+4S  4  0  0.00      0.00000000000      1.44000000000     -1.59107856400
+4P  4  1  0.00      0.00000000000      1.55000000000     -1.10274995100
+</PP_INFO>
+<PP_HEADER>
+    2                  Max angular momentum component
+ Wavefunctions         nl  l   occ
+                       3S  0  2.00
+                       3P  1  6.00
+                       3D  2  8.00
+</PP_HEADER>
+"#;
+
+        let parsed = parse_upf_available_angular_momenta(content, content);
+        assert_eq!(parsed, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn parses_modern_upf_info_generation_tables() {
+        let content = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    Valence configuration:
+    nl pn  l   occ       Rcut    Rcut US       E pseu
+    3S  1  0  2.00      1.600      1.800    -0.794728
+    3P  2  1  2.00      1.600      1.800    -0.299965
+    Generation configuration:
+    3S  1  0  0.00      1.600      1.800     6.000000
+    3P  2  1  0.00      1.600      1.800     6.000000
+    3D  3  2  0.00      1.600      1.800     0.100000
+  </PP_INFO>
+  <PP_HEADER l_max="2" />
+</UPF>
+"#;
+
+        let parsed = parse_upf_available_angular_momenta(content, content);
+        assert_eq!(parsed, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn falls_back_to_lmax_when_only_header_metadata_exists() {
+        let content = r#"<PP_HEADER l_max="1" />"#;
+        let parsed = parse_upf_available_angular_momenta(content, "");
+        assert_eq!(parsed, vec![0, 1]);
+    }
+
+    #[test]
+    fn metadata_tracks_confident_vs_fallback_angular_momentum_sources() {
+        let si_like = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    3S  1  0  2.00      1.600      1.800    -0.794728
+    3P  2  1  2.00      1.600      1.800    -0.299965
+    3D  3  2  0.00      1.600      1.800     0.100000
+  </PP_INFO>
+  <PP_HEADER l_max="2" />
+  <PP_BETA.1 angular_momentum="0" />
+  <PP_BETA.2 angular_momentum="1" />
+  <PP_BETA.3 angular_momentum="2" />
+</UPF>
+"#;
+        let si_metadata = super::parse_pseudopotential_metadata_from_content(
+            "Si.UPF".to_string(),
+            si_like,
+        );
+        assert_eq!(
+            si_metadata.available_angular_momenta_source.as_deref(),
+            Some("upf_tags")
+        );
+        assert_eq!(si_metadata.max_angular_momentum, Some(2));
+
+        let fallback_only = r#"<PP_HEADER l_max="2" />"#;
+        let fallback_metadata = super::parse_pseudopotential_metadata_from_content(
+            "Fallback.UPF".to_string(),
+            fallback_only,
+        );
+        assert_eq!(
+            fallback_metadata.available_angular_momenta_source.as_deref(),
+            Some("upf_l_max_fallback")
+        );
+        assert_eq!(fallback_metadata.available_angular_momenta, vec![0, 1, 2]);
+    }
 }
 
 fn decode_remote_metadata_payload(kind: &str, payload: &str) -> Result<String, String> {
@@ -4670,6 +5020,126 @@ async fn run_local_stage_capture_stdout(
     }
 
     Ok(output)
+}
+
+struct LocalStageStreams {
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_local_stage_capture_streams(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    work_path: &Path,
+    executable: &Path,
+    args: &[&str],
+    stdin_content: Option<&str>,
+    execution_prefix: Option<&str>,
+    mpi_config: Option<&MpiConfig>,
+    allow_mpi: bool,
+) -> Result<LocalStageStreams, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut child = if allow_mpi
+        && mpi_config
+            .map(|mpi| mpi.enabled && mpi.nprocs > 1)
+            .unwrap_or(false)
+    {
+        let mpi = mpi_config.unwrap();
+        let mut command = tokio_command_with_prefix("mpirun", execution_prefix);
+        command.args(["-np", &mpi.nprocs.to_string()]);
+        command.arg(executable);
+        command.args(args);
+        command
+    } else {
+        let mut command = tokio_command_with_prefix(executable, execution_prefix);
+        command.args(args);
+        command
+    };
+
+    child.current_dir(work_path);
+    if stdin_content.is_some() {
+        child.stdin(Stdio::piped());
+    } else {
+        child.stdin(Stdio::null());
+    }
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = child
+        .spawn()
+        .map_err(|e| format!("Failed to start {}: {}", executable.display(), e))?;
+
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+
+    if let Some(content) = stdin_content {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write stage input: {}", e))?;
+        }
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+
+    let stdout_task_id = task_id.to_string();
+    let stdout_app = app.clone();
+    let stdout_pm = pm.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut output = String::new();
+        let mut reader = BufReader::new(stdout).lines();
+        while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+            output.push_str(&line);
+            output.push('\n');
+            let _ = stdout_app.emit(&format!("task-output:{}", stdout_task_id), &line);
+            stdout_pm.append_output(&stdout_task_id, line).await;
+        }
+        Ok::<String, String>(output)
+    });
+
+    let stderr_task_id = task_id.to_string();
+    let stderr_app = app.clone();
+    let stderr_pm = pm.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut output = String::new();
+        let mut reader = BufReader::new(stderr).lines();
+        while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+            output.push_str(&line);
+            output.push('\n');
+            let _ = stderr_app.emit(&format!("task-output:{}", stderr_task_id), &line);
+            stderr_pm.append_output(&stderr_task_id, line).await;
+        }
+        Ok::<String, String>(output)
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let stdout_output = stdout_task
+        .await
+        .map_err(|e| format!("Failed to join stdout task: {}", e))??;
+    let stderr_output = stderr_task
+        .await
+        .map_err(|e| format!("Failed to join stderr task: {}", e))??;
+
+    if !status.success() {
+        return Err(format!(
+            "{} failed with exit code {:?}",
+            executable
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("process"),
+            status.code()
+        ));
+    }
+
+    Ok(LocalStageStreams {
+        stdout: stdout_output,
+        stderr: stderr_output,
+    })
 }
 
 fn collect_surface_files(
@@ -6274,6 +6744,203 @@ async fn run_hpc_bundle_task(
     run_result.map(|_| local_sync_dir)
 }
 
+#[derive(Debug, Clone)]
+struct ValidatedTransportSource {
+    calculation: projects::CalculationRun,
+    source_tmp_dir: PathBuf,
+    seedname: String,
+    reference_fermi_energy_ev: f64,
+    use_ws_distance: bool,
+    source_win_content: String,
+}
+
+fn parse_wannier_win_bool(content: &str, keyword: &str) -> Option<bool> {
+    let expected = keyword.trim().to_ascii_lowercase();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('!') || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        let found_keyword = lhs.trim().to_ascii_lowercase();
+        if found_keyword != expected {
+            continue;
+        }
+        let normalized = rhs
+            .split(['!', '#'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('.')
+            .to_ascii_lowercase();
+        return match normalized.as_str() {
+            "true" | "t" => Some(true),
+            "false" | "f" => Some(false),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn resolve_transport_seedname(calc: &projects::CalculationRun) -> Option<String> {
+    calc.parameters
+        .get("seedname")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            calc.result
+                .as_ref()
+                .and_then(|result| result.wannier_data.as_ref())
+                .and_then(|value| value.get("seedname"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+        })
+}
+
+fn validate_transport_source(
+    app: &AppHandle,
+    project_id: &str,
+    calc_id: &str,
+) -> Result<ValidatedTransportSource, String> {
+    let calculation =
+        projects::get_project_calculation(app.clone(), project_id.to_string(), calc_id.to_string())?;
+    if calculation.calc_type.trim().to_ascii_lowercase() != "wannier" {
+        return Err(format!(
+            "Transport source {} is not a saved Wannier calculation.",
+            calc_id
+        ));
+    }
+
+    let reference_fermi_energy_ev = calculation
+        .result
+        .as_ref()
+        .and_then(|result| result.fermi_energy)
+        .ok_or_else(|| {
+            "Selected Wannier calculation does not have a saved Fermi energy.".to_string()
+        })?;
+    let seedname = resolve_transport_seedname(&calculation).ok_or_else(|| {
+        "Selected Wannier calculation is missing a saved seedname.".to_string()
+    })?;
+
+    let source_tmp_dir = projects::get_projects_dir(app)?
+        .join(project_id)
+        .join("calculations")
+        .join(calc_id)
+        .join("tmp");
+    if !source_tmp_dir.exists() {
+        return Err(format!(
+            "Saved Wannier artifacts are missing at {}.",
+            source_tmp_dir.display()
+        ));
+    }
+
+    let win_path = source_tmp_dir.join(format!("{}.win", seedname));
+    let chk_path = source_tmp_dir.join(format!("{}.chk", seedname));
+    let eig_path = source_tmp_dir.join(format!("{}.eig", seedname));
+    for required_path in [&win_path, &chk_path, &eig_path] {
+        if !required_path.exists() {
+            return Err(format!(
+                "Saved Wannier source is missing required artifact {}.",
+                required_path.display()
+            ));
+        }
+    }
+
+    let source_win_content = std::fs::read_to_string(&win_path)
+        .map_err(|e| format!("Failed to read {}: {}", win_path.display(), e))?;
+    let use_ws_distance = parse_wannier_win_bool(&source_win_content, "use_ws_distance")
+        .or_else(|| calculation.parameters.get("use_ws_distance").and_then(|value| value.as_bool()))
+        .unwrap_or(false);
+    if use_ws_distance {
+        let wsvec_path = source_tmp_dir.join(format!("{}_wsvec.dat", seedname));
+        if !wsvec_path.exists() {
+            return Err(format!(
+                "Saved Wannier source requires {} but it was not found.",
+                wsvec_path.display()
+            ));
+        }
+    }
+
+    Ok(ValidatedTransportSource {
+        calculation,
+        source_tmp_dir,
+        seedname,
+        reference_fermi_energy_ev,
+        use_ws_distance,
+        source_win_content,
+    })
+}
+
+fn copy_transport_source_file(
+    source_root: &Path,
+    destination_root: &Path,
+    file_name: &str,
+) -> Result<(), String> {
+    let source_path = source_root.join(file_name);
+    if !source_path.exists() {
+        return Ok(());
+    }
+    let destination_path = destination_root.join(file_name);
+    if let Some(parent) = destination_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create transport staging directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    std::fs::copy(&source_path, &destination_path).map_err(|e| {
+        format!(
+            "Failed to copy {} to {}: {}",
+            source_path.display(),
+            destination_path.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+fn stage_transport_source_files(
+    source: &ValidatedTransportSource,
+    destination_root: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(destination_root).map_err(|e| {
+        format!(
+            "Failed to create transport staging directory {}: {}",
+            destination_root.display(),
+            e
+        )
+    })?;
+
+    let seedname = &source.seedname;
+    let mut files = vec![
+        format!("{}.win", seedname),
+        format!("{}.chk", seedname),
+        format!("{}.eig", seedname),
+        format!("{}.nnkp", seedname),
+        format!("{}.amn", seedname),
+        format!("{}.mmn", seedname),
+        format!("{}_hr.dat", seedname),
+        format!("{}_wsvec.dat", seedname),
+        format!("{}.wout", seedname),
+    ];
+    if source.use_ws_distance {
+        files.push(format!("{}_wsvec.dat", seedname));
+    }
+
+    for file_name in files {
+        copy_transport_source_file(&source.source_tmp_dir, destination_root, &file_name)?;
+    }
+    Ok(())
+}
+
 fn resolve_hpc_execution(
     state: &AppState,
     execution_target: Option<&hpc::profile::ExecutionTarget>,
@@ -7865,6 +8532,329 @@ async fn run_wannier_hpc_background(
 
     let done_line = format!(
         "[QCortado] Wannier HPC pipeline complete in {:.1}s.",
+        pipeline_start.elapsed().as_secs_f64()
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &done_line);
+    pm.append_output(task_id, done_line).await;
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn start_transport_calculation(
+    app: AppHandle,
+    config: TransportCalculationConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    validate_transport_config(&config)?;
+    let source =
+        validate_transport_source(&app, &config.project_id, &config.source_wannier_calc_id)?;
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
+    }
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("transport".to_string(), label).await;
+
+    if let Some(hpc_target) = hpc_target {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+        tokio::spawn(async move {
+            let result = run_transport_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                source,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(transport_result) => {
+                    let json =
+                        serde_json::to_value(&transport_result).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
+    let postw90_path = resolve_local_postw90_path(&state)?;
+    if !postw90_path.exists() {
+        return Err(format!(
+            "postw90.x executable not found: {}",
+            postw90_path.display()
+        ));
+    }
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = run_transport_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            source,
+            working_dir,
+            mpi_config,
+            postw90_path,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(transport_result) => {
+                let json =
+                    serde_json::to_value(&transport_result).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_transport_background(
+    app: AppHandle,
+    task_id: &str,
+    config: TransportCalculationConfig,
+    source: ValidatedTransportSource,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    postw90_path: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<TransportResult, String> {
+    let work_path = PathBuf::from(&working_dir);
+    prepare_working_directory(&work_path, false)?;
+    let pipeline_start = std::time::Instant::now();
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    emit_line!(format!(
+        "[QCortado] Transport local config: source_wannier={}, seedname={}, mu_offset=[{}, {}, step {}] eV, temp=[{}, {}, step {}] K, tau={} fs.",
+        source.calculation.id,
+        source.seedname,
+        config.mu_offset_min,
+        config.mu_offset_max,
+        config.mu_offset_step,
+        config.temp_min,
+        config.temp_max,
+        config.temp_step,
+        config.relaxation_time_fs
+    ));
+
+    emit_line!("Preparing transport input...".to_string());
+    stage_transport_source_files(&source, &work_path)?;
+    let transport_win = build_transport_win(
+        &source.source_win_content,
+        &config,
+        source.reference_fermi_energy_ev,
+    )?;
+    std::fs::write(work_path.join(format!("{}.win", source.seedname)), &transport_win)
+        .map_err(|e| format!("Failed to write transport .win file: {}", e))?;
+    check_cancel!();
+
+    emit_line!("Step 1/2: Running postw90.x / BoltzWann...".to_string());
+    let run_started = std::time::Instant::now();
+    let stage_output = run_local_stage_capture_streams(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &postw90_path,
+        &[&source.seedname],
+        None,
+        execution_prefix.as_deref(),
+        mpi_config.as_ref(),
+        true,
+    )
+    .await?;
+    std::fs::write(
+        work_path.join(format!("{}.wpout", source.seedname)),
+        &stage_output.stdout,
+    )
+    .map_err(|e| format!("Failed to write {}.wpout: {}", source.seedname, e))?;
+    std::fs::write(
+        work_path.join(format!("{}.werr", source.seedname)),
+        &stage_output.stderr,
+    )
+    .map_err(|e| format!("Failed to write {}.werr: {}", source.seedname, e))?;
+    emit_line!(format!(
+        "[QCortado] postw90.x stage finished in {:.1}s.",
+        run_started.elapsed().as_secs_f64()
+    ));
+    check_cancel!();
+
+    emit_line!("Step 2/2: Parsing BoltzWann output...".to_string());
+    let parse_started = std::time::Instant::now();
+    let result = parse_transport_result(
+        &work_path,
+        &config,
+        &source.seedname,
+        source.reference_fermi_energy_ev,
+    )?;
+    emit_line!(format!(
+        "Parsed transport grid: {} temperatures, {} chemical potentials, {} conductivity components.",
+        result.temperature_values_k.len(),
+        result.mu_values_ev.len(),
+        result.conductivity.component_labels.len()
+    ));
+    emit_line!(format!(
+        "[QCortado] Transport parse finished in {:.1}s.",
+        parse_started.elapsed().as_secs_f64()
+    ));
+    emit_line!("=== Transport Calculation Complete ===".to_string());
+    emit_line!(format!(
+        "[QCortado] Transport local pipeline complete in {:.1}s.",
+        pipeline_start.elapsed().as_secs_f64()
+    ));
+
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_transport_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: TransportCalculationConfig,
+    source: ValidatedTransportSource,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<TransportResult, String> {
+    let pipeline_start = std::time::Instant::now();
+    let remote_postw90 = profile
+        .remote_postw90_path
+        .as_deref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| derive_remote_postw90_path(profile.remote_wannier90_path.as_deref()));
+
+    let stage_dir = PathBuf::from(&working_dir)
+        .join("transport_source_stage")
+        .join(task_id);
+    prepare_working_directory(&stage_dir, false)?;
+    stage_transport_source_files(&source, &stage_dir)?;
+    let transport_win = build_transport_win(
+        &source.source_win_content,
+        &config,
+        source.reference_fermi_energy_ev,
+    )?;
+
+    let launcher = build_hpc_launcher_command(&profile);
+    let transport_cmd = format!(
+        "{} {} {} > {}.wpout 2> {}.werr",
+        launcher,
+        shell_single_quote_local(&remote_postw90),
+        shell_single_quote_local(&source.seedname),
+        shell_single_quote_local(&source.seedname),
+        shell_single_quote_local(&source.seedname)
+    );
+    let commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        build_hpc_logged_shell_step_command("postw90.x / BoltzWann", &transport_cmd),
+    ];
+    let bundle_files = vec![(format!("{}.win", source.seedname), transport_win)];
+    let bundle_copies = vec![(stage_dir.clone(), ".".to_string())];
+
+    let config_line = format!(
+        "[QCortado] Transport HPC config: source_wannier={}, seedname={}, mu_offset=[{}, {}, step {}] eV, temp=[{}, {}, step {}] K, tau={} fs.",
+        source.calculation.id,
+        source.seedname,
+        config.mu_offset_min,
+        config.mu_offset_max,
+        config.mu_offset_step,
+        config.temp_min,
+        config.temp_max,
+        config.temp_step,
+        config.relaxation_time_fs
+    );
+    let _ = app.emit(&format!("task-output:{}", task_id), &config_line);
+    pm.append_output(task_id, config_line).await;
+
+    let work_path = run_hpc_bundle_task(
+        app.clone(),
+        pm.clone(),
+        task_id,
+        "transport",
+        "Transport",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        bundle_files,
+        bundle_copies,
+        cancel_flag,
+    )
+    .await?;
+    let _ = std::fs::remove_dir_all(&stage_dir);
+
+    let result = parse_transport_result(
+        &work_path,
+        &config,
+        &source.seedname,
+        source.reference_fermi_energy_ev,
+    )?;
+
+    let done_line = format!(
+        "[QCortado] Transport HPC pipeline complete in {:.1}s.",
         pipeline_start.elapsed().as_secs_f64()
     );
     let _ = app.emit(&format!("task-output:{}", task_id), &done_line);
@@ -10111,6 +11101,7 @@ pub fn run() {
             let mut qe_bin_dir: Option<PathBuf> = None;
             let mut fermi_surfer_path: Option<PathBuf> = None;
             let mut wannier90_path: Option<PathBuf> = None;
+            let mut postw90_path: Option<PathBuf> = None;
             let mut execution_prefix: Option<String> = None;
             let mut mpi_defaults: Option<config::MpiDefaultsConfig> = None;
             let mut save_size_mode = config::SaveSizeMode::Large;
@@ -10140,6 +11131,12 @@ pub fn run() {
                             wannier90_path = Some(path_buf);
                         }
                     }
+                    if let Some(path) = cfg.postw90_path {
+                        let path_buf = PathBuf::from(&path);
+                        if path_buf.exists() && path_buf.is_file() {
+                            postw90_path = Some(path_buf);
+                        }
+                    }
                     execution_prefix = normalize_execution_prefix(cfg.execution_prefix);
                     mpi_defaults = normalize_mpi_defaults(cfg.mpi_defaults);
                     save_size_mode = cfg.save_size_mode;
@@ -10160,6 +11157,7 @@ pub fn run() {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
                 fermi_surfer_path: Mutex::new(fermi_surfer_path),
                 wannier90_path: Mutex::new(wannier90_path),
+                postw90_path: Mutex::new(postw90_path),
                 execution_prefix: Mutex::new(execution_prefix),
                 mpi_defaults: Mutex::new(mpi_defaults),
                 save_size_mode: Mutex::new(save_size_mode),
@@ -10265,6 +11263,8 @@ pub fn run() {
         get_fermi_surfer_path,
         set_wannier90_path,
         get_wannier90_path,
+        set_postw90_path,
+        get_postw90_path,
         set_execution_prefix,
         get_execution_prefix,
         set_mpi_defaults,
@@ -10324,6 +11324,7 @@ pub fn run() {
         start_fermi_surface_calculation,
         start_phonon_calculation,
         start_wannier_calculation,
+        start_transport_calculation,
         list_running_tasks,
         get_task_info,
         get_task_output,

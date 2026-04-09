@@ -22,6 +22,7 @@ export interface HpcEnvironmentValidation {
   qe_pw_available: boolean;
   qe_pw2wannier_available: boolean;
   wannier90_available: boolean;
+  postw90_available: boolean;
   workspace_writable: boolean;
   messages: string[];
 }

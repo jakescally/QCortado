@@ -84,6 +84,9 @@ export interface PseudopotentialMetadata {
   cutoff_rho?: number | null;
   cutoff_wfc_source?: string | null;
   cutoff_rho_source?: string | null;
+  available_angular_momenta?: number[];
+  available_angular_momenta_source?: string | null;
+  max_angular_momentum?: number | null;
 }
 
 export type ExecutionMode = "local" | "hpc";
@@ -119,6 +122,7 @@ export interface HpcProfile {
   ssh_key_path?: string | null;
   remote_qe_bin_dir: string;
   remote_wannier90_path?: string | null;
+  remote_postw90_path?: string | null;
   remote_pseudo_dir: string;
   remote_workspace_root: string;
   remote_project_root: string;

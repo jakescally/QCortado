@@ -277,6 +277,31 @@ export function updateWannierProgress(line: string, state: ProgressState): Progr
   return next;
 }
 
+export function updateTransportProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  if (line.includes("Preparing transport input")) {
+    return { ...next, percent: 8, phase: "Preparing transport input" };
+  }
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 72, phase: "postw90.x / BoltzWann" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 94, phase: "Parsing BoltzWann output" };
+    }
+  }
+
+  if (line.includes("=== Transport Calculation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
 function updateHpcProgress(line: string, state: ProgressState): ProgressState | null {
   if (line.startsWith("HPC_STAGE|")) {
     const [, stageRaw, infoRaw] = line.split("|", 3);
@@ -349,7 +374,14 @@ function updateHpcProgress(line: string, state: ProgressState): ProgressState | 
   return null;
 }
 
-type ProgressKind = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier";
+type ProgressKind =
+  | "scf"
+  | "bands"
+  | "dos"
+  | "fermi_surface"
+  | "phonon"
+  | "wannier"
+  | "transport";
 
 export function progressReducer(
   kind: ProgressKind,
@@ -374,6 +406,8 @@ export function progressReducer(
       return updatePhononProgress(line, state);
     case "wannier":
       return updateWannierProgress(line, state);
+    case "transport":
+      return updateTransportProgress(line, state);
     default:
       return state;
   }

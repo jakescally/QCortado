@@ -13,6 +13,7 @@ pub mod input;
 pub mod output;
 pub mod phonon;
 pub mod runner;
+pub mod transport;
 pub mod types;
 pub mod wannier;
 
@@ -32,6 +33,11 @@ pub use phonon::{
     read_phonon_dispersion_file, read_phonon_dos_file,
 };
 pub use runner::{QERunner, RunnerError};
+pub use transport::{
+    build_transport_win, collect_transport_artifacts, parse_transport_result,
+    validate_transport_config, TransportCalculationConfig, TransportDataset, TransportResult,
+    TransportTdfData,
+};
 pub use types::*;
 pub use wannier::{
     collect_wannier_artifacts, export_ludwig_bundle, generate_pw2wannier90_input,

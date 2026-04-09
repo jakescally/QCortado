@@ -116,6 +116,8 @@ pub struct HpcProfile {
     pub remote_qe_bin_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_wannier90_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_postw90_path: Option<String>,
     pub remote_pseudo_dir: String,
     pub remote_workspace_root: String,
     pub remote_project_root: String,
@@ -184,6 +186,7 @@ pub struct HpcEnvironmentValidation {
     pub qe_pw_available: bool,
     pub qe_pw2wannier_available: bool,
     pub wannier90_available: bool,
+    pub postw90_available: bool,
     pub workspace_writable: bool,
     #[serde(default)]
     pub messages: Vec<String>,

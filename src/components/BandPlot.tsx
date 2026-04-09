@@ -64,6 +64,9 @@ interface BandPlotProps {
   projectionSelection?: string | null;
   enableWheelRangeControl?: boolean;
   enableHoverScrollLock?: boolean;
+  comparisonOptions?: BandPlotComparisonOption[];
+  comparisonTitle?: string;
+  comparisonNoneLabel?: string;
 }
 
 interface HoveredPoint {
@@ -98,6 +101,12 @@ export interface BandPlotSharedSettings {
 export interface BandPlotProjectionOption {
   value: string;
   label: string;
+}
+
+export interface BandPlotComparisonOption {
+  id: string;
+  label: string;
+  data: BandData;
 }
 
 interface OrbitalElementOption {
@@ -210,6 +219,74 @@ function formatAxisInputValue(value: number): string {
 function isElectronicEFLabel(label: string): boolean {
   const normalized = label.replace(/\s+/g, "").replace(/−/g, "-").toLowerCase();
   return normalized === "e-e_f(ev)";
+}
+
+function normalizeSymmetryLabel(label: string): string {
+  const trimmed = String(label ?? "").trim();
+  if (!trimmed) return "";
+  return formatLabel(trimmed).replace(/\s+/g, "").toUpperCase();
+}
+
+function remapComparisonKPoints(
+  referenceData: BandData,
+  comparisonData: BandData,
+): number[] | null {
+  const comparisonKPoints = comparisonData.k_points ?? [];
+  if (comparisonKPoints.length === 0) {
+    return null;
+  }
+
+  const referenceMarkers = referenceData.high_symmetry_points ?? [];
+  const comparisonMarkers = comparisonData.high_symmetry_points ?? [];
+  if (referenceMarkers.length >= 2 && comparisonMarkers.length >= 2) {
+    const sameMarkerCount = referenceMarkers.length === comparisonMarkers.length;
+    const labelsMatch = sameMarkerCount && referenceMarkers.every((marker, index) => (
+      normalizeSymmetryLabel(marker.label) === normalizeSymmetryLabel(comparisonMarkers[index]?.label)
+    ));
+
+    if (labelsMatch) {
+      const mapped: number[] = [];
+      let segmentIndex = 0;
+      for (const kPoint of comparisonKPoints) {
+        while (
+          segmentIndex < comparisonMarkers.length - 2 &&
+          kPoint > comparisonMarkers[segmentIndex + 1].k_distance + 1e-9
+        ) {
+          segmentIndex += 1;
+        }
+
+        const leftComparison = comparisonMarkers[segmentIndex].k_distance;
+        const rightComparison = comparisonMarkers[segmentIndex + 1].k_distance;
+        const leftReference = referenceMarkers[segmentIndex].k_distance;
+        const rightReference = referenceMarkers[segmentIndex + 1].k_distance;
+        const span = rightComparison - leftComparison;
+        const t = span > 1e-12 ? clamp01((kPoint - leftComparison) / span) : 0;
+        mapped.push(leftReference + t * (rightReference - leftReference));
+      }
+      return mapped;
+    }
+  }
+
+  const referenceStart = referenceData.k_points[0];
+  const referenceEnd = referenceData.k_points[referenceData.k_points.length - 1];
+  const comparisonStart = comparisonKPoints[0];
+  const comparisonEnd = comparisonKPoints[comparisonKPoints.length - 1];
+  const comparisonSpan = comparisonEnd - comparisonStart;
+  const referenceSpan = referenceEnd - referenceStart;
+
+  if (
+    Number.isFinite(referenceStart) &&
+    Number.isFinite(referenceEnd) &&
+    Number.isFinite(comparisonStart) &&
+    Number.isFinite(comparisonEnd) &&
+    Math.abs(comparisonSpan) > 1e-12
+  ) {
+    return comparisonKPoints.map((kPoint) => (
+      referenceStart + ((kPoint - comparisonStart) / comparisonSpan) * referenceSpan
+    ));
+  }
+
+  return null;
 }
 
 export function resolveBandPlotFermiContext(
@@ -640,6 +717,9 @@ export function BandPlot({
   projectionSelection,
   enableWheelRangeControl = true,
   enableHoverScrollLock = true,
+  comparisonOptions,
+  comparisonTitle = "Band Comparison",
+  comparisonNoneLabel = "None",
 }: BandPlotProps) {
   const { isDark } = useTheme();
   const colors = useMemo(() => isDark
@@ -714,9 +794,11 @@ export function BandPlot({
 
   // UI section toggles
   const [appearanceExpanded, setAppearanceExpanded] = useState(true);
+  const [comparisonExpanded, setComparisonExpanded] = useState(true);
   const [bandGapExpanded, setBandGapExpanded] = useState(true);
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
+  const [selectedComparisonId, setSelectedComparisonId] = useState("");
 
   const requestedFermiReferenceMode = sharedSettings?.fermiReferenceMode ?? null;
   const fallbackFermiReferenceMode = (
@@ -767,11 +849,46 @@ export function BandPlot({
 
   const activeFermiSourceLabel = resolvedFermiReferenceMode === "scf" ? "SCF" : "Bands run";
   const activeFermiDisplay = Number.isFinite(fermiEnergy) ? `${fermiEnergy.toFixed(3)} eV` : "N/A";
+  const availableComparisonOptions = comparisonOptions ?? [];
+  const hasComparisonControls = comparisonOptions !== undefined;
+
+  useEffect(() => {
+    if (availableComparisonOptions.length === 0) {
+      setSelectedComparisonId("");
+      return;
+    }
+    if (!selectedComparisonId) {
+      return;
+    }
+    const stillValid = availableComparisonOptions.some((option) => option.id === selectedComparisonId);
+    if (!stillValid) {
+      setSelectedComparisonId("");
+    }
+  }, [availableComparisonOptions, selectedComparisonId]);
 
   // Shift all energies relative to Fermi level (E - E_F)
   const shiftedEnergies = useMemo(() => {
     return data.energies.map((band) => band.map((e) => e - fermiEnergy));
   }, [data.energies, fermiEnergy]);
+
+  const selectedComparison = useMemo(
+    () => availableComparisonOptions.find((option) => option.id === selectedComparisonId) ?? null,
+    [availableComparisonOptions, selectedComparisonId],
+  );
+
+  const comparisonShiftedEnergies = useMemo(() => {
+    if (!selectedComparison) {
+      return [];
+    }
+    return selectedComparison.data.energies.map((band) => band.map((e) => e - fermiEnergy));
+  }, [fermiEnergy, selectedComparison]);
+
+  const comparisonKPointsForPlot = useMemo(() => {
+    if (!selectedComparison) {
+      return [];
+    }
+    return remapComparisonKPoints(data, selectedComparison.data) ?? selectedComparison.data.k_points;
+  }, [data, selectedComparison]);
 
   const displayedBandGap = useMemo(() => {
     if (viewerType !== "electronic") return null;
@@ -893,6 +1010,16 @@ export function BandPlot({
       effectiveRainbowPalette,
     ],
   );
+
+  const comparisonModeActive = viewerType === "electronic" && selectedComparison !== null;
+  const primaryBandStrokeColors = useMemo(
+    () =>
+      comparisonModeActive
+        ? shiftedEnergies.map(() => "#1565c0")
+        : bandColors,
+    [bandColors, comparisonModeActive, shiftedEnergies],
+  );
+  const comparisonBandStrokeColor = "#d97706";
 
   const bandGapOverlay = useMemo(() => {
     if (viewerType !== "electronic" || !displayedBandGap) {
@@ -1258,7 +1385,9 @@ export function BandPlot({
 
         const radius = Math.min(16, 0.35 + Math.sqrt(normalizedWeight) * fatScale);
         const fill =
-          fatColorMode === "accent" ? fatAccentColor : bandColors[bandIdx] || fatAccentColor;
+          fatColorMode === "accent"
+            ? fatAccentColor
+            : primaryBandStrokeColors[bandIdx] || fatAccentColor;
         const opacity = Math.max(0.06, Math.min(1, fatOpacity * (0.3 + normalizedWeight * 0.8)));
 
         points.push({
@@ -1279,9 +1408,9 @@ export function BandPlot({
     fatColorMode,
     fatOpacity,
     fatScale,
-    bandColors,
     data.k_points,
     normalizedProjectionWeights,
+    primaryBandStrokeColors,
     scales,
     shiftedEnergies,
   ]);
@@ -1611,9 +1740,22 @@ export function BandPlot({
                       key={bandIdx}
                       d={bandToPath(band, data.k_points)}
                       fill="none"
-                      stroke={bandColors[bandIdx]}
+                      stroke={primaryBandStrokeColors[bandIdx]}
                       strokeWidth={effectiveLineWidth}
                       opacity={effectiveLineOpacity}
+                    />
+                  ))}
+
+                {drawBandLines &&
+                  selectedComparison &&
+                  comparisonShiftedEnergies.map((band, bandIdx) => (
+                    <path
+                      key={`comparison-${selectedComparison.id}-${bandIdx}`}
+                      d={bandToPath(band, comparisonKPointsForPlot)}
+                      fill="none"
+                      stroke={comparisonBandStrokeColor}
+                      strokeWidth={effectiveLineWidth}
+                      opacity={Math.min(1, effectiveLineOpacity + 0.08)}
                     />
                   ))}
 
@@ -1865,6 +2007,11 @@ export function BandPlot({
               Fat bands: {projectionLabel}
             </span>
           )}
+          {selectedComparison && (
+            <span className="band-plot-projection-pill">
+              Overlay: {selectedComparison.label}
+            </span>
+          )}
         </div>
       </div>
 
@@ -1885,6 +2032,39 @@ export function BandPlot({
         {exportNote && <div className="band-plot-export-note">{exportNote}</div>}
 
         <div className="band-plot-control-panel">
+          {viewerType === "electronic" && hasComparisonControls && (
+            <div className="band-control-section">
+              <button
+                type="button"
+                className="band-control-header"
+                onClick={() => setComparisonExpanded((prev) => !prev)}
+              >
+                <span className={`collapse-icon ${comparisonExpanded ? "expanded" : ""}`}>▶</span>
+                {comparisonTitle}
+              </button>
+              {comparisonExpanded && (
+                <div className="band-control-grid">
+                  <div className="band-control-row">
+                    <label>Overlay Bands</label>
+                    <select
+                      value={selectedComparisonId}
+                      onChange={(event) => setSelectedComparisonId(event.target.value)}
+                      disabled={availableComparisonOptions.length === 0}
+                    >
+                      <option value="">{availableComparisonOptions.length === 0 ? "No matching saved bands" : comparisonNoneLabel}</option>
+                      {availableComparisonOptions.map((option) => (
+                        <option key={option.id} value={option.id}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="band-control-note">
+                    Comparison mode draws Wannier bands in blue and the selected saved band run in orange.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="band-control-section">
             <button
               type="button"

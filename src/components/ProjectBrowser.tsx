@@ -30,6 +30,7 @@ type ProjectCalculationType =
   | "scf"
   | "bands"
   | "dos"
+  | "transport"
   | "phonon"
   | "optimization"
   | "fermi_surface";
@@ -38,6 +39,7 @@ const PROJECT_CALCULATION_TYPE_ORDER: ProjectCalculationType[] = [
   "scf",
   "bands",
   "dos",
+  "transport",
   "phonon",
   "optimization",
   "fermi_surface",
@@ -47,6 +49,7 @@ const PROJECT_CALCULATION_TYPE_LABELS: Record<ProjectCalculationType, string> = 
   scf: "SCF",
   bands: "Bands",
   dos: "DOS",
+  transport: "Transport",
   phonon: "Phonon",
   optimization: "Geometry Optimization",
   fermi_surface: "Fermi Surface",
@@ -72,6 +75,7 @@ function createEmptyCalculationTypeCounts(): Record<ProjectCalculationType, numb
     scf: 0,
     bands: 0,
     dos: 0,
+    transport: 0,
     phonon: 0,
     optimization: 0,
     fermi_surface: 0,
@@ -83,6 +87,7 @@ function normalizeProjectCalculationType(calcType: string): ProjectCalculationTy
   if (normalized === "scf") return "scf";
   if (normalized === "band" || normalized === "bands") return "bands";
   if (normalized === "dos") return "dos";
+  if (normalized === "transport") return "transport";
   if (normalized === "phonon") return "phonon";
   if (
     normalized === "optimization"

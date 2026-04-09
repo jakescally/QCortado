@@ -7,7 +7,7 @@ import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier";
+export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -63,7 +63,7 @@ interface QueueSaveSpec {
   projectId: string;
   cifId: string;
   workingDir?: string | null;
-  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "optimization";
+  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "transport" | "optimization";
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
@@ -126,6 +126,7 @@ const COMMAND_MAP: Record<TaskType, string> = {
   fermi_surface: "start_fermi_surface_calculation",
   phonon: "start_phonon_calculation",
   wannier: "start_wannier_calculation",
+  transport: "start_transport_calculation",
 };
 
 function sleep(ms: number): Promise<void> {
@@ -150,7 +151,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "wannier") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
@@ -331,6 +332,25 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
     };
   }
 
+  if (taskType === "transport") {
+    const resultEf = Number(taskResult?.reference_fermi_energy_ev);
+    const fallbackEf = Number(parameters?.reference_fermi_energy_ev);
+    const fermiEnergy = Number.isFinite(resultEf)
+      ? resultEf
+      : Number.isFinite(fallbackEf)
+        ? fallbackEf
+        : null;
+    return {
+      converged: true,
+      total_energy: null,
+      fermi_energy: fermiEnergy,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+      transport_data: taskResult,
+    };
+  }
+
   const converged = taskResult?.converged ?? true;
   return {
     converged,
@@ -427,6 +447,22 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
     }
     if (next.total_k_points == null && Number.isFinite(Number(taskResult?.band_data?.n_kpoints))) {
       next.total_k_points = Number(taskResult.band_data.n_kpoints);
+    }
+  } else if (taskType === "transport") {
+    if (next.seedname == null && typeof taskResult?.seedname === "string") {
+      next.seedname = taskResult.seedname;
+    }
+    if (next.reference_fermi_energy_ev == null && Number.isFinite(Number(taskResult?.reference_fermi_energy_ev))) {
+      next.reference_fermi_energy_ev = Number(taskResult.reference_fermi_energy_ev);
+    }
+    if (next.mu_points == null && Array.isArray(taskResult?.mu_values_ev)) {
+      next.mu_points = taskResult.mu_values_ev.length;
+    }
+    if (next.temperature_points == null && Array.isArray(taskResult?.temperature_values_k)) {
+      next.temperature_points = taskResult.temperature_values_k.length;
+    }
+    if (next.engine == null && typeof taskResult?.engine === "string") {
+      next.engine = taskResult.engine;
     }
   }
 

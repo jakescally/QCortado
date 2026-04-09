@@ -485,6 +485,9 @@ pub struct QEResult {
     /// Full Wannier90 data (for Wannier calculations)
     #[serde(default)]
     pub wannier_data: Option<serde_json::Value>,
+    /// Full transport data (for BoltzWann transport calculations)
+    #[serde(default)]
+    pub transport_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -504,6 +507,7 @@ impl Default for QEResult {
             phonon_data: None,
             dos_data: None,
             wannier_data: None,
+            transport_data: None,
         }
     }
 }

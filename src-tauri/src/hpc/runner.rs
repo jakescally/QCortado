@@ -230,6 +230,22 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
         return true;
     }
 
+    if task_kind == "transport"
+        && (file_name.ends_with(".win")
+            || file_name.ends_with(".wpout")
+            || file_name.ends_with(".werr")
+            || file_name.ends_with(".chk")
+            || file_name.ends_with(".eig")
+            || file_name.ends_with(".nnkp")
+            || file_name.ends_with("_elcond.dat")
+            || file_name.ends_with("_sigmas.dat")
+            || file_name.ends_with("_seebeck.dat")
+            || file_name.ends_with("_kappa.dat")
+            || file_name.ends_with("_tdf.dat"))
+    {
+        return entry.size_bytes <= 256 * 1024 * 1024;
+    }
+
     if lower_rel.ends_with(".gnu")
         || lower_rel.ends_with(".json")
         || lower_rel.ends_with(".txt")

@@ -11,9 +11,15 @@ import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOS
 import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
 import { PhononWizard } from "./components/PhononWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
+import { TransportPlot } from "./components/TransportPlot";
+import { TransportWizard } from "./components/TransportWizard";
 import { WannierWizard } from "./components/WannierWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
-import { ProjectDashboard, CalculationRun } from "./components/ProjectDashboard";
+import {
+  ProjectDashboard,
+  CalculationRun,
+  WannierBandOverlayOption,
+} from "./components/ProjectDashboard";
 import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
@@ -27,6 +33,7 @@ import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
 import {
   CrystalData,
   SCFPreset,
@@ -118,8 +125,9 @@ interface RemotePhononRecoveryContext {
 const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 const DEFAULT_WANNIER90_PATH = "/usr/local/bin/wannier90.x";
+const DEFAULT_POSTW90_PATH = "/usr/local/bin/postw90.x";
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
+type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
 
 interface SCFContext {
   cifId: string;
@@ -160,6 +168,13 @@ interface FermiSurfaceContext {
   scfCalculations: CalculationRun[];
 }
 
+interface TransportContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  wannierCalculations: CalculationRun[];
+}
+
 interface PhononsContext {
   cifId: string;
   crystalData: CrystalData;
@@ -197,6 +212,18 @@ function normalizePositiveIntInput(input: string, fallback: number): number {
     return fallback;
   }
   return parsed;
+}
+
+function derivePostw90PathFromWannier90Path(path: string | null | undefined): string {
+  const trimmed = String(path || "").trim();
+  if (!trimmed) return DEFAULT_POSTW90_PATH;
+  if (!trimmed.includes("/") && !trimmed.startsWith("~")) {
+    return "postw90.x";
+  }
+  const segments = trimmed.split("/");
+  segments[segments.length - 1] = "postw90.x";
+  const derived = segments.join("/");
+  return derived.trim().length > 0 ? derived : DEFAULT_POSTW90_PATH;
 }
 
 function cloneResourceDefaults(
@@ -318,13 +345,16 @@ function AppInner() {
   const [qePathInput, setQePathInput] = useState("");
   const [fermiSurferPathInput, setFermiSurferPathInput] = useState(DEFAULT_FERMI_SURFER_PATH);
   const [wannier90PathInput, setWannier90PathInput] = useState(DEFAULT_WANNIER90_PATH);
+  const [postw90PathInput, setPostw90PathInput] = useState(DEFAULT_POSTW90_PATH);
   const [isSavingQePath, setIsSavingQePath] = useState(false);
   const [isSavingFermiSurferPath, setIsSavingFermiSurferPath] = useState(false);
   const [isSavingWannier90Path, setIsSavingWannier90Path] = useState(false);
+  const [isSavingPostw90Path, setIsSavingPostw90Path] = useState(false);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [qeStatus, setQeStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [fermiSurferStatus, setFermiSurferStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [wannier90Status, setWannier90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
+  const [postw90Status, setPostw90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [error, setError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("home");
   const [projectCount, setProjectCount] = useState<number>(0);
@@ -415,10 +445,20 @@ function AppInner() {
   const [wannierContext, setWannierContext] = useState<WannierContext | null>(null);
 
   // Context for viewing saved Wannier90 data
-  const [viewWannierData, setViewWannierData] = useState<{ result: any; fermiEnergy: number | null } | null>(null);
+  const [viewWannierData, setViewWannierData] = useState<{
+    result: any;
+    fermiEnergy: number | null;
+    overlayOptions: WannierBandOverlayOption[];
+  } | null>(null);
 
   // Context for running Fermi-surface generation from a project
   const [fermiSurfaceContext, setFermiSurfaceContext] = useState<FermiSurfaceContext | null>(null);
+
+  // Context for running transport from a saved Wannier calculation
+  const [transportContext, setTransportContext] = useState<TransportContext | null>(null);
+
+  // Context for viewing saved transport data
+  const [viewTransportData, setViewTransportData] = useState<{ data: any } | null>(null);
 
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
@@ -466,6 +506,7 @@ function AppInner() {
     loadProjectCount();
     void loadFermiSurferPath();
     void loadWannier90Path();
+    void loadPostw90Path();
     void loadExecutionPrefix();
     void loadHpcExecutionSettings();
     void loadGlobalMpiSettings();
@@ -624,6 +665,26 @@ function AppInner() {
     }
   }
 
+  async function loadPostw90Path() {
+    try {
+      const [path, wannierPath] = await Promise.all([
+        invoke<string | null>("get_postw90_path"),
+        invoke<string | null>("get_wannier90_path").catch(() => null),
+      ]);
+      if (path) {
+        setPostw90PathInput(path);
+        setPostw90Status("Found");
+      } else {
+        setPostw90PathInput(derivePostw90PathFromWannier90Path(wannierPath));
+        setPostw90Status("Not configured");
+      }
+    } catch (e) {
+      console.error("Failed to load postw90 path:", e);
+      setPostw90PathInput(derivePostw90PathFromWannier90Path(wannier90PathInput));
+      setPostw90Status("Not found");
+    }
+  }
+
   async function selectFermiSurferPath() {
     try {
       const selected = await open({
@@ -653,6 +714,24 @@ function AppInner() {
 
       if (selected && typeof selected === "string") {
         setWannier90PathInput(selected);
+        setError(null);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function selectPostw90Path() {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        defaultPath: postw90PathInput || qePath || "/usr/local/bin",
+        title: "Select postw90 executable",
+      });
+
+      if (selected && typeof selected === "string") {
+        setPostw90PathInput(selected);
         setError(null);
       }
     } catch (e) {
@@ -693,9 +772,15 @@ function AppInner() {
       if (normalized.length > 0) {
         setWannier90PathInput(normalized);
         setWannier90Status("Found");
+        if (postw90Status !== "Found") {
+          setPostw90PathInput(derivePostw90PathFromWannier90Path(normalized));
+        }
       } else {
         setWannier90PathInput(DEFAULT_WANNIER90_PATH);
         setWannier90Status("Not configured");
+        if (postw90Status !== "Found") {
+          setPostw90PathInput(derivePostw90PathFromWannier90Path(null));
+        }
       }
       setError(null);
     } catch (e) {
@@ -703,6 +788,29 @@ function AppInner() {
       setError(String(e));
     } finally {
       setIsSavingWannier90Path(false);
+    }
+  }
+
+  async function savePostw90Path() {
+    const normalized = postw90PathInput.trim();
+    setIsSavingPostw90Path(true);
+    try {
+      await invoke("set_postw90_path", {
+        path: normalized.length > 0 ? normalized : null,
+      });
+      if (normalized.length > 0) {
+        setPostw90PathInput(normalized);
+        setPostw90Status("Found");
+      } else {
+        setPostw90PathInput(derivePostw90PathFromWannier90Path(wannier90PathInput));
+        setPostw90Status("Not configured");
+      }
+      setError(null);
+    } catch (e) {
+      setPostw90Status("Not found");
+      setError(String(e));
+    } finally {
+      setIsSavingPostw90Path(false);
     }
   }
 
@@ -1320,6 +1428,7 @@ function AppInner() {
       bands: "bands-wizard",
       dos: "dos-wizard",
       wannier: "wannier-wizard",
+      transport: "transport-wizard",
       fermi_surface: "fermi-surface-wizard",
       phonon: "phonon-wizard",
     };
@@ -2685,7 +2794,7 @@ function AppInner() {
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
           onViewWannier={(result, fermiEnergy) => {
-            setViewWannierData({ result, fermiEnergy });
+            setViewWannierData({ result, fermiEnergy, overlayOptions: [] });
             setCurrentView("wannier-viewer");
             setReconnectTaskId(null);
           }}
@@ -2707,6 +2816,7 @@ function AppInner() {
 
   if (currentView === "wannier-viewer" && viewWannierData) {
     const result = viewWannierData.result;
+    const wannierIssues = getWannierQualityIssues(result, null, viewWannierData.fermiEnergy ?? null);
     return (
       <>
         <div className="bands-viewer-container">
@@ -2722,13 +2832,24 @@ function AppInner() {
             </button>
             <h2>Wannier90</h2>
           </div>
-          <div className="bands-viewer-content" style={{ display: "block" }}>
-            <BandPlot
-              data={result.band_data}
-              scfFermiEnergy={viewWannierData.fermiEnergy ?? undefined}
-              viewerType="electronic"
-            />
-            <div className="details-grid" style={{ marginTop: "1.25rem" }}>
+          <div className="bands-viewer-content bands-viewer-content-stacked">
+            <div className="bands-viewer-plot-region">
+              <BandPlot
+                data={result.band_data}
+                scfFermiEnergy={viewWannierData.fermiEnergy ?? undefined}
+                viewerType="electronic"
+                comparisonOptions={viewWannierData.overlayOptions}
+                comparisonTitle="Saved Band Overlay"
+                comparisonNoneLabel="No overlay"
+              />
+            </div>
+            <div className="bands-viewer-details-region">
+              {wannierIssues.length > 0 && (
+                <div className="warning-banner">
+                  {wannierIssues.map((issue) => issue.message).join(" ")}
+                </div>
+              )}
+              <div className="details-grid">
               <div className="detail-item">
                 <label>seedname</label>
                 <span>{result.seedname || "N/A"}</span>
@@ -2753,7 +2874,70 @@ function AppInner() {
                 <label>Iterations</label>
                 <span>{result.convergence?.iterations ?? "N/A"}</span>
               </div>
+              <div className="detail-item">
+                <label>Minimization</label>
+                <span>{formatWannierConvergenceFlag(result.convergence?.minimization_converged)}</span>
+              </div>
+              <div className="detail-item">
+                <label>Disentanglement</label>
+                <span>{formatWannierConvergenceFlag(result.convergence?.disentanglement_converged)}</span>
+              </div>
             </div>
+            </div>
+          </div>
+        </div>
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "transport-wizard" && (qePath || executionMode === "hpc") && (transportContext || reconnectTaskId)) {
+    return (
+      <>
+        <TransportWizard
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
+          activeHpcProfile={activeHpcProfile}
+          onViewTransport={(transportData) => {
+            setViewTransportData({ data: transportData });
+            setCurrentView("transport-viewer");
+            setReconnectTaskId(null);
+          }}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setTransportContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={transportContext?.projectId ?? ""}
+          cifId={transportContext?.cifId ?? ""}
+          crystalData={transportContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          wannierCalculations={transportContext?.wannierCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "transport-viewer" && viewTransportData) {
+    return (
+      <>
+        <div className="bands-viewer-container">
+          <div className="bands-viewer-header">
+            <button
+              className="back-button"
+              onClick={() => {
+                setCurrentView("project-dashboard");
+                setViewTransportData(null);
+              }}
+            >
+              ← Back to Dashboard
+            </button>
+            <h2>BoltzWann Transport</h2>
+          </div>
+          <div className="bands-viewer-content" style={{ display: "block" }}>
+            <TransportPlot data={viewTransportData.data} />
           </div>
         </div>
         {appChrome}
@@ -3077,9 +3261,22 @@ function AppInner() {
             });
             setCurrentView("wannier-wizard");
           }}
-          onViewWannier={(wannierData, fermiEnergy) => {
-            setViewWannierData({ result: wannierData, fermiEnergy });
+          onViewWannier={(wannierData, fermiEnergy, overlayOptions = []) => {
+            setViewWannierData({ result: wannierData, fermiEnergy, overlayOptions });
             setCurrentView("wannier-viewer");
+          }}
+          onRunTransport={(cifId, crystalData, wannierCalculations) => {
+            setTransportContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              wannierCalculations,
+            });
+            setCurrentView("transport-wizard");
+          }}
+          onViewTransport={(transportData) => {
+            setViewTransportData({ data: transportData });
+            setCurrentView("transport-viewer");
           }}
           onRunFermiSurface={(cifId, crystalData, scfCalculations) => {
             setFermiSurfaceContext({
@@ -3112,13 +3309,16 @@ function AppInner() {
     );
   }
 
-  const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" | "wannier90" }> = [
+  const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" | "wannier90" | "postw90" }> = [
     ...availableExecutables.map((name) => ({ name, type: "qe" as const })),
     ...(fermiSurferStatus === "Found"
       ? [{ name: "fermisurfer", type: "fermisurfer" as const }]
       : []),
     ...(wannier90Status === "Found"
       ? [{ name: "wannier90.x", type: "wannier90" as const }]
+      : []),
+    ...(postw90Status === "Found"
+      ? [{ name: "postw90.x", type: "postw90" as const }]
       : []),
   ];
 
@@ -3127,6 +3327,8 @@ function AppInner() {
     fermiSurferStatus === "Found" ? "ready" : fermiSurferStatus === "Not found" ? "error" : "pending";
   const wannierStatusClass =
     wannier90Status === "Found" ? "ready" : wannier90Status === "Not found" ? "error" : "pending";
+  const postw90StatusClass =
+    postw90Status === "Found" ? "ready" : postw90Status === "Not found" ? "error" : "pending";
 
   return (
     <>
@@ -3210,6 +3412,30 @@ function AppInner() {
             </div>
           </div>
 
+          <div className="config-row">
+            <label>postw90:</label>
+            <input
+              type="text"
+              className="config-path-input"
+              value={postw90PathInput}
+              onChange={(e) => {
+                setPostw90PathInput(e.target.value);
+                setError(null);
+              }}
+              placeholder={derivePostw90PathFromWannier90Path(wannier90PathInput)}
+              spellCheck={false}
+            />
+            <div className="config-row-actions">
+              <button onClick={selectPostw90Path}>Browse</button>
+              <button
+                onClick={() => void savePostw90Path()}
+                disabled={isSavingPostw90Path}
+              >
+                {isSavingPostw90Path ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+
           <div className="status-row">
             <label>QE Status:</label>
             <span className={`status ${qeStatusClass}`}>
@@ -3231,6 +3457,13 @@ function AppInner() {
             </span>
           </div>
 
+          <div className="status-row">
+            <label>postw90 Status:</label>
+            <span className={`status ${postw90StatusClass}`}>
+              {postw90Status}
+            </span>
+          </div>
+
           {error && <div className="error">{error}</div>}
 
           {availablePrograms.length > 0 && (
@@ -3240,7 +3473,7 @@ function AppInner() {
                 {availablePrograms.map((program) => (
                   <span
                     key={program.name}
-                    className={`exe-tag ${program.type === "fermisurfer" ? "exe-tag-fermisurfer" : program.type === "wannier90" ? "exe-tag-fermisurfer" : ""}`}
+                    className={`exe-tag ${program.type === "fermisurfer" || program.type === "wannier90" || program.type === "postw90" ? "exe-tag-fermisurfer" : ""}`}
                   >
                     {program.name}
                   </span>

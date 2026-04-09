@@ -18,6 +18,7 @@ import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
+import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
 import { EditProjectDialog } from "./EditProjectDialog";
 
 interface QEResult {
@@ -31,6 +32,7 @@ interface QEResult {
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
   wannier_data?: any;  // Wannier90 data payload for Wannier calculations
+  transport_data?: any;  // BoltzWann transport payload
 }
 
 export interface CalculationRun {
@@ -42,6 +44,13 @@ export interface CalculationRun {
   completed_at: string | null;
   tags?: string[];
   storage_bytes?: number | null;
+}
+
+export interface WannierBandOverlayOption {
+  id: string;
+  label: string;
+  data: any;
+  fermiEnergy: number | null;
 }
 
 interface CifVariant {
@@ -81,7 +90,13 @@ interface ProjectDashboardProps {
   onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
   onRunWannier: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onViewWannier: (wannierData: any, scfFermiEnergy: number | null) => void;
+  onViewWannier: (
+    wannierData: any,
+    scfFermiEnergy: number | null,
+    overlayOptions?: WannierBandOverlayOption[],
+  ) => void;
+  onRunTransport: (cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
+  onViewTransport: (transportData: any) => void;
   onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
@@ -90,7 +105,7 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "fermi_surface" | "phonon" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "phonon" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
 interface CalculationRuntimeDisplay {
@@ -496,6 +511,11 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
 function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
+  const issueCounts = getWannierIssueCounts(
+    calc.result?.wannier_data ?? null,
+    calc.result?.raw_output ?? null,
+    calc.result?.fermi_energy ?? null,
+  );
   const pushTag = (label: string, type: "info" | "feature") => {
     if (!tags.some((tag) => tag.label === label)) {
       tags.push({ label, type });
@@ -517,6 +537,46 @@ function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "
   }
   if (params.total_spread != null && Number.isFinite(Number(params.total_spread))) {
     pushTag(`Ω ${Number(params.total_spread).toFixed(3)}`, "info");
+  }
+  if (issueCounts.errors > 0) {
+    pushTag("Needs Review", "feature");
+  } else if (issueCounts.warnings > 0) {
+    pushTag("Warning", "feature");
+  }
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
+  return tags;
+}
+
+function getTransportTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (params.boltz_kmesh) {
+    const [k1, k2, k3] = params.boltz_kmesh;
+    pushTag(`${k1}×${k2}×${k3} K`, "info");
+  }
+  if (params.mu_points) {
+    pushTag(`${params.mu_points} μ`, "info");
+  }
+  if (params.temperature_points) {
+    pushTag(`${params.temperature_points} T`, "info");
+  }
+  if (Number.isFinite(Number(params.relaxation_time_fs))) {
+    pushTag(`τ ${Number(params.relaxation_time_fs).toFixed(1)} fs`, "info");
+  }
+  if (params.engine) {
+    pushTag(String(params.engine), "feature");
+  }
+  if (params.is_2d) {
+    pushTag("2D", "feature");
   }
   if (isHpcCalculation(calc)) {
     pushTag("HPC", "feature");
@@ -764,6 +824,13 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     return convergedBonus + (4 * meshScore) + wannScore + bandScore + interpolationScore + socBonus;
   }
 
+  if (category === "transport") {
+    const meshScore = Math.log2(Math.max(1, getMeshProduct(params.boltz_kmesh)));
+    const muScore = Math.log2(Math.max(1, Number(params.mu_points) || 1));
+    const tempScore = Math.log2(Math.max(1, Number(params.temperature_points) || 1));
+    return convergedBonus + (4 * meshScore) + (2 * muScore) + (2 * tempScore);
+  }
+
   // Bands: prioritize denser path sampling, then inherited SCF settings when present.
   const pathScore = Math.log2(Math.max(1, Number(params.total_k_points) || 0));
   const bandCountScore = Math.log2(Math.max(1, Number(params.n_bands) || 0));
@@ -995,6 +1062,8 @@ export function ProjectDashboard({
   onViewDos,
   onRunWannier,
   onViewWannier,
+  onRunTransport,
+  onViewTransport,
   onRunFermiSurface,
   onRunPhonons,
   onViewPhonons,
@@ -1540,6 +1609,13 @@ export function ProjectDashboard({
     onRunWannier(selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunTransport() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunTransport(selectedCifId, crystalData, variant.calculations);
+  }
+
   function handleRunFermiSurface() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -1577,6 +1653,56 @@ export function ProjectDashboard({
     }
   }
 
+  async function loadWannierBandOverlayOptions(
+    calc: CalculationRun,
+    detail: CalculationRun,
+  ): Promise<WannierBandOverlayOption[]> {
+    const variant = getSelectedVariant();
+    if (!variant) {
+      return [];
+    }
+
+    const sourceScfId = String(detail.parameters?.source_scf_id ?? calc.parameters?.source_scf_id ?? "").trim();
+    const kPath = normalizeSavedKPath(detail.parameters?.k_path ?? calc.parameters?.k_path);
+    if (!sourceScfId || !kPath) {
+      return [];
+    }
+
+    const matchingBandRuns = variant.calculations.filter((candidate) => {
+      if (candidate.calc_type !== "bands") {
+        return false;
+      }
+      const candidateSourceScfId = String(candidate.parameters?.source_scf_id ?? "").trim();
+      const candidateKPath = normalizeSavedKPath(candidate.parameters?.k_path);
+      return candidateSourceScfId === sourceScfId && candidateKPath === kPath;
+    });
+
+    const settled = await Promise.allSettled(
+      matchingBandRuns.map(async (candidate) => {
+        const candidateDetail = await ensureCalculationDetails(candidate);
+        const bandData = candidateDetail.result?.band_data ?? candidate.result?.band_data ?? null;
+        if (!bandData) {
+          return null;
+        }
+        const startedAt = candidateDetail.started_at ?? candidate.started_at;
+        return {
+          id: candidate.id,
+          label: `Bands · ${new Date(startedAt).toLocaleString()}`,
+          data: bandData,
+          fermiEnergy: candidateDetail.result?.fermi_energy ?? candidate.result?.fermi_energy ?? null,
+        } satisfies WannierBandOverlayOption;
+      }),
+    );
+
+    return settled
+      .flatMap((entry) => (entry.status === "fulfilled" && entry.value ? [entry.value] : []))
+      .sort((a, b) => {
+        const left = matchingBandRuns.find((calcRun) => calcRun.id === a.id)?.started_at ?? "";
+        const right = matchingBandRuns.find((calcRun) => calcRun.id === b.id)?.started_at ?? "";
+        return right.localeCompare(left);
+      });
+  }
+
   async function handleViewWannier(calc: CalculationRun) {
     try {
       const detail = await ensureCalculationDetails(calc);
@@ -1585,10 +1711,30 @@ export function ProjectDashboard({
         setError("Saved Wannier data is unavailable for this calculation.");
         return;
       }
-      onViewWannier(wannierData, detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null);
+      const overlayOptions = await loadWannierBandOverlayOptions(calc, detail);
+      onViewWannier(
+        wannierData,
+        detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null,
+        overlayOptions,
+      );
     } catch (e) {
       console.error("Failed to load Wannier data:", e);
       setError(`Failed to load Wannier data: ${e}`);
+    }
+  }
+
+  async function handleViewTransport(calc: CalculationRun) {
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const transportData = detail.result?.transport_data ?? calc.result?.transport_data ?? null;
+      if (!transportData) {
+        setError("Saved transport data is unavailable for this calculation.");
+        return;
+      }
+      onViewTransport(transportData);
+    } catch (e) {
+      console.error("Failed to load transport data:", e);
+      setError(`Failed to load transport data: ${e}`);
     }
   }
 
@@ -1897,6 +2043,14 @@ export function ProjectDashboard({
     return variant.calculations.some((calc) => isWannierReadyScf(calc));
   }
 
+  function hasSavedWannierCalculation(): boolean {
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(
+      (calc) => calc.calc_type === "wannier" && (Boolean(calc.completed_at) || Boolean(calc.parameters?.seedname) || Boolean(calc.result?.wannier_data)),
+    );
+  }
+
   function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
     const wallSeconds = calc.result?.wall_time_seconds;
     if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
@@ -1951,9 +2105,16 @@ export function ProjectDashboard({
     }
   }
 
-  function formatEnergy(energy: number): string {
-    return `${energy.toFixed(6)} Ry`;
-  }
+function formatEnergy(energy: number): string {
+  return `${energy.toFixed(6)} Ry`;
+}
+
+function normalizeSavedKPath(value: unknown): string {
+  return String(value || "")
+    .replace(/\s*→\s*/g, "→")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
   function getSelectedVariant(): CifVariant | undefined {
     return project?.cif_variants.find(v => v.id === selectedCifId);
@@ -2037,6 +2198,15 @@ export function ProjectDashboard({
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "wannier") || [],
       calculationSortMode,
       "wannier",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
+  const transportCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "transport") || [],
+      calculationSortMode,
+      "transport",
       pinnedCalcIds,
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
@@ -2471,6 +2641,17 @@ export function ProjectDashboard({
                 <span className="calc-action-label">Wannier90</span>
                 <span className="calc-action-hint">
                   {hasWannierReadyScf() ? "MLWFs + interpolated bands" : "Requires primitive scalar SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunTransport}
+                disabled={!hasSavedWannierCalculation()}
+              >
+                <span className="calc-action-icon">BW</span>
+                <span className="calc-action-label">BoltzWann Transport</span>
+                <span className="calc-action-hint">
+                  {hasSavedWannierCalculation() ? "Transport via postw90.x" : "Requires saved Wannier"}
                 </span>
               </button>
               <button
@@ -2924,6 +3105,11 @@ export function ProjectDashboard({
                 const runtime = getCalculationRuntime(calcData);
                 const wannierData = calcData.result?.wannier_data ?? null;
                 const bandData = wannierData?.band_data ?? calcData.result?.band_data ?? null;
+                const wannierIssues = getWannierQualityIssues(
+                  wannierData,
+                  calcData.result?.raw_output ?? calc.result?.raw_output ?? null,
+                  calcData.result?.fermi_energy ?? calc.result?.fermi_energy ?? null,
+                );
                 const totalSpread = Number(wannierData?.total_spread ?? calc.parameters?.total_spread);
                 return (
                   <div key={calc.id} className="calculation-item bands-item">
@@ -2983,6 +3169,11 @@ export function ProjectDashboard({
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {wannierIssues.length > 0 && (
+                          <div className="warning-banner">
+                            {wannierIssues.map((issue) => issue.message).join(" ")}
+                          </div>
+                        )}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>K-Mesh</label>
@@ -3012,6 +3203,14 @@ export function ProjectDashboard({
                             <label>Source SCF</label>
                             <span>{calc.parameters?.source_scf_id?.slice(0, 8) || "N/A"}</span>
                           </div>
+                          <div className="detail-item">
+                            <label>Minimization</label>
+                            <span>{formatWannierConvergenceFlag(wannierData?.convergence?.minimization_converged)}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Disentanglement</label>
+                            <span>{formatWannierConvergenceFlag(wannierData?.convergence?.disentanglement_converged)}</span>
+                          </div>
                           {runtime && (
                             <div className="detail-item">
                               <label>Time</label>
@@ -3032,6 +3231,17 @@ export function ProjectDashboard({
                             <pre>{calc.parameters.projection_summary.join("\n")}</pre>
                           </div>
                         )}
+                        {(wannierData?.convergence?.failure_reasons?.length || wannierData?.convergence?.warnings?.length) ? (
+                          <div className="detail-item parameters">
+                            <label>Quality Checks</label>
+                            <pre>
+                              {[
+                                ...(wannierData?.convergence?.failure_reasons || []).map((entry: string) => `Error: ${entry}`),
+                                ...(wannierData?.convergence?.warnings || []).map((entry: string) => `Warning: ${entry}`),
+                              ].join("\n")}
+                            </pre>
+                          </div>
+                        ) : null}
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {calc.result && (
@@ -3057,6 +3267,152 @@ export function ProjectDashboard({
                               {isExportingLudwig && calcToExportLudwig?.id === calc.id
                                 ? "Exporting..."
                                 : "Export to Ludwig"}
+                            </button>
+                          )}
+                          {renderHpcDownloadButton(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {transportCalculations.length > 0 && (
+          <section className="history-section dos-section">
+            <h3>BoltzWann Transport</h3>
+            <div className="calculations-list">
+              {transportCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
+                const transportData = calcData.result?.transport_data ?? null;
+                return (
+                  <div key={calc.id} className="calculation-item dos-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">BOLTZWANN</span>
+                        <div className="calc-tags">
+                          {getTransportTags(calc).map((tag, i) => (
+                            <span key={i} className={getCalcTagClass(tag)}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          disabled={readOnly}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Source Wannier</label>
+                            <span>{calc.parameters?.source_wannier_calc_id?.slice(0, 8) || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Boltz k-mesh</label>
+                            <span>
+                              {calc.parameters?.boltz_kmesh
+                                ? `${calc.parameters.boltz_kmesh[0]}×${calc.parameters.boltz_kmesh[1]}×${calc.parameters.boltz_kmesh[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>μ points</label>
+                            <span>{calc.parameters?.mu_points ?? transportData?.mu_values_ev?.length ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>T points</label>
+                            <span>{calc.parameters?.temperature_points ?? transportData?.temperature_values_k?.length ?? "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>τ</label>
+                            <span>
+                              {Number.isFinite(Number(calc.parameters?.relaxation_time_fs))
+                                ? `${Number(calc.parameters.relaxation_time_fs).toFixed(2)} fs`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Engine</label>
+                            <span>{calc.parameters?.engine || transportData?.engine || "N/A"}</span>
+                          </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
+                          {calc.result?.fermi_energy != null && (
+                            <div className="detail-item">
+                              <label>Reference Fermi Energy</label>
+                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                            </div>
+                          )}
+                          {renderStorageDetailItems(calc)}
+                        </div>
+                        <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
+                          {(transportData || calc.result) && (
+                            <button
+                              className="view-dos-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleViewTransport(calc);
+                              }}
+                            >
+                              View Transport
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}
