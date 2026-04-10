@@ -20,6 +20,7 @@ import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattic
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
 import { EditProjectDialog } from "./EditProjectDialog";
+import type { TransportResult } from "../lib/transport";
 
 interface QEResult {
   converged: boolean;
@@ -32,7 +33,7 @@ interface QEResult {
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
   wannier_data?: any;  // Wannier90 data payload for Wannier calculations
-  transport_data?: any;  // BoltzWann transport payload
+  transport_data?: TransportResult;
 }
 
 export interface CalculationRun {
@@ -96,7 +97,7 @@ interface ProjectDashboardProps {
     overlayOptions?: WannierBandOverlayOption[],
   ) => void;
   onRunTransport: (cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
-  onViewTransport: (transportData: any) => void;
+  onViewTransport: (transportData: TransportResult) => void;
   onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;

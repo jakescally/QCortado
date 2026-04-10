@@ -23,6 +23,7 @@ import {
 import { HpcRunSettings } from "./HpcRunSettings";
 import { TransportPlot } from "./TransportPlot";
 import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import type { TransportResult } from "../lib/transport";
 
 interface CalculationRun {
   id: string;
@@ -50,7 +51,7 @@ interface TransportWizardProps {
   crystalData: CrystalData;
   wannierCalculations: CalculationRun[];
   reconnectTaskId?: string;
-  onViewTransport: (transportData: any) => void;
+  onViewTransport: (transportData: TransportResult) => void;
 }
 
 type WizardStep = "source" | "parameters" | "run" | "results";
@@ -94,10 +95,6 @@ function parseInteger(value: string, label: string): number {
 }
 
 function deriveRemotePostw90Path(profile: HpcProfile | null | undefined): string {
-  const explicit = (profile?.remote_postw90_path || "").trim();
-  if (explicit.length > 0) {
-    return explicit;
-  }
   const remoteWannier90 = (profile?.remote_wannier90_path || "").trim();
   if (remoteWannier90.includes("/") || remoteWannier90.startsWith("~")) {
     const segments = remoteWannier90.split("/");
@@ -272,7 +269,7 @@ export function TransportWizard({
     phase: "Transport",
   });
   const [calcStartTime, setCalcStartTime] = useState<string>("");
-  const [transportData, setTransportData] = useState<any | null>(null);
+  const [transportData, setTransportData] = useState<TransportResult | null>(null);
   const [isSaved, setIsSaved] = useState(false);
 
   const [boltzKMesh, setBoltzKMesh] = useState<[number, number, number]>([24, 24, 24]);
@@ -376,7 +373,7 @@ export function TransportWizard({
     setCalcStartTime(task.startedAt);
 
     if (task.status === "completed" && task.result) {
-      setTransportData(task.result);
+      setTransportData(task.result as TransportResult);
       setStep("results");
     } else if (task.status === "failed" || task.status === "cancelled") {
       setError(task.error || "Task failed");
@@ -518,7 +515,7 @@ export function TransportWizard({
         throw new Error(finalTask?.error || "Transport calculation failed");
       }
 
-      const result = finalTask.result;
+      const result = finalTask.result as TransportResult;
       const outputContent = finalTask.output.join("\n");
       const completedAt = new Date().toISOString();
       const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")

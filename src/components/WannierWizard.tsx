@@ -171,11 +171,11 @@ function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input"
 }
 
 function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
-  const lowered = String(raw || "gaussian").toLowerCase();
+  const lowered = String(raw || "marzari-vanderbilt").toLowerCase();
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
-  return "gaussian";
+  return "marzari-vanderbilt";
 }
 
 function orbitalTemplateCount(orbital: ProjectionOrbital): number {

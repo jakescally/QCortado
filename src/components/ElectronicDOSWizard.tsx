@@ -563,12 +563,12 @@ export function ElectronicDOSWizard({
         : occupationRaw === "from_input"
           ? "from_input"
           : "smearing";
-    const smearingRaw = String(scfParams.smearing || "gaussian").toLowerCase();
+    const smearingRaw = String(scfParams.smearing || "marzari-vanderbilt").toLowerCase();
     const smearing = smearingRaw === "methfessel-paxton"
       || smearingRaw === "marzari-vanderbilt"
       || smearingRaw === "fermi-dirac"
       ? smearingRaw
-      : "gaussian";
+      : "marzari-vanderbilt";
     const inheritedDegaussValue = Number(scfParams.degauss);
     const inheritedDegauss = Number.isFinite(inheritedDegaussValue) ? inheritedDegaussValue : null;
     const pseudoDir = isHpcMode

@@ -23,6 +23,17 @@ interface HpcSetupWizardProps {
 
 const STEP_TITLES = ["Connection", "Authentication", "Paths", "Scheduler", "Validation"];
 
+function deriveRemotePostw90Path(remoteWannier90Path: string | null | undefined): string {
+  const remoteWannier90 = String(remoteWannier90Path || "").trim();
+  if (remoteWannier90.includes("/") || remoteWannier90.startsWith("~")) {
+    const segments = remoteWannier90.split("/");
+    segments[segments.length - 1] = "postw90.x";
+    const derived = segments.join("/");
+    return derived.trim().length > 0 ? derived : "postw90.x";
+  }
+  return "postw90.x";
+}
+
 function makeDefaultProfile(): HpcProfile {
   return {
     id: "",
@@ -35,7 +46,6 @@ function makeDefaultProfile(): HpcProfile {
     ssh_key_path: "~/.ssh/id_rsa",
     remote_qe_bin_dir: "~/qe/bin",
     remote_wannier90_path: "wannier90.x",
-    remote_postw90_path: "postw90.x",
     remote_pseudo_dir: "~/qe/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
@@ -128,7 +138,7 @@ export function HpcSetupWizard({
         if (!validation.qe_pw_available) detail.push("`pw.x` is not executable at configured QE path.");
         if (!validation.qe_pw2wannier_available) detail.push("`pw2wannier90.x` is not executable at configured QE path.");
         if (!validation.wannier90_available) detail.push("`wannier90.x` is not executable at configured path or on `PATH`.");
-        if (!validation.postw90_available) detail.push("`postw90.x` is not executable at configured path or on `PATH`.");
+        if (!validation.postw90_available) detail.push("Derived `postw90.x` is not executable from the configured `wannier90.x` location.");
         if (!validation.workspace_writable) detail.push("Remote workspace is not writable.");
         detail.push(...validation.messages);
 
@@ -344,15 +354,14 @@ export function HpcSetupWizard({
               <p className="settings-menu-hint">
                 Leave as <code>wannier90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
               </p>
-              <label className="settings-menu-label">Remote postw90 Executable</label>
+              <label className="settings-menu-label">Remote postw90 Executable (auto-derived)</label>
               <input
                 className="settings-menu-input"
-                value={profile.remote_postw90_path || ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, remote_postw90_path: event.target.value || null }))}
-                placeholder="postw90.x or /path/to/postw90.x"
+                value={deriveRemotePostw90Path(profile.remote_wannier90_path)}
+                readOnly
               />
               <p className="settings-menu-hint">
-                Leave as <code>postw90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
+                QCortado derives this automatically by replacing the executable name in the Wannier90 path with <code>postw90.x</code>.
               </p>
               <label className="settings-menu-label">Remote Pseudopotential Directory</label>
               <input

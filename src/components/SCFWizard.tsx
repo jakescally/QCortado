@@ -260,7 +260,7 @@ export function SCFWizard({
 
     // Electronic structure
     occupations: "smearing",
-    smearing: "gaussian",
+    smearing: "marzari-vanderbilt",
     degauss: 0.01,
     nbnd: null,
     tot_charge: 0,

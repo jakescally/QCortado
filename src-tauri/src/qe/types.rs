@@ -201,11 +201,11 @@ pub enum Occupations {
 #[serde(rename_all = "kebab-case")]
 pub enum SmearingType {
     /// Gaussian smearing
-    #[default]
     Gaussian,
     /// Methfessel-Paxton
     MethfesselPaxton,
     /// Marzari-Vanderbilt (cold smearing)
+    #[default]
     MarzariVanderbilt,
     /// Fermi-Dirac
     FermiDirac,

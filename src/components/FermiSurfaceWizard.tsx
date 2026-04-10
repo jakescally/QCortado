@@ -227,11 +227,11 @@ function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input"
 }
 
 function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
-  const lowered = String(raw || "gaussian").toLowerCase();
+  const lowered = String(raw || "marzari-vanderbilt").toLowerCase();
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
-  return "gaussian";
+  return "marzari-vanderbilt";
 }
 
 export function FermiSurfaceWizard({
@@ -274,7 +274,7 @@ export function FermiSurfaceWizard({
   const [nscfConvThrInput, setNscfConvThrInput] = useState("1e-8");
   const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState("0.7");
   const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">("smearing");
-  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("gaussian");
+  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("marzari-vanderbilt");
   const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
   const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({

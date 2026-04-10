@@ -145,17 +145,18 @@ fn derive_postw90_path_from_wannier90_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_local_postw90_path(state: &AppState) -> Result<PathBuf, String> {
-    if let Some(path) = state.postw90_path.lock().unwrap().as_ref() {
-        return Ok(path.clone());
-    }
-
     if let Some(wannier90_path) = state.wannier90_path.lock().unwrap().as_ref() {
         if let Some(candidate) = derive_postw90_path_from_wannier90_path(wannier90_path) {
             return Ok(candidate);
         }
     }
 
-    Err("postw90.x path not configured. Set postw90.x directly or configure Wannier90 first.".to_string())
+    // Legacy fallback for older configs that stored postw90.x separately.
+    if let Some(path) = state.postw90_path.lock().unwrap().as_ref() {
+        return Ok(path.clone());
+    }
+
+    Err("postw90.x path not configured. Configure the Wannier90 executable path first.".to_string())
 }
 
 fn derive_remote_postw90_path(remote_wannier90_path: Option<&str>) -> String {
@@ -305,7 +306,7 @@ fn sanitize_hpc_profile(
     profile.remote_qe_bin_dir =
         normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
     profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
-    profile.remote_postw90_path = sanitize_optional_hpc_field(profile.remote_postw90_path);
+    profile.remote_postw90_path = None;
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_workspace_root =
@@ -1169,11 +1170,8 @@ fn set_postw90_path(
 /// Gets the current postw90.x executable path.
 #[tauri::command]
 fn get_postw90_path(state: State<AppState>) -> Option<String> {
-    state
-        .postw90_path
-        .lock()
-        .unwrap()
-        .as_ref()
+    resolve_local_postw90_path(state.inner())
+        .ok()
         .map(|p| p.to_string_lossy().to_string())
 }
 
@@ -2276,12 +2274,7 @@ test -x \"$tool\" && echo ok || echo missing",
         ));
     }
 
-    let remote_postw90 = profile
-        .remote_postw90_path
-        .as_deref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| derive_remote_postw90_path(profile.remote_wannier90_path.as_deref()));
+    let remote_postw90 = derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
     let postw90_check = if remote_postw90.contains('/') || remote_postw90.starts_with('~') {
         format!(
             "tool={}; \
@@ -8779,12 +8772,7 @@ async fn run_transport_hpc_background(
     pm: ProcessManager,
 ) -> Result<TransportResult, String> {
     let pipeline_start = std::time::Instant::now();
-    let remote_postw90 = profile
-        .remote_postw90_path
-        .as_deref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| derive_remote_postw90_path(profile.remote_wannier90_path.as_deref()));
+    let remote_postw90 = derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
 
     let stage_dir = PathBuf::from(&working_dir)
         .join("transport_source_stage")
@@ -8991,7 +8979,7 @@ async fn run_dos_hpc_background(
     }
     if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
         nscf_calc.system.occupations = qe::Occupations::Smearing;
-        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        nscf_calc.system.smearing = qe::SmearingType::MarzariVanderbilt;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
         }
@@ -9166,7 +9154,7 @@ async fn run_dos_background(
     }
     if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
         nscf_calc.system.occupations = qe::Occupations::Smearing;
-        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        nscf_calc.system.smearing = qe::SmearingType::MarzariVanderbilt;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
         }
@@ -9517,7 +9505,7 @@ async fn run_fermi_surface_hpc_background(
     }
     if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
         nscf_calc.system.occupations = qe::Occupations::Smearing;
-        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        nscf_calc.system.smearing = qe::SmearingType::MarzariVanderbilt;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
         }
@@ -9699,7 +9687,7 @@ async fn run_fermi_surface_background(
     }
     if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
         nscf_calc.system.occupations = qe::Occupations::Smearing;
-        nscf_calc.system.smearing = qe::SmearingType::Gaussian;
+        nscf_calc.system.smearing = qe::SmearingType::MarzariVanderbilt;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
         }

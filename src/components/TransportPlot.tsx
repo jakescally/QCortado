@@ -1,313 +1,580 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
+import { InfoTooltip } from "./InfoTooltip";
+import { TransportHeatmap } from "./transport/TransportHeatmap";
+import { TransportLinePlot } from "./transport/TransportLinePlot";
+import { TransportTdfPlot } from "./transport/TransportTdfPlot";
+import { useTransportViewerState } from "./transport/useTransportViewerState";
+import {
+  TRANSPORT_METRIC_KEYS,
+  TransportResult,
+  buildTransportHeatmapGrid,
+  buildTransportSeries,
+  formatTransportNumber,
+  getTransportMetricDefinition,
+  getTransportTauBadge,
+  resolveTransportUnitSuffix,
+  resolveTransportXAxisLabel,
+  resolveTransportYAxisLabel,
+} from "../lib/transport";
 
 interface TransportPlotProps {
-  data: any;
+  data: TransportResult;
 }
 
-type TransportMetricKey = "conductivity" | "sigma_s" | "seebeck" | "kappa";
-type TransportAxisMode = "mu" | "temperature";
-interface TransportSeriesPoint {
-  x: number;
-  y: number | null;
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-interface TransportPlotPoint {
-  x: number;
-  y: number;
-  rawX: number;
-  rawY: number;
-}
-
-const METRIC_OPTIONS: Array<{ key: TransportMetricKey; label: string }> = [
-  { key: "conductivity", label: "Conductivity" },
-  { key: "sigma_s", label: "Sigma·S" },
-  { key: "seebeck", label: "Seebeck" },
-  { key: "kappa", label: "K (BoltzWann)" },
-];
-
-function findComponentIndex(labels: string[], target: string): number {
-  return labels.findIndex((label) => label.trim().toLowerCase() === target);
-}
-
-function getComponentOptions(dataset: any): string[] {
-  const labels = Array.isArray(dataset?.component_labels) ? dataset.component_labels.map((label: unknown) => String(label)) : [];
-  const options: string[] = [];
-  const xx = findComponentIndex(labels, "xx");
-  const yy = findComponentIndex(labels, "yy");
-  const zz = findComponentIndex(labels, "zz");
-  if (xx >= 0 || yy >= 0 || zz >= 0) {
-    options.push("avg");
-  }
-  for (const preferred of ["xx", "yy", "zz"]) {
-    if (findComponentIndex(labels, preferred) >= 0) {
-      options.push(preferred);
-    }
-  }
-  for (const label of labels) {
-    const normalized = label.trim().toLowerCase();
-    if (!options.includes(normalized)) {
-      options.push(normalized);
-    }
-  }
-  return options.length > 0 ? options : ["value"];
-}
-
-function getDatasetComponentValue(
-  dataset: any,
-  component: string,
-  temperatureIndex: number,
-  muIndex: number,
-): number | null {
-  const labels = Array.isArray(dataset?.component_labels) ? dataset.component_labels.map((label: unknown) => String(label).trim().toLowerCase()) : [];
-  const values = Array.isArray(dataset?.values) ? dataset.values : [];
-
-  const readValue = (componentIndex: number): number | null => {
-    const raw = values?.[componentIndex]?.[temperatureIndex]?.[muIndex];
-    const numeric = Number(raw);
-    return Number.isFinite(numeric) ? numeric : null;
-  };
-
-  if (component === "avg") {
-    const diagonalIndices = ["xx", "yy", "zz"]
-      .map((label) => findComponentIndex(labels, label))
-      .filter((index) => index >= 0);
-    if (diagonalIndices.length === 0) {
-      return null;
-    }
-    const diagonalValues = diagonalIndices
-      .map(readValue)
-      .filter((value): value is number => value != null);
-    if (diagonalValues.length === 0) {
-      return null;
-    }
-    return diagonalValues.reduce((sum, value) => sum + value, 0) / diagonalValues.length;
-  }
-
-  const index = findComponentIndex(labels, component);
-  if (index < 0) {
-    return null;
-  }
-  return readValue(index);
-}
-
-function formatNumber(value: number | null | undefined, digits = 4): string {
-  if (!Number.isFinite(Number(value))) {
-    return "N/A";
-  }
-  return Number(value).toFixed(digits);
+function joinTransportTooltip(base: string, extra?: string): string {
+  return extra ? `${base} ${extra}` : base;
 }
 
 export function TransportPlot({ data }: TransportPlotProps) {
-  const [metric, setMetric] = useState<TransportMetricKey>("conductivity");
-  const [component, setComponent] = useState("avg");
-  const [axisMode, setAxisMode] = useState<TransportAxisMode>("mu");
-  const [selectedTemperatureIndex, setSelectedTemperatureIndex] = useState(0);
-  const [selectedMuIndex, setSelectedMuIndex] = useState(0);
+  const {
+    state,
+    dataset,
+    componentOptions,
+    tdfOptions,
+    safeTemperatureIndex,
+    safeMuIndex,
+    rangeError,
+    setMetric,
+    setComponent,
+    setAxisMode,
+    setSelectedTemperatureIndex,
+    setSelectedMuIndex,
+    applyHeatmapSelection,
+    setCustomYRange,
+    updateAxisSettings,
+    applyManualYRange,
+    resetView,
+    resetAxisSettings,
+    resetAll,
+    toggleHeatmapOpen,
+    toggleSettingsOpen,
+    toggleRunContextOpen,
+    toggleTdfOpen,
+    setTdfComponent,
+  } = useTransportViewerState(data);
 
-  const dataset = data?.[metric] ?? null;
-  const componentOptions = useMemo(() => getComponentOptions(dataset), [dataset]);
-  const muOffsets = Array.isArray(data?.mu_offsets_ev) ? data.mu_offsets_ev.map((value: unknown) => Number(value)) : [];
-  const temperatureValues = Array.isArray(data?.temperature_values_k)
-    ? data.temperature_values_k.map((value: unknown) => Number(value))
-    : [];
+  const metricDefinition = getTransportMetricDefinition(state.metric);
+  const tdfDefinition = getTransportMetricDefinition("tdf");
+  const yAxisLabel = resolveTransportYAxisLabel(metricDefinition, state.axisSettings);
+  const xAxisLabel = resolveTransportXAxisLabel(state.axisMode, state.axisSettings);
+  const valueUnit = resolveTransportUnitSuffix(metricDefinition, state.axisSettings);
 
-  useEffect(() => {
-    if (!componentOptions.includes(component)) {
-      setComponent(componentOptions[0] ?? "value");
-    }
-  }, [component, componentOptions]);
+  const series = useMemo(() => buildTransportSeries({
+    result: data,
+    dataset,
+    component: state.component,
+    axisMode: state.axisMode,
+    selectedTemperatureIndex: safeTemperatureIndex,
+    selectedMuIndex: safeMuIndex,
+    showAbsoluteMu: state.axisSettings.showAbsoluteMu,
+  }), [
+    data,
+    dataset,
+    safeMuIndex,
+    safeTemperatureIndex,
+    state.axisMode,
+    state.axisSettings.showAbsoluteMu,
+    state.component,
+  ]);
 
-  useEffect(() => {
-    if (!data?.[metric]) {
-      const fallbackMetric = METRIC_OPTIONS.find((option) => data?.[option.key] != null)?.key ?? "conductivity";
-      setMetric(fallbackMetric);
-    }
-  }, [data, metric]);
-
-  const safeTemperatureIndex = Math.min(
-    Math.max(0, selectedTemperatureIndex),
-    Math.max(0, temperatureValues.length - 1),
+  const heatmapGrid = useMemo(
+    () => buildTransportHeatmapGrid(data, dataset, state.component),
+    [data, dataset, state.component],
   );
-  const safeMuIndex = Math.min(
-    Math.max(0, selectedMuIndex),
-    Math.max(0, muOffsets.length - 1),
-  );
 
-  const series = useMemo<TransportSeriesPoint[]>(() => {
-    if (!dataset) return [];
+  const selectedTemperature = data.temperature_values_k[safeTemperatureIndex] ?? 0;
+  const selectedMuOffset = data.mu_offsets_ev[safeMuIndex] ?? 0;
+  const selectedMuValue = data.mu_values_ev[safeMuIndex] ?? selectedMuOffset;
+  const fixedContextLabel = state.axisMode === "mu"
+    ? `T = ${formatTransportNumber(
+        selectedTemperature,
+        state.axisSettings.precisionMode,
+        state.axisSettings.precision,
+      )} K`
+    : `${state.axisSettings.showAbsoluteMu ? "μ" : "Δμ"} = ${formatTransportNumber(
+        state.axisSettings.showAbsoluteMu ? selectedMuValue : selectedMuOffset,
+        state.axisSettings.precisionMode,
+        state.axisSettings.precision,
+      )} eV`;
+  const activeComponent = componentOptions.find((option) => option.value === state.component);
 
-    if (axisMode === "mu") {
-      return muOffsets.map((muOffset: number, index: number) => ({
-        x: muOffset,
-        y: getDatasetComponentValue(dataset, component, safeTemperatureIndex, index),
-      }));
+  const artifactBytes = Array.isArray(data.artifact_manifest)
+    ? data.artifact_manifest.reduce((sum, item) => sum + (Number(item?.size_bytes) || 0), 0)
+    : 0;
+
+  const manualRangeKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") {
+      return;
     }
+    event.preventDefault();
+    applyManualYRange();
+  }, [applyManualYRange]);
 
-    return temperatureValues.map((temperature: number, index: number) => ({
-      x: temperature,
-      y: getDatasetComponentValue(dataset, component, index, safeMuIndex),
-    }));
-  }, [axisMode, component, dataset, muOffsets, safeMuIndex, safeTemperatureIndex, temperatureValues]);
-
-  const validSeries = series.filter((point: TransportSeriesPoint) => point.y != null && Number.isFinite(point.x));
-  const xValues = validSeries.map((point: TransportSeriesPoint) => point.x);
-  const yValues = validSeries.map((point: TransportSeriesPoint) => Number(point.y));
-  const xMin = xValues.length > 0 ? Math.min(...xValues) : 0;
-  const xMax = xValues.length > 0 ? Math.max(...xValues) : 1;
-  const yMinRaw = yValues.length > 0 ? Math.min(...yValues) : 0;
-  const yMaxRaw = yValues.length > 0 ? Math.max(...yValues) : 1;
-  const ySpan = Math.max(1e-12, yMaxRaw - yMinRaw);
-  const yPad = ySpan * 0.1;
-  const yMin = yMinRaw - yPad;
-  const yMax = yMaxRaw + yPad;
-  const width = 860;
-  const height = 360;
-  const paddingLeft = 68;
-  const paddingRight = 24;
-  const paddingTop = 28;
-  const paddingBottom = 48;
-
-  const plotWidth = width - paddingLeft - paddingRight;
-  const plotHeight = height - paddingTop - paddingBottom;
-  const xDenominator = Math.max(1e-12, xMax - xMin);
-  const yDenominator = Math.max(1e-12, yMax - yMin);
-
-  const points: TransportPlotPoint[] = validSeries.map((point: TransportSeriesPoint) => {
-    const x = paddingLeft + ((point.x - xMin) / xDenominator) * plotWidth;
-    const y = paddingTop + (1 - ((Number(point.y) - yMin) / yDenominator)) * plotHeight;
-    return { x, y, rawX: point.x, rawY: Number(point.y) };
-  });
-
-  const polylinePoints = points.map((point: TransportPlotPoint) => `${point.x},${point.y}`).join(" ");
-  const axisLabel = axisMode === "mu" ? "Δμ (eV)" : "Temperature (K)";
-  const fixedLabel = axisMode === "mu"
-    ? `T = ${formatNumber(temperatureValues[safeTemperatureIndex], 1)} K`
-    : `Δμ = ${formatNumber(muOffsets[safeMuIndex], 3)} eV`;
-
-  if (!dataset) {
-    return <p>No transport data is available for plotting.</p>;
-  }
+  const metricTooltip = joinTransportTooltip(
+    metricDefinition.tooltip,
+    metricDefinition.tauBehavior === "dependent"
+      ? "Displayed values scale with the transport relaxation time."
+      : metricDefinition.tauBehavior === "independent"
+        ? "Displayed values are treated as relaxation-time independent in this workflow."
+        : undefined,
+  );
 
   return (
-    <div className="bands-viewer-content" style={{ display: "block" }}>
-      <div className="calc-action-grid" style={{ marginBottom: "1rem" }}>
-        {METRIC_OPTIONS.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            className="calc-action-btn"
-            onClick={() => setMetric(option.key)}
-            style={metric === option.key ? { borderColor: "var(--accent-color, #0f766e)" } : undefined}
-          >
-            <span className="calc-action-label">{option.label}</span>
-            <span className="calc-action-hint">{option.key === "seebeck" ? "tau-independent" : "tau-dependent"}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="details-grid" style={{ marginBottom: "1rem" }}>
-        <div className="detail-item">
-          <label>Component</label>
-          <select value={component} onChange={(event) => setComponent(event.target.value)}>
-            {componentOptions.map((option) => (
-              <option key={option} value={option}>{option}</option>
-            ))}
-          </select>
-        </div>
-        <div className="detail-item">
-          <label>Axis</label>
-          <select value={axisMode} onChange={(event) => setAxisMode(event.target.value as TransportAxisMode)}>
-            <option value="mu">vs Δμ</option>
-            <option value="temperature">vs T</option>
-          </select>
-        </div>
-        {axisMode === "mu" && (
-          <div className="detail-item">
-            <label>Temperature Slice</label>
-            <select
-              value={safeTemperatureIndex}
-              onChange={(event) => setSelectedTemperatureIndex(Number(event.target.value))}
-            >
-              {temperatureValues.map((value: number, index: number) => (
-                <option key={`${value}-${index}`} value={index}>
-                  {formatNumber(value, 1)} K
-                </option>
-              ))}
-            </select>
+    <div className="band-plot-layout transport-plot-layout">
+      <div className="band-plot-main transport-plot-main">
+        <div className="transport-plot-header">
+          <div className="transport-plot-header-main">
+            <div className="transport-plot-header-copy">
+              <span className="transport-plot-kicker">BoltzWann Transport</span>
+              <h3>{metricDefinition.symbol} · {activeComponent?.label ?? state.component}</h3>
+            </div>
           </div>
-        )}
-        {axisMode === "temperature" && (
-          <div className="detail-item">
-            <label>Δμ Slice</label>
-            <select
-              value={safeMuIndex}
-              onChange={(event) => setSelectedMuIndex(Number(event.target.value))}
-            >
-              {muOffsets.map((value: number, index: number) => (
-                <option key={`${value}-${index}`} value={index}>
-                  {formatNumber(value, 3)} eV
-                </option>
-              ))}
-            </select>
+
+          <div className="transport-plot-header-side">
+            <div className="transport-plot-header-controls">
+              <div className="band-control-row transport-plot-control">
+                <label>
+                  Component
+                  <InfoTooltip
+                    text={activeComponent?.tooltip ?? "Choose the tensor component or the diagonal average."}
+                  />
+                </label>
+                <select
+                  value={state.component}
+                  onChange={(event) => setComponent(event.target.value)}
+                >
+                  {componentOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="band-control-row transport-plot-control">
+                <label>
+                  Plot Against
+                  <InfoTooltip text="Plot the selected metric against chemical potential at fixed temperature, or against temperature at fixed chemical potential." />
+                </label>
+                <select
+                  value={state.axisMode}
+                  onChange={(event) => setAxisMode(event.target.value as typeof state.axisMode)}
+                >
+                  <option value="mu">Chemical potential</option>
+                  <option value="temperature">Temperature</option>
+                </select>
+              </div>
+            </div>
           </div>
-        )}
-        <div className="detail-item">
-          <label>Slice</label>
-          <span>{fixedLabel}</span>
         </div>
-      </div>
 
-      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", maxWidth: "100%", border: "1px solid rgba(15, 23, 42, 0.08)", borderRadius: "14px", background: "rgba(248, 250, 252, 0.72)" }}>
-        <rect x="0" y="0" width={width} height={height} fill="transparent" />
-        <line x1={paddingLeft} y1={height - paddingBottom} x2={width - paddingRight} y2={height - paddingBottom} stroke="rgba(15,23,42,0.35)" />
-        <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={height - paddingBottom} stroke="rgba(15,23,42,0.35)" />
-        <text x={width / 2} y={height - 12} textAnchor="middle" fontSize="13" fill="rgba(15,23,42,0.75)">
-          {axisLabel}
-        </text>
-        <text x="18" y={height / 2} textAnchor="middle" fontSize="13" fill="rgba(15,23,42,0.75)" transform={`rotate(-90 18 ${height / 2})`}>
-          {METRIC_OPTIONS.find((option) => option.key === metric)?.label || metric}
-        </text>
-
-        {points.length > 1 && (
-          <polyline
-            fill="none"
-            stroke="var(--accent-color, #0f766e)"
-            strokeWidth="3"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            points={polylinePoints}
+        <div className="transport-lineplot-stage">
+          <TransportLinePlot
+            lockScopeKey={`${data.source_wannier_calc_id || data.seedname}:${state.metric}:${state.component}:${state.axisMode}`}
+            metricDefinition={metricDefinition}
+            axisMode={state.axisMode}
+            axisSettings={state.axisSettings}
+            component={state.component}
+            series={series}
+            xAxisLabel={xAxisLabel}
+            yAxisLabel={yAxisLabel}
+            valueUnit={valueUnit}
+            fixedContextLabel={fixedContextLabel}
+            onCustomYRangeChange={setCustomYRange}
           />
-        )}
-        {points.map((point: TransportPlotPoint, index: number) => (
-          <g key={`${point.rawX}-${index}`}>
-            <circle cx={point.x} cy={point.y} r="4" fill="var(--accent-color, #0f766e)" />
-            <title>{`${axisLabel}: ${formatNumber(point.rawX, axisMode === "mu" ? 3 : 1)}, value: ${formatNumber(point.rawY, 6)}`}</title>
-          </g>
-        ))}
-      </svg>
+        </div>
 
-      <div className="details-grid" style={{ marginTop: "1rem" }}>
-        <div className="detail-item">
-          <label>Engine</label>
-          <span>{data?.engine || "boltzwann"}</span>
-        </div>
-        <div className="detail-item">
-          <label>Reference Fermi Energy</label>
-          <span>{formatNumber(data?.reference_fermi_energy_ev, 4)} eV</span>
-        </div>
-        <div className="detail-item">
-          <label>Relaxation Time</label>
-          <span>{formatNumber(data?.relaxation_time_fs, 2)} fs</span>
-        </div>
-        <div className="detail-item">
-          <label>Provenance</label>
-          <span>{metric === "seebeck" ? "Seebeck is tau-independent" : "Conductivity, Sigma·S, and K are tau-dependent"}</span>
+        <div className="band-plot-info transport-plot-info">
+          <span>seedname {data.seedname}</span>
+          <span>E_F = {formatTransportNumber(data.reference_fermi_energy_ev, "manual", 4)} eV</span>
+          <span>τ = {formatTransportNumber(data.relaxation_time_fs, "manual", 2)} fs</span>
+          <span>{data.mu_values_ev.length} μ points</span>
+          <span>{data.temperature_values_k.length} T points</span>
+          {data.is_2d && (
+            <span className="band-plot-projection-pill">
+              2D · {data.boltz_2d_dir?.trim() || "enabled"}
+            </span>
+          )}
+          {data.warnings.length > 0 && (
+            <span className="transport-plot-status transport-plot-status-warning">
+              {data.warnings.length} warning{data.warnings.length === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
       </div>
 
-      <p className="step-description" style={{ marginTop: "1rem" }}>
-        `K (BoltzWann)` is displayed with its upstream BoltzWann meaning and is not silently relabeled as electronic thermal conductivity.
-      </p>
+      <aside className="band-plot-sidebar transport-plot-sidebar">
+        <div className="band-plot-controls">
+          <button type="button" onClick={resetView} className="band-plot-reset">
+            Reset View
+          </button>
+          <button type="button" onClick={resetAll} className="band-plot-export">
+            Reset Viewer
+          </button>
+          <span className="band-plot-hint">Scroll: zoom Y | Shift+Scroll: pan range</span>
+        </div>
+
+        <div className="band-plot-control-panel">
+          <div className="band-control-section">
+            <div className="band-control-header transport-static-header">
+              <span>Transport View</span>
+              <InfoTooltip text={metricTooltip} />
+            </div>
+            <div className="band-control-grid transport-plot-meta-panel">
+              <div className="transport-plot-metric-tabs" role="tablist" aria-label="Transport metric">
+                {TRANSPORT_METRIC_KEYS.map((metricKey) => {
+                  const definition = getTransportMetricDefinition(metricKey);
+                  const isActive = metricKey === state.metric;
+                  return (
+                    <button
+                      key={metricKey}
+                      type="button"
+                      className={`transport-plot-metric-button ${isActive ? "is-active" : ""}`}
+                      onClick={() => setMetric(metricKey)}
+                      role="tab"
+                      aria-selected={isActive}
+                      title={joinTransportTooltip(
+                        definition.tooltip,
+                        definition.tauBehavior === "dependent"
+                          ? "Displayed values scale with the transport relaxation time."
+                          : definition.tauBehavior === "independent"
+                            ? "Displayed values are treated as relaxation-time independent in this workflow."
+                            : undefined,
+                      )}
+                    >
+                      <span className="transport-plot-metric-symbol">{definition.symbol}</span>
+                      <span className="transport-plot-metric-label">{definition.shortLabel}</span>
+                      <span className="transport-plot-metric-badge">{getTransportTauBadge(definition)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="band-control-section">
+            <button type="button" className="band-control-header" onClick={toggleHeatmapOpen}>
+              <span className={`collapse-icon ${state.heatmapOpen ? "expanded" : ""}`}>▶</span>
+              μ-T Map
+            </button>
+            {state.heatmapOpen && (
+              <div className="band-control-grid transport-heatmap-panel">
+                <div className="band-control-row">
+                  <label>{state.axisMode === "mu" ? "Temperature Slice" : "Chemical-Potential Slice"}</label>
+                  {state.axisMode === "mu" ? (
+                    <select
+                      value={safeTemperatureIndex}
+                      onChange={(event) => setSelectedTemperatureIndex(Number(event.target.value))}
+                    >
+                      {data.temperature_values_k.map((temperature, index) => (
+                        <option key={`${temperature}-${index}`} value={index}>
+                          {formatTransportNumber(
+                            temperature,
+                            state.axisSettings.precisionMode,
+                            state.axisSettings.precision,
+                          )} K
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <select
+                      value={safeMuIndex}
+                      onChange={(event) => setSelectedMuIndex(Number(event.target.value))}
+                    >
+                      {data.mu_offsets_ev.map((muOffset, index) => (
+                        <option key={`${muOffset}-${index}`} value={index}>
+                          {formatTransportNumber(
+                            state.axisSettings.showAbsoluteMu ? (data.mu_values_ev[index] ?? muOffset) : muOffset,
+                            state.axisSettings.precisionMode,
+                            state.axisSettings.precision,
+                          )} eV
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+
+                <div className="band-control-note">
+                  Click the heatmap to move through the chemical-potential and temperature grid while keeping the main plot focused on a single slice.
+                </div>
+
+                <TransportHeatmap
+                  metricDefinition={metricDefinition}
+                  axisMode={state.axisMode}
+                  axisSettings={state.axisSettings}
+                  grid={heatmapGrid}
+                  selectedTemperatureIndex={safeTemperatureIndex}
+                  selectedMuIndex={safeMuIndex}
+                  onSelectCell={applyHeatmapSelection}
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="band-control-section">
+            <button type="button" className="band-control-header" onClick={toggleSettingsOpen}>
+              <span className={`collapse-icon ${state.settingsOpen ? "expanded" : ""}`}>▶</span>
+              Plot Settings
+            </button>
+            {state.settingsOpen && (
+              <div className="band-control-grid">
+                <div className="band-control-row">
+                  <label>μ Display</label>
+                  <select
+                    value={state.axisSettings.showAbsoluteMu ? "absolute" : "relative"}
+                    onChange={(event) => updateAxisSettings({
+                      showAbsoluteMu: event.target.value === "absolute",
+                    })}
+                  >
+                    <option value="relative">Δμ relative to E_F</option>
+                    <option value="absolute">Absolute μ</option>
+                  </select>
+                </div>
+
+                <div className="band-control-row">
+                  <label>Y Range</label>
+                  <div className="band-control-range-inputs">
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="min"
+                      value={state.axisSettings.manualYMinInput}
+                      onChange={(event) => updateAxisSettings({ manualYMinInput: event.target.value })}
+                      onKeyDown={manualRangeKeyDown}
+                    />
+                    <span className="band-control-range-separator">to</span>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="max"
+                      value={state.axisSettings.manualYMaxInput}
+                      onChange={(event) => updateAxisSettings({ manualYMaxInput: event.target.value })}
+                      onKeyDown={manualRangeKeyDown}
+                    />
+                  </div>
+                  <button type="button" className="band-control-apply" onClick={() => applyManualYRange()}>
+                    Apply
+                  </button>
+                  {rangeError && <span className="band-control-range-error">{rangeError}</span>}
+                </div>
+
+                <div className="band-control-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={state.axisSettings.keepYRangeAcrossSlices}
+                      onChange={(event) => updateAxisSettings({
+                        keepYRangeAcrossSlices: event.target.checked,
+                      })}
+                    />
+                    Keep Y range across slices
+                    <InfoTooltip text="Freeze the current auto-scaled Y range while selecting different heatmap rows or columns. Changing the transport metric, component, or plot axis re-bases the auto range. Manual Y min and max still take precedence." />
+                  </label>
+                  <div className="band-control-note">
+                    Useful for stepping through neighboring heatmap slices without the plot re-scaling each time.
+                  </div>
+                </div>
+
+                <div className="band-control-row">
+                  <label>Tick Density</label>
+                  <select
+                    value={state.axisSettings.tickDensity}
+                    onChange={(event) => updateAxisSettings({
+                      tickDensity: event.target.value as typeof state.axisSettings.tickDensity,
+                    })}
+                  >
+                    <option value="sparse">Sparse</option>
+                    <option value="normal">Normal</option>
+                    <option value="dense">Dense</option>
+                  </select>
+                </div>
+
+                <div className="band-control-row">
+                  <label>Precision</label>
+                  <div className="transport-inline-settings">
+                    <select
+                      value={state.axisSettings.precisionMode}
+                      onChange={(event) => updateAxisSettings({
+                        precisionMode: event.target.value as typeof state.axisSettings.precisionMode,
+                      })}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                    {state.axisSettings.precisionMode === "manual" && (
+                      <input
+                        type="number"
+                        min={0}
+                        max={8}
+                        step={1}
+                        value={state.axisSettings.precision}
+                        onChange={(event) => updateAxisSettings({
+                          precision: Math.min(8, Math.max(0, Number(event.target.value))),
+                        })}
+                      />
+                    )}
+                  </div>
+                </div>
+
+                <div className="band-control-row">
+                  <label>X Label Override</label>
+                  <input
+                    type="text"
+                    value={state.axisSettings.xLabelOverride}
+                    onChange={(event) => updateAxisSettings({ xLabelOverride: event.target.value })}
+                    placeholder={xAxisLabel}
+                  />
+                </div>
+
+                <div className="band-control-row">
+                  <label>Y Label Override</label>
+                  <input
+                    type="text"
+                    value={state.axisSettings.yLabelOverride}
+                    onChange={(event) => updateAxisSettings({ yLabelOverride: event.target.value })}
+                    placeholder={metricDefinition.symbol}
+                  />
+                </div>
+
+                <div className="band-control-row">
+                  <label>Unit Suffix Override</label>
+                  <input
+                    type="text"
+                    value={state.axisSettings.unitSuffixOverride}
+                    onChange={(event) => updateAxisSettings({ unitSuffixOverride: event.target.value })}
+                    placeholder={metricDefinition.defaultUnit}
+                  />
+                </div>
+
+                <div className="transport-checkbox-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={state.axisSettings.showGrid}
+                      onChange={(event) => updateAxisSettings({ showGrid: event.target.checked })}
+                    />
+                    Grid
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={state.axisSettings.showZeroLine}
+                      onChange={(event) => updateAxisSettings({ showZeroLine: event.target.checked })}
+                    />
+                    Zero line
+                  </label>
+                </div>
+
+                <button
+                  type="button"
+                  className="band-control-apply"
+                  onClick={resetAxisSettings}
+                >
+                  Reset to Defaults
+                </button>
+              </div>
+            )}
+          </div>
+
+          {data.tdf && (
+            <div className="band-control-section">
+              <button type="button" className="band-control-header" onClick={toggleTdfOpen}>
+                <span className={`collapse-icon ${state.tdfOpen ? "expanded" : ""}`}>▶</span>
+                <span>
+                  TDF
+                  <InfoTooltip text={tdfDefinition.tooltip} />
+                </span>
+              </button>
+              {state.tdfOpen && (
+                <div className="band-control-grid">
+                  <div className="band-control-row">
+                    <label>Component</label>
+                    <select
+                      value={state.tdfComponent}
+                      onChange={(event) => setTdfComponent(event.target.value)}
+                    >
+                      {tdfOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <TransportTdfPlot
+                    data={data.tdf}
+                    component={state.tdfComponent}
+                    axisSettings={state.axisSettings}
+                    metricDefinition={tdfDefinition}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="band-control-section">
+            <button type="button" className="band-control-header" onClick={toggleRunContextOpen}>
+              <span className={`collapse-icon ${state.runContextOpen ? "expanded" : ""}`}>▶</span>
+              Run Context
+            </button>
+            {state.runContextOpen && (
+              <div className="band-control-grid">
+                <div className="transport-context-grid">
+                  <div className="band-control-readout transport-context-card">
+                    <span>Engine</span>
+                    <strong>{data.engine || "boltzwann"}</strong>
+                  </div>
+                  <div className="band-control-readout transport-context-card">
+                    <span>Seedname</span>
+                    <strong>{data.seedname}</strong>
+                  </div>
+                  <div className="band-control-readout transport-context-card">
+                    <span>μ points</span>
+                    <strong>{data.mu_values_ev.length}</strong>
+                  </div>
+                  <div className="band-control-readout transport-context-card">
+                    <span>T points</span>
+                    <strong>{data.temperature_values_k.length}</strong>
+                  </div>
+                  <div className="band-control-readout transport-context-card">
+                    <span>Artifacts</span>
+                    <strong>{formatBytes(artifactBytes)}</strong>
+                  </div>
+                  <div className="band-control-readout transport-context-card">
+                    <span>Tensor mode</span>
+                    <strong>{data.is_2d ? "2D" : "3D"}</strong>
+                  </div>
+                </div>
+
+                {data.warnings.length > 0 && (
+                  <div className="band-control-warning transport-context-stack">
+                    {data.warnings.map((warning, index) => (
+                      <p key={`${warning}-${index}`}>{warning}</p>
+                    ))}
+                  </div>
+                )}
+
+                {data.notes.length > 0 && (
+                  <div className="band-control-note transport-context-stack">
+                    {data.notes.map((note, index) => (
+                      <p key={`${note}-${index}`}>{note}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }

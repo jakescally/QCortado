@@ -20,6 +20,7 @@ import { useWindowSize } from "./lib/useWindowSize";
 import { BandsMultiview } from "./components/BandsMultiview";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
 import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
+import type { TransportResult } from "./lib/transport";
 
 interface ViewerSyncStatus {
   last_synced_at?: string | null;
@@ -96,7 +97,7 @@ function ViewerAppInner() {
     fermiEnergy: number | null;
     overlayOptions: WannierBandOverlayOption[];
   } | null>(null);
-  const [viewTransportData, setViewTransportData] = useState<{ data: any } | null>(null);
+  const [viewTransportData, setViewTransportData] = useState<{ data: TransportResult } | null>(null);
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
 
   const activeHpcProfile = useMemo(
@@ -430,8 +431,8 @@ function ViewerAppInner() {
   if (currentView === "transport-viewer" && viewTransportData) {
     return (
       <>
-        <div className="bands-viewer-container">
-          <div className="bands-viewer-header">
+        <div className="bands-viewer-container transport-viewer-container">
+          <div className="bands-viewer-header transport-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -443,7 +444,7 @@ function ViewerAppInner() {
             </button>
             <h2>BoltzWann Transport</h2>
           </div>
-          <div className="bands-viewer-content" style={{ display: "block" }}>
+          <div className="bands-viewer-content transport-viewer-content">
             <TransportPlot data={viewTransportData.data} />
           </div>
         </div>

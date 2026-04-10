@@ -61,6 +61,7 @@ import {
   setActiveHpcProfile,
   updateHpcProfileDefaults,
 } from "./lib/hpcConfig";
+import type { TransportResult } from "./lib/transport";
 
 interface ProjectSummary {
   id: string;
@@ -345,16 +346,13 @@ function AppInner() {
   const [qePathInput, setQePathInput] = useState("");
   const [fermiSurferPathInput, setFermiSurferPathInput] = useState(DEFAULT_FERMI_SURFER_PATH);
   const [wannier90PathInput, setWannier90PathInput] = useState(DEFAULT_WANNIER90_PATH);
-  const [postw90PathInput, setPostw90PathInput] = useState(DEFAULT_POSTW90_PATH);
   const [isSavingQePath, setIsSavingQePath] = useState(false);
   const [isSavingFermiSurferPath, setIsSavingFermiSurferPath] = useState(false);
   const [isSavingWannier90Path, setIsSavingWannier90Path] = useState(false);
-  const [isSavingPostw90Path, setIsSavingPostw90Path] = useState(false);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [qeStatus, setQeStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [fermiSurferStatus, setFermiSurferStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [wannier90Status, setWannier90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
-  const [postw90Status, setPostw90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [error, setError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("home");
   const [projectCount, setProjectCount] = useState<number>(0);
@@ -458,7 +456,7 @@ function AppInner() {
   const [transportContext, setTransportContext] = useState<TransportContext | null>(null);
 
   // Context for viewing saved transport data
-  const [viewTransportData, setViewTransportData] = useState<{ data: any } | null>(null);
+  const [viewTransportData, setViewTransportData] = useState<{ data: TransportResult } | null>(null);
 
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
@@ -506,7 +504,6 @@ function AppInner() {
     loadProjectCount();
     void loadFermiSurferPath();
     void loadWannier90Path();
-    void loadPostw90Path();
     void loadExecutionPrefix();
     void loadHpcExecutionSettings();
     void loadGlobalMpiSettings();
@@ -665,26 +662,6 @@ function AppInner() {
     }
   }
 
-  async function loadPostw90Path() {
-    try {
-      const [path, wannierPath] = await Promise.all([
-        invoke<string | null>("get_postw90_path"),
-        invoke<string | null>("get_wannier90_path").catch(() => null),
-      ]);
-      if (path) {
-        setPostw90PathInput(path);
-        setPostw90Status("Found");
-      } else {
-        setPostw90PathInput(derivePostw90PathFromWannier90Path(wannierPath));
-        setPostw90Status("Not configured");
-      }
-    } catch (e) {
-      console.error("Failed to load postw90 path:", e);
-      setPostw90PathInput(derivePostw90PathFromWannier90Path(wannier90PathInput));
-      setPostw90Status("Not found");
-    }
-  }
-
   async function selectFermiSurferPath() {
     try {
       const selected = await open({
@@ -714,24 +691,6 @@ function AppInner() {
 
       if (selected && typeof selected === "string") {
         setWannier90PathInput(selected);
-        setError(null);
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
-  async function selectPostw90Path() {
-    try {
-      const selected = await open({
-        directory: false,
-        multiple: false,
-        defaultPath: postw90PathInput || qePath || "/usr/local/bin",
-        title: "Select postw90 executable",
-      });
-
-      if (selected && typeof selected === "string") {
-        setPostw90PathInput(selected);
         setError(null);
       }
     } catch (e) {
@@ -772,15 +731,9 @@ function AppInner() {
       if (normalized.length > 0) {
         setWannier90PathInput(normalized);
         setWannier90Status("Found");
-        if (postw90Status !== "Found") {
-          setPostw90PathInput(derivePostw90PathFromWannier90Path(normalized));
-        }
       } else {
         setWannier90PathInput(DEFAULT_WANNIER90_PATH);
         setWannier90Status("Not configured");
-        if (postw90Status !== "Found") {
-          setPostw90PathInput(derivePostw90PathFromWannier90Path(null));
-        }
       }
       setError(null);
     } catch (e) {
@@ -788,29 +741,6 @@ function AppInner() {
       setError(String(e));
     } finally {
       setIsSavingWannier90Path(false);
-    }
-  }
-
-  async function savePostw90Path() {
-    const normalized = postw90PathInput.trim();
-    setIsSavingPostw90Path(true);
-    try {
-      await invoke("set_postw90_path", {
-        path: normalized.length > 0 ? normalized : null,
-      });
-      if (normalized.length > 0) {
-        setPostw90PathInput(normalized);
-        setPostw90Status("Found");
-      } else {
-        setPostw90PathInput(derivePostw90PathFromWannier90Path(wannier90PathInput));
-        setPostw90Status("Not configured");
-      }
-      setError(null);
-    } catch (e) {
-      setPostw90Status("Not found");
-      setError(String(e));
-    } finally {
-      setIsSavingPostw90Path(false);
     }
   }
 
@@ -2923,8 +2853,8 @@ function AppInner() {
   if (currentView === "transport-viewer" && viewTransportData) {
     return (
       <>
-        <div className="bands-viewer-container">
-          <div className="bands-viewer-header">
+        <div className="bands-viewer-container transport-viewer-container">
+          <div className="bands-viewer-header transport-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -2936,7 +2866,7 @@ function AppInner() {
             </button>
             <h2>BoltzWann Transport</h2>
           </div>
-          <div className="bands-viewer-content" style={{ display: "block" }}>
+          <div className="bands-viewer-content transport-viewer-content">
             <TransportPlot data={viewTransportData.data} />
           </div>
         </div>
@@ -3309,6 +3239,7 @@ function AppInner() {
     );
   }
 
+  const derivedPostw90Path = derivePostw90PathFromWannier90Path(wannier90PathInput);
   const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" | "wannier90" | "postw90" }> = [
     ...availableExecutables.map((name) => ({ name, type: "qe" as const })),
     ...(fermiSurferStatus === "Found"
@@ -3317,7 +3248,7 @@ function AppInner() {
     ...(wannier90Status === "Found"
       ? [{ name: "wannier90.x", type: "wannier90" as const }]
       : []),
-    ...(postw90Status === "Found"
+    ...(wannier90Status === "Found"
       ? [{ name: "postw90.x", type: "postw90" as const }]
       : []),
   ];
@@ -3327,8 +3258,6 @@ function AppInner() {
     fermiSurferStatus === "Found" ? "ready" : fermiSurferStatus === "Not found" ? "error" : "pending";
   const wannierStatusClass =
     wannier90Status === "Found" ? "ready" : wannier90Status === "Not found" ? "error" : "pending";
-  const postw90StatusClass =
-    postw90Status === "Found" ? "ready" : postw90Status === "Not found" ? "error" : "pending";
 
   return (
     <>
@@ -3413,28 +3342,21 @@ function AppInner() {
           </div>
 
           <div className="config-row">
-            <label>postw90:</label>
+            <label>postw90 (auto):</label>
             <input
               type="text"
               className="config-path-input"
-              value={postw90PathInput}
-              onChange={(e) => {
-                setPostw90PathInput(e.target.value);
-                setError(null);
-              }}
-              placeholder={derivePostw90PathFromWannier90Path(wannier90PathInput)}
+              value={derivedPostw90Path}
+              readOnly
               spellCheck={false}
             />
             <div className="config-row-actions">
-              <button onClick={selectPostw90Path}>Browse</button>
-              <button
-                onClick={() => void savePostw90Path()}
-                disabled={isSavingPostw90Path}
-              >
-                {isSavingPostw90Path ? "Saving..." : "Save"}
-              </button>
+              <button disabled title="Derived from the configured Wannier90 path.">Auto</button>
             </div>
           </div>
+          <p className="settings-menu-hint">
+            QCortado derives <code>postw90.x</code> from the Wannier90 executable path by using the same directory.
+          </p>
 
           <div className="status-row">
             <label>QE Status:</label>
@@ -3454,13 +3376,6 @@ function AppInner() {
             <label>Wannier90 Status:</label>
             <span className={`status ${wannierStatusClass}`}>
               {wannier90Status}
-            </span>
-          </div>
-
-          <div className="status-row">
-            <label>postw90 Status:</label>
-            <span className={`status ${postw90StatusClass}`}>
-              {postw90Status}
             </span>
           </div>
 
