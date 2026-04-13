@@ -217,12 +217,13 @@ const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
 const MULTIVIEW_BANDS_PROGRESS_EVENT: &str = "multiview-bands-progress";
-const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 8] = [
+const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 9] = [
     "scf",
     "bands",
     "dos",
     "wannier",
     "transport",
+    "epw",
     "phonon",
     "optimization",
     "fermi_surface",
@@ -1059,6 +1060,7 @@ fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
         || result.phonon_data.is_some()
         || result.wannier_data.is_some()
         || result.transport_data.is_some()
+        || result.epw_data.is_some()
 }
 
 fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
@@ -1078,6 +1080,7 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
         dos_data: None,
         wannier_data: None,
         transport_data: None,
+        epw_data: None,
     }
 }
 
@@ -1276,6 +1279,7 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
         "dos" => Some("dos"),
         "wannier" | "wannier90" => Some("wannier"),
         "transport" => Some("transport"),
+        "epw" => Some("epw"),
         "phonon" => Some("phonon"),
         "optimization"
         | "geometry_optimization"
@@ -1287,6 +1291,91 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhononArtifactSavePolicy {
+    PlotOnly,
+    EpwReady,
+    FullArchive,
+}
+
+impl PhononArtifactSavePolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PlotOnly => "plot-only",
+            Self::EpwReady => "epw-ready",
+            Self::FullArchive => "full-archive",
+        }
+    }
+}
+
+fn parse_phonon_save_policy(value: Option<&str>) -> Option<PhononArtifactSavePolicy> {
+    match value
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("plot-only") | Some("plot_only") | Some("plotonly") => {
+            Some(PhononArtifactSavePolicy::PlotOnly)
+        }
+        Some("epw-ready") | Some("epw_ready") | Some("epwready") => {
+            Some(PhononArtifactSavePolicy::EpwReady)
+        }
+        Some("full-archive") | Some("full_archive") | Some("fullarchive") | Some("full") => {
+            Some(PhononArtifactSavePolicy::FullArchive)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_legacy_phonon_save_policy(parameters: &serde_json::Value) -> PhononArtifactSavePolicy {
+    let preserve_full = parameters
+        .get("epw_preparation")
+        .and_then(|value| value.get("preserve_full_artifacts"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            parameters
+                .get("preserve_full_artifacts")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false);
+    if preserve_full {
+        return PhononArtifactSavePolicy::FullArchive;
+    }
+
+    let epw_ready = parameters
+        .get("epw_preparation")
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            parameters
+                .get("epw_preparation_enabled")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false);
+    if epw_ready {
+        PhononArtifactSavePolicy::EpwReady
+    } else {
+        PhononArtifactSavePolicy::PlotOnly
+    }
+}
+
+fn ensure_phonon_save_policy(parameters: &mut serde_json::Value) -> PhononArtifactSavePolicy {
+    let explicit_policy = parse_phonon_save_policy(
+        parameters
+            .get("phonon_save_policy")
+            .and_then(|value| value.as_str()),
+    );
+    let policy = explicit_policy.unwrap_or_else(|| resolve_legacy_phonon_save_policy(parameters));
+    if let Some(object) = parameters.as_object_mut() {
+        object.insert(
+            "phonon_save_policy".to_string(),
+            serde_json::json!(policy.as_str()),
+        );
+    }
+    policy
 }
 
 // ============================================================================
@@ -1512,6 +1601,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         let mut has_dos = false;
         let mut has_wannier = false;
         let mut has_transport = false;
+        let mut has_epw = false;
         let mut has_phonon = false;
         let mut has_optimization = false;
         let mut has_fermi_surface = false;
@@ -1535,6 +1625,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 Some("dos") => has_dos = true,
                 Some("wannier") => has_wannier = true,
                 Some("transport") => has_transport = true,
+                Some("epw") => has_epw = true,
                 Some("phonon") => has_phonon = true,
                 Some("optimization") => has_optimization = true,
                 Some("fermi_surface") => has_fermi_surface = true,
@@ -1550,6 +1641,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 "dos" => has_dos,
                 "wannier" => has_wannier,
                 "transport" => has_transport,
+                "epw" => has_epw,
                 "phonon" => has_phonon,
                 "optimization" => has_optimization,
                 "fermi_surface" => has_fermi_surface,
@@ -2041,19 +2133,12 @@ pub fn save_calculation(
 
     // Copy working directory contents if provided (includes .save directory, etc.)
     let mut copied_work_path: Option<PathBuf> = None;
-    let preserve_full_phonon_artifacts = calc_data.calc_type == "phonon"
-        && calc_data
-            .parameters
-            .get("epw_preparation")
-            .and_then(|value| value.get("preserve_full_artifacts"))
-            .and_then(|value| value.as_bool())
-            .or_else(|| {
-                calc_data
-                    .parameters
-                    .get("preserve_full_artifacts")
-                    .and_then(|value| value.as_bool())
-            })
-            .unwrap_or(false);
+    let mut calculation_parameters = calc_data.parameters.clone();
+    let phonon_save_policy = if calc_data.calc_type == "phonon" {
+        Some(ensure_phonon_save_policy(&mut calculation_parameters))
+    } else {
+        None
+    };
     let wannier_seedname = if calc_data.calc_type == "wannier" {
         calc_data
             .parameters
@@ -2086,9 +2171,18 @@ pub fn save_calculation(
             fs::create_dir_all(&tmp_dir)
                 .map_err(|e| format!("Failed to create tmp directory: {}", e))?;
 
-            // For phonons, default to compact artifacts unless EPW-prep explicitly asks for full data.
-            if calc_data.calc_type == "phonon" && !preserve_full_phonon_artifacts {
-                copy_compact_phonon_artifacts(&work_path, &tmp_dir)?;
+            if calc_data.calc_type == "phonon" {
+                match phonon_save_policy.unwrap_or(PhononArtifactSavePolicy::PlotOnly) {
+                    PhononArtifactSavePolicy::PlotOnly => {
+                        copy_compact_phonon_artifacts(&work_path, &tmp_dir)?
+                    }
+                    PhononArtifactSavePolicy::EpwReady => {
+                        copy_epw_ready_phonon_artifacts(&work_path, &tmp_dir)?
+                    }
+                    PhononArtifactSavePolicy::FullArchive => {
+                        copy_dir_recursive(&work_path, &tmp_dir)?
+                    }
+                }
             } else if calc_data.calc_type == "wannier" && save_size_mode == SaveSizeMode::Small {
                 copy_compact_wannier_artifacts(&work_path, &tmp_dir, &wannier_seedname)?;
             } else if calc_data.calc_type == "transport" && save_size_mode == SaveSizeMode::Small {
@@ -2098,7 +2192,7 @@ pub fn save_calculation(
                 // SCF keeps wfc* restart files so downstream phonon workflows remain valid.
                 copy_dir_recursive_compact(&work_path, &tmp_dir)?;
             } else {
-                // Copy all files and directories for non-phonon, or EPW-preserving phonon calculations.
+                // Copy all files and directories for non-phonon calculations in large-save mode.
                 copy_dir_recursive(&work_path, &tmp_dir)?;
             }
         }
@@ -2130,7 +2224,7 @@ pub fn save_calculation(
     let calc_run = CalculationRun {
         id: calc_id,
         calc_type: calc_data.calc_type,
-        parameters: calc_data.parameters,
+        parameters: calculation_parameters,
         result: Some(calc_data.result),
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
@@ -2429,6 +2523,58 @@ fn copy_compact_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> 
     Ok(())
 }
 
+fn copy_epw_ready_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> Result<(), String> {
+    copy_compact_phonon_artifacts(src_tmp_dir, staging_tmp_dir)?;
+
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(src_tmp_dir.to_path_buf());
+
+    while let Some(current_dir) = queue.pop_front() {
+        let entries = fs::read_dir(&current_dir).map_err(|e| {
+            format!(
+                "Failed to inspect phonon directory {}: {}",
+                current_dir.display(),
+                e
+            )
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+
+            if file_type.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let rel_path = path
+                .strip_prefix(src_tmp_dir)
+                .map_err(|e| format!("Failed to derive relative phonon path: {}", e))?;
+            let rel_lower = rel_path.to_string_lossy().to_ascii_lowercase();
+            let file_name = rel_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
+            let should_copy = file_name.contains("dvscf")
+                || (rel_lower.contains("_ph0/")
+                    && (file_name.ends_with(".xml") || file_name.contains("dvscf")));
+            if !should_copy {
+                continue;
+            }
+
+            copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, rel_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn copy_compact_wannier_artifacts(
     src_tmp_dir: &Path,
     staging_tmp_dir: &Path,
@@ -2463,6 +2609,56 @@ fn copy_compact_wannier_artifacts(
 
     for file in top_level {
         copy_file_relative_if_exists(src_tmp_dir, staging_tmp_dir, Path::new(&file))?;
+    }
+
+    // Preserve the QE `.save` produced by the Wannier NSCF stage so downstream
+    // EPW runs can reopen the explicit coarse-grid wavefunctions even in compact-save mode.
+    let mut copied_save_dir = false;
+    let preferred_save_root = src_tmp_dir.join("tmp");
+    if preferred_save_root.is_dir() {
+        for entry in fs::read_dir(&preferred_save_root).map_err(|e| {
+            format!(
+                "Failed to inspect Wannier tmp save root {}: {}",
+                preferred_save_root.display(),
+                e
+            )
+        })? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if !dir_name.ends_with(".save") {
+                continue;
+            }
+            copy_dir_recursive(
+                &path,
+                &staging_tmp_dir.join("tmp").join(&dir_name),
+            )?;
+            copied_save_dir = true;
+        }
+    }
+
+    if !copied_save_dir {
+        for entry in fs::read_dir(src_tmp_dir).map_err(|e| {
+            format!(
+                "Failed to inspect Wannier artifact directory {}: {}",
+                src_tmp_dir.display(),
+                e
+            )
+        })? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            if !dir_name.ends_with(".save") {
+                continue;
+            }
+            copy_dir_recursive(&path, &staging_tmp_dir.join(&dir_name))?;
+        }
     }
 
     Ok(())
@@ -2604,6 +2800,7 @@ pub fn recover_phonon_calculation(
         "calculate_dispersion": true,
         "n_qpoints": n_qpoints,
         "n_modes": n_modes,
+        "phonon_save_policy": PhononArtifactSavePolicy::PlotOnly.as_str(),
         "recovered_from_tmp": true,
         "recovery_source_dir": working_dir,
     });
@@ -2667,6 +2864,7 @@ pub fn recover_phonon_calculation(
         })),
         wannier_data: None,
         transport_data: None,
+        epw_data: None,
     };
 
     let input_content = fs::read_to_string(tmp_dir.join("ph.in")).unwrap_or_default();

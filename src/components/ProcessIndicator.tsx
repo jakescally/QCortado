@@ -64,6 +64,9 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
     dos: "Electronic DOS",
     fermi_surface: "Fermi Surface",
     phonon: "Phonon",
+    epw: "EPW",
+    wannier: "Wannier90",
+    transport: "Transport",
   };
   const typeLabel = typeLabels[task.taskType] || task.taskType.toUpperCase();
 

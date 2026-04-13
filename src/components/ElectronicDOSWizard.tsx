@@ -8,10 +8,10 @@ import {
   SlurmResourceRequest,
 } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
-import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
-import { analyzeCrystalSymmetry } from "../lib/symmetryTransform";
+import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
+import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
@@ -80,6 +80,7 @@ interface ElectronicDOSWizardProps {
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
   onViewDos: (dosData: ElectronicDOSData, scfFermiEnergy: number | null) => void;
   qePath: string;
+  defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
   projectId: string;
@@ -185,11 +186,22 @@ function parseOptionalPositiveNumber(input: string, label: string): number | nul
   return parsed;
 }
 
+function normalizeSmearingDefault(
+  raw: unknown,
+): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || "").toLowerCase();
+  if (lowered === "gaussian") return "gaussian";
+  if (lowered === "methfessel-paxton") return "methfessel-paxton";
+  if (lowered === "fermi-dirac") return "fermi-dirac";
+  return "marzari-vanderbilt";
+}
+
 export function ElectronicDOSWizard({
   onBack,
   onExecutionModeChange,
   onViewDos,
   qePath,
+  defaultSmearing = "marzari-vanderbilt",
   executionMode = "local",
   activeHpcProfile = null,
   projectId,
@@ -198,6 +210,7 @@ export function ElectronicDOSWizard({
   scfCalculations,
   reconnectTaskId,
 }: ElectronicDOSWizardProps) {
+  const resolvedDefaultSmearing = normalizeSmearingDefault(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
@@ -513,9 +526,10 @@ export function ElectronicDOSWizard({
     const sourceStructure = resolveSavedScfStructure(scfParams);
     const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
     let structureForNscf = sourceStructure;
+    let resolvedSymmetry: SymmetryTransformResult | null = null;
     if (sourceUsesPrimitive) {
       try {
-        const resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
         if (resolvedSymmetry.standardizedPrimitiveAtoms.length === 0) {
           throw new Error("Primitive cell data is unavailable.");
         }
@@ -532,6 +546,12 @@ export function ElectronicDOSWizard({
         throw new Error(
           `Selected SCF was run in a primitive cell, but matching primitive structure data could not be reconstructed: ${err}`,
         );
+      }
+    } else if (!structureForNscf) {
+      try {
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+      } catch {
+        resolvedSymmetry = null;
       }
     }
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
@@ -563,12 +583,12 @@ export function ElectronicDOSWizard({
         : occupationRaw === "from_input"
           ? "from_input"
           : "smearing";
-    const smearingRaw = String(scfParams.smearing || "marzari-vanderbilt").toLowerCase();
+    const smearingRaw = String(scfParams.smearing || resolvedDefaultSmearing).toLowerCase();
     const smearing = smearingRaw === "methfessel-paxton"
       || smearingRaw === "marzari-vanderbilt"
       || smearingRaw === "fermi-dirac"
       ? smearingRaw
-      : "marzari-vanderbilt";
+      : resolvedDefaultSmearing;
     const inheritedDegaussValue = Number(scfParams.degauss);
     const inheritedDegauss = Number.isFinite(inheritedDegaussValue) ? inheritedDegaussValue : null;
     const pseudoDir = isHpcMode
@@ -593,7 +613,7 @@ export function ElectronicDOSWizard({
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
 
-    const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+    const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
     const commonSystemFields = {
       species: elements.map((element) => ({
         symbol: element,
@@ -611,7 +631,20 @@ export function ElectronicDOSWizard({
       degauss: parsedDegauss ?? inheritedDegauss ?? 0.02,
     };
 
-    const systemConfig = structureForNscf
+    const systemConfig = inferredBravais
+      ? {
+        ...commonSystemFields,
+        ibrav: inferredBravais.ibrav,
+        celldm: inferredBravais.celldm,
+        cell_parameters: null,
+        cell_units: null,
+        atoms: inferredBravais.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true] as [boolean, boolean, boolean],
+        })),
+      }
+      : structureForNscf
       ? {
         ...commonSystemFields,
         ibrav: "free" as const,
@@ -619,19 +652,6 @@ export function ElectronicDOSWizard({
         cell_parameters: structureForNscf.cell_parameters,
         cell_units: structureForNscf.cell_units || "angstrom",
         atoms: structureForNscf.atoms.map((atom) => ({
-          symbol: atom.symbol,
-          position: atom.position,
-          if_pos: [true, true, true] as [boolean, boolean, boolean],
-        })),
-      }
-      : primitiveCell
-      ? {
-        ...commonSystemFields,
-        ibrav: primitiveCell.ibrav,
-        celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
-        cell_parameters: null,
-        cell_units: null,
-        atoms: primitiveCell.atoms.map((atom) => ({
           symbol: atom.symbol,
           position: atom.position,
           if_pos: [true, true, true] as [boolean, boolean, boolean],

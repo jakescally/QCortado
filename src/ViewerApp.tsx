@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { BandData, BandPlot } from "./components/BandPlot";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
+import { EpwViewer } from "./components/EpwViewer";
+import type { EpwViewerPayload } from "./components/EpwViewer";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
@@ -36,7 +38,7 @@ interface ViewerSyncResult {
   total_projects: number;
 }
 
-type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "bands-multiview" | "dos-viewer" | "wannier-viewer" | "transport-viewer" | "phonon-viewer";
+type ViewerView = "home" | "project-browser" | "project-dashboard" | "bands-viewer" | "bands-multiview" | "dos-viewer" | "wannier-viewer" | "transport-viewer" | "phonon-viewer" | "epw-viewer";
 type PhononViewMode = "bands" | "dos";
 
 interface PhononData {
@@ -99,6 +101,7 @@ function ViewerAppInner() {
   } | null>(null);
   const [viewTransportData, setViewTransportData] = useState<{ data: TransportResult } | null>(null);
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
+  const [viewEpwData, setViewEpwData] = useState<EpwViewerPayload | null>(null);
 
   const activeHpcProfile = useMemo(
     () => hpcProfiles.find((profile) => profile.id === activeHpcProfileId) ?? null,
@@ -282,9 +285,17 @@ function ViewerAppInner() {
           }}
           onRunFermiSurface={viewOnlyNoopCalc}
           onRunPhonons={viewOnlyNoopCalc}
+          onRunEPW={viewOnlyNoopCalc}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({ data: phononData, mode: viewMode });
             setCurrentView("phonon-viewer");
+          }}
+          onViewEPW={(epwData, rawOutput) => {
+            setViewEpwData({
+              data: epwData,
+              rawOutput: rawOutput ?? null,
+            });
+            setCurrentView("epw-viewer");
           }}
         />
         {appChrome}
@@ -505,6 +516,21 @@ function ViewerAppInner() {
             )}
           </div>
         </div>
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "epw-viewer" && viewEpwData) {
+    return (
+      <>
+        <EpwViewer
+          payload={viewEpwData}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setViewEpwData(null);
+          }}
+        />
         {appChrome}
       </>
     );

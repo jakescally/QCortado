@@ -7,7 +7,7 @@ import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "transport";
+export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "epw" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -63,7 +63,7 @@ interface QueueSaveSpec {
   projectId: string;
   cifId: string;
   workingDir?: string | null;
-  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "wannier" | "transport" | "optimization";
+  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "epw" | "wannier" | "transport" | "optimization";
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
@@ -125,6 +125,7 @@ const COMMAND_MAP: Record<TaskType, string> = {
   dos: "start_dos_calculation",
   fermi_surface: "start_fermi_surface_calculation",
   phonon: "start_phonon_calculation",
+  epw: "start_epw_calculation",
   wannier: "start_wannier_calculation",
   transport: "start_transport_calculation",
 };
@@ -151,7 +152,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "wannier" || taskType === "transport") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
@@ -351,6 +352,18 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
     };
   }
 
+  if (taskType === "epw") {
+    return {
+      converged: Boolean(taskResult?.result_summary?.completed),
+      total_energy: null,
+      fermi_energy: null,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: outputText,
+      epw_data: taskResult,
+    };
+  }
+
   const converged = taskResult?.converged ?? true;
   return {
     converged,
@@ -463,6 +476,19 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
     }
     if (next.engine == null && typeof taskResult?.engine === "string") {
       next.engine = taskResult.engine;
+    }
+  } else if (taskType === "epw") {
+    if (next.source_phonon_calc_id == null && typeof taskResult?.sources?.phonon?.calc_id === "string") {
+      next.source_phonon_calc_id = taskResult.sources.phonon.calc_id;
+    }
+    if (next.source_wannier_calc_id == null && typeof taskResult?.sources?.wannier?.calc_id === "string") {
+      next.source_wannier_calc_id = taskResult.sources.wannier.calc_id;
+    }
+    if (next.artifact_count == null && Array.isArray(taskResult?.artifacts)) {
+      next.artifact_count = taskResult.artifacts.length;
+    }
+    if (next.parse_partial == null && typeof taskResult?.result_summary?.parse_partial === "boolean") {
+      next.parse_partial = taskResult.result_summary.parse_partial;
     }
   }
 

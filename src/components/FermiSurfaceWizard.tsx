@@ -9,10 +9,10 @@ import {
   SlurmResourceRequest,
 } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
-import { getPrimitiveCell, PrimitiveCell } from "../lib/primitiveCell";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
-import { analyzeCrystalSymmetry } from "../lib/symmetryTransform";
+import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
+import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
@@ -79,6 +79,7 @@ interface FermiSurfaceWizardProps {
   onBack: () => void;
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
   qePath: string;
+  defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
   projectId: string;
@@ -226,18 +227,23 @@ function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input"
   return "smearing";
 }
 
-function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
-  const lowered = String(raw || "marzari-vanderbilt").toLowerCase();
+function normalizeSmearing(
+  raw: unknown,
+  fallback: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" = "marzari-vanderbilt",
+): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || fallback).toLowerCase();
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
-  return "marzari-vanderbilt";
+  if (lowered === "gaussian") return "gaussian";
+  return fallback;
 }
 
 export function FermiSurfaceWizard({
   onBack,
   onExecutionModeChange,
   qePath,
+  defaultSmearing = "marzari-vanderbilt",
   executionMode = "local",
   activeHpcProfile = null,
   projectId,
@@ -254,6 +260,7 @@ export function FermiSurfaceWizard({
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
   const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
+  const resolvedDefaultSmearing = normalizeSmearing(defaultSmearing);
 
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -274,7 +281,7 @@ export function FermiSurfaceWizard({
   const [nscfConvThrInput, setNscfConvThrInput] = useState("1e-8");
   const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState("0.7");
   const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">("smearing");
-  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">("marzari-vanderbilt");
+  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(resolvedDefaultSmearing);
   const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
   const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -373,7 +380,7 @@ export function FermiSurfaceWizard({
     }
 
     setNscfOccupations(normalizeOccupations(params.occupations));
-    setNscfSmearing(normalizeSmearing(params.smearing));
+    setNscfSmearing(normalizeSmearing(params.smearing, resolvedDefaultSmearing));
 
     const degauss = Number(params.degauss);
     if (Number.isFinite(degauss) && degauss > 0) {
@@ -395,7 +402,7 @@ export function FermiSurfaceWizard({
     } else {
       setNscfVerbosity("high");
     }
-  }, []);
+  }, [resolvedDefaultSmearing]);
 
   const selectSourceScf = useCallback((scf: CalculationRun) => {
     setSelectedScf(scf);
@@ -651,9 +658,10 @@ export function FermiSurfaceWizard({
     const sourceStructure = resolveSavedScfStructure(scfParams);
     const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
     let structureForNscf: SavedStructureData | null = sourceStructure;
+    let resolvedSymmetry: SymmetryTransformResult | null = null;
     if (sourceUsesPrimitive) {
       try {
-        const resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
         if (resolvedSymmetry.standardizedPrimitiveAtoms.length === 0) {
           throw new Error("Primitive cell data is unavailable.");
         }
@@ -670,6 +678,12 @@ export function FermiSurfaceWizard({
         throw new Error(
           `Selected SCF was run in a primitive cell, but matching primitive structure data could not be reconstructed: ${err}`,
         );
+      }
+    } else if (!structureForNscf) {
+      try {
+        resolvedSymmetry = await analyzeCrystalSymmetry(crystalData);
+      } catch {
+        resolvedSymmetry = null;
       }
     }
     const savedPseudoMap = (scfParams.selected_pseudos && typeof scfParams.selected_pseudos === "object")
@@ -715,7 +729,7 @@ export function FermiSurfaceWizard({
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
 
-    const primitiveCell: PrimitiveCell | null = getPrimitiveCell(crystalData);
+    const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
     const commonSystemFields = {
       species: elements.map((element) => ({
         symbol: element,
@@ -733,7 +747,20 @@ export function FermiSurfaceWizard({
       degauss: parsedDegauss,
     };
 
-    const systemConfig = structureForNscf
+    const systemConfig = inferredBravais
+      ? {
+        ...commonSystemFields,
+        ibrav: inferredBravais.ibrav,
+        celldm: inferredBravais.celldm,
+        cell_parameters: null,
+        cell_units: null,
+        atoms: inferredBravais.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true] as [boolean, boolean, boolean],
+        })),
+      }
+      : structureForNscf
       ? {
         ...commonSystemFields,
         ibrav: "free" as const,
@@ -741,19 +768,6 @@ export function FermiSurfaceWizard({
         cell_parameters: structureForNscf.cell_parameters,
         cell_units: structureForNscf.cell_units || "angstrom",
         atoms: structureForNscf.atoms.map((atom) => ({
-          symbol: atom.symbol,
-          position: atom.position,
-          if_pos: [true, true, true] as [boolean, boolean, boolean],
-        })),
-      }
-      : primitiveCell
-      ? {
-        ...commonSystemFields,
-        ibrav: primitiveCell.ibrav,
-        celldm: [primitiveCell.celldm1, 0, 0, 0, 0, 0],
-        cell_parameters: null,
-        cell_units: null,
-        atoms: primitiveCell.atoms.map((atom) => ({
           symbol: atom.symbol,
           position: atom.position,
           if_pos: [true, true, true] as [boolean, boolean, boolean],

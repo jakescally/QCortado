@@ -302,6 +302,27 @@ export function updateTransportProgress(line: string, state: ProgressState): Pro
   return next;
 }
 
+export function updateEpwProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 72, phase: "epw.x" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 94, phase: "Parsing EPW outputs" };
+    }
+  }
+
+  if (line.includes("EPW local pipeline complete") || line.includes("EPW HPC pipeline complete")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
 function updateHpcProgress(line: string, state: ProgressState): ProgressState | null {
   if (line.startsWith("HPC_STAGE|")) {
     const [, stageRaw, infoRaw] = line.split("|", 3);
@@ -380,6 +401,7 @@ type ProgressKind =
   | "dos"
   | "fermi_surface"
   | "phonon"
+  | "epw"
   | "wannier"
   | "transport";
 
@@ -404,6 +426,8 @@ export function progressReducer(
       return updateFermiSurfaceProgress(line, state);
     case "phonon":
       return updatePhononProgress(line, state);
+    case "epw":
+      return updateEpwProgress(line, state);
     case "wannier":
       return updateWannierProgress(line, state);
     case "transport":

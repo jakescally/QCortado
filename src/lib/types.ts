@@ -90,6 +90,7 @@ export interface PseudopotentialMetadata {
 }
 
 export type ExecutionMode = "local" | "hpc";
+export type QeSmearingType = "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
 export type HpcAuthMethod = "ssh_key" | "password";
 export type HpcResourceType = "cpu" | "gpu";
 export type HpcResourceMode = "cpu_only" | "gpu_only" | "both";
@@ -146,6 +147,10 @@ export interface HpcExecutionTarget {
 export interface ExecutionTarget {
   mode: ExecutionMode;
   hpc?: HpcExecutionTarget | null;
+}
+
+export interface QeDefaults {
+  smearing: QeSmearingType;
 }
 
 export interface HpcTaskMeta {

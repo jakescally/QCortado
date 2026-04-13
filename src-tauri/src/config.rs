@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 use crate::hpc::profile::{ExecutionMode, HpcProfile};
+use crate::qe::SmearingType;
 
 /// Controls how much calculation scratch data is persisted in project history.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -23,6 +24,26 @@ pub enum SaveSizeMode {
 pub struct MpiDefaultsConfig {
     pub enabled: bool,
     pub nprocs: u32,
+}
+
+/// Global QE defaults shared across calculation workflows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QeDefaultsConfig {
+    /// Default smearing type when occupations = smearing.
+    #[serde(default = "default_qe_smearing")]
+    pub smearing: SmearingType,
+}
+
+fn default_qe_smearing() -> SmearingType {
+    SmearingType::MarzariVanderbilt
+}
+
+impl Default for QeDefaultsConfig {
+    fn default() -> Self {
+        Self {
+            smearing: default_qe_smearing(),
+        }
+    }
 }
 
 /// Application configuration stored on disk
@@ -47,6 +68,9 @@ pub struct AppConfig {
     /// Optional global defaults for MPI in calculation wizards
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mpi_defaults: Option<MpiDefaultsConfig>,
+    /// Global QE defaults for new calculations.
+    #[serde(default)]
+    pub qe_defaults: QeDefaultsConfig,
     /// Global save-size mode for persisted project artifacts.
     #[serde(default)]
     pub save_size_mode: SaveSizeMode,
@@ -89,6 +113,7 @@ impl Default for AppConfig {
             wannier90_path: None,
             postw90_path: None,
             mpi_defaults: None,
+            qe_defaults: QeDefaultsConfig::default(),
             save_size_mode: SaveSizeMode::Large,
             execution_mode: ExecutionMode::Local,
             hpc_profiles: Vec::new(),
@@ -186,6 +211,13 @@ pub fn update_mpi_defaults(
 ) -> Result<(), String> {
     let mut config = load_config(app)?;
     config.mpi_defaults = mpi_defaults;
+    save_config(app, &config)
+}
+
+/// Updates global QE defaults and saves.
+pub fn update_qe_defaults(app: &AppHandle, qe_defaults: QeDefaultsConfig) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.qe_defaults = qe_defaults;
     save_config(app, &config)
 }
 

@@ -7,13 +7,19 @@ import {
   HpcProfile,
   SlurmResourceRequest,
 } from "../lib/types";
-import { BandData } from "./BandPlot";
+import {
+  BandData,
+  BandPlot,
+  buildBandPlotProjectionOptions,
+  getDefaultBandPlotEnergyRange,
+} from "./BandPlot";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
 import {
   analyzeCrystalSymmetry,
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
+import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -47,6 +53,7 @@ import {
   WannierQualityIssue,
 } from "../lib/wannierQuality";
 import { getNeutralElectronConfiguration } from "../lib/electronConfigurations";
+import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 
 interface CalculationRun {
   id: string;
@@ -55,12 +62,20 @@ interface CalculationRun {
   result: {
     converged: boolean;
     fermi_energy: number | null;
+    band_data?: BandData | null;
     raw_output?: string | null;
     wannier_data?: WannierResult | null;
   } | null;
   started_at: string;
   completed_at: string | null;
   tags?: string[];
+}
+
+interface WannierBandOverlayOption {
+  id: string;
+  label: string;
+  data: BandData;
+  fermiEnergy: number | null;
 }
 
 interface WannierSpread {
@@ -121,6 +136,7 @@ type ProjectionTargetType = "element" | "site";
 type ProjectionOrbital = "s" | "p" | "d" | "f" | "sp" | "sp2" | "sp3" | "sp3d" | "sp3d2";
 type WizardStep = "source" | "mesh" | "projections" | "run" | "results";
 type NumBandsMode = "auto" | "manual";
+type ReferenceEnergyMode = "relative" | "absolute";
 
 interface ProjectionDraft {
   id: string;
@@ -133,8 +149,13 @@ interface ProjectionDraft {
 interface WannierWizardProps {
   onBack: () => void;
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
-  onViewWannier: (result: WannierResult, scfFermiEnergy: number | null) => void;
+  onViewWannier: (
+    result: WannierResult,
+    scfFermiEnergy: number | null,
+    overlayOptions?: WannierBandOverlayOption[],
+  ) => void;
   qePath: string;
+  defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
   projectId: string;
@@ -170,12 +191,16 @@ function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input"
   return "fixed";
 }
 
-function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
-  const lowered = String(raw || "marzari-vanderbilt").toLowerCase();
+function normalizeSmearing(
+  raw: unknown,
+  fallback: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" = "marzari-vanderbilt",
+): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || fallback).toLowerCase();
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
-  return "marzari-vanderbilt";
+  if (lowered === "gaussian") return "gaussian";
+  return fallback;
 }
 
 function orbitalTemplateCount(orbital: ProjectionOrbital): number {
@@ -388,10 +413,8 @@ function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint
 function getWannierSourceIssues(calc: CalculationRun): string[] {
   const params = calc.parameters || {};
   const issues: string[] = [];
-  if (!sourceScfUsesPrimitiveCell(params)) {
-    issues.push("Primitive-cell SCF required");
-  }
-  if (Number(params.nspin) !== 1) {
+  const nspin = Number(params.nspin ?? 1);
+  if (nspin !== 1) {
     issues.push("Scalar nspin=1 required");
   }
   if (Boolean(params.noncolin) || Boolean(params.lspinorb)) {
@@ -468,10 +491,26 @@ function makeProjectionId(): string {
   return `proj_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
 }
 
+function formatReferenceBandsLabel(calc: CalculationRun): string {
+  const dateLabel = new Date(calc.completed_at ?? calc.started_at).toLocaleDateString();
+  const sourceScfId = String(calc.parameters?.source_scf_id || "").trim();
+  const sourceLabel = sourceScfId ? sourceScfId.slice(0, 8) : "unknown";
+  const hasProjections = Boolean(calc.result?.band_data?.projections);
+  return `${dateLabel} · ${calc.id.slice(0, 8)} · source ${sourceLabel} · ${hasProjections ? "fat bands" : "line bands"}`;
+}
+
+function normalizeSavedKPath(value: unknown): string {
+  return String(value || "")
+    .replace(/\s*→\s*/g, "→")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function WannierWizard({
   onBack,
   onViewWannier,
   qePath,
+  defaultSmearing = "marzari-vanderbilt",
   executionMode = "local",
   activeHpcProfile = null,
   projectId,
@@ -480,6 +519,7 @@ export function WannierWizard({
   scfCalculations,
   reconnectTaskId,
 }: WannierWizardProps) {
+  const resolvedDefaultSmearing = normalizeSmearing(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
@@ -509,6 +549,15 @@ export function WannierWizard({
   const [disWinMaxInput, setDisWinMaxInput] = useState("");
   const [disFrozMinInput, setDisFrozMinInput] = useState("");
   const [disFrozMaxInput, setDisFrozMaxInput] = useState("");
+  const [referenceBandsCalcId, setReferenceBandsCalcId] = useState("");
+  const [referenceEnergyMode, setReferenceEnergyMode] = useState<ReferenceEnergyMode>("absolute");
+  const [referenceEnergyMinInput, setReferenceEnergyMinInput] = useState("");
+  const [referenceEnergyMaxInput, setReferenceEnergyMaxInput] = useState("");
+  const [referenceEnergyRange, setReferenceEnergyRange] = useState<[number, number] | null>(null);
+  const [referenceEnergyError, setReferenceEnergyError] = useState<string | null>(null);
+  const [referenceProjectionSelection, setReferenceProjectionSelection] = useState("none");
+  const [detailedBandsById, setDetailedBandsById] = useState<Record<string, CalculationRun>>({});
+  const [referenceBandsLoading, setReferenceBandsLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressState>(defaultProgressState("Wannier90"));
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
@@ -540,6 +589,7 @@ export function WannierWizard({
     () => [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))],
     [crystalData],
   );
+  const conventionalAtomCount = crystalData.atom_sites.length;
   const structureElectronConfigs = useMemo(
     () => uniqueCrystalElements.map((element) => ({
       element,
@@ -561,7 +611,7 @@ export function WannierWizard({
 
   async function prepareSelectedScfSource(scf: CalculationRun): Promise<void> {
     const params = scf.parameters || {};
-    if (sourceScfUsesPrimitiveCell(params)) {
+    if (sourceScfUsesPrimitiveCell(params, conventionalAtomCount)) {
       await ensureSymmetryTransform();
     }
   }
@@ -660,14 +710,14 @@ export function WannierWizard({
   const wannierCellAtomSymbols = useMemo(() => {
     const params = selectedScf?.parameters || {};
     if (
-      sourceScfUsesPrimitiveCell(params)
+      sourceScfUsesPrimitiveCell(params, conventionalAtomCount)
       && symmetryTransform
       && symmetryTransform.standardizedPrimitiveAtoms.length > 0
     ) {
       return symmetryTransform.standardizedPrimitiveAtoms.map((atom) => getBaseElement(atom.symbol));
     }
     return crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol));
-  }, [crystalData, selectedScf, symmetryTransform]);
+  }, [conventionalAtomCount, crystalData, selectedScf, symmetryTransform]);
 
   const validScfs = useMemo(
     () => scfCalculations.filter((calc) => calc.calc_type === "scf" && calc.result?.converged),
@@ -686,6 +736,50 @@ export function WannierWizard({
     () => (selectedScf ? getWannierSourceIssues(selectedScf) : []),
     [selectedScf],
   );
+  const bandCalculationSummaries = useMemo(
+    () => scfCalculations.filter((calc) => calc.calc_type === "bands"),
+    [scfCalculations],
+  );
+  const hydratedBandCalculations = useMemo(
+    () => bandCalculationSummaries.map((calc) => detailedBandsById[calc.id] ?? calc),
+    [bandCalculationSummaries, detailedBandsById],
+  );
+  const referenceBandsCalculations = useMemo(
+    () => hydratedBandCalculations
+      .filter((calc) => Boolean(calc.result?.band_data))
+      .slice()
+      .sort((left, right) => {
+        const leftTime = new Date(left.completed_at ?? left.started_at).getTime();
+        const rightTime = new Date(right.completed_at ?? right.started_at).getTime();
+        return rightTime - leftTime;
+      }),
+    [hydratedBandCalculations],
+  );
+  const selectedReferenceBandsCalculation = useMemo(
+    () => referenceBandsCalculations.find((calc) => calc.id === referenceBandsCalcId)
+      ?? referenceBandsCalculations[0]
+      ?? null,
+    [referenceBandsCalcId, referenceBandsCalculations],
+  );
+  const selectedReferenceBandData = selectedReferenceBandsCalculation?.result?.band_data ?? null;
+  const selectedReferenceFermiEnergy = useMemo(() => {
+    const sourceScfEf = Number(selectedScf?.result?.fermi_energy);
+    if (Number.isFinite(sourceScfEf)) {
+      return sourceScfEf;
+    }
+    const sourceBandsEf = Number(selectedReferenceBandsCalculation?.result?.fermi_energy);
+    if (Number.isFinite(sourceBandsEf)) {
+      return sourceBandsEf;
+    }
+    return 0;
+  }, [selectedReferenceBandsCalculation?.result?.fermi_energy, selectedScf?.result?.fermi_energy]);
+  const referencePlotFermi = referenceEnergyMode === "relative" ? selectedReferenceFermiEnergy : 0;
+  const referenceProjectionOptions = useMemo(
+    () => selectedReferenceBandData
+      ? buildBandPlotProjectionOptions(selectedReferenceBandData)
+      : [{ value: "none", label: "none" }],
+    [selectedReferenceBandData],
+  );
 
   useEffect(() => {
     if (!selectedScf) return;
@@ -694,6 +788,195 @@ export function WannierWizard({
     }
     setSelectedScf(null);
   }, [readyScfs, selectedScf]);
+
+  useEffect(() => {
+    if (step !== "projections") return;
+    const missingBandDetails = bandCalculationSummaries.filter((calc) => {
+      if (calc.result?.band_data) return false;
+      if (detailedBandsById[calc.id]?.result?.band_data) return false;
+      return true;
+    });
+    if (missingBandDetails.length === 0) {
+      setReferenceBandsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setReferenceBandsLoading(true);
+    void (async () => {
+      const details = await Promise.all(
+        missingBandDetails.map(async (calc) => {
+          try {
+            return await invoke<CalculationRun>("get_project_calculation", {
+              projectId,
+              calcId: calc.id,
+            });
+          } catch (err) {
+            console.warn(`Failed to hydrate bands calculation ${calc.id}:`, err);
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setDetailedBandsById((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const detail of details) {
+          if (!detail || !detail.result?.band_data) continue;
+          if (!next[detail.id]?.result?.band_data) {
+            next[detail.id] = detail;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+      setReferenceBandsLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bandCalculationSummaries, detailedBandsById, projectId, step]);
+
+  useEffect(() => {
+    if (!selectedReferenceBandsCalculation) {
+      if (referenceBandsCalcId) {
+        setReferenceBandsCalcId("");
+      }
+      return;
+    }
+    if (selectedReferenceBandsCalculation.id !== referenceBandsCalcId) {
+      setReferenceBandsCalcId(selectedReferenceBandsCalculation.id);
+    }
+  }, [referenceBandsCalcId, selectedReferenceBandsCalculation]);
+
+  useEffect(() => {
+    if (!selectedReferenceBandData) {
+      setReferenceEnergyRange(null);
+      setReferenceEnergyMinInput("");
+      setReferenceEnergyMaxInput("");
+      setReferenceEnergyError(null);
+      setReferenceProjectionSelection("none");
+      return;
+    }
+    const [defaultMin, defaultMax] = getDefaultBandPlotEnergyRange(
+      selectedReferenceBandData,
+      referencePlotFermi,
+      "scf",
+    );
+    setReferenceEnergyRange([defaultMin, defaultMax]);
+    setReferenceEnergyMinInput(Number.parseFloat(defaultMin.toFixed(3)).toString());
+    setReferenceEnergyMaxInput(Number.parseFloat(defaultMax.toFixed(3)).toString());
+    setReferenceEnergyError(null);
+    setReferenceProjectionSelection("none");
+  }, [selectedReferenceBandData, selectedReferenceBandsCalculation?.id, referencePlotFermi]);
+
+  useEffect(() => {
+    if (!referenceProjectionOptions.some((option) => option.value === referenceProjectionSelection)) {
+      setReferenceProjectionSelection("none");
+    }
+  }, [referenceProjectionOptions, referenceProjectionSelection]);
+
+  const buildViewerOverlayOptions = useCallback(async (): Promise<WannierBandOverlayOption[]> => {
+    const sourceScfId = String(selectedScf?.id ?? "").trim();
+    const selectedKPath = normalizeSavedKPath(kPath.map((point) => point.label).join(" → "));
+    if (!sourceScfId || !selectedKPath) {
+      return [];
+    }
+
+    const matchingBandRuns = bandCalculationSummaries.filter((candidate) => {
+      if (candidate.calc_type !== "bands") {
+        return false;
+      }
+      const candidateSourceScfId = String(candidate.parameters?.source_scf_id ?? "").trim();
+      const candidateKPath = normalizeSavedKPath(candidate.parameters?.k_path);
+      return candidateSourceScfId === sourceScfId && candidateKPath === selectedKPath;
+    });
+    if (matchingBandRuns.length === 0) {
+      return [];
+    }
+
+    const hydratedBandDetails: CalculationRun[] = [];
+    const settled = await Promise.allSettled(
+      matchingBandRuns.map(async (candidate) => {
+        let detail = detailedBandsById[candidate.id] ?? candidate;
+        if (!detail.result?.band_data) {
+          try {
+            detail = await invoke<CalculationRun>("get_project_calculation", {
+              projectId,
+              calcId: candidate.id,
+            });
+          } catch {
+            return null;
+          }
+        }
+        if (detail.result?.band_data) {
+          hydratedBandDetails.push(detail);
+        }
+        const bandData = detail.result?.band_data ?? candidate.result?.band_data ?? null;
+        if (!bandData) {
+          return null;
+        }
+        const startedAt = detail.started_at ?? candidate.started_at;
+        return {
+          id: candidate.id,
+          label: `Bands · ${new Date(startedAt).toLocaleString()}`,
+          data: bandData,
+          fermiEnergy: detail.result?.fermi_energy ?? candidate.result?.fermi_energy ?? null,
+          startedAt,
+        };
+      }),
+    );
+
+    if (hydratedBandDetails.length > 0) {
+      setDetailedBandsById((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const detail of hydratedBandDetails) {
+          if (!next[detail.id]?.result?.band_data && detail.result?.band_data) {
+            next[detail.id] = detail;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+
+    return settled
+      .flatMap((entry) => (entry.status === "fulfilled" && entry.value ? [entry.value] : []))
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+      .map(({ startedAt: _startedAt, ...overlay }) => overlay);
+  }, [bandCalculationSummaries, detailedBandsById, kPath, projectId, selectedScf?.id]);
+
+  const commitReferenceEnergyRange = useCallback(() => {
+    if (!selectedReferenceBandData) {
+      return;
+    }
+    const parsedMin = Number.parseFloat(referenceEnergyMinInput.trim());
+    const parsedMax = Number.parseFloat(referenceEnergyMaxInput.trim());
+    if (!Number.isFinite(parsedMin) || !Number.isFinite(parsedMax)) {
+      setReferenceEnergyError("Provide numeric energy limits.");
+      return;
+    }
+    if (parsedMin >= parsedMax) {
+      setReferenceEnergyError("Energy minimum must be smaller than energy maximum.");
+      return;
+    }
+    setReferenceEnergyRange([parsedMin, parsedMax]);
+    setReferenceEnergyMinInput(Number.parseFloat(parsedMin.toFixed(3)).toString());
+    setReferenceEnergyMaxInput(Number.parseFloat(parsedMax.toFixed(3)).toString());
+    setReferenceEnergyError(null);
+  }, [
+    referenceEnergyMaxInput,
+    referenceEnergyMinInput,
+    selectedReferenceBandData,
+  ]);
+
+  const handleReferenceEnergyKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitReferenceEnergyRange();
+  }, [commitReferenceEnergyRange]);
 
   const derivedNumWann = useMemo(
     () => projectionDrafts.reduce(
@@ -979,7 +1262,7 @@ export function WannierWizard({
     const noncolin = Boolean(params.noncolin);
     const lspinorb = Boolean(params.lspinorb);
     const occupations = normalizeOccupations(params.occupations);
-    const smearing = normalizeSmearing(params.smearing);
+    const smearing = normalizeSmearing(params.smearing, resolvedDefaultSmearing);
     const degauss = Number(params.degauss);
     const convThr = Number(params.conv_thr);
     const mixingBeta = Number(params.mixing_beta);
@@ -994,7 +1277,15 @@ export function WannierWizard({
     }
 
     const resolvedSymmetry = await ensureSymmetryTransform();
-    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(params);
+    const structureForNscf = resolveSavedScfStructure(params);
+    const isOptimizedSourceScf =
+      String(params.cell_representation || "").toLowerCase() === "optimized_source";
+    if (isOptimizedSourceScf && !structureForNscf) {
+      throw new Error(
+        "Selected SCF was run from an optimized structure, but its saved structure metadata is missing. Re-run the SCF from the optimized source and try again.",
+      );
+    }
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(params, conventionalAtomCount);
     const canUseSymmetryPrimitive =
       sourceUsesPrimitive &&
       resolvedSymmetry !== null &&
@@ -1010,9 +1301,16 @@ export function WannierWizard({
     const effectiveRhombohedralConvention = kPathRhombohedralConvention
       ?? defaultRhombohedralConventionForSetting(context.rhombohedralSetting ?? null);
     const converters = createPathCoordinateConverters(context, resolvedSymmetry);
+    const inferredBravais =
+      canUseSymmetryPrimitive && resolvedSymmetry
+        ? inferQeBravaisCellFromCif(crystalData, resolvedSymmetry)
+        : null;
 
-    const baseCalculation = canUseSymmetryPrimitive && resolvedSymmetry
-      ? {
+    let baseCalculation;
+    let transformedPath;
+
+    if (isOptimizedSourceScf && structureForNscf) {
+      baseCalculation = {
         calculation: "scf",
         prefix: params.prefix || "qcortado_scf",
         outdir: "./tmp",
@@ -1020,10 +1318,59 @@ export function WannierWizard({
         system: {
           ibrav: "free",
           celldm: null,
-          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
-          cell_units: "angstrom",
+          cell_parameters: structureForNscf.cell_parameters,
+          cell_units: structureForNscf.cell_units || "angstrom",
           species,
-          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+          atoms: structureForNscf.atoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: roundVec3(atom.position),
+            if_pos: [true, true, true],
+          })),
+          position_units: structureForNscf.position_units || "crystal",
+          ecutwfc,
+          ecutrho,
+          nbnd: null,
+          nspin,
+          noncolin,
+          lspinorb,
+          occupations,
+          smearing,
+          degauss: Number.isFinite(degauss) && degauss > 0 ? degauss : null,
+          nosym: false,
+          noinv: false,
+        },
+        kpoints: { type: "gamma" },
+        conv_thr: Number.isFinite(convThr) && convThr > 0 ? convThr : 1e-8,
+        mixing_beta: Number.isFinite(mixingBeta) && mixingBeta > 0 ? mixingBeta : 0.7,
+        tprnfor: false,
+        tstress: false,
+        forc_conv_thr: null,
+        etot_conv_thr: null,
+        verbosity: "high",
+      };
+      transformedPath = mapPathCoordinates(
+        kPath,
+        canUseSymmetryPrimitive && resolvedSymmetry
+          ? converters.toSymmetryPrimitiveCoords
+          : converters.toInputConventionalCoords,
+      ).map((point) => ({
+        label: point.label,
+        coords: point.coords,
+        npoints: point.npoints,
+      }));
+    } else if (canUseSymmetryPrimitive && resolvedSymmetry) {
+      baseCalculation = {
+        calculation: "scf",
+        prefix: params.prefix || "qcortado_scf",
+        outdir: "./tmp",
+        pseudo_dir: isHpcMode ? (activeHpcProfile?.remote_pseudo_dir || "") : qePath.replace(/\/bin\/?$/, "/pseudo"),
+        system: {
+          ibrav: inferredBravais?.ibrav ?? "free",
+          celldm: inferredBravais?.celldm ?? null,
+          cell_parameters: inferredBravais ? null : resolvedSymmetry.standardizedPrimitiveLattice,
+          cell_units: inferredBravais ? null : "angstrom",
+          species,
+          atoms: (inferredBravais?.atoms ?? resolvedSymmetry.standardizedPrimitiveAtoms).map((atom) => ({
             symbol: atom.symbol,
             position: roundVec3(atom.position),
             if_pos: [true, true, true],
@@ -1049,8 +1396,17 @@ export function WannierWizard({
         forc_conv_thr: null,
         etot_conv_thr: null,
         verbosity: "high",
-      }
-      : {
+      };
+      transformedPath = mapPathCoordinates(
+        kPath,
+        converters.toSymmetryPrimitiveCoords,
+      ).map((point) => ({
+        label: point.label,
+        coords: point.coords,
+        npoints: point.npoints,
+      }));
+    } else {
+      baseCalculation = {
         calculation: "scf",
         prefix: params.prefix || "qcortado_scf",
         outdir: "./tmp",
@@ -1088,17 +1444,15 @@ export function WannierWizard({
         etot_conv_thr: null,
         verbosity: "high",
       };
-
-    const transformedPath = mapPathCoordinates(
-      kPath,
-      canUseSymmetryPrimitive && resolvedSymmetry
-        ? converters.toSymmetryPrimitiveCoords
-        : converters.toInputConventionalCoords,
-    ).map((point) => ({
-      label: point.label,
-      coords: point.coords,
-      npoints: point.npoints,
-    }));
+      transformedPath = mapPathCoordinates(
+        kPath,
+        converters.toInputConventionalCoords,
+      ).map((point) => ({
+        label: point.label,
+        coords: point.coords,
+        npoints: point.npoints,
+      }));
+    }
 
     const projectionSpecs = projectionDrafts.map((item) => {
       if (item.targetType === "site" && item.siteIndex != null) {
@@ -1211,7 +1565,9 @@ export function WannierWizard({
         k_path: kPath.map((point) => point.label).join(" → "),
         total_k_points_target: totalKPoints,
         scf_fermi_energy: selectedScf.result?.fermi_energy ?? null,
-        cell_representation: canUseSymmetryPrimitive ? "primitive_spglib" : "conventional_input",
+        cell_representation: isOptimizedSourceScf
+          ? "optimized_source"
+          : (canUseSymmetryPrimitive ? "primitive_spglib" : "conventional_input"),
         ecutwfc: params.ecutwfc,
         nspin: params.nspin,
         lspinorb: params.lspinorb,
@@ -1341,12 +1697,12 @@ export function WannierWizard({
           </div>
         </div>
         <p className="step-description">
-          Choose the converged scalar SCF that will supply the restart density and primitive-cell metadata for Wannierization.
+          Choose the converged scalar SCF that will supply the restart density and source metadata for Wannierization.
         </p>
 
         {readyScfs.length === 0 && (
           <div className="warning-banner">
-            No Wannier-ready SCFs found. Wannier v1 requires a primitive-cell scalar source with no SOC, noncollinearity, DFT+U, or certified vdW corrections.
+            No Wannier-ready SCFs found. Wannier v1 requires a scalar source with no SOC, noncollinearity, DFT+U, or certified vdW corrections.
           </div>
         )}
 
@@ -1563,6 +1919,128 @@ export function WannierWizard({
             ))}
           </div>
         )}
+
+        <div className="param-section">
+          <div className="source-step-header">
+            <h4>
+              Reference Bands Preview
+              <Tooltip text="Load a saved bands calculation from this project to guide projection and disentanglement choices before launching Wannier90." />
+            </h4>
+          </div>
+          {referenceBandsCalculations.length === 0 ? (
+            <div className="info-banner">
+              {referenceBandsLoading
+                ? "Loading saved bands calculations..."
+                : "No saved bands calculations with plot data are available yet. Run a bands calculation first to use this preview."}
+            </div>
+          ) : (
+            <>
+              {referenceBandsLoading && (
+                <div className="info-banner">
+                  Loading additional saved bands calculations...
+                </div>
+              )}
+              <div className="param-grid">
+                <div className="param-row">
+                  <label>
+                    Bands calculation
+                    <Tooltip text="Choose which saved bands result to preview. This list includes bands runs for the current structure only." />
+                  </label>
+                  <select
+                    value={selectedReferenceBandsCalculation?.id ?? ""}
+                    onChange={(event) => setReferenceBandsCalcId(event.target.value)}
+                  >
+                    {referenceBandsCalculations.map((calc) => (
+                      <option key={calc.id} value={calc.id}>
+                        {formatReferenceBandsLabel(calc)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="param-row">
+                  <label>
+                    Energy mode
+                    <Tooltip text="Toggle between plotting E − E_F and absolute energies in eV for the reference bands preview." />
+                  </label>
+                  <select
+                    value={referenceEnergyMode}
+                    onChange={(event) => setReferenceEnergyMode(event.target.value as ReferenceEnergyMode)}
+                  >
+                    <option value="relative">E − E_F (eV)</option>
+                    <option value="absolute">Absolute energy (eV)</option>
+                  </select>
+                </div>
+                <div className="param-row">
+                  <label>
+                    Energy minimum (eV)
+                    <Tooltip text="Lower bound for the previewed energy window in the selected mode." />
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={referenceEnergyMinInput}
+                    onChange={(event) => setReferenceEnergyMinInput(event.target.value)}
+                    onBlur={commitReferenceEnergyRange}
+                    onKeyDown={handleReferenceEnergyKeyDown}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Energy maximum (eV)
+                    <Tooltip text="Upper bound for the previewed energy window in the selected mode. Use this with the minimum field to focus on the target manifold." />
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={referenceEnergyMaxInput}
+                    onChange={(event) => setReferenceEnergyMaxInput(event.target.value)}
+                    onBlur={commitReferenceEnergyRange}
+                    onKeyDown={handleReferenceEnergyKeyDown}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Fat-band projection
+                    <Tooltip text="Select the saved projection group to render as fat bands. This control is disabled if the chosen bands run has no projection data." />
+                  </label>
+                  <select
+                    value={referenceProjectionSelection}
+                    onChange={(event) => setReferenceProjectionSelection(event.target.value)}
+                    disabled={referenceProjectionOptions.length <= 1}
+                  >
+                    {referenceProjectionOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              {referenceEnergyError && (
+                <div className="warning-banner">{referenceEnergyError}</div>
+              )}
+              {selectedReferenceBandData && (
+                <div className="wannier-reference-bands-plot">
+                  <BandPlot
+                    data={selectedReferenceBandData}
+                    scfFermiEnergy={referencePlotFermi}
+                    energyRange={referenceEnergyRange ?? undefined}
+                    projectionSelection={referenceProjectionSelection}
+                    viewerType="electronic"
+                    yAxisLabel={referenceEnergyMode === "absolute" ? "Energy (eV)" : "E − E_F (eV)"}
+                    valueLabel={referenceEnergyMode === "absolute" ? "Energy" : "E − E_F"}
+                    showFermiLevel={referenceEnergyMode !== "absolute"}
+                    showSidebar={false}
+                    enableWheelRangeControl={false}
+                    enableHoverScrollLock={false}
+                    height={360}
+                    scrollHint="Use the controls above to set range and projection."
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         <div className="param-section">
           <div className="source-step-header">
@@ -2030,7 +2508,12 @@ export function WannierWizard({
           </button>
           <button
             className="primary-button"
-            onClick={() => onViewWannier(result, selectedScf?.result?.fermi_energy ?? null)}
+            onClick={() => {
+              void (async () => {
+                const overlays = await buildViewerOverlayOptions();
+                onViewWannier(result, selectedScf?.result?.fermi_energy ?? null, overlays);
+              })();
+            }}
           >
             View Wannier
           </button>

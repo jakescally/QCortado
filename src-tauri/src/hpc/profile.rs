@@ -184,6 +184,7 @@ pub struct HpcEnvironmentValidation {
     pub squeue_available: bool,
     pub sacct_available: bool,
     pub qe_pw_available: bool,
+    pub qe_epw_available: bool,
     pub qe_pw2wannier_available: bool,
     pub wannier90_available: bool,
     pub postw90_available: bool,

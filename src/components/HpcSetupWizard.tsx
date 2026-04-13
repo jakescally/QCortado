@@ -136,6 +136,7 @@ export function HpcSetupWizard({
         if (!validation.squeue_available) detail.push("`squeue` is not available.");
         if (!validation.sacct_available) detail.push("`sacct` is not available.");
         if (!validation.qe_pw_available) detail.push("`pw.x` is not executable at configured QE path.");
+        if (!validation.qe_epw_available) detail.push("`epw.x` is not executable at configured QE path.");
         if (!validation.qe_pw2wannier_available) detail.push("`pw2wannier90.x` is not executable at configured QE path.");
         if (!validation.wannier90_available) detail.push("`wannier90.x` is not executable at configured path or on `PATH`.");
         if (!validation.postw90_available) detail.push("Derived `postw90.x` is not executable from the configured `wannier90.x` location.");
@@ -148,6 +149,7 @@ export function HpcSetupWizard({
           && validation.squeue_available
           && validation.sacct_available
           && validation.qe_pw_available
+          && validation.qe_epw_available
           && validation.qe_pw2wannier_available
           && validation.wannier90_available
           && validation.postw90_available
@@ -488,7 +490,7 @@ export function HpcSetupWizard({
           {step === 4 && (
             <div className="settings-menu-section">
               <p className="settings-menu-hint">
-                Runs checks for SSH login, Slurm commands (`sbatch`/`squeue`/`sacct`), `pw.x`, `pw2wannier90.x`, `wannier90.x`, and remote workspace write permissions.
+                Runs checks for SSH login, Slurm commands (`sbatch`/`squeue`/`sacct`), `pw.x`, `epw.x`, `pw2wannier90.x`, `wannier90.x`, and remote workspace write permissions.
               </p>
               <button
                 className="settings-menu-item"

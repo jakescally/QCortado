@@ -321,6 +321,7 @@ interface PhononWizardProps {
 }
 
 type WizardStep = "source" | "qgrid" | "options" | "run" | "results";
+type PhononSavePolicy = "plot-only" | "epw-ready" | "full-archive";
 const PHONON_WORK_DIR = "/tmp/qcortado_phonon";
 
 interface PhononTaskPlan {
@@ -458,8 +459,8 @@ export function PhononWizard({
   const [elPhNsigmaInput, setElPhNsigmaInput] = useState<string>("10");
   const [fildvscfEnabled, setFildvscfEnabled] = useState(false);
   const [fildvscf, setFildvscf] = useState("dvscf");
-  const [epwPreparationEnabled, setEpwPreparationEnabled] = useState(false);
-  const [preserveFullArtifacts, setPreserveFullArtifacts] = useState(true);
+  const [phononSavePolicy, setPhononSavePolicy] = useState<PhononSavePolicy>("plot-only");
+  const epwPreparationEnabled = phononSavePolicy !== "plot-only";
 
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     solver: false,
@@ -592,10 +593,7 @@ export function PhononWizard({
   useEffect(() => {
     if (!epwPreparationEnabled) return;
     if (!fildvscfEnabled) setFildvscfEnabled(true);
-    if (electronPhononMode === "none") {
-      setElectronPhononMode("interpolated");
-    }
-  }, [epwPreparationEnabled, fildvscfEnabled, electronPhononMode]);
+  }, [epwPreparationEnabled, fildvscfEnabled]);
 
   useEffect(() => {
     if (!isHpcMode || step !== "run") {
@@ -781,7 +779,10 @@ export function PhononWizard({
       throw new Error("Select at least 2 Q-path points for dispersion, or disable dispersion.");
     }
 
-    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(
+      scfParams,
+      crystalData.atom_sites.length,
+    );
     const canUseSymmetryPrimitive =
       sourceUsesPrimitive &&
       resolvedSymmetry !== null &&
@@ -851,7 +852,7 @@ export function PhononWizard({
 
     const fildvscfPath = fildvscfEnabled ? (fildvscf.trim() || "dvscf") : null;
     const verbosityValue = verbosity === "default" ? null : verbosity;
-    const shouldPreserveFullArtifacts = epwPreparationEnabled && preserveFullArtifacts;
+    const shouldPreserveFullArtifacts = phononSavePolicy === "full-archive";
     const transformedQPath = shouldCalculateDispersion
       ? mapPathCoordinates(
         qPath,
@@ -953,6 +954,7 @@ export function PhononWizard({
       symmetry_hall_number: resolvedSymmetry?.hallNumber ?? null,
       primitive_to_input_reciprocal: resolvedSymmetry?.primitiveToInputReciprocal ?? null,
       symmetry_error: resolvedSymmetryError,
+      phonon_save_policy: phononSavePolicy,
       epw_preparation: {
         enabled: epwPreparationEnabled,
         preserve_full_artifacts: shouldPreserveFullArtifacts,
@@ -1638,23 +1640,27 @@ export function PhononWizard({
           </h4>
           {expandedSections.epw && (
             <div className="option-params">
-              <label className="option-checkbox">
-                <input
-                  type="checkbox"
-                  checked={epwPreparationEnabled}
-                  onChange={(e) => setEpwPreparationEnabled(e.target.checked)}
-                />
-                <span>
-                  Enable EPW-ready artifact preparation
-                  <Tooltip text="Turns on options commonly needed before EPW (dvscf outputs and preservation controls). This does not run `epw.x`; it prepares prerequisite phonon data." />
-                </span>
-              </label>
+              <div className="phonon-field">
+                <label>
+                  Artifact Save Policy
+                  <Tooltip text="Controls which phonon artifacts are retained in project history after saving. Choose `epw-ready` or `full-archive` for EPW workflows." />
+                </label>
+                <select
+                  value={phononSavePolicy}
+                  onChange={(e) => setPhononSavePolicy(e.target.value as PhononSavePolicy)}
+                >
+                  <option value="plot-only">plot-only (minimal retained files)</option>
+                  <option value="epw-ready">epw-ready (retain EPW prerequisites)</option>
+                  <option value="full-archive">full-archive (preserve complete run tree)</option>
+                </select>
+              </div>
               <div className="option-params">
                 <label className="option-checkbox">
                   <input
                     type="checkbox"
                     checked={fildvscfEnabled}
                     onChange={(e) => setFildvscfEnabled(e.target.checked)}
+                    disabled={epwPreparationEnabled}
                   />
                   <span>
                     Write perturbation potentials
@@ -1679,20 +1685,9 @@ export function PhononWizard({
                     )}
                   </div>
                 )}
-                <label className="option-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={preserveFullArtifacts}
-                    onChange={(e) => setPreserveFullArtifacts(e.target.checked)}
-                  />
-                  <span>
-                    Preserve full phonon scratch artifacts on save
-                    <Tooltip text="Keeps complete phonon temporary data in the project instead of compact copy. Needed for maximum EPW flexibility, but can consume many GB." />
-                  </span>
-                </label>
-                {epwPreparationEnabled && !preserveFullArtifacts && (
+                {epwPreparationEnabled && (
                   <div className="epw-warning">
-                    EPW prep is enabled, but compact-save mode may omit intermediate files needed by some EPW post-processing paths.
+                    EPW preparation mode is active. QCortado will enforce `fildvscf` and retain artifacts according to the selected save policy.
                   </div>
                 )}
               </div>

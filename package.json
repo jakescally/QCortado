@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:unit": "node scripts/run-transport-unit-tests.mjs",
+    "test:unit": "node scripts/run-unit-tests.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev:viewer": "VITE_APP_ROLE=viewer QCORTADO_APP_ROLE=viewer tauri dev -c src-tauri/tauri.viewer.conf.json --features viewer",

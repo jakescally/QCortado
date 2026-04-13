@@ -8,6 +8,9 @@ import { BandStructureWizard } from "./components/BandStructureWizard";
 import { BandData, BandPlot } from "./components/BandPlot";
 import { ElectronicDOSWizard } from "./components/ElectronicDOSWizard";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
+import { EpwWizard } from "./components/EpwWizard";
+import { EpwViewer } from "./components/EpwViewer";
+import type { EpwViewerPayload } from "./components/EpwViewer";
 import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
 import { PhononWizard } from "./components/PhononWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
@@ -20,7 +23,6 @@ import {
   CalculationRun,
   WannierBandOverlayOption,
 } from "./components/ProjectDashboard";
-import { CreateProjectDialog } from "./components/CreateProjectDialog";
 import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
@@ -42,6 +44,8 @@ import {
   HpcLauncher,
   HpcProfile,
   HpcResourceMode,
+  QeDefaults,
+  QeSmearingType,
   SlurmResourceRequest,
 } from "./lib/types";
 import {
@@ -62,16 +66,6 @@ import {
   updateHpcProfileDefaults,
 } from "./lib/hpcConfig";
 import type { TransportResult } from "./lib/transport";
-
-interface ProjectSummary {
-  id: string;
-  name: string;
-  description: string | null;
-  created_at: string;
-  formula: string | null;
-  calculation_count: number;
-  last_activity: string;
-}
 
 interface TempCleanupResult {
   removed_paths: string[];
@@ -127,8 +121,11 @@ const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
 const DEFAULT_WANNIER90_PATH = "/usr/local/bin/wannier90.x";
 const DEFAULT_POSTW90_PATH = "/usr/local/bin/postw90.x";
+const DEFAULT_QE_DEFAULTS: QeDefaults = {
+  smearing: "marzari-vanderbilt",
+};
 
-type AppView = "home" | "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
 
 interface SCFContext {
   cifId: string;
@@ -183,6 +180,13 @@ interface PhononsContext {
   scfCalculations: CalculationRun[];
 }
 
+interface EpwContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  calculations: CalculationRun[];
+}
+
 interface PhononData {
   dos_data: any | null;
   dispersion_data: any | null;
@@ -225,6 +229,14 @@ function derivePostw90PathFromWannier90Path(path: string | null | undefined): st
   segments[segments.length - 1] = "postw90.x";
   const derived = segments.join("/");
   return derived.trim().length > 0 ? derived : DEFAULT_POSTW90_PATH;
+}
+
+function normalizeQeSmearing(raw: unknown): QeSmearingType {
+  const lowered = String(raw || "").toLowerCase();
+  if (lowered === "gaussian") return "gaussian";
+  if (lowered === "methfessel-paxton") return "methfessel-paxton";
+  if (lowered === "fermi-dirac") return "fermi-dirac";
+  return "marzari-vanderbilt";
 }
 
 function cloneResourceDefaults(
@@ -349,21 +361,20 @@ function AppInner() {
   const [isSavingQePath, setIsSavingQePath] = useState(false);
   const [isSavingFermiSurferPath, setIsSavingFermiSurferPath] = useState(false);
   const [isSavingWannier90Path, setIsSavingWannier90Path] = useState(false);
+  const [isSavingQeDefaults, setIsSavingQeDefaults] = useState(false);
   const [availableExecutables, setAvailableExecutables] = useState<string[]>([]);
   const [qeStatus, setQeStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [fermiSurferStatus, setFermiSurferStatus] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [wannier90Status, setWannier90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [error, setError] = useState<string | null>(null);
-  const [currentView, setCurrentView] = useState<AppView>("home");
-  const [projectCount, setProjectCount] = useState<number>(0);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [currentView, setCurrentView] = useState<AppView>("project-browser");
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
     useState<BandsMultiviewCalculation[] | undefined>(undefined);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showQueueMenu, setShowQueueMenu] = useState(false);
-  const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("home");
+  const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("project-browser");
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"general" | "hpc">("general");
@@ -374,6 +385,8 @@ function AppInner() {
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
   const [hpcStatus, setHpcStatus] = useState<string | null>(null);
+  const [qeDefaults, setQeDefaults] = useState<QeDefaults>(DEFAULT_QE_DEFAULTS);
+  const [qeDefaultsStatus, setQeDefaultsStatus] = useState<string | null>(null);
   const [isExportingHpcPresetBundle, setIsExportingHpcPresetBundle] = useState(false);
   const [isImportingHpcPresetBundle, setIsImportingHpcPresetBundle] = useState(false);
   const [isCleaningHpcRemote, setIsCleaningHpcRemote] = useState(false);
@@ -461,8 +474,12 @@ function AppInner() {
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
 
+  // Context for running EPW from a project
+  const [epwContext, setEpwContext] = useState<EpwContext | null>(null);
+
   // Context for viewing saved phonon data
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
+  const [viewEpwData, setViewEpwData] = useState<EpwViewerPayload | null>(null);
   const [phononBandsUnit, setPhononBandsUnit] = useState<PhononFrequencyUnit>("cm-1");
   const [phononBandFocus, setPhononBandFocus] = useState<PhononBandFocus>("full");
   const isHpcActivityPopout = new URLSearchParams(window.location.search).get("hpc_activity") === "1";
@@ -501,7 +518,7 @@ function AppInner() {
   // Check for existing QE configuration on startup
   useEffect(() => {
     checkQEPath();
-    loadProjectCount();
+    void loadQeDefaults();
     void loadFermiSurferPath();
     void loadWannier90Path();
     void loadExecutionPrefix();
@@ -545,15 +562,6 @@ function AppInner() {
       setSettingsPage("general");
     }
   }, [executionMode, settingsPage]);
-
-  async function loadProjectCount() {
-    try {
-      const projects = await invoke<ProjectSummary[]>("list_projects");
-      setProjectCount(projects.length);
-    } catch (e) {
-      console.log("Failed to load project count:", e);
-    }
-  }
 
   async function checkQEPath() {
     try {
@@ -625,6 +633,39 @@ function AppInner() {
       setError(String(e));
     } finally {
       setIsSavingQePath(false);
+    }
+  }
+
+  async function loadQeDefaults() {
+    try {
+      const defaults = await invoke<Partial<QeDefaults> | null>("get_qe_defaults");
+      setQeDefaults({
+        smearing: normalizeQeSmearing(defaults?.smearing),
+      });
+      setQeDefaultsStatus(null);
+    } catch (e) {
+      console.error("Failed to load QE defaults:", e);
+      setQeDefaults(DEFAULT_QE_DEFAULTS);
+      setQeDefaultsStatus("Failed to load QE defaults");
+    }
+  }
+
+  async function saveQeDefaults() {
+    setIsSavingQeDefaults(true);
+    setQeDefaultsStatus(null);
+    try {
+      const normalized: QeDefaults = {
+        smearing: normalizeQeSmearing(qeDefaults.smearing),
+      };
+      await invoke("set_qe_defaults", { defaults: normalized });
+      setQeDefaults(normalized);
+      setQeDefaultsStatus("Saved");
+      setError(null);
+    } catch (e) {
+      setQeDefaultsStatus("Failed to save QE defaults");
+      setError(String(e));
+    } finally {
+      setIsSavingQeDefaults(false);
     }
   }
 
@@ -1336,13 +1377,14 @@ function AppInner() {
       setDosContext(null);
       setFermiSurfaceContext(null);
       setPhononsContext(null);
+      setEpwContext(null);
       setViewBandsData(null);
       setViewDosData(null);
       setViewPhononData(null);
+      setViewEpwData(null);
       setReconnectTaskId(null);
       setSelectedProjectId(null);
       setCurrentView("project-browser");
-      await loadProjectCount();
     } catch (e) {
       console.error("Failed to delete project:", e);
       setPrefixStatus("Failed to delete project");
@@ -1361,6 +1403,7 @@ function AppInner() {
       transport: "transport-wizard",
       fermi_surface: "fermi-surface-wizard",
       phonon: "phonon-wizard",
+      epw: "epw-wizard",
     };
     const view = viewMap[taskType];
     if (view) {
@@ -1385,12 +1428,31 @@ function AppInner() {
   }
 
   function returnFromUtilityView() {
-    const fallback: AppView = selectedProjectId ? "project-dashboard" : "home";
+    const fallback: AppView = selectedProjectId ? "project-dashboard" : "project-browser";
     const destination = (lastNonUtilityView === "task-queue" || lastNonUtilityView === "node-activity")
       ? fallback
       : lastNonUtilityView;
     setCurrentView(destination);
   }
+
+  const derivedPostw90Path = derivePostw90PathFromWannier90Path(wannier90PathInput);
+  const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" | "wannier90" | "postw90" }> = [
+    ...availableExecutables.map((name) => ({ name, type: "qe" as const })),
+    ...(fermiSurferStatus === "Found"
+      ? [{ name: "fermisurfer", type: "fermisurfer" as const }]
+      : []),
+    ...(wannier90Status === "Found"
+      ? [{ name: "wannier90.x", type: "wannier90" as const }]
+      : []),
+    ...(wannier90Status === "Found"
+      ? [{ name: "postw90.x", type: "postw90" as const }]
+      : []),
+  ];
+  const qeStatusClass = qeStatus === "Found" ? "ready" : qeStatus === "Not found" ? "error" : "pending";
+  const fermiStatusClass =
+    fermiSurferStatus === "Found" ? "ready" : fermiSurferStatus === "Not found" ? "error" : "pending";
+  const wannierStatusClass =
+    wannier90Status === "Found" ? "ready" : wannier90Status === "Not found" ? "error" : "pending";
 
   const hpcCpuAdditionalSbatchText = (hpcDefaultCpuDraft.additional_sbatch || []).join("\n");
   const hpcGpuAdditionalSbatchText = (hpcDefaultGpuDraft.additional_sbatch || []).join("\n");
@@ -1522,6 +1584,7 @@ function AppInner() {
               </button>
             </div>
             <div className="settings-window-content">
+              <div className="settings-pane">
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="execution-mode-select">
                   Execution Mode
@@ -2080,6 +2143,177 @@ function AppInner() {
 
               {settingsPage === "general" && (
                 <>
+              {executionMode === "local" && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <div className="settings-menu-section settings-local-tools">
+                    <label className="settings-menu-label">Local Executable Paths</label>
+                    <p className="settings-menu-hint">
+                      These are only used when execution mode is set to Local.
+                    </p>
+
+                    <div className="settings-local-config-grid">
+                      <div className="config-row">
+                        <label>QE Installation:</label>
+                        <input
+                          type="text"
+                          className="config-path-input"
+                          value={qePathInput}
+                          onChange={(e) => {
+                            setQePathInput(e.target.value);
+                            setError(null);
+                          }}
+                          placeholder="/path/to/qe/bin"
+                          spellCheck={false}
+                        />
+                        <div className="config-row-actions">
+                          <button onClick={selectQEPath}>Browse</button>
+                          <button
+                            onClick={() => void saveQEPath()}
+                            disabled={isSavingQePath || qePathInput.trim().length === 0}
+                          >
+                            {isSavingQePath ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="config-row">
+                        <label>FermiSurfer:</label>
+                        <input
+                          type="text"
+                          className="config-path-input"
+                          value={fermiSurferPathInput}
+                          onChange={(e) => {
+                            setFermiSurferPathInput(e.target.value);
+                            setError(null);
+                          }}
+                          placeholder={DEFAULT_FERMI_SURFER_PATH}
+                          spellCheck={false}
+                        />
+                        <div className="config-row-actions">
+                          <button onClick={selectFermiSurferPath}>Browse</button>
+                          <button
+                            onClick={() => void saveFermiSurferPath()}
+                            disabled={isSavingFermiSurferPath}
+                          >
+                            {isSavingFermiSurferPath ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      </div>
+
+          <div className="config-row">
+            <label>Wannier90:</label>
+            <input
+              type="text"
+                          className="config-path-input"
+                          value={wannier90PathInput}
+                          onChange={(e) => {
+                            setWannier90PathInput(e.target.value);
+                            setError(null);
+                          }}
+                          placeholder={DEFAULT_WANNIER90_PATH}
+                          spellCheck={false}
+                        />
+                        <div className="config-row-actions">
+                          <button onClick={selectWannier90Path}>Browse</button>
+                          <button
+                            onClick={() => void saveWannier90Path()}
+                            disabled={isSavingWannier90Path}
+                          >
+                            {isSavingWannier90Path ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+
+          <div className="config-row">
+            <label>Default Smearing:</label>
+            <select
+              className="config-path-input"
+              value={qeDefaults.smearing}
+              onChange={(e) => {
+                setQeDefaults((prev) => ({ ...prev, smearing: normalizeQeSmearing(e.target.value) }));
+                setQeDefaultsStatus(null);
+              }}
+            >
+              <option value="marzari-vanderbilt">marzari-vanderbilt</option>
+              <option value="gaussian">gaussian</option>
+              <option value="methfessel-paxton">methfessel-paxton</option>
+              <option value="fermi-dirac">fermi-dirac</option>
+            </select>
+            <div className="config-row-actions">
+              <button
+                onClick={() => void saveQeDefaults()}
+                disabled={isSavingQeDefaults}
+              >
+                {isSavingQeDefaults ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+          {qeDefaultsStatus && <p className="settings-menu-hint">{qeDefaultsStatus}</p>}
+
+          <div className="config-row">
+            <label>postw90 (auto):</label>
+                        <input
+                          type="text"
+                          className="config-path-input"
+                          value={derivedPostw90Path}
+                          readOnly
+                          spellCheck={false}
+                        />
+                        <div className="config-row-actions">
+                          <button disabled title="Derived from the configured Wannier90 path.">Auto</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="settings-menu-hint">
+                      QCortado derives <code>postw90.x</code> from the Wannier90 executable path by using the same directory.
+                    </p>
+
+                    <div className="settings-local-status-grid">
+                      <div className="status-row">
+                        <label>QE Status:</label>
+                        <span className={`status ${qeStatusClass}`}>
+                          {qeStatus}
+                        </span>
+                      </div>
+
+                      <div className="status-row">
+                        <label>FermiSurfer Status:</label>
+                        <span className={`status ${fermiStatusClass}`}>
+                          {fermiSurferStatus}
+                        </span>
+                      </div>
+
+                      <div className="status-row">
+                        <label>Wannier90 Status:</label>
+                        <span className={`status ${wannierStatusClass}`}>
+                          {wannier90Status}
+                        </span>
+                      </div>
+                    </div>
+
+                    {error && <div className="error">{error}</div>}
+
+                    {availablePrograms.length > 0 && (
+                      <div className="executables">
+                        <label>Available programs:</label>
+                        <div className="exe-list">
+                          {availablePrograms.map((program) => (
+                            <span
+                              key={program.name}
+                              className={`exe-tag ${program.type === "fermisurfer" || program.type === "wannier90" || program.type === "postw90" ? "exe-tag-fermisurfer" : ""}`}
+                            >
+                              {program.name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
               <div className="settings-menu-divider" />
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="global-execution-prefix-input">
@@ -2258,6 +2492,7 @@ function AppInner() {
               )}
                 </>
               )}
+              </div>
             </div>
           </div>
         </div>
@@ -2603,6 +2838,7 @@ function AppInner() {
       <>
         <BandStructureWizard
           qePath={qePath || ""}
+          defaultSmearing={qeDefaults.smearing}
           executionMode={executionMode}
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
@@ -2661,6 +2897,7 @@ function AppInner() {
       <>
         <ElectronicDOSWizard
           qePath={qePath || ""}
+          defaultSmearing={qeDefaults.smearing}
           executionMode={executionMode}
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
@@ -2720,11 +2957,12 @@ function AppInner() {
       <>
         <WannierWizard
           qePath={qePath || ""}
+          defaultSmearing={qeDefaults.smearing}
           executionMode={executionMode}
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
-          onViewWannier={(result, fermiEnergy) => {
-            setViewWannierData({ result, fermiEnergy, overlayOptions: [] });
+          onViewWannier={(result, fermiEnergy, overlayOptions = []) => {
+            setViewWannierData({ result, fermiEnergy, overlayOptions });
             setCurrentView("wannier-viewer");
             setReconnectTaskId(null);
           }}
@@ -2880,6 +3118,7 @@ function AppInner() {
       <>
         <FermiSurfaceWizard
           qePath={qePath || ""}
+          defaultSmearing={qeDefaults.smearing}
           executionMode={executionMode}
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
@@ -3059,11 +3298,58 @@ function AppInner() {
     );
   }
 
+  if (currentView === "epw-wizard" && (qePath || executionMode === "hpc") && (epwContext || reconnectTaskId)) {
+    return (
+      <>
+        <EpwWizard
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
+          onViewEPW={(epwData, rawOutput) => {
+            setViewEpwData({
+              data: epwData,
+              rawOutput: rawOutput ?? null,
+            });
+            setCurrentView("epw-viewer");
+            setReconnectTaskId(null);
+          }}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setEpwContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={epwContext?.projectId ?? ""}
+          cifId={epwContext?.cifId ?? ""}
+          crystalData={epwContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          calculations={epwContext?.calculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "epw-viewer" && viewEpwData) {
+    return (
+      <>
+        <EpwViewer
+          payload={viewEpwData}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setViewEpwData(null);
+          }}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
   if (currentView === "scf-wizard" && (qePath || executionMode === "hpc")) {
     return (
       <>
         <SCFWizard
           qePath={qePath || ""}
+          defaultSmearing={qeDefaults.smearing}
           executionMode={executionMode}
           activeHpcProfile={activeHpcProfile}
           onBack={() => {
@@ -3071,7 +3357,7 @@ function AppInner() {
               setCurrentView("project-dashboard");
               setScfContext(null);
             } else {
-              setCurrentView("home");
+              setCurrentView("project-browser");
             }
             setReconnectTaskId(null);
           }}
@@ -3091,13 +3377,6 @@ function AppInner() {
       <>
         <ProjectBrowser
           initialActiveFolderId={projectBrowserFolderId}
-          onBack={() => {
-            setCurrentView("home");
-            loadProjectCount();
-          }}
-          onProjectsChanged={() => {
-            void loadProjectCount();
-          }}
           onSelectProject={(projectId, folderId) => {
             setSelectedProjectId(projectId);
             setProjectBrowserFolderId(folderId);
@@ -3141,7 +3420,6 @@ function AppInner() {
           onDeleted={() => {
             setCurrentView("project-browser");
             setSelectedProjectId(null);
-            loadProjectCount();
           }}
           onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures) => {
             setScfContext({
@@ -3226,6 +3504,15 @@ function AppInner() {
             });
             setCurrentView("phonon-wizard");
           }}
+          onRunEPW={(cifId, crystalData, calculations) => {
+            setEpwContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              calculations,
+            });
+            setCurrentView("epw-wizard");
+          }}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({
               data: phononData,
@@ -3233,240 +3520,34 @@ function AppInner() {
             });
             setCurrentView("phonon-viewer");
           }}
+          onViewEPW={(epwData, rawOutput) => {
+            setViewEpwData({
+              data: epwData,
+              rawOutput: rawOutput ?? null,
+            });
+            setCurrentView("epw-viewer");
+          }}
         />
         {appChrome}
       </>
     );
   }
 
-  const derivedPostw90Path = derivePostw90PathFromWannier90Path(wannier90PathInput);
-  const availablePrograms: Array<{ name: string; type: "qe" | "fermisurfer" | "wannier90" | "postw90" }> = [
-    ...availableExecutables.map((name) => ({ name, type: "qe" as const })),
-    ...(fermiSurferStatus === "Found"
-      ? [{ name: "fermisurfer", type: "fermisurfer" as const }]
-      : []),
-    ...(wannier90Status === "Found"
-      ? [{ name: "wannier90.x", type: "wannier90" as const }]
-      : []),
-    ...(wannier90Status === "Found"
-      ? [{ name: "postw90.x", type: "postw90" as const }]
-      : []),
-  ];
-
-  const qeStatusClass = qeStatus === "Found" ? "ready" : qeStatus === "Not found" ? "error" : "pending";
-  const fermiStatusClass =
-    fermiSurferStatus === "Found" ? "ready" : fermiSurferStatus === "Not found" ? "error" : "pending";
-  const wannierStatusClass =
-    wannier90Status === "Found" ? "ready" : wannier90Status === "Not found" ? "error" : "pending";
-
   return (
     <>
-      <main className="container">
-        <header className="header">
-          <h1>QCortado</h1>
-          <p className="subtitle">A Modern Interface for Quantum ESPRESSO</p>
-        </header>
-
-        <section className="config-section">
-          <h2>Configuration</h2>
-          <div className="config-row">
-            <label>QE Installation:</label>
-            <input
-              type="text"
-              className="config-path-input"
-              value={qePathInput}
-              onChange={(e) => {
-                setQePathInput(e.target.value);
-                setError(null);
-              }}
-              placeholder="/path/to/qe/bin"
-              spellCheck={false}
-            />
-            <div className="config-row-actions">
-              <button onClick={selectQEPath}>Browse</button>
-              <button
-                onClick={() => void saveQEPath()}
-                disabled={isSavingQePath || qePathInput.trim().length === 0}
-              >
-                {isSavingQePath ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </div>
-
-          <div className="config-row">
-            <label>FermiSurfer:</label>
-            <input
-              type="text"
-              className="config-path-input"
-              value={fermiSurferPathInput}
-              onChange={(e) => {
-                setFermiSurferPathInput(e.target.value);
-                setError(null);
-              }}
-              placeholder={DEFAULT_FERMI_SURFER_PATH}
-              spellCheck={false}
-            />
-            <div className="config-row-actions">
-              <button onClick={selectFermiSurferPath}>Browse</button>
-              <button
-                onClick={() => void saveFermiSurferPath()}
-                disabled={isSavingFermiSurferPath}
-              >
-                {isSavingFermiSurferPath ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </div>
-
-          <div className="config-row">
-            <label>Wannier90:</label>
-            <input
-              type="text"
-              className="config-path-input"
-              value={wannier90PathInput}
-              onChange={(e) => {
-                setWannier90PathInput(e.target.value);
-                setError(null);
-              }}
-              placeholder={DEFAULT_WANNIER90_PATH}
-              spellCheck={false}
-            />
-            <div className="config-row-actions">
-              <button onClick={selectWannier90Path}>Browse</button>
-              <button
-                onClick={() => void saveWannier90Path()}
-                disabled={isSavingWannier90Path}
-              >
-                {isSavingWannier90Path ? "Saving..." : "Save"}
-              </button>
-            </div>
-          </div>
-
-          <div className="config-row">
-            <label>postw90 (auto):</label>
-            <input
-              type="text"
-              className="config-path-input"
-              value={derivedPostw90Path}
-              readOnly
-              spellCheck={false}
-            />
-            <div className="config-row-actions">
-              <button disabled title="Derived from the configured Wannier90 path.">Auto</button>
-            </div>
-          </div>
-          <p className="settings-menu-hint">
-            QCortado derives <code>postw90.x</code> from the Wannier90 executable path by using the same directory.
-          </p>
-
-          <div className="status-row">
-            <label>QE Status:</label>
-            <span className={`status ${qeStatusClass}`}>
-              {qeStatus}
-            </span>
-          </div>
-
-          <div className="status-row">
-            <label>FermiSurfer Status:</label>
-            <span className={`status ${fermiStatusClass}`}>
-              {fermiSurferStatus}
-            </span>
-          </div>
-
-          <div className="status-row">
-            <label>Wannier90 Status:</label>
-            <span className={`status ${wannierStatusClass}`}>
-              {wannier90Status}
-            </span>
-          </div>
-
-          {error && <div className="error">{error}</div>}
-
-          {availablePrograms.length > 0 && (
-            <div className="executables">
-              <label>Available programs:</label>
-              <div className="exe-list">
-                {availablePrograms.map((program) => (
-                  <span
-                    key={program.name}
-                    className={`exe-tag ${program.type === "fermisurfer" || program.type === "wannier90" || program.type === "postw90" ? "exe-tag-fermisurfer" : ""}`}
-                  >
-                    {program.name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {(qePath || executionMode === "hpc") && (
-          <>
-            <section className="actions-section">
-              <h2>Projects</h2>
-              <div className="action-grid">
-                <button className="action-btn" onClick={() => setShowCreateDialog(true)}>
-                  <span className="action-icon">+</span>
-                  <span className="action-label">New Project</span>
-                  <span className="action-hint">Create a project</span>
-                </button>
-                <button
-                  className="action-btn"
-                  onClick={() => {
-                    setProjectBrowserFolderId(null);
-                    setCurrentView("project-browser");
-                  }}
-                  disabled={projectCount === 0}
-                >
-                  <span className="action-icon">{projectCount}</span>
-                  <span className="action-label">
-                    {projectCount === 1 ? "View Project" : "View Projects"}
-                  </span>
-                  <span className="action-hint">
-                    {projectCount === 0 ? "No projects yet" : "Browse & manage"}
-                  </span>
-                </button>
-              </div>
-            </section>
-
-          </>
-        )}
-
-        <footer className="footer">
-          <p>QCortado v0.1.0 - Quantum ESPRESSO 7.5 Interface</p>
-          <div className="theme-toggle-group" role="group" aria-label="Theme">
-            <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "system" ? "active" : ""}`}
-              onClick={() => setTheme("system")}
-            >
-              System
-            </button>
-            <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "light" ? "active" : ""}`}
-              onClick={() => setTheme("light")}
-            >
-              Light
-            </button>
-            <button
-              type="button"
-              className={`theme-toggle-btn ${theme === "dark" ? "active" : ""}`}
-              onClick={() => setTheme("dark")}
-            >
-              Dark
-            </button>
-          </div>
-        </footer>
-
-        <CreateProjectDialog
-          isOpen={showCreateDialog}
-          onClose={() => setShowCreateDialog(false)}
-          onCreated={() => {
-            setShowCreateDialog(false);
-            loadProjectCount();
-          }}
-        />
-      </main>
-        {appChrome}
+      <ProjectBrowser
+        initialActiveFolderId={projectBrowserFolderId}
+        onSelectProject={(projectId, folderId) => {
+          setSelectedProjectId(projectId);
+          setProjectBrowserFolderId(folderId);
+          setCurrentView("project-dashboard");
+        }}
+        onOpenBandsMultiview={(initialCalculations) => {
+          setBandsMultiviewInitialCalculations(initialCalculations);
+          setCurrentView("bands-multiview");
+        }}
+      />
+      {appChrome}
     </>
   );
 }

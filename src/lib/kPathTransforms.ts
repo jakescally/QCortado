@@ -188,10 +188,35 @@ export function createPathCoordinateConverters(
   };
 }
 
-export function sourceScfUsesPrimitiveCell(scfParameters: unknown): boolean {
+export function sourceScfUsesPrimitiveCell(
+  scfParameters: unknown,
+  conventionalAtomCount?: number,
+): boolean {
   const params = (scfParameters ?? {}) as Record<string, unknown>;
   const sourceCellRepresentation = String(params.cell_representation || "").toLowerCase();
-  return sourceCellRepresentation.startsWith("primitive");
+  const conventionalNat = typeof conventionalAtomCount === "number"
+    ? conventionalAtomCount
+    : null;
+  if (sourceCellRepresentation.startsWith("primitive")) {
+    return true;
+  }
+
+  if (
+    sourceCellRepresentation === "optimized_source"
+    && conventionalNat !== null
+    && Number.isInteger(conventionalNat)
+    && conventionalNat > 0
+  ) {
+    const sourceStructure = params.source_structure as Record<string, unknown> | undefined;
+    const sourceAtoms = Array.isArray(sourceStructure?.atoms)
+      ? sourceStructure.atoms.length
+      : 0;
+    if (sourceAtoms > 0 && sourceAtoms < conventionalNat) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 type Vec3WithCoords = { coords: Vec3 };

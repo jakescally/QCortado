@@ -10,7 +10,6 @@ import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } fr
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { isPhononReadyScf } from "../lib/phononReady";
-import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
 import { detectBravaisLattice } from "../lib/brillouinZone";
@@ -32,6 +31,7 @@ interface QEResult {
   band_data?: any;  // Band structure data for bands calculations
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
+  epw_data?: any;  // EPW data payload for EPW calculations
   wannier_data?: any;  // Wannier90 data payload for Wannier calculations
   transport_data?: TransportResult;
 }
@@ -100,13 +100,15 @@ interface ProjectDashboardProps {
   onViewTransport: (transportData: TransportResult) => void;
   onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunEPW: (cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
+  onViewEPW: (epwData: any, rawOutput?: string | null) => void;
 }
 
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "phonon" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "phonon" | "epw" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
 interface CalculationRuntimeDisplay {
@@ -174,6 +176,101 @@ const DISPLAY_CENTERING_BY_BRAVAIS: Record<BravaisLattice, CenteringType> = {
 interface OptimizationDisplayCellContext {
   centering: CenteringType;
   rhombohedralSetting?: RhombohedralSetting;
+}
+
+interface DashboardBravaisInfo {
+  bravais: BravaisLattice;
+  centering: CenteringType;
+  shortCode: string;
+  qeIbrav: number;
+  label: string;
+}
+
+const DASHBOARD_BRAVAIS_INFO: Record<BravaisLattice, Omit<DashboardBravaisInfo, "bravais">> = {
+  "cubic-P": { centering: "P", shortCode: "cP", qeIbrav: 1, label: "Cubic primitive" },
+  "cubic-F": { centering: "F", shortCode: "cF", qeIbrav: 2, label: "Cubic face-centered" },
+  "cubic-I": { centering: "I", shortCode: "cI", qeIbrav: 3, label: "Cubic body-centered" },
+  "tetragonal-P": { centering: "P", shortCode: "tP", qeIbrav: 6, label: "Tetragonal primitive" },
+  "tetragonal-I": { centering: "I", shortCode: "tI", qeIbrav: 7, label: "Tetragonal body-centered" },
+  "orthorhombic-P": { centering: "P", shortCode: "oP", qeIbrav: 8, label: "Orthorhombic primitive" },
+  "orthorhombic-C": { centering: "C", shortCode: "oC", qeIbrav: 9, label: "Orthorhombic base-centered" },
+  "orthorhombic-I": { centering: "I", shortCode: "oI", qeIbrav: 11, label: "Orthorhombic body-centered" },
+  "orthorhombic-F": { centering: "F", shortCode: "oF", qeIbrav: 10, label: "Orthorhombic face-centered" },
+  "hexagonal": { centering: "P", shortCode: "hP", qeIbrav: 4, label: "Hexagonal primitive" },
+  "trigonal-R": { centering: "R", shortCode: "hR", qeIbrav: 5, label: "Trigonal rhombohedral" },
+  "monoclinic-P": { centering: "P", shortCode: "mP", qeIbrav: 12, label: "Monoclinic primitive" },
+  "monoclinic-C": { centering: "C", shortCode: "mC", qeIbrav: 13, label: "Monoclinic base-centered" },
+  triclinic: { centering: "P", shortCode: "aP", qeIbrav: 14, label: "Triclinic primitive" },
+};
+
+function resolveDashboardBravaisInfo(crystalData: CrystalData | null): DashboardBravaisInfo | null {
+  const spaceGroup = coerceSpaceGroupNumber(crystalData?.space_group_IT_number);
+  if (spaceGroup == null) return null;
+  try {
+    const bravais = detectBravaisLattice(spaceGroup);
+    const info = DASHBOARD_BRAVAIS_INFO[bravais];
+    return { bravais, ...info };
+  } catch {
+    return null;
+  }
+}
+
+function getBravaisCellPolygon(bravais: BravaisLattice): string {
+  if (bravais === "hexagonal" || bravais === "trigonal-R") {
+    return "12,3 20,8 20,16 12,21 4,16 4,8";
+  }
+  if (bravais === "monoclinic-P" || bravais === "monoclinic-C") {
+    return "6,4 20,4 18,20 4,20";
+  }
+  if (bravais === "triclinic") {
+    return "7,4 20,6 17,20 4,18";
+  }
+  return "4,4 20,4 20,20 4,20";
+}
+
+function getBravaisLatticePoints(bravais: BravaisLattice, centering: CenteringType): Array<[number, number]> {
+  if (bravais === "hexagonal" || bravais === "trigonal-R") {
+    const hexCorners: Array<[number, number]> = [[12, 3], [20, 8], [20, 16], [12, 21], [4, 16], [4, 8]];
+    if (centering === "R") {
+      return [...hexCorners, [12, 8], [9, 12], [15, 12]];
+    }
+    return hexCorners;
+  }
+
+  const corners: Array<[number, number]> = [[4, 4], [20, 4], [20, 20], [4, 20]];
+  switch (centering) {
+    case "I":
+      return [...corners, [12, 12]];
+    case "F":
+      return [...corners, [12, 4], [20, 12], [12, 20], [4, 12]];
+    case "C":
+      return [...corners, [12, 4], [12, 20]];
+    case "A":
+      return [...corners, [4, 12], [20, 12]];
+    case "B":
+      return [...corners, [12, 4], [12, 20]];
+    default:
+      return corners;
+  }
+}
+
+function BravaisLatticeIcon({ info }: { info: DashboardBravaisInfo }) {
+  const polygon = getBravaisCellPolygon(info.bravais);
+  const points = getBravaisLatticePoints(info.bravais, info.centering);
+
+  return (
+    <svg
+      className="hero-bravais-icon"
+      viewBox="0 0 24 24"
+      role="img"
+      aria-label={`${info.label} (${info.shortCode})`}
+    >
+      <polygon className="hero-bravais-icon-cell" points={polygon} />
+      {points.map(([x, y], idx) => (
+        <circle key={`${x}-${y}-${idx}`} className="hero-bravais-icon-point" cx={x} cy={y} r={1.2} />
+      ))}
+    </svg>
+  );
 }
 
 function findSliceAxis(primaryAxis: number, secondaryAxis: number): number | null {
@@ -285,10 +382,8 @@ function isWannierReadyScf(calc: CalculationRun): boolean {
     return false;
   }
   const params = calc.parameters || {};
-  if (!sourceScfUsesPrimitiveCell(params)) {
-    return false;
-  }
-  if (Number(params.nspin) !== 1) {
+  const nspin = Number(params.nspin ?? 1);
+  if (nspin !== 1) {
     return false;
   }
   if (Boolean(params.noncolin) || Boolean(params.lspinorb)) {
@@ -655,6 +750,31 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
   return tags;
 }
 
+function getEpwTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  const tags: { label: string; type: "info" | "feature" }[] = [];
+  const params = calc.parameters || {};
+  const pushTag = (label: string, type: "info" | "feature") => {
+    if (!tags.some((tag) => tag.label === label)) {
+      tags.push({ label, type });
+    }
+  };
+
+  if (Array.isArray(params.k_mesh) && params.k_mesh.length === 3) {
+    pushTag(`${params.k_mesh[0]}×${params.k_mesh[1]}×${params.k_mesh[2]} K`, "info");
+  }
+  if (Array.isArray(params.q_mesh) && params.q_mesh.length === 3) {
+    pushTag(`${params.q_mesh[0]}×${params.q_mesh[1]}×${params.q_mesh[2]} Q`, "info");
+  }
+  if (params.parse_partial === true) {
+    pushTag("Parse Partial", "feature");
+  }
+  if (isHpcCalculation(calc)) {
+    pushTag("HPC", "feature");
+  }
+
+  return tags;
+}
+
 function getRecencyTimestamp(calc: CalculationRun): number {
   const completed = calc.completed_at ? Date.parse(calc.completed_at) : Number.NaN;
   if (Number.isFinite(completed)) return completed;
@@ -795,6 +915,13 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     const qScore = Math.log2(Math.max(1, getMeshProduct(params.q_grid)));
     const tr2Score = getThresholdTightness(params.tr2_ph);
     return convergedBonus + (6 * qScore) + tr2Score;
+  }
+
+  if (category === "epw") {
+    const kScore = Math.log2(Math.max(1, getMeshProduct(params.k_mesh)));
+    const qScore = Math.log2(Math.max(1, getMeshProduct(params.q_mesh)));
+    const outputScore = Math.log2(Math.max(1, Number(params.artifact_count) || 1));
+    return convergedBonus + (4 * kScore) + (5 * qScore) + outputScore;
   }
 
   if (category === "optimization") {
@@ -1067,7 +1194,9 @@ export function ProjectDashboard({
   onViewTransport,
   onRunFermiSurface,
   onRunPhonons,
+  onRunEPW,
   onViewPhonons,
+  onViewEPW,
 }: ProjectDashboardProps) {
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
@@ -1983,6 +2112,13 @@ export function ProjectDashboard({
     onRunPhonons(selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunEPW() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunEPW(selectedCifId, crystalData, variant.calculations);
+  }
+
   async function handleViewPhonon(
     calc: CalculationRun,
     viewMode: "bands" | "dos",
@@ -2032,6 +2168,26 @@ export function ProjectDashboard({
     onViewPhonons(phononData, viewMode);
   }
 
+  async function handleViewEPW(calc: CalculationRun) {
+    try {
+      const detail = await ensureCalculationDetails(calc);
+      const epwData = detail.result?.epw_data ?? calc.result?.epw_data ?? null;
+      if (!epwData) {
+        setError("Saved EPW data is unavailable for this calculation.");
+        return;
+      }
+      const rawOutput = typeof detail.result?.raw_output === "string"
+        ? detail.result.raw_output
+        : typeof calc.result?.raw_output === "string"
+          ? calc.result.raw_output
+          : null;
+      onViewEPW(epwData, rawOutput);
+    } catch (e) {
+      console.error("Failed to load EPW data:", e);
+      setError(`Failed to load EPW data: ${e}`);
+    }
+  }
+
   function hasConvergedSCF(): boolean {
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return false;
@@ -2049,6 +2205,14 @@ export function ProjectDashboard({
     if (!variant) return false;
     return variant.calculations.some(
       (calc) => calc.calc_type === "wannier" && (Boolean(calc.completed_at) || Boolean(calc.parameters?.seedname) || Boolean(calc.result?.wannier_data)),
+    );
+  }
+
+  function hasSavedPhononCalculation(): boolean {
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(
+      (calc) => calc.calc_type === "phonon" && (Boolean(calc.completed_at) || Boolean(calc.result?.converged)),
     );
   }
 
@@ -2230,6 +2394,15 @@ function normalizeSavedKPath(value: unknown): string {
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
+  const epwCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "epw") || [],
+      calculationSortMode,
+      "epw",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
   const optimizationCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => isOptimizationCalculation(calc)) || [],
@@ -2286,6 +2459,10 @@ function normalizeSavedKPath(value: unknown): string {
   }, [primitiveCell]);
 
   const hasPrimitiveDisplay = primitiveCellMetrics !== null;
+  const dashboardBravaisInfo = useMemo(
+    () => resolveDashboardBravaisInfo(crystalData),
+    [crystalData],
+  );
   const displayedCellMetrics = cellViewMode === "primitive" && primitiveCellMetrics
     ? primitiveCellMetrics
     : conventionalCellMetrics;
@@ -2553,6 +2730,19 @@ function normalizeSavedKPath(value: unknown): string {
                 </span>
               </div>
               <div className="hero-detail-item">
+                <label>Bravais / QE Ibrav</label>
+                {dashboardBravaisInfo ? (
+                  <span className="hero-bravais-value">
+                    <BravaisLatticeIcon info={dashboardBravaisInfo} />
+                    <span className="hero-bravais-text">
+                      {dashboardBravaisInfo.shortCode} ({dashboardBravaisInfo.label}), ibrav = {dashboardBravaisInfo.qeIbrav}
+                    </span>
+                  </span>
+                ) : (
+                  <span>N/A</span>
+                )}
+              </div>
+              <div className="hero-detail-item">
                 <label>Lattice Parameters</label>
                 <span>
                   a = {(displayedCellMetrics?.a ?? crystalData.cell_length_a.value).toFixed(4)} A,{" "}
@@ -2641,7 +2831,7 @@ function normalizeSavedKPath(value: unknown): string {
                 <span className="calc-action-icon">W90</span>
                 <span className="calc-action-label">Wannier90</span>
                 <span className="calc-action-hint">
-                  {hasWannierReadyScf() ? "MLWFs + interpolated bands" : "Requires primitive scalar SCF"}
+                  {hasWannierReadyScf() ? "MLWFs + interpolated bands" : "Requires scalar SCF"}
                 </span>
               </button>
               <button
@@ -2675,6 +2865,17 @@ function normalizeSavedKPath(value: unknown): string {
                 <span className="calc-action-label">Phonons</span>
                 <span className="calc-action-hint">
                   {hasConvergedSCF() ? "DOS & Dispersion" : "Requires SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
+                onClick={handleRunEPW}
+                disabled={!hasSavedPhononCalculation()}
+              >
+                <span className="calc-action-icon">EPW</span>
+                <span className="calc-action-label">EPW</span>
+                <span className="calc-action-hint">
+                  {hasSavedPhononCalculation() ? "Electron-phonon workflow" : "Requires saved phonons"}
                 </span>
               </button>
               <button className="calc-action-btn" onClick={handleRunOptimization}>
@@ -3740,6 +3941,166 @@ function normalizeSavedKPath(value: unknown): string {
                               }}
                             >
                               View DOS
+                            </button>
+                          )}
+                          {renderHpcDownloadButton(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* EPW Calculations */}
+        {epwCalculations.length > 0 && (
+          <section className="history-section dos-section">
+            <h3>EPW</h3>
+            <div className="calculations-list">
+              {epwCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
+                const epwData = calcData.result?.epw_data ?? null;
+                const summary = epwData?.result_summary ?? null;
+                const artifactCount = Array.isArray(epwData?.artifacts)
+                  ? epwData.artifacts.length
+                  : calc.parameters?.artifact_count ?? "N/A";
+                const sourcePhononId = String(
+                  calc.parameters?.source_phonon_calc_id
+                  ?? epwData?.sources?.phonon?.calc_id
+                  ?? "",
+                ).trim();
+                const sourceWannierId = String(
+                  calc.parameters?.source_wannier_calc_id
+                  ?? epwData?.sources?.wannier?.calc_id
+                  ?? "",
+                ).trim();
+
+                return (
+                  <div key={calc.id} className="calculation-item dos-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
+                      }
+                    >
+                      <div className="calculation-info">
+                        <span className="calc-type">EPW</span>
+                        <div className="calc-tags">
+                          {getEpwTags(calc).map((tag, i) => (
+                            <span key={i} className={getCalcTagClass(tag)}>
+                              {tag.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          disabled={readOnly}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        <span className="calc-date">
+                          {calc.completed_at
+                            ? formatDate(calc.completed_at)
+                            : "In progress..."}
+                        </span>
+                        {runtime && (
+                          <span className="calc-runtime">
+                            {formatRuntimeDuration(runtime.seconds)}
+                          </span>
+                        )}
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">
+                          {expandedCalc === calc.id ? "▼" : "▶"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>K-Mesh</label>
+                            <span>
+                              {Array.isArray(calc.parameters?.k_mesh)
+                                ? `${calc.parameters.k_mesh[0]}×${calc.parameters.k_mesh[1]}×${calc.parameters.k_mesh[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Q-Mesh</label>
+                            <span>
+                              {Array.isArray(calc.parameters?.q_mesh)
+                                ? `${calc.parameters.q_mesh[0]}×${calc.parameters.q_mesh[1]}×${calc.parameters.q_mesh[2]}`
+                                : "N/A"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source Phonon</label>
+                            <span>{sourcePhononId ? sourcePhononId.slice(0, 8) : "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source Wannier</label>
+                            <span>{sourceWannierId ? sourceWannierId.slice(0, 8) : "None"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Artifacts</label>
+                            <span>{artifactCount}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Completed</label>
+                            <span>{summary?.completed ? "Yes" : "No"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Parse Partial</label>
+                            <span>{summary?.parse_partial ? "Yes" : "No"}</span>
+                          </div>
+                          {runtime && (
+                            <div className="detail-item">
+                              <label>Time</label>
+                              <span>{formatRuntimeDuration(runtime.seconds)}</span>
+                            </div>
+                          )}
+                          {renderStorageDetailItems(calc)}
+                        </div>
+                        <div className="calc-actions">
+                          {renderHpcDownloadProgress(calc)}
+                          {epwData && (
+                            <button
+                              className="view-dos-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleViewEPW(calc);
+                              }}
+                            >
+                              View EPW
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}

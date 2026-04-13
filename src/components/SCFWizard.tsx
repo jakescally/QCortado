@@ -25,6 +25,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
+import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
@@ -65,6 +66,7 @@ interface InitialCifData {
 interface SCFWizardProps {
   onBack: () => void;
   qePath: string;
+  defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
   /** Pre-loaded CIF data from project dashboard */
@@ -159,6 +161,16 @@ interface ScfTaskPlan {
   sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string };
 }
 
+function normalizeDefaultSmearing(
+  raw: unknown,
+): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || "").toLowerCase();
+  if (lowered === "gaussian") return "gaussian";
+  if (lowered === "methfessel-paxton") return "methfessel-paxton";
+  if (lowered === "fermi-dirac") return "fermi-dirac";
+  return "marzari-vanderbilt";
+}
+
 type CutoffStatusKind = "parsed" | "inferred" | "missing";
 type CutoffStatus = "idle" | CutoffStatusKind;
 type CutoffProvenance = "sssp" | "djrepo" | "upf" | "upf_info" | "upf_fallback" | "unknown" | "missing";
@@ -180,6 +192,7 @@ interface ResolvedPseudoCutoffs {
 export function SCFWizard({
   onBack,
   qePath,
+  defaultSmearing = "marzari-vanderbilt",
   executionMode = "local",
   activeHpcProfile = null,
   initialCif,
@@ -188,6 +201,7 @@ export function SCFWizard({
   optimizedStructures = [],
   reconnectTaskId,
 }: SCFWizardProps) {
+  const resolvedDefaultSmearing = normalizeDefaultSmearing(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
   // Track background task for this wizard
@@ -260,7 +274,7 @@ export function SCFWizard({
 
     // Electronic structure
     occupations: "smearing",
-    smearing: "marzari-vanderbilt",
+    smearing: resolvedDefaultSmearing,
     degauss: 0.01,
     nbnd: null,
     tot_charge: 0,
@@ -1347,15 +1361,28 @@ export function SCFWizard({
         if_pos: [true, true, true],
       }));
     } else if (canUseSymmetryPrimitive && resolvedSymmetry) {
-      systemConfig.ibrav = "free";
-      systemConfig.celldm = null;
-      systemConfig.cell_parameters = resolvedSymmetry.standardizedPrimitiveLattice;
-      systemConfig.cell_units = "angstrom";
-      systemConfig.atoms = resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
-        symbol: atom.symbol,
-        position: atom.position,
-        if_pos: [true, true, true],
-      }));
+      const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
+      if (inferredBravais) {
+        systemConfig.ibrav = inferredBravais.ibrav;
+        systemConfig.celldm = inferredBravais.celldm;
+        systemConfig.cell_parameters = null;
+        systemConfig.cell_units = null;
+        systemConfig.atoms = inferredBravais.atoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true],
+        }));
+      } else {
+        systemConfig.ibrav = "free";
+        systemConfig.celldm = null;
+        systemConfig.cell_parameters = resolvedSymmetry.standardizedPrimitiveLattice;
+        systemConfig.cell_units = "angstrom";
+        systemConfig.atoms = resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+          if_pos: [true, true, true],
+        }));
+      }
     } else {
       // Conventional cell with ibrav=0 fallback when primitive extraction is unavailable.
       systemConfig.ibrav = "free";

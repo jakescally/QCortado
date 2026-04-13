@@ -4,8 +4,8 @@ use super::bands::{
     add_symmetry_markers, parse_bands_gnu, BandData, BandGap, HighSymmetryMarker, KPathPoint,
 };
 use super::types::{
-    CalculationType, CellMatrix, KPoint, KPoints, Occupations, PositionUnits, QECalculation,
-    SmearingType, StartingPotential,
+    BravaisLattice, CalculationType, CellMatrix, KPoint, KPoints, Occupations, PositionUnits,
+    QECalculation, SmearingType, StartingPotential,
 };
 use nalgebra::DMatrix;
 use num_complex::Complex64;
@@ -400,41 +400,233 @@ fn parse_usize_token(token: &str, context: &str) -> Result<usize, String> {
         .map_err(|_| format!("Failed to parse {} from '{}'.", context, token))
 }
 
-fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<CellMatrix, String> {
-    let cell = system
-        .cell_parameters
-        .ok_or_else(|| "Wannier export requires explicit cell_parameters.".to_string())?;
-    let cell_units = system.cell_units.unwrap_or(PositionUnits::Angstrom);
+fn lattice_from_ibrav_celldm_angstrom(
+    ibrav: BravaisLattice,
+    celldm: [f64; 6],
+) -> Result<CellMatrix, String> {
+    let a = celldm[0];
+    if a <= 0.0 {
+        return Err("Invalid celldm(1) while deriving Wannier lattice vectors.".to_string());
+    }
 
-    let scale = match cell_units {
-        PositionUnits::Angstrom => 1.0,
-        PositionUnits::Bohr => BOHR_TO_ANGSTROM,
-        PositionUnits::Alat => {
-            let celldm = system.celldm.ok_or_else(|| {
-                "CELL_PARAMETERS in alat units require celldm(1) to convert to angstrom."
-                    .to_string()
-            })?;
-            let alat_bohr = celldm[0];
-            if alat_bohr <= 0.0 {
-                return Err("Invalid celldm(1) for alat cell conversion.".to_string());
-            }
-            alat_bohr * BOHR_TO_ANGSTROM
-        }
-        PositionUnits::Crystal => {
+    let b_over_a = celldm[1];
+    let c_over_a = celldm[2];
+    let c4 = celldm[3];
+    let c5 = celldm[4];
+    let c6 = celldm[5];
+    let sr2 = 2.0_f64.sqrt();
+    let sr3 = 3.0_f64.sqrt();
+    let mut lattice_bohr = [[0.0_f64; 3]; 3];
+
+    match ibrav {
+        BravaisLattice::Free => {
             return Err(
-                "CELL_PARAMETERS in crystal units cannot be exported to Wannier90 unit_cell_cart."
+                "Cannot derive Wannier lattice vectors from ibrav=0 without CELL_PARAMETERS."
                     .to_string(),
             );
         }
-    };
-
-    let mut converted = cell;
-    for row in &mut converted {
-        for value in row {
-            *value *= scale;
+        BravaisLattice::CubicP => {
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [0.0, a, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a];
+        }
+        BravaisLattice::CubicF => {
+            let term = a / 2.0;
+            lattice_bohr[0] = [-term, 0.0, term];
+            lattice_bohr[1] = [0.0, term, term];
+            lattice_bohr[2] = [-term, term, 0.0];
+        }
+        BravaisLattice::CubicI => {
+            let term = a / 2.0;
+            lattice_bohr[0] = [term, term, term];
+            lattice_bohr[1] = [-term, term, term];
+            lattice_bohr[2] = [-term, -term, term];
+        }
+        BravaisLattice::Hexagonal => {
+            if c_over_a <= 0.0 {
+                return Err("Invalid celldm(3) for ibrav=4 Wannier lattice export.".to_string());
+            }
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [-a / 2.0, (a * sr3) / 2.0, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a * c_over_a];
+        }
+        BravaisLattice::TrigonalR => {
+            if !(-0.5..1.0).contains(&c4) {
+                return Err("Invalid celldm(4) for ibrav=5 Wannier lattice export.".to_string());
+            }
+            let term1 = (1.0 + 2.0 * c4).sqrt();
+            let term2 = (1.0 - c4).sqrt();
+            lattice_bohr[1][1] = (sr2 * a * term2) / sr3;
+            lattice_bohr[1][2] = (a * term1) / sr3;
+            lattice_bohr[0][0] = (a * term2) / sr2;
+            lattice_bohr[0][1] = -lattice_bohr[0][0] / sr3;
+            lattice_bohr[0][2] = lattice_bohr[1][2];
+            lattice_bohr[2][0] = -lattice_bohr[0][0];
+            lattice_bohr[2][1] = lattice_bohr[0][1];
+            lattice_bohr[2][2] = lattice_bohr[1][2];
+        }
+        BravaisLattice::TetragonalP => {
+            if c_over_a <= 0.0 {
+                return Err("Invalid celldm(3) for ibrav=6 Wannier lattice export.".to_string());
+            }
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [0.0, a, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a * c_over_a];
+        }
+        BravaisLattice::TetragonalI => {
+            if c_over_a <= 0.0 {
+                return Err("Invalid celldm(3) for ibrav=7 Wannier lattice export.".to_string());
+            }
+            let term = a / 2.0;
+            let z = (a * c_over_a) / 2.0;
+            lattice_bohr[0] = [term, -term, z];
+            lattice_bohr[1] = [term, term, z];
+            lattice_bohr[2] = [-term, -term, z];
+        }
+        BravaisLattice::OrthorhombicP => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 {
+                return Err(
+                    "Invalid celldm(2)/celldm(3) for ibrav=8 Wannier lattice export.".to_string(),
+                );
+            }
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [0.0, a * b_over_a, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a * c_over_a];
+        }
+        BravaisLattice::OrthorhombicBC => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 {
+                return Err(
+                    "Invalid celldm(2)/celldm(3) for ibrav=9 Wannier lattice export.".to_string(),
+                );
+            }
+            let half_a = 0.5 * a;
+            lattice_bohr[0] = [half_a, half_a * b_over_a, 0.0];
+            lattice_bohr[1] = [-half_a, half_a * b_over_a, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a * c_over_a];
+        }
+        BravaisLattice::OrthorhombicFC => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 {
+                return Err(
+                    "Invalid celldm(2)/celldm(3) for ibrav=10 Wannier lattice export.".to_string(),
+                );
+            }
+            let half_a = 0.5 * a;
+            lattice_bohr[1] = [half_a, half_a * b_over_a, 0.0];
+            lattice_bohr[0] = [half_a, 0.0, half_a * c_over_a];
+            lattice_bohr[2] = [0.0, half_a * b_over_a, half_a * c_over_a];
+        }
+        BravaisLattice::OrthorhombicI => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 {
+                return Err(
+                    "Invalid celldm(2)/celldm(3) for ibrav=11 Wannier lattice export.".to_string(),
+                );
+            }
+            let half_a = 0.5 * a;
+            lattice_bohr[0] = [half_a, half_a * b_over_a, half_a * c_over_a];
+            lattice_bohr[1] = [-half_a, half_a * b_over_a, half_a * c_over_a];
+            lattice_bohr[2] = [-half_a, -half_a * b_over_a, half_a * c_over_a];
+        }
+        BravaisLattice::MonoclinicP => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 || c4.abs() >= 1.0 {
+                return Err("Invalid celldm for ibrav=12 Wannier lattice export.".to_string());
+            }
+            let sin_gamma = (1.0 - c4 * c4).sqrt();
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [a * b_over_a * c4, a * b_over_a * sin_gamma, 0.0];
+            lattice_bohr[2] = [0.0, 0.0, a * c_over_a];
+        }
+        BravaisLattice::MonoclinicBC => {
+            if b_over_a <= 0.0 || c_over_a <= 0.0 || c4.abs() >= 1.0 {
+                return Err("Invalid celldm for ibrav=13 Wannier lattice export.".to_string());
+            }
+            let sin_gamma = (1.0 - c4 * c4).sqrt();
+            lattice_bohr[0] = [0.5 * a, 0.0, -0.5 * a * c_over_a];
+            lattice_bohr[1] = [a * b_over_a * c4, a * b_over_a * sin_gamma, 0.0];
+            lattice_bohr[2] = [0.5 * a, 0.0, 0.5 * a * c_over_a];
+        }
+        BravaisLattice::Triclinic => {
+            if b_over_a <= 0.0
+                || c_over_a <= 0.0
+                || c4.abs() >= 1.0
+                || c5.abs() >= 1.0
+                || c6.abs() >= 1.0
+            {
+                return Err("Invalid celldm for ibrav=14 Wannier lattice export.".to_string());
+            }
+            let sin_gamma = (1.0 - c6 * c6).sqrt();
+            if sin_gamma <= 0.0 {
+                return Err("Invalid celldm(6) for triclinic Wannier lattice export.".to_string());
+            }
+            let term_raw = 1.0 + 2.0 * c4 * c5 * c6 - c4 * c4 - c5 * c5 - c6 * c6;
+            if term_raw <= 0.0 {
+                return Err(
+                    "Inconsistent celldm values for triclinic Wannier lattice export.".to_string(),
+                );
+            }
+            let term = (term_raw / (1.0 - c6 * c6)).sqrt();
+            lattice_bohr[0] = [a, 0.0, 0.0];
+            lattice_bohr[1] = [a * b_over_a * c6, a * b_over_a * sin_gamma, 0.0];
+            lattice_bohr[2] = [
+                a * c_over_a * c5,
+                a * c_over_a * (c4 - c5 * c6) / sin_gamma,
+                a * c_over_a * term,
+            ];
         }
     }
-    Ok(converted)
+
+    let mut lattice_angstrom = lattice_bohr;
+    for row in &mut lattice_angstrom {
+        for value in row {
+            *value *= BOHR_TO_ANGSTROM;
+        }
+    }
+    Ok(lattice_angstrom)
+}
+
+fn convert_cell_matrix_to_angstrom(system: &super::types::QESystem) -> Result<CellMatrix, String> {
+    if let Some(cell) = system.cell_parameters {
+        let cell_units = system.cell_units.unwrap_or(PositionUnits::Angstrom);
+
+        let scale = match cell_units {
+            PositionUnits::Angstrom => 1.0,
+            PositionUnits::Bohr => BOHR_TO_ANGSTROM,
+            PositionUnits::Alat => {
+                let celldm = system.celldm.ok_or_else(|| {
+                    "CELL_PARAMETERS in alat units require celldm(1) to convert to angstrom."
+                        .to_string()
+                })?;
+                let alat_bohr = celldm[0];
+                if alat_bohr <= 0.0 {
+                    return Err("Invalid celldm(1) for alat cell conversion.".to_string());
+                }
+                alat_bohr * BOHR_TO_ANGSTROM
+            }
+            PositionUnits::Crystal => {
+                return Err(
+                    "CELL_PARAMETERS in crystal units cannot be exported to Wannier90 unit_cell_cart."
+                        .to_string(),
+                );
+            }
+        };
+
+        let mut converted = cell;
+        for row in &mut converted {
+            for value in row {
+                *value *= scale;
+            }
+        }
+        return Ok(converted);
+    }
+
+    if !matches!(system.ibrav, BravaisLattice::Free) {
+        let celldm = system.celldm.ok_or_else(|| {
+            "Wannier export requires celldm when CELL_PARAMETERS are omitted for nonzero ibrav."
+                .to_string()
+        })?;
+        return lattice_from_ibrav_celldm_angstrom(system.ibrav, celldm);
+    }
+
+    Err("Wannier export requires explicit cell_parameters for ibrav=0.".to_string())
 }
 
 fn cross_product(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -525,7 +717,8 @@ fn cumulative_k_path_distances(
     let reciprocal_lattice = reciprocal_lattice_vectors(lattice_vectors_angstrom)?;
     let mut distances = Vec::with_capacity(fractional_kpoints.len());
     let mut total = 0.0;
-    let mut previous = reciprocal_fractional_to_cartesian(fractional_kpoints[0], &reciprocal_lattice);
+    let mut previous =
+        reciprocal_fractional_to_cartesian(fractional_kpoints[0], &reciprocal_lattice);
     distances.push(0.0);
 
     for fractional in fractional_kpoints.iter().skip(1) {
@@ -597,13 +790,21 @@ fn wannier_segment_lengths(
     let reciprocal_lattice = reciprocal_lattice_vectors(lattice_vectors_angstrom)?;
     let segments = collect_wannier_path_segments(k_path);
     if segments.is_empty() {
-        return Err("Wannier interpolation path requires at least one connected segment.".to_string());
+        return Err(
+            "Wannier interpolation path requires at least one connected segment.".to_string(),
+        );
     }
 
     let mut lengths = Vec::with_capacity(segments.len());
     for segment in &segments {
-        let from = reciprocal_fractional_to_cartesian(k_path[segment.from_index].coords, &reciprocal_lattice);
-        let to = reciprocal_fractional_to_cartesian(k_path[segment.to_index].coords, &reciprocal_lattice);
+        let from = reciprocal_fractional_to_cartesian(
+            k_path[segment.from_index].coords,
+            &reciprocal_lattice,
+        );
+        let to = reciprocal_fractional_to_cartesian(
+            k_path[segment.to_index].coords,
+            &reciprocal_lattice,
+        );
         let dx = to[0] - from[0];
         let dy = to[1] - from[1];
         let dz = to[2] - from[2];
@@ -648,15 +849,20 @@ fn derive_wannier_path_sampling(
         let should_print_start = if segment_index == 0 {
             true
         } else {
-            let previous_end = &k_path[segments[segment_index - 1].to_index];
-            let current_start = &k_path[segment.from_index];
-            let labels_differ = previous_end.label.trim() != current_start.label.trim();
-            let coords_differ = previous_end
-                .coords
-                .iter()
-                .zip(current_start.coords.iter())
-                .any(|(left, right)| (left - right).abs() > 1.0e-6);
-            labels_differ || coords_differ
+            let previous_segment = &segments[segment_index - 1];
+            if segment.from_index != previous_segment.to_index {
+                true
+            } else {
+                let previous_end = &k_path[previous_segment.to_index];
+                let current_start = &k_path[segment.from_index];
+                let labels_differ = previous_end.label.trim() != current_start.label.trim();
+                let coords_differ = previous_end
+                    .coords
+                    .iter()
+                    .zip(current_start.coords.iter())
+                    .any(|(left, right)| (left - right).abs() > 1.0e-6);
+                labels_differ || coords_differ
+            }
         };
         print_start_points.push(should_print_start);
         total_points += count + usize::from(should_print_start);
@@ -682,16 +888,24 @@ fn derive_wannier_bands_num_points_for_total_target(
     let mut best_bands_num_points = 1u32;
     let mut best_abs_diff = usize::MAX;
     let mut best_total_points = usize::MAX;
+    let target_total_points = total_k_points_target as usize;
 
     for candidate in 1..=total_k_points_target {
         let sampling = derive_wannier_path_sampling(k_path, lattice_vectors_angstrom, candidate)?;
-        let diff = sampling.total_points.abs_diff(total_k_points_target as usize);
-        if diff < best_abs_diff
-            || (diff == best_abs_diff && sampling.total_points < best_total_points)
+        let diff = sampling.total_points.abs_diff(target_total_points);
+        let current_meets_or_exceeds_target = sampling.total_points >= target_total_points;
+        let best_meets_or_exceeds_target = best_total_points >= target_total_points;
+        let is_better = diff < best_abs_diff
+            || (diff == best_abs_diff
+                && current_meets_or_exceeds_target
+                && !best_meets_or_exceeds_target)
+            || (diff == best_abs_diff
+                && current_meets_or_exceeds_target == best_meets_or_exceeds_target
+                && sampling.total_points < best_total_points)
             || (diff == best_abs_diff
                 && sampling.total_points == best_total_points
-                && candidate < best_bands_num_points)
-        {
+                && candidate < best_bands_num_points);
+        if is_better {
             best_abs_diff = diff;
             best_total_points = sampling.total_points;
             best_bands_num_points = candidate;
@@ -791,9 +1005,12 @@ fn parse_wannier_band_labelinfo_markers(
                 trimmed
             ));
         }
-        let marker_index = parts[1]
-            .parse::<usize>()
-            .map_err(|_| format!("Invalid Wannier labelinfo index on line {}.", line_index + 1))?;
+        let marker_index = parts[1].parse::<usize>().map_err(|_| {
+            format!(
+                "Invalid Wannier labelinfo index on line {}.",
+                line_index + 1
+            )
+        })?;
         let zero_based_index = marker_index.saturating_sub(1);
         let k_distance = data
             .k_points
@@ -813,7 +1030,9 @@ fn parse_wannier_band_labelinfo_markers(
         });
     }
     if markers.is_empty() {
-        return Err("Wannier labelinfo file did not contain any high-symmetry markers.".to_string());
+        return Err(
+            "Wannier labelinfo file did not contain any high-symmetry markers.".to_string(),
+        );
     }
     Ok(markers)
 }
@@ -834,7 +1053,8 @@ fn rebuild_wannier_band_markers_from_workdir(
         return Ok(());
     }
 
-    let sampling = derive_wannier_path_sampling(k_path, lattice_vectors_angstrom, bands_num_points)?;
+    let sampling =
+        derive_wannier_path_sampling(k_path, lattice_vectors_angstrom, bands_num_points)?;
     build_wannier_symmetry_markers_from_sampling(data, k_path, &sampling)
 }
 
@@ -907,7 +1127,10 @@ fn parse_wannier_eig_energies(content: &str) -> Result<Vec<f64>, String> {
     Ok(energies)
 }
 
-fn analyze_fermi_bracketing(values: &[f64], fermi_energy: f64) -> (bool, Option<f64>, Option<[f64; 2]>) {
+fn analyze_fermi_bracketing(
+    values: &[f64],
+    fermi_energy: f64,
+) -> (bool, Option<f64>, Option<[f64; 2]>) {
     if values.is_empty() {
         return (false, None, None);
     }
@@ -970,7 +1193,8 @@ fn analyze_wannier_band_fermi_alignment(
     let (source_brackets_fermi, source_min_distance_ev, source_energy_range_ev) =
         if let Some(content) = source_eig_content {
             if let Ok(source_energies) = parse_wannier_eig_energies(content) {
-                let (brackets, distance, range) = analyze_fermi_bracketing(&source_energies, fermi_energy);
+                let (brackets, distance, range) =
+                    analyze_fermi_bracketing(&source_energies, fermi_energy);
                 (Some(brackets), distance, range)
             } else {
                 (None, None, None)
@@ -995,7 +1219,10 @@ fn push_unique_line(lines: &mut Vec<String>, value: &str) {
     if normalized.is_empty() {
         return;
     }
-    if !lines.iter().any(|entry| entry.eq_ignore_ascii_case(normalized)) {
+    if !lines
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(normalized))
+    {
         lines.push(normalized.to_string());
     }
 }
@@ -1204,7 +1431,8 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
     if config.band_path.k_path.len() < 2 {
         return Err("Wannier interpolation path requires at least two k-points.".to_string());
     }
-    let lattice_vectors_angstrom = convert_cell_matrix_to_angstrom(&config.base_calculation.system)?;
+    let lattice_vectors_angstrom =
+        convert_cell_matrix_to_angstrom(&config.base_calculation.system)?;
     let resolved_bands_num_points =
         resolve_wannier_bands_num_points(&config.band_path, &lattice_vectors_angstrom)?;
     if resolved_bands_num_points == 0 {
@@ -1280,17 +1508,6 @@ pub fn validate_wannier_config(config: &WannierCalculationConfig) -> Result<(), 
                 ));
             }
         }
-    }
-    if source
-        .and_then(|value| value.cell_representation.as_ref())
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| !value.starts_with("primitive"))
-        .is_some()
-    {
-        return Err(
-            "Scalar Wannier v1 requires a source SCF saved in a primitive-cell representation."
-                .to_string(),
-        );
     }
     if source.and_then(|value| value.lda_plus_u).unwrap_or(false) {
         return Err("Scalar Wannier v1 does not support DFT+U source calculations.".to_string());
@@ -1870,7 +2087,8 @@ pub fn parse_wannier_wout(
             continue;
         }
 
-        if lower.contains("convergence criteria not satisfied") || lower.contains("failed to converge")
+        if lower.contains("convergence criteria not satisfied")
+            || lower.contains("failed to converge")
         {
             if lower.contains("disentang") {
                 convergence.disentanglement_converged = Some(false);
@@ -2087,8 +2305,11 @@ pub fn read_wannier_result(
         .map_err(|e| format!("Failed to read {}: {}", band_path.display(), e))?;
 
     let (spreads, mut convergence) = parse_wannier_wout(&wout_content)?;
-    let mut band_data = parse_wannier_band_data(&band_content, fermi_energy, &config.band_path.k_path)?;
-    if let Ok(lattice_vectors_angstrom) = convert_cell_matrix_to_angstrom(&config.base_calculation.system) {
+    let mut band_data =
+        parse_wannier_band_data(&band_content, fermi_energy, &config.band_path.k_path)?;
+    if let Ok(lattice_vectors_angstrom) =
+        convert_cell_matrix_to_angstrom(&config.base_calculation.system)
+    {
         let band_kpt_path = work_path.join(format!("{}_band.kpt", config.seedname));
         if band_kpt_path.exists() {
             match std::fs::read_to_string(&band_kpt_path)
@@ -2099,22 +2320,23 @@ pub fn read_wannier_result(
                         &content,
                         &lattice_vectors_angstrom,
                     )
-                })
-            {
+                }) {
                 Ok(()) => {
                     band_data.band_gap = recalculate_band_gap(&band_data);
-                    match resolve_wannier_bands_num_points(&config.band_path, &lattice_vectors_angstrom)
-                        .and_then(|bands_num_points| {
-                            rebuild_wannier_band_markers_from_workdir(
-                                &mut band_data,
-                                work_path,
-                                &config.seedname,
-                                &config.band_path.k_path,
-                                &lattice_vectors_angstrom,
-                                bands_num_points,
-                            )
-                        })
-                    {
+                    match resolve_wannier_bands_num_points(
+                        &config.band_path,
+                        &lattice_vectors_angstrom,
+                    )
+                    .and_then(|bands_num_points| {
+                        rebuild_wannier_band_markers_from_workdir(
+                            &mut band_data,
+                            work_path,
+                            &config.seedname,
+                            &config.band_path.k_path,
+                            &lattice_vectors_angstrom,
+                            bands_num_points,
+                        )
+                    }) {
                         Ok(()) => {}
                         Err(err) => {
                             add_symmetry_markers(&mut band_data, &config.band_path.k_path);
@@ -2130,7 +2352,10 @@ pub fn read_wannier_result(
                 }
                 Err(err) => push_unique_line(
                     &mut convergence.warnings,
-                    &format!("Failed to reconstruct k-path spacing from _band.kpt: {}", err),
+                    &format!(
+                        "Failed to reconstruct k-path spacing from _band.kpt: {}",
+                        err
+                    ),
                 ),
             }
         }
@@ -2653,6 +2878,112 @@ mod tests {
         }
     }
 
+    fn assert_close(left: f64, right: f64, tol: f64) {
+        assert!(
+            (left - right).abs() <= tol,
+            "expected {} to be within {} of {}",
+            left,
+            tol,
+            right
+        );
+    }
+
+    #[test]
+    fn wannier_cell_conversion_supports_nonzero_ibrav_without_cell_parameters() {
+        let system = QESystem {
+            ibrav: BravaisLattice::CubicF,
+            celldm: Some([10.2, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            cell_parameters: None,
+            cell_units: None,
+            species: vec![],
+            atoms: vec![],
+            position_units: PositionUnits::Crystal,
+            ecutwfc: 30.0,
+            ecutrho: Some(240.0),
+            nbnd: None,
+            tot_charge: None,
+            input_dft: None,
+            nspin: 1,
+            noncolin: false,
+            lspinorb: false,
+            occupations: Occupations::Fixed,
+            smearing: SmearingType::Gaussian,
+            degauss: None,
+            nosym: false,
+            noinv: false,
+        };
+
+        let lattice =
+            convert_cell_matrix_to_angstrom(&system).expect("expected derived lattice vectors");
+        let expected = 10.2 * BOHR_TO_ANGSTROM / 2.0;
+        assert_close(lattice[0][0], -expected, 1.0e-10);
+        assert_close(lattice[0][2], expected, 1.0e-10);
+        assert_close(lattice[1][1], expected, 1.0e-10);
+        assert_close(lattice[1][2], expected, 1.0e-10);
+        assert_close(lattice[2][0], -expected, 1.0e-10);
+        assert_close(lattice[2][1], expected, 1.0e-10);
+    }
+
+    #[test]
+    fn wannier_cell_conversion_rejects_nonzero_ibrav_without_celldm() {
+        let system = QESystem {
+            ibrav: BravaisLattice::CubicP,
+            celldm: None,
+            cell_parameters: None,
+            cell_units: None,
+            species: vec![],
+            atoms: vec![],
+            position_units: PositionUnits::Crystal,
+            ecutwfc: 30.0,
+            ecutrho: Some(240.0),
+            nbnd: None,
+            tot_charge: None,
+            input_dft: None,
+            nspin: 1,
+            noncolin: false,
+            lspinorb: false,
+            occupations: Occupations::Fixed,
+            smearing: SmearingType::Gaussian,
+            degauss: None,
+            nosym: false,
+            noinv: false,
+        };
+
+        let error =
+            convert_cell_matrix_to_angstrom(&system).expect_err("expected missing celldm failure");
+        assert!(error.contains("celldm"), "unexpected error: {}", error);
+    }
+
+    #[test]
+    fn wannier_cell_conversion_preserves_existing_cell_parameters_path() {
+        let system = QESystem {
+            ibrav: BravaisLattice::Free,
+            celldm: None,
+            cell_parameters: Some([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]),
+            cell_units: Some(PositionUnits::Angstrom),
+            species: vec![],
+            atoms: vec![],
+            position_units: PositionUnits::Crystal,
+            ecutwfc: 30.0,
+            ecutrho: Some(240.0),
+            nbnd: None,
+            tot_charge: None,
+            input_dft: None,
+            nspin: 1,
+            noncolin: false,
+            lspinorb: false,
+            occupations: Occupations::Fixed,
+            smearing: SmearingType::Gaussian,
+            degauss: None,
+            nosym: false,
+            noinv: false,
+        };
+
+        let lattice =
+            convert_cell_matrix_to_angstrom(&system).expect("expected direct lattice vectors");
+        assert_eq!(lattice, [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]);
+    }
+
     #[test]
     fn uniform_grid_is_zero_shifted() {
         let grid = generate_uniform_mp_kpoints([2, 2, 1]);
@@ -2771,14 +3102,22 @@ mod tests {
         };
 
         let win = generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
-        assert!(win.lines().any(|line| line.trim_start().starts_with("G ") && line.contains(" X ")));
-        assert!(win.lines().any(|line| line.trim_start().starts_with("L ") && line.contains(" W ")));
-        assert!(!win.lines().any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
+        assert!(win
+            .lines()
+            .any(|line| line.trim_start().starts_with("G ") && line.contains(" X ")));
+        assert!(win
+            .lines()
+            .any(|line| line.trim_start().starts_with("L ") && line.contains(" W ")));
+        assert!(!win
+            .lines()
+            .any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
 
         config.band_path.k_path[1].npoints = 20;
         let connected_win =
             generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
-        assert!(connected_win.lines().any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
+        assert!(connected_win
+            .lines()
+            .any(|line| line.trim_start().starts_with("X ") && line.contains(" L ")));
     }
 
     #[test]
@@ -2828,6 +3167,65 @@ mod tests {
 
         let win = generate_wannier90_win(&config, &generate_uniform_mp_kpoints([2, 2, 2])).unwrap();
         assert!(win.contains("bands_num_points = 100"));
+    }
+
+    #[test]
+    fn total_k_point_target_tie_prefers_above_target_total() {
+        let k_path = vec![
+            KPathPoint {
+                label: "G".to_string(),
+                coords: [0.0, 0.0, 0.0],
+                npoints: 1,
+            },
+            KPathPoint {
+                label: "X".to_string(),
+                coords: [0.5, 0.0, 0.0],
+                npoints: 1,
+            },
+            KPathPoint {
+                label: "M".to_string(),
+                coords: [0.5, 0.5, 0.0],
+                npoints: 0,
+            },
+        ];
+        let cubic_cell = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let resolved = derive_wannier_bands_num_points_for_total_target(&k_path, &cubic_cell, 120)
+            .expect("expected bands_num_points resolution");
+        assert_eq!(resolved, 60);
+    }
+
+    #[test]
+    fn disconnected_repeated_kpoint_starts_new_sampling_segment() {
+        let path = vec![
+            KPathPoint {
+                label: "G".to_string(),
+                coords: [0.0, 0.0, 0.0],
+                npoints: 10,
+            },
+            KPathPoint {
+                label: "X".to_string(),
+                coords: [0.5, 0.0, 0.0],
+                npoints: 0,
+            },
+            KPathPoint {
+                label: "X".to_string(),
+                coords: [0.5, 0.0, 0.0],
+                npoints: 10,
+            },
+            KPathPoint {
+                label: "M".to_string(),
+                coords: [0.5, 0.5, 0.0],
+                npoints: 0,
+            },
+        ];
+        let cell = convert_cell_matrix_to_angstrom(&sample_base_calculation().system).unwrap();
+        let sampling =
+            derive_wannier_path_sampling(&path, &cell, 10).expect("expected path sampling");
+        assert_eq!(sampling.print_start_points, vec![true, true]);
+        assert_eq!(
+            sampling.total_points,
+            sampling.segment_point_counts.iter().sum::<usize>() + 2
+        );
     }
 
     #[test]
@@ -2907,11 +3305,7 @@ mod tests {
         override_wannier_band_distances_from_kpt(
             &mut data,
             band_kpt,
-            &[
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         )
         .unwrap();
         add_symmetry_markers(
@@ -2938,7 +3332,9 @@ mod tests {
         assert!((data.k_points[1] - std::f64::consts::PI).abs() < 1.0e-9);
         assert!((data.k_points[2] - 2.0 * std::f64::consts::PI).abs() < 1.0e-9);
         assert!((data.high_symmetry_points[1].k_distance - std::f64::consts::PI).abs() < 1.0e-9);
-        assert!((data.high_symmetry_points[2].k_distance - 2.0 * std::f64::consts::PI).abs() < 1.0e-9);
+        assert!(
+            (data.high_symmetry_points[2].k_distance - 2.0 * std::f64::consts::PI).abs() < 1.0e-9
+        );
     }
 
     #[test]
@@ -2963,7 +3359,8 @@ mod tests {
         let source_eig = "1 1 9.98\n2 1 10.02\n";
         let alignment =
             analyze_wannier_band_fermi_alignment(&band_data, Some(source_eig), 10.0).unwrap();
-        let issues = build_wannier_quality_issues(&WannierConvergenceData::default(), Some(&alignment));
+        let issues =
+            build_wannier_quality_issues(&WannierConvergenceData::default(), Some(&alignment));
         assert!(issues.iter().any(|issue| {
             issue.code == "misses_source_fermi" && issue.severity == WannierIssueSeverity::Error
         }));
@@ -3205,6 +3602,57 @@ mod tests {
 
         let error = validate_wannier_config(&config).unwrap_err();
         assert!(error.contains("expands to 8 Wannier functions"));
+    }
+
+    #[test]
+    fn validate_wannier_config_allows_conventional_source_representation() {
+        let config = WannierCalculationConfig {
+            base_calculation: sample_base_calculation(),
+            k_grid: [2, 2, 2],
+            num_wann: 4,
+            num_bands: 8,
+            seedname: "si_mlwf".to_string(),
+            projections: vec![sample_site_projection()],
+            band_path: WannierBandPathConfig {
+                k_path: vec![
+                    KPathPoint {
+                        label: "G".to_string(),
+                        coords: [0.0, 0.0, 0.0],
+                        npoints: 20,
+                    },
+                    KPathPoint {
+                        label: "X".to_string(),
+                        coords: [0.5, 0.0, 0.5],
+                        npoints: 0,
+                    },
+                ],
+                bands_num_points: 100,
+                total_k_points_target: None,
+            },
+            disentanglement: None,
+            pw2wannier90: None,
+            project_id: None,
+            scf_calc_id: None,
+            source_metadata: Some(WannierSourceMetadata {
+                cell_representation: Some("conventional_input".to_string()),
+                electron_count: Some(8.0),
+                nspin: Some(1),
+                noncolin: Some(false),
+                lspinorb: Some(false),
+                lda_plus_u: Some(false),
+                vdw_corr: Some("none".to_string()),
+            }),
+            guiding_centres: true,
+            use_ws_distance: true,
+            write_hr: true,
+            write_xyz: true,
+            bands_plot: true,
+            conv_window: 5,
+            conv_tol: 1.0e-10,
+            num_iter: 100,
+        };
+
+        validate_wannier_config(&config).expect("conventional scalar source metadata should be valid");
     }
 
     #[test]

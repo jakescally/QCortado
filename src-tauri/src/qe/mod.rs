@@ -9,6 +9,7 @@
 //! - Phonon calculation support (`phonon`)
 
 pub mod bands;
+pub mod epw;
 pub mod input;
 pub mod output;
 pub mod phonon;
@@ -22,6 +23,14 @@ pub use bands::{
     generate_bands_x_input, generate_projwfc_input, parse_bands_gnu,
     parse_projwfc_projection_groups, parse_projwfc_projection_groups_aligned, read_bands_gnu_file,
     BandData, BandProjectionData, BandProjectionGroup, BandsXConfig, KPathPoint, ProjwfcConfig,
+};
+pub use epw::{
+    build_epw_input, build_epw_input_preview, build_epw_keyword_map, collect_epw_artifacts,
+    parse_epw_result_summary, render_epw_input, validate_epw_config, EpwArtifactManifestEntry,
+    EpwCalculationConfig, EpwCalculationV1, EpwErrorRecord, EpwInputConfig, EpwInputPreviewResult,
+    EpwExtensionsV1, EpwPrerequisiteValidation, EpwResultSummaryV1, EpwRuntimeConfig,
+    EpwSourceRef, EpwSourcesV1,
+    EPW_SCHEMA_VERSION,
 };
 pub use input::{
     generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input,

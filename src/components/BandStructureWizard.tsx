@@ -19,6 +19,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
+import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -26,6 +27,7 @@ import {
   resolvePathTransformContext,
   sourceScfUsesPrimitiveCell,
 } from "../lib/kPathTransforms";
+import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
@@ -270,12 +272,16 @@ function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input"
   return "smearing";
 }
 
-function normalizeSmearing(raw: unknown): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
-  const lowered = String(raw || "marzari-vanderbilt").toLowerCase();
+function normalizeSmearing(
+  raw: unknown,
+  fallback: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" = "marzari-vanderbilt",
+): "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac" {
+  const lowered = String(raw || fallback).toLowerCase();
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "marzari-vanderbilt") return "marzari-vanderbilt";
   if (lowered === "fermi-dirac") return "fermi-dirac";
-  return "marzari-vanderbilt";
+  if (lowered === "gaussian") return "gaussian";
+  return fallback;
 }
 
 const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
@@ -367,6 +373,7 @@ interface BandStructureWizardProps {
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
   onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
   qePath: string;
+  defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
   activeHpcProfile?: HpcProfile | null;
   projectId: string;
@@ -391,6 +398,7 @@ export function BandStructureWizard({
   onExecutionModeChange,
   onViewBands,
   qePath,
+  defaultSmearing = "marzari-vanderbilt",
   executionMode = "local",
   activeHpcProfile = null,
   projectId,
@@ -410,6 +418,7 @@ export function BandStructureWizard({
     (task) => task.status === "running" && task.taskId !== activeTaskId,
   );
   const hasBlockingExternalTask = !isHpcMode && hasExternalRunningTask;
+  const resolvedDefaultSmearing = normalizeSmearing(defaultSmearing);
   // Wizard state
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
@@ -451,7 +460,7 @@ export function BandStructureWizard({
     () => normalizeOccupations(storedBandWizardSettings?.nscfOccupations),
   );
   const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(
-    () => normalizeSmearing(storedBandWizardSettings?.nscfSmearing),
+    () => normalizeSmearing(storedBandWizardSettings?.nscfSmearing, resolvedDefaultSmearing),
   );
   const [nscfDegaussInput, setNscfDegaussInput] = useState(
     () => storedBandWizardSettings?.nscfDegaussInput ?? "0.02",
@@ -630,7 +639,7 @@ export function BandStructureWizard({
     }
 
     setNscfOccupations(normalizeOccupations(params.occupations));
-    setNscfSmearing(normalizeSmearing(params.smearing));
+    setNscfSmearing(normalizeSmearing(params.smearing, resolvedDefaultSmearing));
 
     const degauss = Number(params.degauss);
     if (Number.isFinite(degauss) && degauss > 0) {
@@ -652,7 +661,7 @@ export function BandStructureWizard({
     } else {
       setNbnd("auto");
     }
-  }, []);
+  }, [resolvedDefaultSmearing]);
 
   const selectSourceScf = useCallback((scf: CalculationRun) => {
     setSelectedScf(scf);
@@ -1066,7 +1075,18 @@ export function BandStructureWizard({
       }
     }
 
-    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(scfParams);
+    const structureForNscf = resolveSavedScfStructure(scfParams);
+    const isOptimizedSourceScf =
+      String(scfParams.cell_representation || "").toLowerCase() === "optimized_source";
+    if (isOptimizedSourceScf && !structureForNscf) {
+      throw new Error(
+        "Selected SCF was run from an optimized structure, but its saved structure metadata is missing. Re-run the SCF from the optimized source and try again.",
+      );
+    }
+    const sourceUsesPrimitive = sourceScfUsesPrimitiveCell(
+      scfParams,
+      crystalData.atom_sites.length,
+    );
     const canUseSymmetryPrimitive =
       sourceUsesPrimitive &&
       resolvedSymmetry !== null &&
@@ -1093,7 +1113,7 @@ export function BandStructureWizard({
     let baseCalculation;
     let transformedKPath: KPathPoint[];
 
-    if (canUseSymmetryPrimitive && resolvedSymmetry) {
+    if (isOptimizedSourceScf && structureForNscf) {
       baseCalculation = {
         calculation: "scf",
         prefix: scfPrefix,
@@ -1102,10 +1122,57 @@ export function BandStructureWizard({
         system: {
           ibrav: "free",
           celldm: null,
-          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
-          cell_units: "angstrom",
+          cell_parameters: structureForNscf.cell_parameters,
+          cell_units: structureForNscf.cell_units || "angstrom",
           species,
-          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+          atoms: structureForNscf.atoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: roundVec3(atom.position),
+            if_pos: [true, true, true],
+          })),
+          position_units: "crystal",
+          ecutwfc,
+          ecutrho,
+          nspin,
+          noncolin,
+          lspinorb,
+          occupations: nscfOccupations,
+          smearing: nscfSmearing,
+          degauss: parsedDegauss,
+        },
+        kpoints: { type: "gamma" },
+        conv_thr: parsedConvThr,
+        mixing_beta: parsedMixingBeta,
+        tprnfor: false,
+        tstress: false,
+        forc_conv_thr: null,
+        etot_conv_thr: null,
+        verbosity: nscfVerbosity,
+      };
+      transformedKPath = mapPathCoordinates(
+        kPath,
+        canUseSymmetryPrimitive
+          ? converters.toSymmetryPrimitiveCoords
+          : converters.toInputConventionalCoords,
+      ).map((point) => ({
+        label: point.label,
+        coords: point.coords as Vec3,
+        npoints: point.npoints,
+      }));
+    } else if (canUseSymmetryPrimitive && resolvedSymmetry) {
+      const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
+      baseCalculation = {
+        calculation: "scf",
+        prefix: scfPrefix,
+        outdir: "./tmp",
+        pseudo_dir: pseudoDir,
+        system: {
+          ibrav: inferredBravais?.ibrav ?? "free",
+          celldm: inferredBravais?.celldm ?? null,
+          cell_parameters: inferredBravais ? null : resolvedSymmetry.standardizedPrimitiveLattice,
+          cell_units: inferredBravais ? null : "angstrom",
+          species,
+          atoms: (inferredBravais?.atoms ?? resolvedSymmetry.standardizedPrimitiveAtoms).map((atom) => ({
             symbol: atom.symbol,
             position: roundVec3(atom.position),
             if_pos: [true, true, true],
@@ -1178,9 +1245,11 @@ export function BandStructureWizard({
       }));
     }
 
-    const bandCellRepresentation = canUseSymmetryPrimitive
-      ? "primitive_spglib"
-      : "conventional_input";
+    const bandCellRepresentation = isOptimizedSourceScf && structureForNscf
+      ? "optimized_source"
+      : canUseSymmetryPrimitive
+        ? "primitive_spglib"
+        : "conventional_input";
 
     const taskLabel = `Bands - ${crystalData?.formula_sum || ""}`;
     const taskParams = {

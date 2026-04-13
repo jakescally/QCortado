@@ -3937,6 +3937,26 @@ html[data-theme="dark"] .node-activity-empty-cell {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  background: #f4f7fb;
+}
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.8rem;
+}
+
+.settings-pane .settings-menu-section {
+  border: 1px solid #dbe6f3;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+
+.settings-pane .settings-menu-divider {
+  margin: 0.1rem 0;
+  background: #dbe6f3;
 }
 
 .settings-menu-section {
@@ -4054,6 +4074,42 @@ html[data-theme="dark"] .node-activity-empty-cell {
   border-color: #38a169;
 }
 
+.settings-local-tools .settings-menu-hint code {
+  background: #edf2f7;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.settings-local-config-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.settings-local-tools .config-row {
+  grid-template-columns: 140px minmax(0, 1fr) auto;
+  margin-bottom: 0;
+}
+
+.settings-local-tools .config-path-input {
+  background: #ffffff;
+}
+
+.settings-local-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.2rem 0.75rem;
+}
+
+.settings-local-status-grid .status-row {
+  margin-bottom: 0;
+}
+
+.settings-local-tools .executables {
+  margin-top: 0.3rem;
+  padding-top: 0.7rem;
+}
+
 @media (max-width: 720px) {
   .settings-window-overlay {
     align-items: stretch;
@@ -4064,6 +4120,14 @@ html[data-theme="dark"] .node-activity-empty-cell {
     width: 100%;
     max-height: calc(100vh - 1.3rem);
     border-radius: 10px;
+  }
+
+  .settings-pane {
+    padding: 0.65rem;
+  }
+
+  .settings-pane .settings-menu-section {
+    padding: 0.7rem;
   }
 }
 
@@ -4606,6 +4670,20 @@ html[data-theme="dark"] {
     color: #e2e8f0;
   }
 
+  .settings-window-content {
+    background: #1f2937;
+  }
+
+  .settings-pane .settings-menu-section {
+    background: #1a202c;
+    border-color: #374151;
+    box-shadow: none;
+  }
+
+  .settings-pane .settings-menu-divider {
+    background: #374151;
+  }
+
   .floating-queue-menu {
     background: #2d3748;
     border-color: #4a5568;
@@ -4744,6 +4822,17 @@ html[data-theme="dark"] {
   .settings-menu-item.saved:active:not(:disabled) {
     background: #2f855a;
     border-color: #68d391;
+  }
+
+  .settings-local-tools .config-path-input {
+    background: #111827;
+    border-color: #4b5563;
+    color: #f9fafb;
+  }
+
+  .settings-local-tools .settings-menu-hint code {
+    background: #2d3748;
+    color: #e2e8f0;
   }
 
   .delete-warning p {
@@ -4988,6 +5077,34 @@ html[data-theme="dark"] {
 .hero-detail-item span {
   font-size: 0.95rem;
   font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.hero-bravais-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.hero-bravais-icon {
+  width: 1.55rem;
+  height: 1.55rem;
+  flex: 0 0 auto;
+}
+
+.hero-bravais-icon-cell {
+  fill: rgba(255, 255, 255, 0.08);
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.hero-bravais-icon-point {
+  fill: rgba(255, 255, 255, 0.98);
+}
+
+.hero-bravais-text {
+  line-height: 1.4;
 }
 
 /* Calculation Actions Grid */
@@ -7537,6 +7654,20 @@ html[data-theme="dark"] .kpath-sampling-note {
   margin-bottom: 1.5rem;
 }
 
+.wannier-reference-bands-plot {
+  margin-top: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: #ffffff;
+  min-height: 320px;
+}
+
+html[data-theme="dark"] .wannier-reference-bands-plot {
+  border-color: #45475a;
+  background: #1e1e2e;
+}
+
 .param-section label {
   display: flex;
   align-items: center;
@@ -9072,6 +9203,86 @@ html[data-theme="dark"] .option-section {
 
 html[data-theme="dark"] .option-section h4 {
   color: #cdd6f4;
+}
+
+.epw-controls-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.epw-overrides-textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.epw-overrides-textarea:focus {
+  outline: none;
+  border-color: #4299e1;
+}
+
+.epw-overrides-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: #4a5568;
+}
+
+.epw-overrides-preview,
+.epw-input-preview {
+  margin: 0;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e5e7eb;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  overflow: auto;
+  max-height: 220px;
+  white-space: pre;
+}
+
+.epw-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.epw-preview-header h4 {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+html[data-theme="dark"] .epw-overrides-textarea {
+  background: #1e1e2e;
+  border-color: #45475a;
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .epw-overrides-textarea:focus {
+  border-color: #89b4fa;
+}
+
+html[data-theme="dark"] .epw-overrides-meta {
+  color: #a6adc8;
 }
 
 .option-checkbox {

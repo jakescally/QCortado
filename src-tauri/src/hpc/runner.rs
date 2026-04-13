@@ -49,6 +49,7 @@ pub struct HpcBatchResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactSyncMode {
     Minimal,
+    EpwReady,
     Full,
 }
 
@@ -56,6 +57,7 @@ impl ArtifactSyncMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
+            Self::EpwReady => "epw-ready",
             Self::Full => "full",
         }
     }
@@ -290,6 +292,47 @@ fn should_download_minimal(task_kind: &str, entry: &RemoteFileEntry) -> bool {
     false
 }
 
+fn should_download_epw_ready(task_kind: &str, entry: &RemoteFileEntry) -> bool {
+    if should_download_minimal(task_kind, entry) {
+        return true;
+    }
+    if task_kind != "epw" {
+        return false;
+    }
+    if is_heavy_scratch_path(&entry.rel_path) {
+        return false;
+    }
+
+    let lower_rel = entry.rel_path.to_ascii_lowercase();
+    let file_name = Path::new(&lower_rel)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+
+    if matches!(
+        file_name,
+        "epw.in" | "epw.out" | "epw.err" | "run.sbatch" | "slurm.out" | "slurm.err"
+    ) {
+        return true;
+    }
+
+    if file_name.starts_with("epw")
+        || file_name.ends_with(".epw")
+        || file_name.ends_with(".epb")
+        || file_name.ends_with(".ephmat")
+        || file_name.ends_with(".a2f")
+        || file_name.ends_with(".freq")
+        || file_name.ends_with(".frq")
+        || file_name.ends_with(".fmt")
+        || file_name.ends_with(".xml")
+        || file_name.ends_with(".dat")
+    {
+        return entry.size_bytes <= 1024 * 1024 * 1024;
+    }
+
+    false
+}
+
 async fn list_remote_files(
     profile: &HpcProfile,
     secret: Option<&str>,
@@ -463,12 +506,21 @@ pub async fn sync_remote_artifacts(
             }
             Ok(report)
         }
-        ArtifactSyncMode::Minimal => {
+        ArtifactSyncMode::Minimal | ArtifactSyncMode::EpwReady => {
+            let mode_label = request.mode.label();
+            let mode_title = if matches!(request.mode, ArtifactSyncMode::EpwReady) {
+                "EPW-ready"
+            } else {
+                "Minimal"
+            };
             emit_task_line(
                 app,
                 pm,
                 &request.task_id,
-                "[QCortado] Enumerating remote files for minimal sync...".to_string(),
+                format!(
+                    "[QCortado] Enumerating remote files for {} sync...",
+                    mode_label
+                ),
             )
             .await;
             let scan_started = Instant::now();
@@ -483,7 +535,8 @@ pub async fn sync_remote_artifacts(
                 pm,
                 &request.task_id,
                 format!(
-                    "[QCortado] Minimal sync manifest complete: {} files discovered in {:.1}s.",
+                    "[QCortado] {} sync manifest complete: {} files discovered in {:.1}s.",
+                    mode_title,
                     remote_files.len(),
                     scan_started.elapsed().as_secs_f64()
                 ),
@@ -491,7 +544,12 @@ pub async fn sync_remote_artifacts(
             .await;
             let mut candidates: Vec<RemoteFileEntry> = Vec::new();
             for entry in remote_files {
-                if should_download_minimal(&request.task_kind, &entry) {
+                let include = if matches!(request.mode, ArtifactSyncMode::EpwReady) {
+                    should_download_epw_ready(&request.task_kind, &entry)
+                } else {
+                    should_download_minimal(&request.task_kind, &entry)
+                };
+                if include {
                     candidates.push(entry);
                 } else {
                     report.skipped_files += 1;
@@ -504,7 +562,8 @@ pub async fn sync_remote_artifacts(
                 pm,
                 &request.task_id,
                 format!(
-                    "[QCortado] Minimal sync selected {} files ({} skipped as heavy/scratch).",
+                    "[QCortado] {} sync selected {} files ({} skipped as heavy/scratch).",
+                    mode_title,
                     total_candidates, report.skipped_files
                 ),
             )
@@ -550,7 +609,8 @@ pub async fn sync_remote_artifacts(
                         pm,
                         &request.task_id,
                         format!(
-                            "[QCortado] Minimal sync progress: {}/{} files, {:.2} MB downloaded, {} skipped.",
+                            "[QCortado] {} sync progress: {}/{} files, {:.2} MB downloaded, {} skipped.",
+                            mode_title,
                             processed_files,
                             total_candidates,
                             report.downloaded_bytes as f64 / (1024.0 * 1024.0),
@@ -574,7 +634,8 @@ pub async fn sync_remote_artifacts(
                     pm,
                     &request.task_id,
                     format!(
-                        "HPC_WARNING|Some artifacts were not downloaded during minimal sync ({}).",
+                        "HPC_WARNING|Some artifacts were not downloaded during {} sync ({}).",
+                        mode_label,
                         preview
                     ),
                 )
@@ -586,7 +647,8 @@ pub async fn sync_remote_artifacts(
                 pm,
                 &request.task_id,
                 format!(
-                    "[QCortado] Minimal sync finished: {} files downloaded ({:.2} MB), {} skipped ({:.2} MB).",
+                    "[QCortado] {} sync finished: {} files downloaded ({:.2} MB), {} skipped ({:.2} MB).",
+                    mode_title,
                     report.downloaded_files,
                     report.downloaded_bytes as f64 / (1024.0 * 1024.0),
                     report.skipped_files,
@@ -1112,11 +1174,20 @@ pub async fn run_batch_task(
     }
 
     if terminal_state == "COMPLETED" {
+        let completion_sync_mode = if request.task_kind == "epw" {
+            ArtifactSyncMode::EpwReady
+        } else {
+            ArtifactSyncMode::Minimal
+        };
         emit_task_line(
             &app,
             &pm,
             task_id(&request),
-            format!("HPC_STAGE|Collecting|{} (minimal)", remote_workdir),
+            format!(
+                "HPC_STAGE|Collecting|{} ({})",
+                remote_workdir,
+                completion_sync_mode.label()
+            ),
         )
         .await;
         let sync_started = Instant::now();
@@ -1130,16 +1201,22 @@ pub async fn run_batch_task(
                 secret: request.secret.clone(),
                 remote_workdir: remote_workdir.clone(),
                 local_sync_dir: request.local_sync_dir.clone(),
-                mode: ArtifactSyncMode::Minimal,
+                mode: completion_sync_mode,
             },
         )
         .await?;
+        let sync_title = if matches!(completion_sync_mode, ArtifactSyncMode::EpwReady) {
+            "EPW-ready"
+        } else {
+            "Minimal"
+        };
         emit_task_line(
             &app,
             &pm,
             task_id(&request),
             format!(
-                "[QCortado] Minimal artifact sync finished in {:.1}s.",
+                "[QCortado] {} artifact sync finished in {:.1}s.",
+                sync_title,
                 sync_started.elapsed().as_secs_f64()
             ),
         )
@@ -1154,7 +1231,8 @@ pub async fn run_batch_task(
             &pm,
             task_id(&request),
             format!(
-                "HPC_STAGE|Saved|Minimal sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+                "HPC_STAGE|Saved|{} sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+                sync_report.mode,
                 sync_report.downloaded_files,
                 sync_report.downloaded_bytes as f64 / (1024.0 * 1024.0),
                 sync_report.skipped_files,
@@ -1166,8 +1244,13 @@ pub async fn run_batch_task(
             &app,
             &pm,
             task_id(&request),
-            "HPC_WARNING|Large scratch artifacts remain remote. Use 'Download full bundle' if needed."
-                .to_string(),
+            if matches!(completion_sync_mode, ArtifactSyncMode::EpwReady) {
+                "HPC_WARNING|Additional scratch artifacts remain remote after EPW-ready sync. Use 'Download full bundle' if needed."
+                    .to_string()
+            } else {
+                "HPC_WARNING|Large scratch artifacts remain remote. Use 'Download full bundle' if needed."
+                    .to_string()
+            },
         )
         .await;
     } else {

@@ -32,6 +32,7 @@ type ProjectCalculationType =
   | "dos"
   | "transport"
   | "phonon"
+  | "epw"
   | "optimization"
   | "fermi_surface";
 
@@ -41,6 +42,7 @@ const PROJECT_CALCULATION_TYPE_ORDER: ProjectCalculationType[] = [
   "dos",
   "transport",
   "phonon",
+  "epw",
   "optimization",
   "fermi_surface",
 ];
@@ -51,6 +53,7 @@ const PROJECT_CALCULATION_TYPE_LABELS: Record<ProjectCalculationType, string> = 
   dos: "DOS",
   transport: "Transport",
   phonon: "Phonon",
+  epw: "EPW",
   optimization: "Geometry Optimization",
   fermi_surface: "Fermi Surface",
 };
@@ -77,6 +80,7 @@ function createEmptyCalculationTypeCounts(): Record<ProjectCalculationType, numb
     dos: 0,
     transport: 0,
     phonon: 0,
+    epw: 0,
     optimization: 0,
     fermi_surface: 0,
   };
@@ -89,6 +93,7 @@ function normalizeProjectCalculationType(calcType: string): ProjectCalculationTy
   if (normalized === "dos") return "dos";
   if (normalized === "transport") return "transport";
   if (normalized === "phonon") return "phonon";
+  if (normalized === "epw") return "epw";
   if (
     normalized === "optimization"
     || normalized === "geometry_optimization"
@@ -121,7 +126,7 @@ function getProjectCalculationTypes(project: ProjectSummary): ProjectCalculation
 }
 
 interface ProjectBrowserProps {
-  onBack: () => void;
+  onBack?: () => void;
   onSelectProject?: (projectId: string, folderId: string | null) => void;
   onProjectsChanged?: () => void;
   onOpenBandsMultiview?: (initialCalculations: BandsMultiviewCalculation[]) => void;
@@ -980,9 +985,11 @@ export function ProjectBrowser({
     <div className={`browser-container ${isOpeningBandsMultiview ? "browser-container-multiview-loading" : ""}`}>
       {isOpeningBandsMultiview && <div className="browser-multiview-loading-backdrop" />}
       <div className="browser-header">
-        <button className="back-btn" onClick={onBack}>
-          ← Back
-        </button>
+        {onBack && (
+          <button className="back-btn" onClick={onBack}>
+            ← Back
+          </button>
+        )}
         <h2>Projects</h2>
         <div className="browser-actions">
           {onOpenBandsMultiview && (

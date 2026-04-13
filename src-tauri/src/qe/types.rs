@@ -488,6 +488,9 @@ pub struct QEResult {
     /// Full transport data (for BoltzWann transport calculations)
     #[serde(default)]
     pub transport_data: Option<serde_json::Value>,
+    /// Full EPW data payload (for `epw.x` calculations)
+    #[serde(default)]
+    pub epw_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -508,6 +511,7 @@ impl Default for QEResult {
             dos_data: None,
             wannier_data: None,
             transport_data: None,
+            epw_data: None,
         }
     }
 }
