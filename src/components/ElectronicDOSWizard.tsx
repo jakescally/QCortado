@@ -27,6 +27,7 @@ import {
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
   listRemotePseudopotentials,
+  resolveProfileRemoteQeBinDir,
   sampleHpcUtilization,
   saveExecutionMode,
 } from "../lib/hpcConfig";
@@ -279,11 +280,11 @@ export function ElectronicDOSWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      "QE_BIN=\"$HOME/qe/bin\"",
+      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out"),
       buildHpcQeInputCommandLine(activeHpcProfile, "dos.x", "dos.in", "dos.out"),
     ],
-    [activeHpcProfile],
+    [activeHpcProfile, hpcResources.resource_type],
   );
 
   useEffect(() => {
@@ -1244,7 +1245,7 @@ export function ElectronicDOSWizard({
         </>
       )}
 
-      <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
+      <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : "run-layout-single"}`}>
         <LiveOutputPanel
           title={isRunning ? "Running..." : "Output"}
           output={output}

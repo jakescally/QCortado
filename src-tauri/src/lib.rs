@@ -267,6 +267,17 @@ fn build_hpc_launcher_command(profile: &hpc::profile::HpcProfile) -> String {
     command
 }
 
+fn resolve_hpc_qe_bin_dir_for_resources(
+    profile: &hpc::profile::HpcProfile,
+    resources: Option<&hpc::profile::SlurmResourceRequest>,
+) -> String {
+    let effective = hpc::slurm::merge_resources(profile, resources.cloned());
+    profile
+        .remote_qe_bin_dir_for_resource(effective.resource_type)
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn build_hpc_qe_input_command(
     profile: &hpc::profile::HpcProfile,
     executable: &str,
@@ -351,6 +362,19 @@ fn sanitize_hpc_profile(
     profile.username = normalize_hpc_text(&profile.username, "SSH username")?;
     profile.remote_qe_bin_dir =
         normalize_hpc_text(&profile.remote_qe_bin_dir, "Remote QE bin path")?;
+    profile.remote_qe_cpu_bin_dir = sanitize_optional_hpc_field(profile.remote_qe_cpu_bin_dir);
+    profile.remote_qe_gpu_bin_dir = sanitize_optional_hpc_field(profile.remote_qe_gpu_bin_dir);
+    if profile.remote_qe_cpu_bin_dir.is_none() {
+        profile.remote_qe_cpu_bin_dir = Some(profile.remote_qe_bin_dir.clone());
+    }
+    if profile.remote_qe_gpu_bin_dir.is_none() {
+        profile.remote_qe_gpu_bin_dir = Some(profile.remote_qe_bin_dir.clone());
+    }
+    profile.remote_qe_bin_dir = profile
+        .remote_qe_cpu_bin_dir
+        .clone()
+        .or(profile.remote_qe_gpu_bin_dir.clone())
+        .unwrap_or(profile.remote_qe_bin_dir);
     profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
     profile.remote_postw90_path = None;
     profile.remote_pseudo_dir =
@@ -1378,6 +1402,10 @@ struct HpcPresetBundleProfile {
     host: String,
     remote_qe_bin_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_qe_cpu_bin_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_qe_gpu_bin_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_wannier90_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_postw90_path: Option<String>,
@@ -1620,6 +1648,8 @@ fn hpc_export_preset_bundle(
                 port: profile.port,
                 host: profile.host,
                 remote_qe_bin_dir: profile.remote_qe_bin_dir,
+                remote_qe_cpu_bin_dir: profile.remote_qe_cpu_bin_dir,
+                remote_qe_gpu_bin_dir: profile.remote_qe_gpu_bin_dir,
                 remote_wannier90_path: profile.remote_wannier90_path,
                 remote_postw90_path: profile.remote_postw90_path,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
@@ -1760,6 +1790,8 @@ fn hpc_import_preset_bundle(
                 auth_method: existing_profile.auth_method.clone(),
                 ssh_key_path: existing_profile.ssh_key_path.clone(),
                 remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+                remote_qe_cpu_bin_dir: imported_profile.remote_qe_cpu_bin_dir,
+                remote_qe_gpu_bin_dir: imported_profile.remote_qe_gpu_bin_dir,
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_postw90_path: imported_profile.remote_postw90_path,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
@@ -1806,6 +1838,8 @@ fn hpc_import_preset_bundle(
             auth_method: hpc::profile::HpcAuthMethod::SshKey,
             ssh_key_path: None,
             remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
+            remote_qe_cpu_bin_dir: imported_profile.remote_qe_cpu_bin_dir,
+            remote_qe_gpu_bin_dir: imported_profile.remote_qe_gpu_bin_dir,
             remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_postw90_path: imported_profile.remote_postw90_path,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
@@ -2271,63 +2305,91 @@ async fn hpc_validate_environment(
         messages.push("sacct not available in remote shell PATH".to_string());
     }
 
-    let qe_pw_available = hpc::ssh::run_ssh_command(
-        &profile,
-        secret.as_deref(),
-        &format!(
-            "test -x {}/pw.x && echo ok || echo missing",
-            profile.remote_qe_bin_dir.trim_end_matches('/')
-        ),
-    )
-    .await
-    .map(|value| value.contains("ok"))
-    .unwrap_or(false);
-    if !qe_pw_available {
-        messages.push(format!(
-            "pw.x not found/executable at {}",
-            profile.remote_qe_bin_dir
-        ));
-    }
-
-    let qe_epw_resolved_path = hpc::ssh::run_ssh_command(
-        &profile,
-        secret.as_deref(),
-        &resolve_remote_epw_path_shell(profile.remote_qe_bin_dir.trim_end_matches('/')),
-    )
-    .await
-    .ok()
-    .and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || trimmed == "missing" {
-            None
-        } else {
-            Some(trimmed.to_string())
+    let cpu_qe_bin_dir = profile
+        .remote_qe_bin_dir_for_resource(hpc::profile::ResourceType::Cpu)
+        .trim_end_matches('/')
+        .to_string();
+    let gpu_qe_bin_dir = profile
+        .remote_qe_bin_dir_for_resource(hpc::profile::ResourceType::Gpu)
+        .trim_end_matches('/')
+        .to_string();
+    let qe_path_checks: Vec<(String, String)> = match profile.resource_mode {
+        hpc::profile::HpcResourceMode::CpuOnly => vec![("CPU".to_string(), cpu_qe_bin_dir)],
+        hpc::profile::HpcResourceMode::GpuOnly => vec![("GPU".to_string(), gpu_qe_bin_dir)],
+        hpc::profile::HpcResourceMode::Both => {
+            if cpu_qe_bin_dir == gpu_qe_bin_dir {
+                vec![("CPU/GPU".to_string(), cpu_qe_bin_dir)]
+            } else {
+                vec![
+                    ("CPU".to_string(), cpu_qe_bin_dir),
+                    ("GPU".to_string(), gpu_qe_bin_dir),
+                ]
+            }
         }
-    });
-    let qe_epw_available = qe_epw_resolved_path.is_some();
-    if qe_epw_resolved_path.is_none() {
-        messages.push(format!(
-            "epw.x not found/executable at {} or fallback EPW/bin locations",
-            profile.remote_qe_bin_dir
-        ));
-    }
+    };
 
-    let qe_pw2wannier_available = hpc::ssh::run_ssh_command(
-        &profile,
-        secret.as_deref(),
-        &format!(
-            "test -x {}/pw2wannier90.x && echo ok || echo missing",
-            profile.remote_qe_bin_dir.trim_end_matches('/')
-        ),
-    )
-    .await
-    .map(|value| value.contains("ok"))
-    .unwrap_or(false);
-    if !qe_pw2wannier_available {
-        messages.push(format!(
-            "pw2wannier90.x not found/executable at {}",
-            profile.remote_qe_bin_dir
-        ));
+    let mut qe_pw_available = true;
+    let mut qe_epw_available = true;
+    let mut qe_pw2wannier_available = true;
+    for (role, qe_bin_dir) in qe_path_checks {
+        let pw_available_for_role = hpc::ssh::run_ssh_command(
+            &profile,
+            secret.as_deref(),
+            &format!("test -x {}/pw.x && echo ok || echo missing", qe_bin_dir),
+        )
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
+        if !pw_available_for_role {
+            messages.push(format!(
+                "pw.x not found/executable at {} ({} QE path)",
+                qe_bin_dir, role
+            ));
+        }
+        qe_pw_available &= pw_available_for_role;
+
+        let epw_resolved_for_role = hpc::ssh::run_ssh_command(
+            &profile,
+            secret.as_deref(),
+            &resolve_remote_epw_path_shell(&qe_bin_dir),
+        )
+        .await
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "missing" {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let epw_available_for_role = epw_resolved_for_role.is_some();
+        if !epw_available_for_role {
+            messages.push(format!(
+                "epw.x not found/executable at {} or fallback EPW/bin locations ({} QE path)",
+                qe_bin_dir, role
+            ));
+        }
+        qe_epw_available &= epw_available_for_role;
+
+        let pw2wannier_available_for_role = hpc::ssh::run_ssh_command(
+            &profile,
+            secret.as_deref(),
+            &format!(
+                "test -x {}/pw2wannier90.x && echo ok || echo missing",
+                qe_bin_dir
+            ),
+        )
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
+        if !pw2wannier_available_for_role {
+            messages.push(format!(
+                "pw2wannier90.x not found/executable at {} ({} QE path)",
+                qe_bin_dir, role
+            ));
+        }
+        qe_pw2wannier_available &= pw2wannier_available_for_role;
     }
 
     let remote_wannier90 = profile
@@ -8131,7 +8193,7 @@ async fn run_scf_hpc_background(
     let mut remote_calculation = calculation;
     remote_calculation.pseudo_dir = profile.remote_pseudo_dir.clone();
     let input = generate_pw_input(&remote_calculation);
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let commands = vec![
         "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
         format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
@@ -8474,7 +8536,7 @@ async fn run_bands_hpc_background(
         pm.append_output(task_id, hydrate_line).await;
     }
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
     commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
@@ -9493,7 +9555,7 @@ async fn run_wannier_hpc_background(
         config.scf_calc_id.as_deref(),
     )?;
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let launcher = build_hpc_launcher_command(&profile);
     let pre_cmd = format!(
         "{} {} -pp {} > wannier90_pre.out 2>&1",
@@ -10629,7 +10691,7 @@ async fn run_epw_hpc_background(
     let input_text = build_epw_input(&config)?;
     let total_steps = if sources.rebuild_wannier_nscf_save { 3 } else { 2 };
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let launcher = build_hpc_launcher_command(&profile);
     let epw_cmd = format!(
         "{} \"$EPW_EXE\" -npool {} -in epw.in > epw.out 2> epw.err",
@@ -10929,7 +10991,7 @@ async fn run_dos_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
     commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
@@ -11454,7 +11516,7 @@ async fn run_fermi_surface_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
     commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
@@ -12035,7 +12097,7 @@ async fn run_phonon_hpc_background(
         None
     };
 
-    let qe_bin_dir = profile.remote_qe_bin_dir.trim_end_matches('/').to_string();
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
     commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));

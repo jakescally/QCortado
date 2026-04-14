@@ -36,6 +36,7 @@ import {
   buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
+  resolveProfileRemoteQeBinDir,
   sampleHpcUtilization,
   saveExecutionMode,
 } from "../lib/hpcConfig";
@@ -521,9 +522,10 @@ export function PhononWizard({
   const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
   useViewportScrollLock(step === "run");
   const hpcCommandLines = useMemo(() => {
+    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      "QE_BIN=\"$HOME/qe/bin\"",
+      `QE_BIN="${qeBinDir}"`,
       buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out"),
       buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out"),
     ];
@@ -534,7 +536,7 @@ export function PhononWizard({
       lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_bands.in", "matdyn_bands.out"));
     }
     return lines;
-  }, [activeHpcProfile, calculateDos, calculateDispersion]);
+  }, [activeHpcProfile, calculateDos, calculateDispersion, hpcResources.resource_type]);
 
   useEffect(() => {
     if (!isHpcMode) return;
@@ -2093,7 +2095,7 @@ export function PhononWizard({
           </>
         )}
 
-        <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
+        <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : "run-layout-single"}`}>
           <LiveOutputPanel
             title={isRunning ? "Running..." : "Output"}
             output={output}

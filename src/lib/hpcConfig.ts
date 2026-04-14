@@ -4,6 +4,7 @@ import {
   ExecutionTarget,
   HpcLauncher,
   HpcProfile,
+  HpcResourceType,
   HpcResourceMode,
   PseudopotentialMetadata,
   SlurmResourceRequest,
@@ -185,6 +186,30 @@ export function defaultResourcesForProfile(profile: HpcProfile | null | undefine
     return cloneResourceTemplate(profile.default_gpu_resources, "gpu");
   }
   return cloneResourceTemplate(profile.default_cpu_resources, "cpu");
+}
+
+function normalizeRemoteQeBinDir(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function resolveProfileRemoteQeBinDir(
+  profile: HpcProfile | null | undefined,
+  resourceType?: HpcResourceType | null,
+): string {
+  const fallback = normalizeRemoteQeBinDir(profile?.remote_qe_bin_dir) || "$HOME/qe/bin";
+  if (!profile) {
+    return fallback;
+  }
+  const requestedType = resourceType
+    || (profile.resource_mode === "gpu_only" ? "gpu" : "cpu");
+  if (requestedType === "gpu") {
+    return normalizeRemoteQeBinDir(profile.remote_qe_gpu_bin_dir) || fallback;
+  }
+  return normalizeRemoteQeBinDir(profile.remote_qe_cpu_bin_dir) || fallback;
 }
 
 export function buildHpcLauncherCommand(profile: HpcProfile | null | undefined): string {

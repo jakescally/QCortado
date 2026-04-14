@@ -122,6 +122,8 @@ export interface HpcProfile {
   auth_method: HpcAuthMethod;
   ssh_key_path?: string | null;
   remote_qe_bin_dir: string;
+  remote_qe_cpu_bin_dir?: string | null;
+  remote_qe_gpu_bin_dir?: string | null;
   remote_wannier90_path?: string | null;
   remote_postw90_path?: string | null;
   remote_pseudo_dir: string;

@@ -45,6 +45,8 @@ function makeDefaultProfile(): HpcProfile {
     auth_method: "ssh_key",
     ssh_key_path: "~/.ssh/id_rsa",
     remote_qe_bin_dir: "~/qe/bin",
+    remote_qe_cpu_bin_dir: "~/qe/bin",
+    remote_qe_gpu_bin_dir: "~/qe-gpu/bin",
     remote_wannier90_path: "wannier90.x",
     remote_pseudo_dir: "~/qe/pseudo",
     remote_workspace_root: "~/qcortado/work",
@@ -61,6 +63,27 @@ function makeDefaultProfile(): HpcProfile {
   };
 }
 
+function normalizeQeProfilePaths(profile: HpcProfile): HpcProfile {
+  const legacy = (profile.remote_qe_bin_dir || "").trim();
+  const fallback = legacy.length > 0 ? legacy : "~/qe/bin";
+  const cpu = (profile.remote_qe_cpu_bin_dir || "").trim();
+  const gpu = (profile.remote_qe_gpu_bin_dir || "").trim();
+  const primary = cpu.length > 0
+    ? cpu
+    : gpu.length > 0
+      ? gpu
+      : fallback;
+  const normalizedCpu = cpu.length > 0 ? cpu : primary;
+  const normalizedGpu = gpu.length > 0 ? gpu : primary;
+
+  return {
+    ...profile,
+    remote_qe_bin_dir: primary,
+    remote_qe_cpu_bin_dir: normalizedCpu,
+    remote_qe_gpu_bin_dir: normalizedGpu,
+  };
+}
+
 export function HpcSetupWizard({
   isOpen,
   initialProfile = null,
@@ -69,7 +92,7 @@ export function HpcSetupWizard({
 }: HpcSetupWizardProps) {
   const wasOpenRef = useRef(false);
   const [step, setStep] = useState(0);
-  const [profile, setProfile] = useState<HpcProfile>(initialProfile ?? makeDefaultProfile());
+  const [profile, setProfile] = useState<HpcProfile>(normalizeQeProfilePaths(initialProfile ?? makeDefaultProfile()));
   const [credential, setCredential] = useState("");
   const [persistCredential, setPersistCredential] = useState(initialProfile?.credential_persisted ?? false);
   const [isSaving, setIsSaving] = useState(false);
@@ -83,7 +106,7 @@ export function HpcSetupWizard({
     const isNewlyOpened = isOpen && !wasOpenRef.current;
     if (isNewlyOpened) {
       setStep(0);
-      setProfile(initialProfile ?? makeDefaultProfile());
+      setProfile(normalizeQeProfilePaths(initialProfile ?? makeDefaultProfile()));
       setCredential("");
       setPersistCredential(initialProfile?.credential_persisted ?? false);
       setImportMessage(null);
@@ -104,8 +127,16 @@ export function HpcSetupWizard({
       return credential.trim().length > 0 || profile.id.trim().length > 0;
     }
     if (step === 2) {
+      const legacyPath = (profile.remote_qe_bin_dir || "").trim();
+      const cpuPath = (profile.remote_qe_cpu_bin_dir || "").trim();
+      const gpuPath = (profile.remote_qe_gpu_bin_dir || "").trim();
+      const resolvedCpuPath = cpuPath.length > 0 ? cpuPath : legacyPath;
+      const resolvedGpuPath = gpuPath.length > 0 ? gpuPath : legacyPath;
+      const hasCpuPath = profile.resource_mode !== "gpu_only" ? resolvedCpuPath.length > 0 : true;
+      const hasGpuPath = profile.resource_mode !== "cpu_only" ? resolvedGpuPath.length > 0 : true;
       return (
-        profile.remote_qe_bin_dir.trim().length > 0
+        hasCpuPath
+        && hasGpuPath
         && profile.remote_pseudo_dir.trim().length > 0
         && profile.remote_workspace_root.trim().length > 0
         && profile.remote_project_root.trim().length > 0
@@ -118,8 +149,9 @@ export function HpcSetupWizard({
     setIsSaving(true);
     setValidationMessage(null);
     try {
+      const normalizedProfile = normalizeQeProfilePaths(profile);
       const saved = await saveHpcProfile(
-        profile,
+        normalizedProfile,
         credential.trim().length > 0 ? credential : null,
         persistCredential,
       );
@@ -206,7 +238,7 @@ export function HpcSetupWizard({
       }
 
       setStep(0);
-      setProfile(importedProfile);
+      setProfile(normalizeQeProfilePaths(importedProfile));
       setCredential("");
       setPersistCredential(importedProfile.credential_persisted);
       onSaved(importedProfile);
@@ -340,12 +372,29 @@ export function HpcSetupWizard({
 
           {step === 2 && (
             <div className="settings-menu-section">
-              <label className="settings-menu-label">Remote QE Bin Directory</label>
-              <input
-                className="settings-menu-input"
-                value={profile.remote_qe_bin_dir}
-                onChange={(event) => setProfile((prev) => ({ ...prev, remote_qe_bin_dir: event.target.value }))}
-              />
+              <div className="hpc-path-grid">
+                <label className="settings-menu-label">Remote QE CPU Bin Directory</label>
+                <input
+                  className="settings-menu-input"
+                  value={profile.remote_qe_cpu_bin_dir || ""}
+                  onChange={(event) =>
+                    setProfile((prev) => ({ ...prev, remote_qe_cpu_bin_dir: event.target.value || null }))
+                  }
+                  placeholder="~/qe/bin"
+                />
+                <label className="settings-menu-label">Remote QE GPU Bin Directory</label>
+                <input
+                  className="settings-menu-input"
+                  value={profile.remote_qe_gpu_bin_dir || ""}
+                  onChange={(event) =>
+                    setProfile((prev) => ({ ...prev, remote_qe_gpu_bin_dir: event.target.value || null }))
+                  }
+                  placeholder="~/qe-gpu/bin"
+                />
+              </div>
+              <p className="settings-menu-hint">
+                CPU runs use the CPU path and GPU runs use the GPU path. Legacy fallback path is preserved automatically.
+              </p>
               <label className="settings-menu-label">Remote Wannier90 Executable</label>
               <input
                 className="settings-menu-input"

@@ -41,6 +41,7 @@ import {
   defaultResourcesForProfile,
   loadRemoteSsspData,
   listRemotePseudopotentialMetadata,
+  resolveProfileRemoteQeBinDir,
   sampleHpcUtilization,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -633,10 +634,10 @@ export function SCFWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      "QE_BIN=\"$HOME/qe/bin\"",
+      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "pw.in", "pw.out"),
     ],
-    [activeHpcProfile],
+    [activeHpcProfile, hpcResources.resource_type],
   );
 
   // Load available pseudopotentials and SSSP data
@@ -3050,7 +3051,18 @@ export function SCFWizard({
         )}
 
         {(step === "run" || step === "results") && (
-          <div className="run-step run-step-focused scf-run-step">
+          <div className="wizard-step run-step run-step-focused scf-run-step">
+            <div className="run-step-headline">
+              <h3>
+                {isOptimizationWizard
+                  ? (isRunning ? "Running Structure Optimization" : "Structure Optimization Output")
+                  : (isRunning ? "Running SCF Calculation" : "SCF Output")}
+              </h3>
+              <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
+                {isRunning ? "Live output" : error ? "Run failed" : "Output"}
+              </span>
+            </div>
+
             <div className="run-status-rail scf-run-status">
               <ProgressBar
                 status={progress.status}
@@ -3063,7 +3075,7 @@ export function SCFWizard({
                 <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
               </div>
             </div>
-            <div className={`run-layout ${isHpcMode && !result ? "run-layout-hpc-telemetry" : ""}`}>
+            <div className={`run-layout ${isHpcMode && !result ? "run-layout-hpc-telemetry" : result ? "" : "run-layout-single"}`}>
               <LiveOutputPanel
                 title={isRunning ? "Running..." : "Output"}
                 output={output}

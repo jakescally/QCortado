@@ -114,6 +114,10 @@ pub struct HpcProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_key_path: Option<String>,
     pub remote_qe_bin_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_qe_cpu_bin_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_qe_gpu_bin_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_wannier90_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,6 +152,24 @@ impl HpcProfile {
 
     pub fn preferred_resource_type(&self) -> ResourceType {
         self.resource_mode.preferred_resource_type()
+    }
+
+    pub fn remote_qe_bin_dir_for_resource(&self, resource_type: ResourceType) -> &str {
+        let fallback = self.remote_qe_bin_dir.trim();
+        match resource_type {
+            ResourceType::Cpu => self
+                .remote_qe_cpu_bin_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback),
+            ResourceType::Gpu => self
+                .remote_qe_gpu_bin_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback),
+        }
     }
 }
 

@@ -654,6 +654,8 @@ mod tests {
             auth_method: HpcAuthMethod::SshKey,
             ssh_key_path: Some("~/.ssh/id_rsa".to_string()),
             remote_qe_bin_dir: "~/qe/bin".to_string(),
+            remote_qe_cpu_bin_dir: Some("~/qe/bin".to_string()),
+            remote_qe_gpu_bin_dir: Some("~/qe-gpu/bin".to_string()),
             remote_wannier90_path: Some("wannier90.x".to_string()),
             remote_postw90_path: Some("postw90.x".to_string()),
             remote_pseudo_dir: "~/qe/pseudo".to_string(),

@@ -972,6 +972,7 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
+.epw-wizard.wizard-step-run .wizard-content,
 .transport-wizard.wizard-step-run .wizard-content,
 .wannier-wizard.wizard-step-run .wizard-content {
   display: flex;
@@ -2372,6 +2373,17 @@ html[data-theme="dark"] {
   color: #234e52;
 }
 
+.project-filter-tab-transport.active {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #92400e;
+}
+
+.project-filter-tab-transport.active .project-filter-count {
+  background: #fde68a;
+  color: #78350f;
+}
+
 .project-filter-tab-phonon.active {
   background: #fff7ed;
   border-color: #fbd38d;
@@ -2381,6 +2393,17 @@ html[data-theme="dark"] {
 .project-filter-tab-phonon.active .project-filter-count {
   background: #feebc8;
   color: #9c4221;
+}
+
+.project-filter-tab-epw.active {
+  background: #f5f3ff;
+  border-color: #d8b4fe;
+  color: #6b21a8;
+}
+
+.project-filter-tab-epw.active .project-filter-count {
+  background: #e9d5ff;
+  color: #581c87;
 }
 
 .project-filter-tab-optimization.active {
@@ -2617,10 +2640,22 @@ html[data-theme="dark"] {
   border-color: #81e6d9;
 }
 
+.project-calc-tag-transport {
+  background: #fffbeb;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+
 .project-calc-tag-phonon {
   background: #fff7ed;
   color: #9c4221;
   border-color: #fbd38d;
+}
+
+.project-calc-tag-epw {
+  background: #f5f3ff;
+  color: #6b21a8;
+  border-color: #d8b4fe;
 }
 
 .project-calc-tag-optimization {
@@ -3033,6 +3068,17 @@ html[data-theme="dark"] {
     color: #e6fffa;
   }
 
+  .project-filter-tab-transport.active {
+    background: #3f2f08;
+    border-color: #ca8a04;
+    color: #fde68a;
+  }
+
+  .project-filter-tab-transport.active .project-filter-count {
+    background: #a16207;
+    color: #fef3c7;
+  }
+
   .project-filter-tab-phonon.active {
     background: #4a2a14;
     border-color: #c05621;
@@ -3042,6 +3088,17 @@ html[data-theme="dark"] {
   .project-filter-tab-phonon.active .project-filter-count {
     background: #c05621;
     color: #fffaf0;
+  }
+
+  .project-filter-tab-epw.active {
+    background: #312e81;
+    border-color: #7c3aed;
+    color: #ddd6fe;
+  }
+
+  .project-filter-tab-epw.active .project-filter-count {
+    background: #6d28d9;
+    color: #f5f3ff;
   }
 
   .project-filter-tab-optimization.active {
@@ -3095,10 +3152,22 @@ html[data-theme="dark"] {
     border-color: #2c7a7b;
   }
 
+  .project-calc-tag-transport {
+    background: #3f2f08;
+    color: #fde68a;
+    border-color: #ca8a04;
+  }
+
   .project-calc-tag-phonon {
     background: #4a2a14;
     color: #fbd38d;
     border-color: #c05621;
+  }
+
+  .project-calc-tag-epw {
+    background: #312e81;
+    color: #ddd6fe;
+    border-color: #7c3aed;
   }
 
   .project-calc-tag-optimization {
@@ -6780,6 +6849,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard,
 .fermi-surface-wizard,
 .phonon-wizard,
+.epw-wizard,
 .transport-wizard,
 .wannier-wizard {
   height: 100%;
@@ -6797,6 +6867,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard.wizard-step-run,
 .fermi-surface-wizard.wizard-step-run,
 .phonon-wizard.wizard-step-run,
+.epw-wizard.wizard-step-run,
 .transport-wizard.wizard-step-run,
 .wannier-wizard.wizard-step-run {
   height: 100%;
@@ -6815,6 +6886,7 @@ html[data-theme="dark"] .band-structure-wizard,
 html[data-theme="dark"] .electronic-dos-wizard,
 html[data-theme="dark"] .fermi-surface-wizard,
 html[data-theme="dark"] .phonon-wizard,
+html[data-theme="dark"] .epw-wizard,
 html[data-theme="dark"] .transport-wizard,
 html[data-theme="dark"] .wannier-wizard {
   background: #1e1e2e;
@@ -6824,6 +6896,7 @@ html[data-theme="dark"] .wannier-wizard {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header {
   display: flex;
@@ -6848,6 +6921,7 @@ html[data-theme="dark"] .band-structure-wizard > .wizard-header,
 html[data-theme="dark"] .electronic-dos-wizard > .wizard-header,
 html[data-theme="dark"] .fermi-surface-wizard > .wizard-header,
 html[data-theme="dark"] .phonon-wizard > .wizard-header,
+html[data-theme="dark"] .epw-wizard > .wizard-header,
 html[data-theme="dark"] .transport-wizard > .wizard-header,
 html[data-theme="dark"] .wannier-wizard > .wizard-header {
   border-bottom-color: #45475a;
@@ -6857,6 +6931,7 @@ html[data-theme="dark"] .wannier-wizard > .wizard-header {
 .electronic-dos-wizard .wizard-header h2,
 .fermi-surface-wizard .wizard-header h2,
 .phonon-wizard .wizard-header h2,
+.epw-wizard .wizard-header h2,
 .transport-wizard .wizard-header h2,
 .wannier-wizard .wizard-header h2 {
   margin: 0;
@@ -6869,6 +6944,7 @@ html[data-theme="dark"] .band-structure-wizard .wizard-header h2,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-header h2,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-header h2,
 html[data-theme="dark"] .phonon-wizard .wizard-header h2,
+html[data-theme="dark"] .epw-wizard .wizard-header h2,
 html[data-theme="dark"] .transport-wizard .wizard-header h2,
 html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
   color: #f7fafc;
@@ -6878,6 +6954,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
 .electronic-dos-wizard .step-indicator,
 .fermi-surface-wizard .step-indicator,
 .phonon-wizard .step-indicator,
+.epw-wizard .step-indicator,
 .transport-wizard .step-indicator,
 .wannier-wizard .step-indicator {
   display: flex;
@@ -6889,6 +6966,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
 .electronic-dos-wizard .step-indicator span,
 .fermi-surface-wizard .step-indicator span,
 .phonon-wizard .step-indicator span,
+.epw-wizard .step-indicator span,
 .transport-wizard .step-indicator span,
 .wannier-wizard .step-indicator span {
   color: #718096;
@@ -6900,6 +6978,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span,
 html[data-theme="dark"] .phonon-wizard .step-indicator span,
+html[data-theme="dark"] .epw-wizard .step-indicator span,
 html[data-theme="dark"] .transport-wizard .step-indicator span,
 html[data-theme="dark"] .wannier-wizard .step-indicator span {
   color: #6c7086;
@@ -6909,6 +6988,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span {
 .electronic-dos-wizard .step-indicator span.active,
 .fermi-surface-wizard .step-indicator span.active,
 .phonon-wizard .step-indicator span.active,
+.epw-wizard .step-indicator span.active,
 .transport-wizard .step-indicator span.active,
 .wannier-wizard .step-indicator span.active {
   background: #4299e1;
@@ -6920,6 +7000,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span.active,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.active,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.active,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.active,
+html[data-theme="dark"] .epw-wizard .step-indicator span.active,
 html[data-theme="dark"] .transport-wizard .step-indicator span.active,
 html[data-theme="dark"] .wannier-wizard .step-indicator span.active {
   background: #89b4fa;
@@ -6930,6 +7011,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.active {
 .electronic-dos-wizard .step-indicator span.completed,
 .fermi-surface-wizard .step-indicator span.completed,
 .phonon-wizard .step-indicator span.completed,
+.epw-wizard .step-indicator span.completed,
 .transport-wizard .step-indicator span.completed,
 .wannier-wizard .step-indicator span.completed {
   color: #38a169;
@@ -6939,6 +7021,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span.completed,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.completed,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.completed,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.completed,
+html[data-theme="dark"] .epw-wizard .step-indicator span.completed,
 html[data-theme="dark"] .transport-wizard .step-indicator span.completed,
 html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
   color: #a6e3a1;
@@ -6948,6 +7031,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content,
+.epw-wizard .wizard-content,
 .transport-wizard .wizard-content,
 .wannier-wizard .wizard-content {
   flex: 1 1 auto;
@@ -6962,10 +7046,12 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
   margin: 0 auto;
 }
 
+.wizard-container .wizard-step.run-step,
 .band-structure-wizard .wizard-step.run-step,
 .electronic-dos-wizard .wizard-step.run-step,
 .fermi-surface-wizard .wizard-step.run-step,
 .phonon-wizard .wizard-step.run-step,
+.epw-wizard .wizard-step.run-step,
 .transport-wizard .wizard-step.run-step,
 .wannier-wizard .wizard-step.run-step {
   max-width: 1180px;
@@ -6975,6 +7061,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
 .electronic-dos-wizard .wizard-step h3,
 .fermi-surface-wizard .wizard-step h3,
 .phonon-wizard .wizard-step h3,
+.epw-wizard .wizard-step h3,
 .transport-wizard .wizard-step h3,
 .wannier-wizard .wizard-step h3 {
   margin: 0 0 1rem 0;
@@ -6986,6 +7073,7 @@ html[data-theme="dark"] .band-structure-wizard .wizard-step h3,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-step h3,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-step h3,
 html[data-theme="dark"] .phonon-wizard .wizard-step h3,
+html[data-theme="dark"] .epw-wizard .wizard-step h3,
 html[data-theme="dark"] .transport-wizard .wizard-step h3,
 html[data-theme="dark"] .wannier-wizard .wizard-step h3 {
   color: #cdd6f4;
@@ -6995,6 +7083,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-step h3 {
 .electronic-dos-wizard .step-description,
 .fermi-surface-wizard .step-description,
 .phonon-wizard .step-description,
+.epw-wizard .step-description,
 .transport-wizard .step-description,
 .wannier-wizard .step-description {
   color: #718096;
@@ -7005,6 +7094,7 @@ html[data-theme="dark"] .band-structure-wizard .step-description,
 html[data-theme="dark"] .electronic-dos-wizard .step-description,
 html[data-theme="dark"] .fermi-surface-wizard .step-description,
 html[data-theme="dark"] .phonon-wizard .step-description,
+html[data-theme="dark"] .epw-wizard .step-description,
 html[data-theme="dark"] .transport-wizard .step-description,
 html[data-theme="dark"] .wannier-wizard .step-description {
   color: #a6adc8;
@@ -9871,6 +9961,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header,
 .bands-viewer-header,
@@ -9891,6 +9982,7 @@ html[data-platform="linux"] .band-structure-wizard > .wizard-header,
 html[data-platform="linux"] .electronic-dos-wizard > .wizard-header,
 html[data-platform="linux"] .fermi-surface-wizard > .wizard-header,
 html[data-platform="linux"] .phonon-wizard > .wizard-header,
+html[data-platform="linux"] .epw-wizard > .wizard-header,
 html[data-platform="linux"] .transport-wizard > .wizard-header,
 html[data-platform="linux"] .wannier-wizard > .wizard-header,
 html[data-platform="linux"] .bands-viewer-header,
@@ -9920,6 +10012,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header {
   background: rgba(248, 250, 252, 0.96);
@@ -9929,6 +10022,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content,
+.epw-wizard .wizard-content,
 .transport-wizard .wizard-content,
 .wannier-wizard .wizard-content {
   padding-bottom: var(--floating-content-clearance);
@@ -9938,6 +10032,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content,
+.epw-wizard.wizard-step-run .wizard-content,
 .transport-wizard.wizard-step-run .wizard-content,
 .wannier-wizard.wizard-step-run .wizard-content {
   overflow: hidden;
@@ -9949,6 +10044,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions,
 .fermi-surface-wizard .step-actions,
 .phonon-wizard .step-actions,
+.epw-wizard .step-actions,
 .transport-wizard .step-actions,
 .wannier-wizard .step-actions {
   display: flex;
@@ -9982,6 +10078,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions > button,
 .fermi-surface-wizard .step-actions > button,
 .phonon-wizard .step-actions > button,
+.epw-wizard .step-actions > button,
 .transport-wizard .step-actions > button,
 .wannier-wizard .step-actions > button {
   pointer-events: auto;
@@ -9993,6 +10090,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions > button:first-child,
 .fermi-surface-wizard .step-actions > button:first-child,
 .phonon-wizard .step-actions > button:first-child,
+.epw-wizard .step-actions > button:first-child,
 .transport-wizard .step-actions > button:first-child,
 .wannier-wizard .step-actions > button:first-child {
   margin-right: auto;
@@ -10370,6 +10468,7 @@ html[data-theme="dark"] {
   .electronic-dos-wizard > .wizard-header,
   .fermi-surface-wizard > .wizard-header,
   .phonon-wizard > .wizard-header,
+  .epw-wizard > .wizard-header,
   .transport-wizard > .wizard-header,
   .wannier-wizard > .wizard-header {
     background: rgba(45, 55, 72, 0.95);
@@ -10554,23 +10653,50 @@ html[data-theme="dark"] .phonon-plot-wrapper {
 }
 
 /* HPC integration */
-.settings-hpc-actions {
-  display: flex;
-  flex-wrap: wrap;
+.settings-hpc-profile-shell {
+  display: grid;
   gap: 0.5rem;
-  margin-top: 0.5rem;
+  margin-top: 0.35rem;
+  padding: 0.65rem;
+  border-radius: 10px;
+  border: 1px solid #d7e3f3;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
+}
+
+.settings-hpc-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.1rem;
+}
+
+.settings-hpc-actions .settings-menu-item {
+  margin: 0;
+  padding: 0.58rem 0.72rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.settings-hpc-defaults-section {
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
 .settings-hpc-defaults-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 0.65rem;
+  gap: 0.8rem;
+  margin-top: 0.35rem;
 }
 
 .settings-hpc-launcher-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.55rem;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.6rem;
+  padding: 0.65rem;
+  border-radius: 9px;
+  border: 1px solid #dbe6f3;
+  background: #f8fbff;
 }
 
 .settings-hpc-launcher-grid label {
@@ -10586,7 +10712,7 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   border: 1px solid #cbd5e0;
   border-radius: 7px;
   padding: 0.35rem 0.45rem;
-  background: #fff;
+  background: #ffffff;
   color: #1a202c;
   font-family: inherit;
   font-size: 0.86rem;
@@ -10611,6 +10737,12 @@ html[data-theme="dark"] .phonon-plot-wrapper {
 .settings-hpc-default-card .hpc-advanced-grid {
   border-top: 1px solid #dbe6f3;
   padding-top: 0.55rem;
+}
+
+.hpc-path-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.45rem 0.65rem;
 }
 
 .hpc-setup-wizard {
@@ -11163,6 +11295,20 @@ html[data-theme="dark"] .settings-page-tab.active {
   background: #2b6cb0;
   border-color: #2b6cb0;
   color: #ffffff;
+}
+
+html[data-theme="dark"] .settings-hpc-profile-shell {
+  background: linear-gradient(180deg, #172335 0%, #111b2b 100%);
+  border-color: #334155;
+}
+
+html[data-theme="dark"] .settings-hpc-defaults-section {
+  background: linear-gradient(180deg, #1a2434 0%, #111827 100%);
+}
+
+html[data-theme="dark"] .settings-hpc-launcher-grid {
+  background: #182235;
+  border-color: #334155;
 }
 
 html[data-theme="dark"] .settings-hpc-launcher-grid label {

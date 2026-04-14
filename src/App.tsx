@@ -1605,7 +1605,7 @@ function AppInner() {
                   HPC target host: <code>andromeda.bc.edu</code>. Access usually requires BC network or VPN.
                 </p>
                 {executionMode === "hpc" && settingsPage === "hpc" && (
-                  <>
+                  <div className="settings-hpc-profile-shell">
                     <label className="settings-menu-label" htmlFor="hpc-profile-select">
                       Active HPC Profile
                     </label>
@@ -1687,7 +1687,7 @@ function AppInner() {
                         {isImportingHpcPresetBundle ? "Importing..." : "Import Presets + Defaults"}
                       </button>
                     </div>
-                  </>
+                  </div>
                 )}
                 {executionMode === "hpc" && settingsPage === "general" && (
                   <button
@@ -1703,7 +1703,7 @@ function AppInner() {
               {executionMode === "hpc" && settingsPage === "hpc" && activeHpcProfile && (
                 <>
                   <div className="settings-menu-divider" />
-                  <div className="settings-menu-section">
+                  <div className="settings-menu-section settings-hpc-defaults-section">
                     <label className="settings-menu-label">HPC Default Run Settings</label>
                     <p className="settings-menu-hint">
                       These values prefill the HPC run block in all calculation wizards. They remain editable per run.

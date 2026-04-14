@@ -48,6 +48,7 @@ import {
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
   listRemotePseudopotentials,
+  resolveProfileRemoteQeBinDir,
   sampleHpcUtilization,
   saveExecutionMode,
 } from "../lib/hpcConfig";
@@ -948,9 +949,10 @@ export function BandStructureWizard({
     MAX_VIEWER_POINTS_PER_SEGMENT,
   );
   const hpcCommandLines = useMemo(() => {
+    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      "QE_BIN=\"$HOME/qe/bin\"",
+      `QE_BIN="${qeBinDir}"`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out"),
       buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out"),
     ];
@@ -958,7 +960,7 @@ export function BandStructureWizard({
       lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "projwfc.x", "projwfc.in", "projwfc.out"));
     }
     return lines;
-  }, [activeHpcProfile, enableProjections]);
+  }, [activeHpcProfile, enableProjections, hpcResources.resource_type]);
 
   useEffect(() => {
     setTotalKPointsInput(String(totalKPointsTarget));
@@ -2287,7 +2289,7 @@ export function BandStructureWizard({
           </>
         )}
 
-        <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
+        <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : "run-layout-single"}`}>
           <LiveOutputPanel
             title={isRunning ? "Running..." : "Output"}
             output={output}

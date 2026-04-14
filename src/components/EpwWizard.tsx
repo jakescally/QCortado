@@ -19,6 +19,7 @@ import {
   buildExecutionTarget,
   buildHpcLauncherCommand,
   defaultResourcesForProfile,
+  resolveProfileRemoteQeBinDir,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
 
@@ -364,10 +365,10 @@ export function EpwWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN=\"${activeHpcProfile?.remote_qe_bin_dir || "$HOME/qe/bin"}\"`,
+      `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
       `${buildHpcLauncherCommand(activeHpcProfile)} \"$QE_BIN/epw.x\" -in epw.in > epw.out 2> epw.err`,
     ],
-    [activeHpcProfile],
+    [activeHpcProfile, hpcResources.resource_type],
   );
 
   const overrideMap = useMemo(
@@ -1343,7 +1344,7 @@ export function EpwWizard({
   }
 
   return (
-    <div className={`band-structure-wizard epw-wizard wizard-step-${step}`}>
+    <div className={`epw-wizard wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back

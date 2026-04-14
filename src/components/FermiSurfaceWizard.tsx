@@ -27,6 +27,7 @@ import {
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
   listRemotePseudopotentials,
+  resolveProfileRemoteQeBinDir,
   sampleHpcUtilization,
   saveExecutionMode,
 } from "../lib/hpcConfig";
@@ -325,7 +326,7 @@ export function FermiSurfaceWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      "QE_BIN=\"$HOME/qe/bin\"",
+      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
       buildHpcQeInputCommandLine(
         activeHpcProfile,
         "fermi_velocity.x",
@@ -334,7 +335,7 @@ export function FermiSurfaceWizard({
         "-npool 1",
       ),
     ],
-    [activeHpcProfile],
+    [activeHpcProfile, hpcResources.resource_type],
   );
 
   useEffect(() => {
@@ -1523,7 +1524,7 @@ export function FermiSurfaceWizard({
         </>
       )}
 
-      <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : ""}`}>
+      <div className={`run-layout ${isHpcMode ? "run-layout-hpc-telemetry" : "run-layout-single"}`}>
         <LiveOutputPanel
           title={isRunning ? "Running..." : "Output"}
           output={output}
@@ -1643,7 +1644,7 @@ export function FermiSurfaceWizard({
   };
 
   return (
-    <div className={`electronic-dos-wizard fermi-surface-wizard wizard-step-${step}`}>
+    <div className={`fermi-surface-wizard wizard-step-${step}`}>
       <div className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
