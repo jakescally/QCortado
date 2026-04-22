@@ -161,7 +161,7 @@ function OverviewTab({ payload }: { payload: EpwViewerPayload }) {
         <div className="epw-metric-grid">
           <MetricCard label="Schema" value={data.schema_version ?? "v1"} />
           <MetricCard label="Elapsed" value={summary.elapsed_seconds} unit="s" />
-          <MetricCard label="Parse Partial" value={summary.parse_partial ? "Yes" : "No"} />
+          <MetricCard label="Parsed Results" value={summary.parse_partial ? "Limited" : "Complete"} />
           <MetricCard label="Artifacts" value={artifacts.length} />
           <MetricCard label="Parsed Tables" value={parsedTables.length} />
           <MetricCard label="Warnings" value={warnings.length} />

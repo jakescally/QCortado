@@ -22,7 +22,7 @@ fn default_outdir() -> String {
 }
 
 fn default_phonon_dir() -> String {
-    "./phonon".to_string()
+    "./save".to_string()
 }
 
 fn default_wannier_dir() -> String {
@@ -45,6 +45,40 @@ fn default_wannierize() -> bool {
     true
 }
 
+fn default_epw_goal_coupling() -> bool {
+    true
+}
+
+fn default_epw_goal_linewidth() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpwGoalSelection {
+    #[serde(default = "default_epw_goal_coupling")]
+    pub coupling: bool,
+    #[serde(default = "default_epw_goal_linewidth")]
+    pub phonon_linewidth_a2f: bool,
+    #[serde(default)]
+    pub electron_self_energy: bool,
+    #[serde(default)]
+    pub transport_mobility: bool,
+    #[serde(default)]
+    pub superconductivity: bool,
+}
+
+impl Default for EpwGoalSelection {
+    fn default() -> Self {
+        Self {
+            coupling: true,
+            phonon_linewidth_a2f: true,
+            electron_self_energy: false,
+            transport_mobility: false,
+            superconductivity: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpwInputConfig {
     #[serde(default = "default_prefix")]
@@ -59,6 +93,14 @@ pub struct EpwInputConfig {
     pub k_mesh: [u32; 3],
     #[serde(default = "default_q_mesh")]
     pub q_mesh: [u32; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coarse_k_mesh: Option<[u32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_k_mesh: Option<[u32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coarse_q_mesh: Option<[u32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_q_mesh: Option<[u32; 3]>,
     #[serde(default = "default_true")]
     pub epbwrite: bool,
     #[serde(default)]
@@ -86,6 +128,10 @@ impl Default for EpwInputConfig {
             wannier_dir: default_wannier_dir(),
             k_mesh: default_k_mesh(),
             q_mesh: default_q_mesh(),
+            coarse_k_mesh: None,
+            fine_k_mesh: None,
+            coarse_q_mesh: None,
+            fine_q_mesh: None,
             epbwrite: true,
             epbread: false,
             epwwrite: true,
@@ -131,6 +177,8 @@ pub struct EpwCalculationConfig {
     pub runtime: EpwRuntimeConfig,
     #[serde(default)]
     pub extensions: EpwExtensionsV1,
+    #[serde(default)]
+    pub goals: EpwGoalSelection,
     #[serde(default)]
     pub advanced_overrides: HashMap<String, String>,
 }
@@ -345,6 +393,8 @@ pub struct EpwCalculationV1 {
     pub schema_version: u32,
     pub sources: EpwSourcesV1,
     pub input: EpwInputConfig,
+    #[serde(default)]
+    pub goals: EpwGoalSelection,
     pub runtime: EpwRuntimeConfig,
     #[serde(default)]
     pub extensions: EpwExtensionsV1,
@@ -389,6 +439,34 @@ fn quote_string(value: &str) -> String {
     format!("'{}'", escaped)
 }
 
+fn bool_keyword(value: bool) -> String {
+    if value {
+        ".true.".to_string()
+    } else {
+        ".false.".to_string()
+    }
+}
+
+fn mesh_has_zero(mesh: &[u32; 3]) -> bool {
+    mesh.iter().any(|entry| *entry == 0)
+}
+
+pub fn epw_coarse_k_mesh(input: &EpwInputConfig) -> [u32; 3] {
+    input.coarse_k_mesh.unwrap_or(input.k_mesh)
+}
+
+pub fn epw_fine_k_mesh(input: &EpwInputConfig) -> [u32; 3] {
+    input.fine_k_mesh.unwrap_or(input.k_mesh)
+}
+
+pub fn epw_coarse_q_mesh(input: &EpwInputConfig) -> [u32; 3] {
+    input.coarse_q_mesh.unwrap_or(input.q_mesh)
+}
+
+pub fn epw_fine_q_mesh(input: &EpwInputConfig) -> [u32; 3] {
+    input.fine_q_mesh.unwrap_or_else(|| epw_fine_k_mesh(input))
+}
+
 fn format_decimal(value: f64) -> String {
     let formatted = format!("{:.12}", value);
     formatted
@@ -413,11 +491,23 @@ pub fn validate_epw_config(config: &EpwCalculationConfig) -> Result<(), String> 
     if config.input.dvscf_dir.trim().is_empty() {
         return Err("EPW input dvscf_dir cannot be empty.".to_string());
     }
-    if config.input.k_mesh.iter().any(|entry| *entry == 0) {
+    if mesh_has_zero(&config.input.k_mesh) {
         return Err("EPW k_mesh values must all be positive.".to_string());
     }
-    if config.input.q_mesh.iter().any(|entry| *entry == 0) {
+    if mesh_has_zero(&config.input.q_mesh) {
         return Err("EPW q_mesh values must all be positive.".to_string());
+    }
+    for (label, mesh) in [
+        ("coarse_k_mesh", config.input.coarse_k_mesh),
+        ("fine_k_mesh", config.input.fine_k_mesh),
+        ("coarse_q_mesh", config.input.coarse_q_mesh),
+        ("fine_q_mesh", config.input.fine_q_mesh),
+    ] {
+        if let Some(mesh) = mesh {
+            if mesh_has_zero(&mesh) {
+                return Err(format!("EPW {} values must all be positive.", label));
+            }
+        }
     }
     if let Some(value) = config.input.fsthick_ev {
         if !value.is_finite() || value <= 0.0 {
@@ -465,51 +555,62 @@ pub fn build_epw_keyword_map(
         "dvscf_dir".to_string(),
         quote_string(config.input.dvscf_dir.trim()),
     );
-    keywords.insert("nk1".to_string(), config.input.k_mesh[0].to_string());
-    keywords.insert("nk2".to_string(), config.input.k_mesh[1].to_string());
-    keywords.insert("nk3".to_string(), config.input.k_mesh[2].to_string());
-    keywords.insert("nq1".to_string(), config.input.q_mesh[0].to_string());
-    keywords.insert("nq2".to_string(), config.input.q_mesh[1].to_string());
-    keywords.insert("nq3".to_string(), config.input.q_mesh[2].to_string());
-    keywords.insert(
-        "epbwrite".to_string(),
-        if config.input.epbwrite {
-            ".true.".to_string()
-        } else {
-            ".false.".to_string()
-        },
-    );
-    keywords.insert(
-        "epbread".to_string(),
-        if config.input.epbread {
-            ".true.".to_string()
-        } else {
-            ".false.".to_string()
-        },
-    );
-    keywords.insert(
-        "epwwrite".to_string(),
-        if config.input.epwwrite {
-            ".true.".to_string()
-        } else {
-            ".false.".to_string()
-        },
-    );
-    keywords.insert(
-        "epwread".to_string(),
-        if config.input.epwread {
-            ".true.".to_string()
-        } else {
-            ".false.".to_string()
-        },
-    );
+    let coarse_k_mesh = epw_coarse_k_mesh(&config.input);
+    let fine_k_mesh = epw_fine_k_mesh(&config.input);
+    let coarse_q_mesh = epw_coarse_q_mesh(&config.input);
+    let fine_q_mesh = epw_fine_q_mesh(&config.input);
+    keywords.insert("nk1".to_string(), coarse_k_mesh[0].to_string());
+    keywords.insert("nk2".to_string(), coarse_k_mesh[1].to_string());
+    keywords.insert("nk3".to_string(), coarse_k_mesh[2].to_string());
+    keywords.insert("nq1".to_string(), coarse_q_mesh[0].to_string());
+    keywords.insert("nq2".to_string(), coarse_q_mesh[1].to_string());
+    keywords.insert("nq3".to_string(), coarse_q_mesh[2].to_string());
+    keywords.insert("nkf1".to_string(), fine_k_mesh[0].to_string());
+    keywords.insert("nkf2".to_string(), fine_k_mesh[1].to_string());
+    keywords.insert("nkf3".to_string(), fine_k_mesh[2].to_string());
+    keywords.insert("nqf1".to_string(), fine_q_mesh[0].to_string());
+    keywords.insert("nqf2".to_string(), fine_q_mesh[1].to_string());
+    keywords.insert("nqf3".to_string(), fine_q_mesh[2].to_string());
+
+    let goals = &config.goals;
+    let any_epw_physics = goals.coupling
+        || goals.phonon_linewidth_a2f
+        || goals.electron_self_energy
+        || goals.transport_mobility
+        || goals.superconductivity;
+    if any_epw_physics {
+        keywords.insert("elph".to_string(), ".true.".to_string());
+    }
+    if goals.coupling || goals.superconductivity {
+        keywords.insert("ep_coupling".to_string(), ".true.".to_string());
+    }
+    if goals.phonon_linewidth_a2f {
+        keywords.insert("phonselfen".to_string(), ".true.".to_string());
+        keywords.insert("a2f".to_string(), ".true.".to_string());
+    }
+    if goals.electron_self_energy {
+        keywords.insert("elecselfen".to_string(), ".true.".to_string());
+        keywords.insert("specfun_el".to_string(), ".true.".to_string());
+    }
+    if goals.transport_mobility {
+        keywords.insert("scattering".to_string(), ".true.".to_string());
+        keywords.insert("scattering_serta".to_string(), ".true.".to_string());
+        keywords.insert("int_mob".to_string(), ".true.".to_string());
+    }
+    if goals.superconductivity {
+        keywords.insert("ephwrite".to_string(), ".true.".to_string());
+        keywords.insert("eliashberg".to_string(), ".true.".to_string());
+        keywords.insert("liso".to_string(), ".true.".to_string());
+        keywords.insert("limag".to_string(), ".true.".to_string());
+    }
+
+    keywords.insert("epbwrite".to_string(), bool_keyword(config.input.epbwrite));
+    keywords.insert("epbread".to_string(), bool_keyword(config.input.epbread));
+    keywords.insert("epwwrite".to_string(), bool_keyword(config.input.epwwrite));
+    keywords.insert("epwread".to_string(), bool_keyword(config.input.epwread));
     keywords.insert(
         "wannierize".to_string(),
-        if config.input.wannierize {
-            ".true.".to_string()
-        } else {
-            ".false.".to_string()
-        },
+        bool_keyword(config.input.wannierize),
     );
 
     if let Some(value) = config.input.fsthick_ev {
@@ -569,6 +670,9 @@ pub fn build_epw_input_preview(
 }
 
 fn should_keep_epw_artifact(lower: &str) -> bool {
+    if is_epw_scratch_artifact(lower) {
+        return lower == "epw.in" || lower == "epw.out" || lower == "epw.err";
+    }
     lower == "epw.in"
         || lower == "epw.out"
         || lower == "epw.err"
@@ -581,7 +685,6 @@ fn should_keep_epw_artifact(lower: &str) -> bool {
         || lower.ends_with(".freq")
         || lower.ends_with(".frq")
         || lower.ends_with(".fmt")
-        || lower.ends_with(".xml")
         || lower.ends_with(".dat")
         || lower.ends_with(".dos")
         || lower.ends_with(".phdos")
@@ -593,7 +696,11 @@ fn should_keep_epw_artifact(lower: &str) -> bool {
         || lower.contains("mob")
 }
 
-fn collect_epw_artifacts_recursive(root: &Path, current: &Path, artifacts: &mut Vec<WannierArtifact>) {
+fn collect_epw_artifacts_recursive(
+    root: &Path,
+    current: &Path,
+    artifacts: &mut Vec<WannierArtifact>,
+) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
@@ -632,13 +739,28 @@ pub fn collect_epw_artifacts(work_path: &Path) -> Vec<WannierArtifact> {
     artifacts
 }
 
+fn is_epw_scratch_artifact(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.contains(".save/")
+        || lower.starts_with("save/")
+        || lower.starts_with("phonon/")
+        || lower.starts_with("wannier/")
+        || lower.contains("/_ph0/")
+        || lower.contains("/wfc")
+        || lower.ends_with("charge-density.dat")
+        || lower.ends_with("data-file-schema.xml")
+}
+
 fn parse_fortran_float(raw: &str) -> Option<f64> {
     let cleaned = raw
         .trim()
         .trim_matches(',')
         .trim_matches(';')
         .replace(['D', 'd'], "E");
-    cleaned.parse::<f64>().ok().filter(|value| value.is_finite())
+    cleaned
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 fn numeric_tokens(line: &str) -> Vec<f64> {
@@ -766,7 +888,10 @@ fn parse_axis_mobility_block(
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("temp [k]") || lower.contains("total time") || lower.contains("writing scattering") {
+        if lower.contains("temp [k]")
+            || lower.contains("total time")
+            || lower.contains("writing scattering")
+        {
             break;
         }
         let numbers = numeric_tokens(trimmed);
@@ -859,13 +984,11 @@ fn parse_tensor_mobility_block(
             break;
         }
 
-        let mut tensor_rows = vec![
-            [
-                first_numbers[first_numbers.len() - 3],
-                first_numbers[first_numbers.len() - 2],
-                first_numbers[first_numbers.len() - 1],
-            ],
-        ];
+        let mut tensor_rows = vec![[
+            first_numbers[first_numbers.len() - 3],
+            first_numbers[first_numbers.len() - 2],
+            first_numbers[first_numbers.len() - 1],
+        ]];
         let mut population = Some(first_numbers[3]);
         let temperature_k = first_numbers[0];
         let fermi_ev = first_numbers[1];
@@ -946,7 +1069,10 @@ fn parse_epw_transport_data(output: &str) -> Option<EpwTransportData> {
         } else if lower.contains("no intermediate mobility") {
             push_unique_string(&mut notes, line.trim());
         } else if let Some(captures) = max_error_re.captures(line) {
-            if let Some(value) = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str())) {
+            if let Some(value) = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()))
+            {
                 if let Some(last) = mobility.last_mut() {
                     last.max_error = Some(value);
                 }
@@ -958,7 +1084,11 @@ fn parse_epw_transport_data(output: &str) -> Option<EpwTransportData> {
             && lower.contains("mobility")
             && (lower.contains("hole") || lower.contains("elec"))
         {
-            let carrier_type = if lower.contains("hole") { "hole" } else { "electron" };
+            let carrier_type = if lower.contains("hole") {
+                "hole"
+            } else {
+                "electron"
+            };
             let is_tensor = lower.contains("population") || lower.contains("drift");
             let (dataset, next_index) = if is_tensor {
                 parse_tensor_mobility_block(
@@ -998,7 +1128,11 @@ fn parse_epw_transport_data(output: &str) -> Option<EpwTransportData> {
         index += 1;
     }
 
-    if mobility.is_empty() && scattering_file_notices == 0 && notes.is_empty() && warnings.is_empty() {
+    if mobility.is_empty()
+        && scattering_file_notices == 0
+        && notes.is_empty()
+        && warnings.is_empty()
+    {
         return None;
     }
 
@@ -1019,16 +1153,23 @@ fn parse_first_capture(output: &str, pattern: &str) -> Option<f64> {
         .and_then(|entry| parse_fortran_float(entry.as_str()))
 }
 
-fn parse_epw_superconductivity_data(output: &str, parsed_tables: &[EpwParsedTable]) -> Option<EpwSuperconductivityData> {
+fn parse_epw_superconductivity_data(
+    output: &str,
+    parsed_tables: &[EpwParsedTable],
+) -> Option<EpwSuperconductivityData> {
     let mut data = EpwSuperconductivityData::default();
     data.electron_phonon_coupling = parse_first_capture(
         output,
         r"(?i)Electron-phonon coupling strength\s*=\s*([-\d.Ee+Dd+]+)",
     );
-    data.lambda = parse_first_capture(output, r"(?i)\blambda\s*[:=]\s*([-\d.Ee+Dd+]+)")
-        .or_else(|| parse_first_capture(output, r"(?i)lambda___\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)"));
+    data.lambda =
+        parse_first_capture(output, r"(?i)\blambda\s*[:=]\s*([-\d.Ee+Dd+]+)").or_else(|| {
+            parse_first_capture(output, r"(?i)lambda___\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)")
+        });
     data.lambda_tr = parse_first_capture(output, r"(?i)\blambda_tr\s*[:=]\s*([-\d.Ee+Dd+]+)")
-        .or_else(|| parse_first_capture(output, r"(?i)lambda_tr\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)"));
+        .or_else(|| {
+            parse_first_capture(output, r"(?i)lambda_tr\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)")
+        });
     data.tc_mcmillan_k = parse_first_capture(
         output,
         r"(?i)Estimated Tc using McMillan expression\s*=\s*([-\d.Ee+Dd+]+)\s*K",
@@ -1041,53 +1182,65 @@ fn parse_epw_superconductivity_data(output: &str, parsed_tables: &[EpwParsedTabl
         output,
         r"(?i)Estimated Tc using SISSO machine learning model\s*=\s*([-\d.Ee+Dd+]+)\s*K",
     );
-    data.w_log_mev = parse_first_capture(output, r"(?i)Estimated w_log\s*=\s*([-\d.Ee+Dd+]+)\s*meV");
+    data.w_log_mev =
+        parse_first_capture(output, r"(?i)Estimated w_log\s*=\s*([-\d.Ee+Dd+]+)\s*meV");
     data.bcs_gap_mev = parse_first_capture(
         output,
         r"(?i)Estimated BCS superconducting gap using McMillan Tc\s*=\s*([-\d.Ee+Dd+]+)\s*meV",
     );
     data.muc = parse_first_capture(output, r"(?i)\bmuc\s*=\s*([-\d.Ee+Dd+]+)")
         .or_else(|| parse_first_capture(output, r"(?i)for muc\s*=\s*([-\d.Ee+Dd+]+)"));
-    data.frequency_cutoff_ev = parse_first_capture(output, r"(?i)Cutoff frequency wscut\s*=\s*([-\d.Ee+Dd+]+)");
-    data.frequency_points = Regex::new(r"(?i)Total number of frequency points nsiw\(\s*\d+\)\s*=\s*(\d+)")
-        .ok()
-        .and_then(|regex| regex.captures_iter(output).last())
-        .and_then(|captures| captures.get(1))
-        .and_then(|entry| entry.as_str().parse::<u32>().ok())
-        .or_else(|| {
-            Regex::new(r"(?i)Actual number of frequency points\s*\(\s*\d+\)\s*=\s*(\d+)")
-                .ok()
-                .and_then(|regex| regex.captures_iter(output).last())
-                .and_then(|captures| captures.get(1))
-                .and_then(|entry| entry.as_str().parse::<u32>().ok())
-        });
+    data.frequency_cutoff_ev =
+        parse_first_capture(output, r"(?i)Cutoff frequency wscut\s*=\s*([-\d.Ee+Dd+]+)");
+    data.frequency_points =
+        Regex::new(r"(?i)Total number of frequency points nsiw\(\s*\d+\)\s*=\s*(\d+)")
+            .ok()
+            .and_then(|regex| regex.captures_iter(output).last())
+            .and_then(|captures| captures.get(1))
+            .and_then(|entry| entry.as_str().parse::<u32>().ok())
+            .or_else(|| {
+                Regex::new(r"(?i)Actual number of frequency points\s*\(\s*\d+\)\s*=\s*(\d+)")
+                    .ok()
+                    .and_then(|regex| regex.captures_iter(output).last())
+                    .and_then(|captures| captures.get(1))
+                    .and_then(|entry| entry.as_str().parse::<u32>().ok())
+            });
 
-    let temp_re = Regex::new(r"(?i)temp\(\s*\d+\)\s*=\s*([-\d.Ee+Dd+]+)\s*K").expect("valid EPW temp regex");
+    let temp_re =
+        Regex::new(r"(?i)temp\(\s*\d+\)\s*=\s*([-\d.Ee+Dd+]+)\s*K").expect("valid EPW temp regex");
     let itemp_re = Regex::new(r"(?i)Temp\s*\(itemp\s*=\s*\d+\)\s*=\s*([-\d.Ee+Dd+]+)\s*K(?:\s+Free energy\s*=\s*([-\d.Ee+Dd+]+)\s*meV)?")
         .expect("valid EPW itemp regex");
-    let iter_re = Regex::new(r"^\s*(\d+)\s+([-\d.Ee+Dd+]+)\s+([-\d.Ee+Dd+]+)\s+([-\d.Ee+Dd+]+)\s*$")
-        .expect("valid Eliashberg iteration regex");
+    let iter_re =
+        Regex::new(r"^\s*(\d+)\s+([-\d.Ee+Dd+]+)\s+([-\d.Ee+Dd+]+)\s+([-\d.Ee+Dd+]+)\s*$")
+            .expect("valid Eliashberg iteration regex");
     let gap_re = Regex::new(r"(?i)Min\.\s*/\s*Max\.\s*values of superconducting gap\s*=\s*([-\d.Ee+Dd+]+)\s+([-\d.Ee+Dd+]+)\s*meV")
         .expect("valid gap regex");
-    let convergence_re = Regex::new(r"(?i)Convergence was reached in nsiter\s*=\s*(\d+)").expect("valid convergence regex");
+    let convergence_re = Regex::new(r"(?i)Convergence was reached in nsiter\s*=\s*(\d+)")
+        .expect("valid convergence regex");
     let mut current_temperature: Option<f64> = None;
     let mut active_gap_summary: Option<usize> = None;
 
     for line in output.lines() {
         if let Some(captures) = temp_re.captures(line) {
-            current_temperature = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str()));
+            current_temperature = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()));
             if let Some(temp) = current_temperature {
                 push_unique_number(&mut data.temperatures_k, temp);
             }
         }
         if let Some(captures) = itemp_re.captures(line) {
-            current_temperature = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str()));
+            current_temperature = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()));
             if let Some(temp) = current_temperature {
                 push_unique_number(&mut data.temperatures_k, temp);
             }
             data.gap_summaries.push(EpwGapSummary {
                 temperature_k: current_temperature,
-                free_energy_mev: captures.get(2).and_then(|entry| parse_fortran_float(entry.as_str())),
+                free_energy_mev: captures
+                    .get(2)
+                    .and_then(|entry| parse_fortran_float(entry.as_str())),
                 gap_min_mev: None,
                 gap_max_mev: None,
             });
@@ -1095,10 +1248,18 @@ fn parse_epw_superconductivity_data(output: &str, parsed_tables: &[EpwParsedTabl
         }
         if let Some(captures) = iter_re.captures(line) {
             if let (Some(iteration), Some(ethr), Some(znorm), Some(delta_mev)) = (
-                captures.get(1).and_then(|entry| entry.as_str().parse::<u32>().ok()),
-                captures.get(2).and_then(|entry| parse_fortran_float(entry.as_str())),
-                captures.get(3).and_then(|entry| parse_fortran_float(entry.as_str())),
-                captures.get(4).and_then(|entry| parse_fortran_float(entry.as_str())),
+                captures
+                    .get(1)
+                    .and_then(|entry| entry.as_str().parse::<u32>().ok()),
+                captures
+                    .get(2)
+                    .and_then(|entry| parse_fortran_float(entry.as_str())),
+                captures
+                    .get(3)
+                    .and_then(|entry| parse_fortran_float(entry.as_str())),
+                captures
+                    .get(4)
+                    .and_then(|entry| parse_fortran_float(entry.as_str())),
             ) {
                 data.eliashberg_iterations.push(EpwEliashbergIteration {
                     temperature_k: current_temperature,
@@ -1110,8 +1271,12 @@ fn parse_epw_superconductivity_data(output: &str, parsed_tables: &[EpwParsedTabl
             }
         }
         if let Some(captures) = gap_re.captures(line) {
-            let gap_min_mev = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str()));
-            let gap_max_mev = captures.get(2).and_then(|entry| parse_fortran_float(entry.as_str()));
+            let gap_min_mev = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()));
+            let gap_max_mev = captures
+                .get(2)
+                .and_then(|entry| parse_fortran_float(entry.as_str()));
             if let Some(index) = active_gap_summary {
                 if let Some(summary) = data.gap_summaries.get_mut(index) {
                     summary.gap_min_mev = gap_min_mev;
@@ -1128,7 +1293,9 @@ fn parse_epw_superconductivity_data(output: &str, parsed_tables: &[EpwParsedTabl
         }
         if let Some(captures) = convergence_re.captures(line) {
             data.eliashberg_converged = Some(true);
-            data.eliashberg_nsiter = captures.get(1).and_then(|entry| entry.as_str().parse::<u32>().ok());
+            data.eliashberg_nsiter = captures
+                .get(1)
+                .and_then(|entry| entry.as_str().parse::<u32>().ok());
         }
         let lower = line.to_ascii_lowercase();
         if lower.contains("eliashberg") || lower.contains("a2f file") {
@@ -1174,22 +1341,39 @@ fn parse_epw_self_energy_modes(output: &str) -> Vec<EpwSelfEnergyMode> {
 
     for line in output.lines() {
         if let Some(captures) = lambda_re.captures(line) {
-            let label = captures.get(1).map(|entry| entry.as_str().trim().to_string()).unwrap_or_default();
-            if let Some(lambda) = captures.get(2).and_then(|entry| parse_fortran_float(entry.as_str())) {
+            let label = captures
+                .get(1)
+                .map(|entry| entry.as_str().trim().to_string())
+                .unwrap_or_default();
+            if let Some(lambda) = captures
+                .get(2)
+                .and_then(|entry| parse_fortran_float(entry.as_str()))
+            {
                 modes.push(EpwSelfEnergyMode {
                     mode_label: label,
                     lambda,
                     lambda_tr: None,
-                    gamma_mev: captures.get(3).and_then(|entry| parse_fortran_float(entry.as_str())),
+                    gamma_mev: captures
+                        .get(3)
+                        .and_then(|entry| parse_fortran_float(entry.as_str())),
                     gamma_tr_mev: None,
-                    omega_mev: captures.get(4).and_then(|entry| parse_fortran_float(entry.as_str())),
+                    omega_mev: captures
+                        .get(4)
+                        .and_then(|entry| parse_fortran_float(entry.as_str())),
                 });
             }
         } else if let Some(captures) = lambda_tr_re.captures(line) {
-            let label = captures.get(1).map(|entry| entry.as_str().trim().to_string()).unwrap_or_default();
+            let label = captures
+                .get(1)
+                .map(|entry| entry.as_str().trim().to_string())
+                .unwrap_or_default();
             if let Some(mode) = modes.iter_mut().rev().find(|mode| mode.mode_label == label) {
-                mode.lambda_tr = captures.get(2).and_then(|entry| parse_fortran_float(entry.as_str()));
-                mode.gamma_tr_mev = captures.get(3).and_then(|entry| parse_fortran_float(entry.as_str()));
+                mode.lambda_tr = captures
+                    .get(2)
+                    .and_then(|entry| parse_fortran_float(entry.as_str()));
+                mode.gamma_tr_mev = captures
+                    .get(3)
+                    .and_then(|entry| parse_fortran_float(entry.as_str()));
             }
         }
     }
@@ -1222,8 +1406,15 @@ fn infer_epw_table_family(file_name: &str) -> String {
 
 fn is_chartable_epw_file(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    lower.ends_with(".dat")
-        || lower.ends_with(".a2f")
+    if is_epw_scratch_artifact(&lower)
+        || lower.ends_with(".xml")
+        || lower.ends_with("wfc.dat")
+        || lower.contains("/wfc")
+        || lower.contains("charge-density")
+    {
+        return false;
+    }
+    lower.ends_with(".a2f")
         || lower.ends_with(".dos")
         || lower.ends_with(".phdos")
         || lower.ends_with(".freq")
@@ -1231,6 +1422,7 @@ fn is_chartable_epw_file(file_name: &str) -> bool {
         || lower.ends_with(".fmt")
         || lower.ends_with(".gnu")
         || lower.ends_with(".txt")
+        || lower.ends_with(".dat") && infer_epw_table_family(&lower) != "generic"
         || lower.contains("specfun")
         || lower.contains("selfen")
         || lower.contains("scat")
@@ -1244,7 +1436,9 @@ fn labels_from_header(header: Option<&str>, count: usize) -> Vec<String> {
             .trim_start_matches('#')
             .trim_start_matches('!')
             .split_whitespace()
-            .map(|entry| entry.trim_matches(|ch: char| ch == '[' || ch == ']' || ch == ',' || ch == ':'))
+            .map(|entry| {
+                entry.trim_matches(|ch: char| ch == '[' || ch == ']' || ch == ',' || ch == ':')
+            })
             .filter(|entry| !entry.is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -1271,7 +1465,10 @@ fn skipped_table(file_name: &str, size_bytes: u64, reason: String) -> EpwParsedT
     }
 }
 
-fn parse_numeric_table_file(work_path: &Path, artifact: &WannierArtifact) -> Option<EpwParsedTable> {
+fn parse_numeric_table_file(
+    work_path: &Path,
+    artifact: &WannierArtifact,
+) -> Option<EpwParsedTable> {
     if !is_chartable_epw_file(&artifact.file_name) {
         return None;
     }
@@ -1349,25 +1546,39 @@ fn parse_numeric_table_file(work_path: &Path, artifact: &WannierArtifact) -> Opt
     })
 }
 
-fn parse_epw_numeric_tables(work_path: &Path, artifacts: &[WannierArtifact]) -> Vec<EpwParsedTable> {
+fn parse_epw_numeric_tables(
+    work_path: &Path,
+    artifacts: &[WannierArtifact],
+) -> Vec<EpwParsedTable> {
     artifacts
         .iter()
         .filter_map(|artifact| parse_numeric_table_file(work_path, artifact))
         .collect()
 }
 
-fn parse_epw_spectral_data(output: &str, parsed_tables: &[EpwParsedTable]) -> Option<EpwSpectralData> {
+fn parse_epw_spectral_data(
+    output: &str,
+    parsed_tables: &[EpwParsedTable],
+) -> Option<EpwSpectralData> {
     let self_energy_modes = parse_epw_self_energy_modes(output);
     let tables = parsed_tables
         .iter()
-        .filter(|table| matches!(table.family.as_str(), "spectral_function" | "self_energy" | "frequency" | "scattering" | "generic"))
+        .filter(|table| {
+            matches!(
+                table.family.as_str(),
+                "spectral_function" | "self_energy" | "frequency" | "scattering"
+            )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut notes = Vec::new();
     let mut warnings = Vec::new();
     for line in output.lines() {
         let lower = line.to_ascii_lowercase();
-        if lower.contains("self-energy") || lower.contains("spectral function") || lower.contains("lambda___") {
+        if lower.contains("self-energy")
+            || lower.contains("spectral function")
+            || lower.contains("lambda___")
+        {
             push_unique_string(&mut notes, line.trim());
         }
         if lower.contains("warning") && (lower.contains("self") || lower.contains("spectral")) {
@@ -1385,12 +1596,21 @@ fn parse_epw_spectral_data(output: &str, parsed_tables: &[EpwParsedTable]) -> Op
     })
 }
 
+fn epw_output_reports_completion(output: &str) -> bool {
+    if output.contains("JOB DONE") {
+        return true;
+    }
+    let lower = output.to_ascii_lowercase();
+    lower.contains("total program execution") && lower.contains("epw")
+}
+
 pub fn parse_epw_result_summary(
     output: &str,
     artifacts: Vec<WannierArtifact>,
+    runner_completed: bool,
 ) -> EpwResultSummaryV1 {
     let mut summary = EpwResultSummaryV1 {
-        completed: output.contains("JOB DONE"),
+        completed: runner_completed || epw_output_reports_completion(output),
         elapsed_seconds: None,
         core_metrics: HashMap::new(),
         generated_outputs: artifacts,
@@ -1415,7 +1635,8 @@ pub fn parse_epw_result_summary(
         }
     }
 
-    let lambda_re = Regex::new(r"(?i)\blambda\s*[:=]\s*([-\d.Ee+Dd+]+)").expect("valid lambda regex");
+    let lambda_re =
+        Regex::new(r"(?i)\blambda\s*[:=]\s*([-\d.Ee+Dd+]+)").expect("valid lambda regex");
     if let Some(captures) = lambda_re.captures_iter(output).last() {
         if let Some(value) = captures
             .get(1)
@@ -1424,11 +1645,14 @@ pub fn parse_epw_result_summary(
             summary.core_metrics.insert("lambda".to_string(), value);
         }
     }
-    let lambda_tot_re =
-        Regex::new(r"(?i)lambda___\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)").expect("valid lambda tot regex");
+    let lambda_tot_re = Regex::new(r"(?i)lambda___\(\s*tot\s*\)\s*=\s*([-\d.Ee+Dd+]+)")
+        .expect("valid lambda tot regex");
     if !summary.core_metrics.contains_key("lambda") {
         if let Some(captures) = lambda_tot_re.captures_iter(output).last() {
-            if let Some(value) = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str())) {
+            if let Some(value) = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()))
+            {
                 summary.core_metrics.insert("lambda".to_string(), value);
             }
         }
@@ -1436,7 +1660,10 @@ pub fn parse_epw_result_summary(
     let lambda_tr_re =
         Regex::new(r"(?i)\blambda_tr\s*[:=]\s*([-\d.Ee+Dd+]+)").expect("valid lambda_tr regex");
     if let Some(captures) = lambda_tr_re.captures_iter(output).last() {
-        if let Some(value) = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str())) {
+        if let Some(value) = captures
+            .get(1)
+            .and_then(|entry| parse_fortran_float(entry.as_str()))
+        {
             summary.core_metrics.insert("lambda_tr".to_string(), value);
         }
     }
@@ -1450,11 +1677,16 @@ pub fn parse_epw_result_summary(
             summary.core_metrics.insert("tc".to_string(), value);
         }
     }
-    let tc_named_re = Regex::new(r"(?i)Estimated Tc using (?:Allen-Dynes|McMillan|SISSO)[^=]*=\s*([-\d.Ee+Dd+]+)\s*K")
-        .expect("valid named Tc regex");
+    let tc_named_re = Regex::new(
+        r"(?i)Estimated Tc using (?:Allen-Dynes|McMillan|SISSO)[^=]*=\s*([-\d.Ee+Dd+]+)\s*K",
+    )
+    .expect("valid named Tc regex");
     if !summary.core_metrics.contains_key("tc") {
         if let Some(captures) = tc_named_re.captures_iter(output).last() {
-            if let Some(value) = captures.get(1).and_then(|entry| parse_fortran_float(entry.as_str())) {
+            if let Some(value) = captures
+                .get(1)
+                .and_then(|entry| parse_fortran_float(entry.as_str()))
+            {
                 summary.core_metrics.insert("tc".to_string(), value);
             }
         }
@@ -1496,13 +1728,6 @@ pub fn parse_epw_result_summary(
             "Run completed but no known EPW scalar metrics were extracted from stdout.".to_string(),
         );
     }
-    if !summary.completed {
-        summary.parse_partial = true;
-        summary
-            .notes
-            .push("Run did not report JOB DONE; output metrics may be incomplete.".to_string());
-    }
-
     summary
 }
 
@@ -1510,18 +1735,20 @@ pub fn parse_epw_result_v2(
     output: &str,
     work_path: &Path,
     artifacts: Vec<WannierArtifact>,
+    runner_completed: bool,
 ) -> EpwParsedResultV2 {
     let parsed_tables = parse_epw_numeric_tables(work_path, &artifacts);
     let transport = parse_epw_transport_data(output);
     let superconductivity = parse_epw_superconductivity_data(output, &parsed_tables);
     let spectral = parse_epw_spectral_data(output, &parsed_tables);
-    let mut summary = parse_epw_result_summary(output, artifacts);
+    let mut summary = parse_epw_result_summary(output, artifacts, runner_completed);
 
     if let Some(transport) = &transport {
         if !transport.mobility.is_empty() {
-            summary
-                .core_metrics
-                .insert("epw_mobility_datasets".to_string(), transport.mobility.len() as f64);
+            summary.core_metrics.insert(
+                "epw_mobility_datasets".to_string(),
+                transport.mobility.len() as f64,
+            );
             summary.parse_coverage.push("transport".to_string());
         }
         if transport.scattering_file_notices > 0 {
@@ -1535,7 +1762,10 @@ pub fn parse_epw_result_v2(
         }
     }
     if let Some(superconductivity) = &superconductivity {
-        if let Some(value) = superconductivity.lambda.or(superconductivity.electron_phonon_coupling) {
+        if let Some(value) = superconductivity
+            .lambda
+            .or(superconductivity.electron_phonon_coupling)
+        {
             summary.core_metrics.insert("lambda".to_string(), value);
         }
         if let Some(value) = superconductivity.lambda_tr {
@@ -1565,14 +1795,15 @@ pub fn parse_epw_result_v2(
             push_unique_string(&mut summary.warnings, warning);
         }
     }
-    if !parsed_tables.is_empty() {
+    let parsed_preview_tables = parsed_tables.iter().filter(|table| !table.skipped).count();
+    if parsed_preview_tables > 0 {
         summary
             .core_metrics
-            .insert("parsed_tables".to_string(), parsed_tables.len() as f64);
+            .insert("parsed_tables".to_string(), parsed_preview_tables as f64);
         summary.parse_coverage.push("numeric_tables".to_string());
     }
     for table in &parsed_tables {
-        if table.skipped {
+        if table.skipped && !is_epw_scratch_artifact(&table.file_name) {
             summary.notes.push(format!(
                 "Skipped preview for {}: {}",
                 table.file_name,
@@ -1583,12 +1814,15 @@ pub fn parse_epw_result_v2(
 
     if summary.completed
         && summary.parse_coverage.is_empty()
-        && summary.core_metrics.keys().all(|key| key == "elapsed_seconds")
+        && summary
+            .core_metrics
+            .keys()
+            .all(|key| key == "elapsed_seconds")
     {
         summary.parse_partial = true;
-        summary.notes.push(
-            "Run completed but no structured EPW result families were detected.".to_string(),
-        );
+        summary
+            .notes
+            .push("Run completed but no structured EPW result families were detected.".to_string());
     }
 
     EpwParsedResultV2 {
@@ -1605,7 +1839,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("qcortado_epw_{}_{}", name, uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("qcortado_epw_{}_{}", name, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1632,7 +1867,7 @@ mod tests {
      Writing scattering rate to file
      JOB DONE.
 "#;
-        let parsed = parse_epw_result_v2(output, &dir, Vec::new());
+        let parsed = parse_epw_result_v2(output, &dir, Vec::new(), true);
         let transport = parsed.transport.expect("transport parsed");
         assert_eq!(transport.scattering_file_notices, 1);
         assert_eq!(transport.mobility.len(), 1);
@@ -1643,7 +1878,10 @@ mod tests {
         assert_eq!(dataset.component_labels, vec!["xx", "yy", "zz", "avg"]);
         assert_eq!(dataset.mobility_values[0][0], Some(148.369));
         assert_eq!(dataset.mobility_values[3][1], Some(133.001));
-        assert!(transport.warnings.iter().any(|entry| entry.contains("Mobility are sorted")));
+        assert!(transport
+            .warnings
+            .iter()
+            .any(|entry| entry.contains("Mobility are sorted")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1672,7 +1910,7 @@ mod tests {
                                                       0.767385E+00    Max error
      The iteration reached the maximum but did not converge.
 "#;
-        let parsed = parse_epw_result_v2(output, &dir, Vec::new());
+        let parsed = parse_epw_result_v2(output, &dir, Vec::new(), true);
         let datasets = parsed.transport.expect("transport parsed").mobility;
         assert_eq!(datasets.len(), 2);
         assert_eq!(datasets[0].method, "SERTA");
@@ -1680,7 +1918,10 @@ mod tests {
         assert_eq!(datasets[1].iteration, Some(2));
         assert_eq!(datasets[1].converged, Some(false));
         assert_eq!(datasets[1].max_error, Some(0.767385));
-        assert_eq!(datasets[1].component_labels, vec!["xx", "yy", "zz", "xy", "xz", "yx", "yz", "zx", "zy"]);
+        assert_eq!(
+            datasets[1].component_labels,
+            vec!["xx", "yy", "zz", "xy", "xz", "yx", "yz", "zx", "zy"]
+        );
         assert_eq!(datasets[1].mobility_values[0][0], Some(25.2006));
         assert_eq!(datasets[1].mobility_values[2][0], Some(25.2005));
         let _ = std::fs::remove_dir_all(dir);
@@ -1705,7 +1946,7 @@ mod tests {
      Min. / Max. values of superconducting gap =     2.639256   14.001996 meV
      JOB DONE.
 "#;
-        let parsed = parse_epw_result_v2(output, &dir, Vec::new());
+        let parsed = parse_epw_result_v2(output, &dir, Vec::new(), true);
         let supercon = parsed.superconductivity.expect("superconductivity parsed");
         assert_eq!(supercon.electron_phonon_coupling, Some(0.8714948));
         assert_eq!(supercon.tc_mcmillan_k, Some(26.4082));
@@ -1718,11 +1959,15 @@ mod tests {
         assert_eq!(supercon.eliashberg_nsiter, Some(2));
         assert_eq!(supercon.eliashberg_iterations.len(), 2);
         assert_eq!(supercon.gap_summaries[0].gap_max_mev, Some(14.001996));
-        assert!(parsed.summary.parse_coverage.contains(&"superconductivity".to_string()));
+        assert!(parsed
+            .summary
+            .parse_coverage
+            .contains(&"superconductivity".to_string()));
         let json = serde_json::to_string(&EpwCalculationV1 {
             schema_version: EPW_SCHEMA_VERSION,
             sources: EpwSourcesV1::default(),
             input: EpwInputConfig::default(),
+            goals: EpwGoalSelection::default(),
             runtime: EpwRuntimeConfig::default(),
             extensions: EpwExtensionsV1::default(),
             artifacts: Vec::new(),
@@ -1752,19 +1997,148 @@ mod tests {
                 size_bytes: std::fs::metadata(dir.join("sample.a2f")).unwrap().len(),
             },
             WannierArtifact {
-                file_name: "huge.dat".to_string(),
+                file_name: "huge.a2f".to_string(),
                 size_bytes: MAX_PARSED_TABLE_BYTES + 1,
             },
         ];
-        let parsed = parse_epw_result_v2("JOB DONE.", &dir, artifacts);
+        let parsed = parse_epw_result_v2("JOB DONE.", &dir, artifacts, true);
         assert_eq!(parsed.parsed_tables.len(), 2);
-        let a2f = parsed.parsed_tables.iter().find(|table| table.file_name == "sample.a2f").unwrap();
+        let a2f = parsed
+            .parsed_tables
+            .iter()
+            .find(|table| table.file_name == "sample.a2f")
+            .unwrap();
         assert_eq!(a2f.family, "a2f");
         assert_eq!(a2f.column_labels, vec!["omega", "a2f", "lambda"]);
         assert_eq!(a2f.rows.len(), 2);
-        let huge = parsed.parsed_tables.iter().find(|table| table.file_name == "huge.dat").unwrap();
+        let huge = parsed
+            .parsed_tables
+            .iter()
+            .find(|table| table.file_name == "huge.a2f")
+            .unwrap();
         assert!(huge.skipped);
         assert!(huge.skip_reason.as_deref().unwrap_or("").contains("larger"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn treats_successful_epw_without_job_done_as_completed() {
+        let dir = temp_dir("completed_no_job_done");
+        let output = r#"
+     Program EPW v.6.0 starts
+     lambda = 0.42
+     Total program execution
+"#;
+        let parsed = parse_epw_result_v2(output, &dir, Vec::new(), true);
+        assert!(parsed.summary.completed);
+        assert!(!parsed.summary.parse_partial);
+
+        let failed = parse_epw_result_v2("lambda = 0.42", &dir, Vec::new(), false);
+        assert!(!failed.summary.completed);
+        assert!(!failed.summary.parse_partial);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn excludes_qe_scratch_files_from_parsed_tables() {
+        let dir = temp_dir("scratch");
+        std::fs::create_dir_all(dir.join("tmp/qcortado_scf.save")).unwrap();
+        std::fs::create_dir_all(dir.join("save/qcortado_scf.phsave")).unwrap();
+        std::fs::write(dir.join("tmp/qcortado_scf.save/wfc1.dat"), "1 2\n3 4\n").unwrap();
+        std::fs::write(
+            dir.join("tmp/qcortado_scf.save/charge-density.dat"),
+            "1 2\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("save/qcortado_scf.dvscf_q1"), "1 2\n").unwrap();
+        std::fs::write(dir.join("linewidth.phself"), "1.0 2.0\n").unwrap();
+        let artifacts = vec![
+            WannierArtifact {
+                file_name: "tmp/qcortado_scf.save/wfc1.dat".to_string(),
+                size_bytes: 8,
+            },
+            WannierArtifact {
+                file_name: "tmp/qcortado_scf.save/charge-density.dat".to_string(),
+                size_bytes: 4,
+            },
+            WannierArtifact {
+                file_name: "save/qcortado_scf.dvscf_q1".to_string(),
+                size_bytes: 4,
+            },
+            WannierArtifact {
+                file_name: "linewidth.phself".to_string(),
+                size_bytes: 8,
+            },
+        ];
+        let parsed = parse_epw_result_v2("JOB DONE.", &dir, artifacts, true);
+        assert!(parsed.parsed_tables.iter().all(
+            |table| !table.file_name.contains(".save") && !table.file_name.starts_with("save/")
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn epw_goals_emit_expected_keywords_and_meshes() {
+        let mut config = EpwCalculationConfig {
+            project_id: "project".to_string(),
+            source_phonon_calc_id: "phonon".to_string(),
+            source_wannier_calc_id: None,
+            source_scf_calc_id: None,
+            mode: None,
+            input: EpwInputConfig {
+                k_mesh: [6, 6, 6],
+                q_mesh: [3, 3, 3],
+                fine_k_mesh: Some([24, 24, 24]),
+                fine_q_mesh: Some([12, 12, 12]),
+                ..EpwInputConfig::default()
+            },
+            runtime: EpwRuntimeConfig::default(),
+            extensions: EpwExtensionsV1::default(),
+            goals: EpwGoalSelection {
+                electron_self_energy: true,
+                transport_mobility: true,
+                superconductivity: true,
+                ..EpwGoalSelection::default()
+            },
+            advanced_overrides: HashMap::new(),
+        };
+        config.input.coarse_k_mesh = Some(config.input.k_mesh);
+        config.input.coarse_q_mesh = Some(config.input.q_mesh);
+
+        let keywords = build_epw_keyword_map(&config).unwrap();
+        assert_eq!(keywords.get("nk1").map(String::as_str), Some("6"));
+        assert_eq!(keywords.get("nkf1").map(String::as_str), Some("24"));
+        assert_eq!(keywords.get("nq1").map(String::as_str), Some("3"));
+        assert_eq!(keywords.get("nqf1").map(String::as_str), Some("12"));
+        assert_eq!(keywords.get("elph").map(String::as_str), Some(".true."));
+        assert_eq!(
+            keywords.get("phonselfen").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(keywords.get("a2f").map(String::as_str), Some(".true."));
+        assert_eq!(
+            keywords.get("elecselfen").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(
+            keywords.get("specfun_el").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(
+            keywords.get("scattering").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(
+            keywords.get("scattering_serta").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(keywords.get("int_mob").map(String::as_str), Some(".true."));
+        assert_eq!(keywords.get("ephwrite").map(String::as_str), Some(".true."));
+        assert_eq!(
+            keywords.get("eliashberg").map(String::as_str),
+            Some(".true.")
+        );
+        assert_eq!(keywords.get("liso").map(String::as_str), Some(".true."));
+        assert_eq!(keywords.get("limag").map(String::as_str), Some(".true."));
     }
 }

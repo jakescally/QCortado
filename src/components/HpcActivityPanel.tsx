@@ -93,17 +93,29 @@ function extractScriptData(lines: string[]): { submitCommand: string | null; scr
 }
 
 export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) {
-  const { tasks, reconnectToTask } = useTaskContext();
+  const { tasks, cancelTask, reconnectToTask } = useTaskContext();
   const tasksRef = useRef(tasks);
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [confirmingCancelTaskId, setConfirmingCancelTaskId] = useState<string | null>(null);
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
   const followLogRef = useRef(true);
   const syncInFlightRef = useRef(false);
+  const cancelConfirmTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+
+  useEffect(() => {
+    return () => {
+      if (cancelConfirmTimeoutRef.current !== null) {
+        window.clearTimeout(cancelConfirmTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const syncFromBackend = useCallback(async () => {
     if (syncInFlightRef.current) return;
@@ -177,6 +189,9 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
   );
   const selectedStatus = selectedTask?.hpc.scheduler_state || selectedTask?.status || "idle";
   const selectedIsRunning = selectedTask?.status === "running";
+  const selectedCancelIsConfirming = Boolean(selectedTask && confirmingCancelTaskId === selectedTask.taskId);
+  const selectedCancelIsSubmitting = Boolean(selectedTask && cancellingTaskId === selectedTask.taskId);
+  const canCancelSelected = Boolean(selectedTask && selectedTask.status === "running" && !selectedCancelIsSubmitting);
   const syncLabel = isSyncing
     ? "Syncing..."
     : lastSyncAt
@@ -184,10 +199,60 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
       : "Waiting for first sync";
 
   useEffect(() => {
+    setConfirmingCancelTaskId(null);
+    setCancelError(null);
+    if (cancelConfirmTimeoutRef.current !== null) {
+      window.clearTimeout(cancelConfirmTimeoutRef.current);
+      cancelConfirmTimeoutRef.current = null;
+    }
+  }, [selectedTask?.taskId]);
+
+  useEffect(() => {
     const el = logRef.current;
     if (!el || !followLogRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [selectedTask?.taskId, readableOutput.length]);
+
+  const handleCancelSelectedTask = useCallback(async () => {
+    if (!selectedTask || selectedTask.status !== "running" || selectedCancelIsSubmitting) return;
+
+    if (confirmingCancelTaskId !== selectedTask.taskId) {
+      setCancelError(null);
+      setConfirmingCancelTaskId(selectedTask.taskId);
+      if (cancelConfirmTimeoutRef.current !== null) {
+        window.clearTimeout(cancelConfirmTimeoutRef.current);
+      }
+      const taskId = selectedTask.taskId;
+      cancelConfirmTimeoutRef.current = window.setTimeout(() => {
+        setConfirmingCancelTaskId((current) => (current === taskId ? null : current));
+        cancelConfirmTimeoutRef.current = null;
+      }, 3000);
+      return;
+    }
+
+    if (cancelConfirmTimeoutRef.current !== null) {
+      window.clearTimeout(cancelConfirmTimeoutRef.current);
+      cancelConfirmTimeoutRef.current = null;
+    }
+
+    setCancellingTaskId(selectedTask.taskId);
+    setCancelError(null);
+    try {
+      await cancelTask(selectedTask.taskId);
+      setConfirmingCancelTaskId(null);
+      void syncFromBackend();
+    } catch (e) {
+      setCancelError(`Failed to cancel task: ${e}`);
+    } finally {
+      setCancellingTaskId(null);
+    }
+  }, [
+    cancelTask,
+    confirmingCancelTaskId,
+    selectedCancelIsSubmitting,
+    selectedTask,
+    syncFromBackend,
+  ]);
 
   if (hpcTasks.length === 0) {
     return (
@@ -219,6 +284,21 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
             <button type="button" className="hpc-activity-refresh" onClick={() => void syncFromBackend()}>
               Refresh
             </button>
+            {selectedTask && selectedTask.status === "running" && (
+              <button
+                type="button"
+                className={`hpc-activity-cancel ${selectedCancelIsConfirming ? "confirming" : ""}`}
+                onClick={() => void handleCancelSelectedTask()}
+                disabled={!canCancelSelected}
+                aria-label={selectedCancelIsConfirming ? "Confirm cancel selected cluster task" : "Cancel selected cluster task"}
+              >
+                {selectedCancelIsSubmitting
+                  ? "Cancelling..."
+                  : selectedCancelIsConfirming
+                    ? "Confirm cancel"
+                    : "Cancel"}
+              </button>
+            )}
             {!standalone && (
               <button
                 type="button"
@@ -238,6 +318,7 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
           </span>
           <span className="hpc-activity-sync">{syncLabel}</span>
         </div>
+        {cancelError && <div className="hpc-activity-cancel-error">{cancelError}</div>}
       </div>
 
       <div className="hpc-activity-task-list">

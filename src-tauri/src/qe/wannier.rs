@@ -2821,6 +2821,7 @@ mod tests {
                     symbol: "Si".to_string(),
                     mass: 28.0855,
                     pseudopotential: "Si.upf".to_string(),
+                    starting_magnetization: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -2843,11 +2844,14 @@ mod tests {
                 nspin: 1,
                 noncolin: false,
                 lspinorb: false,
+                tot_magnetization: None,
+                constrained_magnetization: None,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::Gaussian,
                 degauss: None,
                 nosym: false,
                 noinv: false,
+                hubbard: None,
             },
             kpoints: KPoints::Gamma,
             conv_thr: 1.0e-8,
@@ -2906,11 +2910,14 @@ mod tests {
             nspin: 1,
             noncolin: false,
             lspinorb: false,
+            tot_magnetization: None,
+            constrained_magnetization: None,
             occupations: Occupations::Fixed,
             smearing: SmearingType::Gaussian,
             degauss: None,
             nosym: false,
             noinv: false,
+            hubbard: None,
         };
 
         let lattice =
@@ -2942,11 +2949,14 @@ mod tests {
             nspin: 1,
             noncolin: false,
             lspinorb: false,
+            tot_magnetization: None,
+            constrained_magnetization: None,
             occupations: Occupations::Fixed,
             smearing: SmearingType::Gaussian,
             degauss: None,
             nosym: false,
             noinv: false,
+            hubbard: None,
         };
 
         let error =
@@ -2972,11 +2982,14 @@ mod tests {
             nspin: 1,
             noncolin: false,
             lspinorb: false,
+            tot_magnetization: None,
+            constrained_magnetization: None,
             occupations: Occupations::Fixed,
             smearing: SmearingType::Gaussian,
             degauss: None,
             nosym: false,
             noinv: false,
+            hubbard: None,
         };
 
         let lattice =

@@ -1054,6 +1054,14 @@ export function BandStructureWizard({
     const nspin = Number.isFinite(sourceNspin) && sourceNspin > 0 ? sourceNspin : 1;
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
+    const sourceStartingMagnetization =
+      scfParams.starting_magnetization && typeof scfParams.starting_magnetization === "object"
+        ? scfParams.starting_magnetization as Record<string, unknown>
+        : {};
+    const getStartingMagnetization = (element: string) => {
+      const value = Number(sourceStartingMagnetization[element]);
+      return Number.isFinite(value) ? value : undefined;
+    };
 
     let resolvedSymmetry = symmetryTransform;
     let resolvedSymmetryError = symmetryError;
@@ -1097,6 +1105,9 @@ export function BandStructureWizard({
       symbol: el,
       mass: ELEMENT_MASSES[el] || 1.0,
       pseudopotential: resolvedPseudos[el],
+      ...(getStartingMagnetization(el) !== undefined
+        ? { starting_magnetization: getStartingMagnetization(el) }
+        : {}),
     }));
 
     const context = resolvePathTransformContext(crystalData, resolvedSymmetry);
@@ -1297,8 +1308,16 @@ export function BandStructureWizard({
       // Inherit SCF parameters for tags
       ecutwfc: scfParams.ecutwfc,
       nspin: scfParams.nspin,
+      noncolin: scfParams.noncolin,
       lspinorb: scfParams.lspinorb,
+      starting_magnetization: scfParams.starting_magnetization ?? null,
       lda_plus_u: scfParams.lda_plus_u,
+      hubbard_projector: scfParams.hubbard_projector ?? null,
+      hubbard_formulation: scfParams.hubbard_formulation ?? null,
+      hubbard_manifold: scfParams.hubbard_manifold ?? null,
+      hubbard_parameters: scfParams.hubbard_parameters ?? null,
+      hubbard_u: scfParams.hubbard_u ?? null,
+      hubbard_j: scfParams.hubbard_j ?? null,
       vdw_corr: scfParams.vdw_corr,
       fat_bands_requested: enableProjections,
       projection_filproj: projectionFilproj,

@@ -153,6 +153,51 @@ pub struct AtomicSpecies {
     pub mass: f64,
     /// Pseudopotential filename
     pub pseudopotential: String,
+    /// Initial spin polarization for this atomic type.
+    #[serde(default)]
+    pub starting_magnetization: Option<f64>,
+}
+
+/// Hubbard projector basis for the QE 7.3.1+ HUBBARD card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HubbardProjector {
+    Atomic,
+    OrthoAtomic,
+    NormAtomic,
+    Wf,
+    Pseudo,
+}
+
+impl HubbardProjector {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Atomic => "atomic",
+            Self::OrthoAtomic => "ortho-atomic",
+            Self::NormAtomic => "norm-atomic",
+            Self::Wf => "wf",
+            Self::Pseudo => "pseudo",
+        }
+    }
+}
+
+/// One line in the QE 7.3.1+ HUBBARD card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HubbardParameter {
+    /// Parameter keyword, e.g. U, J, J0, B, E2, E3, ALPHA.
+    pub parameter: String,
+    /// Target label and manifold, e.g. Fe-3d.
+    pub manifold: String,
+    /// Parameter value in eV.
+    pub value: f64,
+}
+
+/// Complete QE 7.3.1+ HUBBARD card configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HubbardSettings {
+    pub projector: HubbardProjector,
+    #[serde(default)]
+    pub parameters: Vec<HubbardParameter>,
 }
 
 /// An atom in the structure
@@ -356,6 +401,12 @@ pub struct QESystem {
     /// Spin-orbit coupling flag (requires noncolin = .true.).
     #[serde(default)]
     pub lspinorb: bool,
+    /// Fixed total magnetization target.
+    #[serde(default)]
+    pub tot_magnetization: Option<f64>,
+    /// Magnetization constraint mode.
+    #[serde(default)]
+    pub constrained_magnetization: Option<String>,
     /// Occupations scheme
     #[serde(default)]
     pub occupations: Occupations,
@@ -371,6 +422,9 @@ pub struct QESystem {
     /// Disable inversion symmetry.
     #[serde(default)]
     pub noinv: bool,
+    /// QE 7.3.1+ DFT+Hubbard settings emitted as a HUBBARD card.
+    #[serde(default)]
+    pub hubbard: Option<HubbardSettings>,
 }
 
 fn default_nspin() -> u32 {

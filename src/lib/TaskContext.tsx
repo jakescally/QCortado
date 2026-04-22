@@ -490,6 +490,21 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
     if (next.parse_partial == null && typeof taskResult?.result_summary?.parse_partial === "boolean") {
       next.parse_partial = taskResult.result_summary.parse_partial;
     }
+    if (next.epw_goals == null && taskResult?.goals && typeof taskResult.goals === "object") {
+      next.epw_goals = taskResult.goals;
+    }
+    if (next.coarse_k_grid == null && Array.isArray(taskResult?.input?.coarse_k_mesh)) {
+      next.coarse_k_grid = taskResult.input.coarse_k_mesh;
+    }
+    if (next.fine_k_grid == null && Array.isArray(taskResult?.input?.fine_k_mesh)) {
+      next.fine_k_grid = taskResult.input.fine_k_mesh;
+    }
+    if (next.coarse_q_grid == null && Array.isArray(taskResult?.input?.coarse_q_mesh)) {
+      next.coarse_q_grid = taskResult.input.coarse_q_mesh;
+    }
+    if (next.fine_q_grid == null && Array.isArray(taskResult?.input?.fine_q_mesh)) {
+      next.fine_q_grid = taskResult.input.fine_q_mesh;
+    }
   }
 
   return next;

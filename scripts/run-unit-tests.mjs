@@ -5,6 +5,7 @@ import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const testEntries = [
+  "tests/cifSubstitution/cifSubstitution.test.ts",
   "tests/epw/epwUtils.test.ts",
   "tests/transport/transportUtils.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",

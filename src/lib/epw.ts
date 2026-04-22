@@ -132,6 +132,10 @@ export interface EpwViewerData {
     wannier_dir?: string;
     k_mesh?: [number, number, number];
     q_mesh?: [number, number, number];
+    coarse_k_mesh?: [number, number, number] | null;
+    fine_k_mesh?: [number, number, number] | null;
+    coarse_q_mesh?: [number, number, number] | null;
+    fine_q_mesh?: [number, number, number] | null;
     epbwrite?: boolean;
     epbread?: boolean;
     epwwrite?: boolean;
@@ -140,6 +144,13 @@ export interface EpwViewerData {
     fsthick_ev?: number | null;
     degaussw_ev?: number | null;
     nbndsub?: number | null;
+  };
+  goals?: {
+    coupling?: boolean;
+    phonon_linewidth_a2f?: boolean;
+    electron_self_energy?: boolean;
+    transport_mobility?: boolean;
+    superconductivity?: boolean;
   };
   extensions?: {
     superconductivity?: unknown;

@@ -54,7 +54,10 @@ import {
   getWannierQualityIssues,
   WannierQualityIssue,
 } from "../lib/wannierQuality";
-import { getNeutralElectronConfiguration } from "../lib/electronConfigurations";
+import {
+  getNeutralElectronConfiguration,
+  getOutermostOccupiedOrbital,
+} from "../lib/electronConfigurations";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 
 interface CalculationRun {
@@ -246,6 +249,10 @@ function renderElectronConfiguration(config: string) {
 
 function getNeutralElectronConfigSummary(symbol: string) {
   return getNeutralElectronConfiguration(symbol);
+}
+
+function getDefaultProjectionOrbital(symbol: string): ProjectionOrbital {
+  return getOutermostOccupiedOrbital(symbol) ?? "s";
 }
 
 function countMatchingElementSites(symbol: string, atomSymbols: string[]): number {
@@ -698,7 +705,7 @@ export function WannierWizard({
     if (projectionDrafts.length === 0) {
       const uniqueElements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
       if (uniqueElements.length === 1) {
-        const defaultOrbital = ORBITAL_OPTIONS[0];
+        const defaultOrbital = getDefaultProjectionOrbital(uniqueElements[0]);
         setProjectionDrafts([
           {
             id: makeProjectionId(),
@@ -1418,7 +1425,7 @@ export function WannierWizard({
 
   const addProjection = useCallback(() => {
     const firstElement = getBaseElement(crystalData.atom_sites[0]?.type_symbol || "X");
-    const defaultOrbital = ORBITAL_OPTIONS[0];
+    const defaultOrbital = getDefaultProjectionOrbital(firstElement);
     setProjectionDrafts((prev) => [
       ...prev,
       {
@@ -1496,18 +1503,29 @@ export function WannierWizard({
     const ecutwfc = Number(params.ecutwfc);
     const ecutrho = Number(params.ecutrho);
     const nspin = Number(params.nspin) || 1;
-    const noncolin = Boolean(params.noncolin);
     const lspinorb = Boolean(params.lspinorb);
+    const noncolin = nspin === 4 || Boolean(params.noncolin) || lspinorb;
     const occupations = normalizeOccupations(params.occupations);
     const smearing = normalizeSmearing(params.smearing, resolvedDefaultSmearing);
     const degauss = Number(params.degauss);
     const convThr = Number(params.conv_thr);
     const mixingBeta = Number(params.mixing_beta);
+    const sourceStartingMagnetization =
+      params.starting_magnetization && typeof params.starting_magnetization === "object"
+        ? params.starting_magnetization as Record<string, unknown>
+        : {};
+    const getStartingMagnetization = (element: string) => {
+      const value = Number(sourceStartingMagnetization[element]);
+      return Number.isFinite(value) ? value : undefined;
+    };
     const baseElements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
     const species = baseElements.map((element) => ({
       symbol: element,
       mass: ELEMENT_MASSES[element] || 1,
       pseudopotential: sourcePseudoMap[element],
+      ...(getStartingMagnetization(element) !== undefined
+        ? { starting_magnetization: getStartingMagnetization(element) }
+        : {}),
     }));
     if (species.some((entry) => !entry.pseudopotential)) {
       throw new Error("Source SCF pseudopotential metadata is incomplete. Re-run the SCF before starting Wannier.");
@@ -1807,7 +1825,9 @@ export function WannierWizard({
           : (canUseSymmetryPrimitive ? "primitive_spglib" : "conventional_input"),
         ecutwfc: params.ecutwfc,
         nspin: params.nspin,
+        noncolin: params.noncolin,
         lspinorb: params.lspinorb,
+        starting_magnetization: params.starting_magnetization ?? null,
         lda_plus_u: params.lda_plus_u,
         vdw_corr: params.vdw_corr,
         symmetry_spacegroup: resolvedSymmetry?.spacegroupNumber ?? null,

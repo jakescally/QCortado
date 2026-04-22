@@ -31,7 +31,8 @@ use process_manager::ProcessManager;
 
 use qe::{
     add_phonon_symmetry_markers, build_epw_input, build_epw_keyword_map, build_transport_win,
-    collect_epw_artifacts, export_ludwig_bundle, generate_dos_input, generate_matdyn_bands_input,
+    collect_epw_artifacts, epw_coarse_k_mesh, epw_coarse_q_mesh, epw_fine_k_mesh, epw_fine_q_mesh,
+    export_ludwig_bundle, generate_dos_input, generate_matdyn_bands_input,
     generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_epw_result_v2,
     parse_ph_output, parse_transport_result, parse_wannier_hamiltonian,
     prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
@@ -7467,6 +7468,154 @@ fn copy_epw_source_manifest_entry(
     Ok(())
 }
 
+fn copy_epw_source_file_to(
+    source_root: &Path,
+    destination_root: &Path,
+    source_rel_path: &str,
+    destination_rel_path: &str,
+) -> Result<(), String> {
+    let source_path = source_root.join(source_rel_path);
+    if !source_path.exists() || !source_path.is_file() {
+        return Err(format!(
+            "EPW prerequisite artifact missing: {}",
+            source_path.display()
+        ));
+    }
+    let destination_path = destination_root.join(destination_rel_path);
+    if let Some(parent) = destination_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create EPW staging directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    std::fs::copy(&source_path, &destination_path).map_err(|e| {
+        format!(
+            "Failed to stage EPW prerequisite {} -> {}: {}",
+            source_path.display(),
+            destination_path.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+fn find_epw_phsave_dir(source_root: &Path, prefix: &str) -> Option<PathBuf> {
+    let expected = format!("{}.phsave", prefix.trim()).to_ascii_lowercase();
+    let mut fallback: Option<PathBuf> = None;
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(source_root.to_path_buf());
+    while let Some(current) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if name == expected {
+                return Some(path);
+            }
+            if name.ends_with(".phsave") && fallback.is_none() {
+                fallback = Some(path.clone());
+            }
+            queue.push_back(path);
+        }
+    }
+    fallback
+}
+
+fn stage_epw_phonon_save_directory(
+    source: &ValidatedEpwSources,
+    destination_root: &Path,
+    config: &EpwCalculationConfig,
+) -> Result<(), String> {
+    let prefix = config.input.prefix.trim();
+    let save_subdir = resolve_epw_stage_subdir(&config.input.dvscf_dir, "save");
+    let dyn_re = Regex::new(r"(?i)(?:^|/)(?:.+\.)?dyn(\d+)(\.xml)?$").unwrap();
+    let q_dir_re = Regex::new(r"(?i)(?:^|/)q_(\d+)(?:/|$)").unwrap();
+    let dvscf_q_re = Regex::new(r"(?i)dvscf_q(\d+)").unwrap();
+
+    for entry in source
+        .manifests
+        .iter()
+        .filter(|entry| entry.source_calc_type == "phonon")
+    {
+        let lower = entry.rel_path.to_ascii_lowercase();
+        if let Some(captures) = dyn_re.captures(&entry.rel_path) {
+            let q_index = captures.get(1).map(|value| value.as_str()).unwrap_or("1");
+            let extension = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+            copy_epw_source_file_to(
+                &source.phonon_tmp_dir,
+                destination_root,
+                &entry.rel_path,
+                &format!("{}/{}.dyn_q{}{}", save_subdir, prefix, q_index, extension),
+            )?;
+            continue;
+        }
+
+        if lower.contains("dvscf") {
+            let q_index = q_dir_re
+                .captures(&entry.rel_path)
+                .and_then(|captures| captures.get(1).map(|value| value.as_str().to_string()))
+                .or_else(|| {
+                    dvscf_q_re.captures(&entry.rel_path).and_then(|captures| {
+                        captures.get(1).map(|value| value.as_str().to_string())
+                    })
+                })
+                .unwrap_or_else(|| "1".to_string());
+            copy_epw_source_file_to(
+                &source.phonon_tmp_dir,
+                destination_root,
+                &entry.rel_path,
+                &format!("{}/{}.dvscf_q{}", save_subdir, prefix, q_index),
+            )?;
+            continue;
+        }
+
+        let file_name = Path::new(&entry.rel_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(file_name.as_str(), "ifc.q2r" | "ifc.q2r.xml") {
+            copy_epw_source_file_to(
+                &source.phonon_tmp_dir,
+                destination_root,
+                &entry.rel_path,
+                &format!("{}/{}", save_subdir, file_name),
+            )?;
+        }
+    }
+
+    if let Some(phsave_dir) = find_epw_phsave_dir(&source.phonon_tmp_dir, prefix) {
+        let destination = destination_root
+            .join(&save_subdir)
+            .join(format!("{}.phsave", prefix));
+        projects::copy_dir_contents(&phsave_dir, &destination).map_err(|e| {
+            format!(
+                "Failed to stage EPW phsave directory {} -> {}: {}",
+                phsave_dir.display(),
+                destination.display(),
+                e
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn stage_epw_scf_save_directory(
     source: &ValidatedEpwSources,
     destination_root: &Path,
@@ -7527,7 +7676,6 @@ fn stage_epw_source_files(
     })?;
     stage_epw_scf_save_directory(source, destination_root, config)?;
 
-    let phonon_subdir = resolve_epw_stage_subdir(&config.input.dvscf_dir, "phonon");
     let optional_wannier_subdir = config
         .input
         .wannier_dir
@@ -7538,12 +7686,7 @@ fn stage_epw_source_files(
 
     for entry in &source.manifests {
         match entry.source_calc_type.as_str() {
-            "phonon" => copy_epw_source_manifest_entry(
-                &source.phonon_tmp_dir,
-                destination_root,
-                &phonon_subdir,
-                &entry.rel_path,
-            )?,
+            "phonon" => {}
             "wannier" => {
                 let Some(wannier_root) = source.wannier_tmp_dir.as_ref() else {
                     return Err(
@@ -7570,6 +7713,7 @@ fn stage_epw_source_files(
             _ => {}
         }
     }
+    stage_epw_phonon_save_directory(source, destination_root, config)?;
     Ok(())
 }
 
@@ -7708,6 +7852,7 @@ fn validate_epw_prerequisites_detailed(
         "phonon",
         |lower_rel, file_name| {
             file_name.starts_with("dyn")
+                || file_name.contains(".dyn")
                 || file_name.contains("dvscf")
                 || file_name.ends_with(".ukk")
                 || matches!(
@@ -7724,6 +7869,8 @@ fn validate_epw_prerequisites_detailed(
                         | "phonon_freq"
                         | "phonon_freq.gp"
                         | "phonon_dos"
+                        | "ifc.q2r"
+                        | "ifc.q2r.xml"
                 )
                 || (lower_rel.contains("_ph0/") && file_name.ends_with(".xml"))
         },
@@ -7732,9 +7879,14 @@ fn validate_epw_prerequisites_detailed(
         validation.errors.push(err);
         Vec::new()
     });
-    let has_dyn = phonon_manifest
-        .iter()
-        .any(|entry| entry.rel_path.to_ascii_lowercase().starts_with("dyn"));
+    let has_dyn = phonon_manifest.iter().any(|entry| {
+        let file_name = Path::new(&entry.rel_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        file_name.starts_with("dyn") || file_name.contains(".dyn")
+    });
     let has_dvscf = phonon_manifest
         .iter()
         .any(|entry| entry.rel_path.to_ascii_lowercase().contains("dvscf"));
@@ -7784,18 +7936,32 @@ fn validate_epw_prerequisites_detailed(
             let q3 = values[2].as_u64()?;
             Some([q1 as u32, q2 as u32, q3 as u32])
         });
+    let configured_coarse_q = epw_coarse_q_mesh(&config.input);
     if let Some(saved_q) = phonon_q_grid {
-        if saved_q != config.input.q_mesh {
-            validation.warnings.push(format!(
-                "Configured EPW q-mesh {}x{}x{} differs from saved phonon q-grid {}x{}x{}.",
-                config.input.q_mesh[0],
-                config.input.q_mesh[1],
-                config.input.q_mesh[2],
+        if saved_q != configured_coarse_q {
+            validation.errors.push(format!(
+                "Configured EPW coarse q-mesh {}x{}x{} differs from saved phonon q-grid {}x{}x{}.",
+                configured_coarse_q[0],
+                configured_coarse_q[1],
+                configured_coarse_q[2],
                 saved_q[0],
                 saved_q[1],
                 saved_q[2]
             ));
+            validation.remediation_hints.push(
+                "Select a phonon source with recorded q-grid metadata; EPW coarse q-mesh is read from the phonon run."
+                    .to_string(),
+            );
         }
+    } else {
+        validation.errors.push(
+            "Selected phonon source does not record its q-grid, so EPW cannot infer the required coarse q-mesh."
+                .to_string(),
+        );
+        validation.remediation_hints.push(
+            "Re-run the phonon workflow so QCortado can save the phonon q-grid metadata."
+                .to_string(),
+        );
     }
 
     let phonon_prefix = extract_string_param(&phonon_calculation.parameters, "prefix")
@@ -7867,12 +8033,13 @@ fn validate_epw_prerequisites_detailed(
             wannier_nscf_input_path = Some(candidate_nscf_input);
         }
         if let Some(wannier_k_grid) = extract_u32_triplet_param(&source.parameters, "k_grid") {
-            if wannier_k_grid != config.input.k_mesh {
+            let configured_coarse_k = epw_coarse_k_mesh(&config.input);
+            if wannier_k_grid != configured_coarse_k {
                 let message = format!(
-                    "Configured EPW k-mesh {}x{}x{} differs from Wannier source NSCF k-grid {}x{}x{}.",
-                    config.input.k_mesh[0],
-                    config.input.k_mesh[1],
-                    config.input.k_mesh[2],
+                    "Configured EPW coarse k-mesh {}x{}x{} differs from Wannier source NSCF k-grid {}x{}x{}.",
+                    configured_coarse_k[0],
+                    configured_coarse_k[1],
+                    configured_coarse_k[2],
                     wannier_k_grid[0],
                     wannier_k_grid[1],
                     wannier_k_grid[2]
@@ -10540,7 +10707,7 @@ async fn run_epw_background(
     }
 
     emit_line!(format!(
-        "[QCortado] EPW local config: phonon_source={}, wannier_source={}, prefix={}, kmesh={}x{}x{}, qmesh={}x{}x{}, started_at={}.",
+        "[QCortado] EPW local config: phonon_source={}, wannier_source={}, prefix={}, coarse_k={}x{}x{}, fine_k={}x{}x{}, coarse_q={}x{}x{}, fine_q={}x{}x{}, started_at={}.",
         sources.phonon_calculation.id,
         sources
             .wannier_calculation
@@ -10548,12 +10715,18 @@ async fn run_epw_background(
             .map(|calc| calc.id.as_str())
             .unwrap_or("none"),
         config.input.prefix,
-        config.input.k_mesh[0],
-        config.input.k_mesh[1],
-        config.input.k_mesh[2],
-        config.input.q_mesh[0],
-        config.input.q_mesh[1],
-        config.input.q_mesh[2],
+        epw_coarse_k_mesh(&config.input)[0],
+        epw_coarse_k_mesh(&config.input)[1],
+        epw_coarse_k_mesh(&config.input)[2],
+        epw_fine_k_mesh(&config.input)[0],
+        epw_fine_k_mesh(&config.input)[1],
+        epw_fine_k_mesh(&config.input)[2],
+        epw_coarse_q_mesh(&config.input)[0],
+        epw_coarse_q_mesh(&config.input)[1],
+        epw_coarse_q_mesh(&config.input)[2],
+        epw_fine_q_mesh(&config.input)[0],
+        epw_fine_q_mesh(&config.input)[1],
+        epw_fine_q_mesh(&config.input)[2],
         now_iso()
     ));
     for warning in &sources.warnings {
@@ -10766,7 +10939,7 @@ async fn run_epw_background(
     let parse_started = std::time::Instant::now();
     let artifacts = collect_epw_artifacts(&work_path);
     let combined_output = format!("{}\n{}", stage_output.stdout, stage_output.stderr);
-    let parsed_result = parse_epw_result_v2(&combined_output, &work_path, artifacts.clone());
+    let parsed_result = parse_epw_result_v2(&combined_output, &work_path, artifacts.clone(), true);
     let mut errors: Vec<EpwErrorRecord> = Vec::new();
     if parsed_result.summary.parse_partial {
         errors.push(EpwErrorRecord {
@@ -10788,6 +10961,7 @@ async fn run_epw_background(
         schema_version: EPW_SCHEMA_VERSION,
         sources: build_epw_sources_payload(&config, &sources),
         input: config.input,
+        goals: config.goals,
         runtime: config.runtime,
         extensions: config.extensions,
         artifacts,
@@ -10945,7 +11119,7 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
     let bundle_copies = vec![(stage_dir.clone(), ".".to_string())];
 
     let config_line = format!(
-        "[QCortado] EPW HPC config: phonon_source={}, wannier_source={}, prefix={}, kmesh={}x{}x{}, qmesh={}x{}x{}, mpi_ranks={}, npool={}, nimage={}, steps={}.",
+        "[QCortado] EPW HPC config: phonon_source={}, wannier_source={}, prefix={}, coarse_k={}x{}x{}, fine_k={}x{}x{}, coarse_q={}x{}x{}, fine_q={}x{}x{}, mpi_ranks={}, npool={}, nimage={}, steps={}.",
         sources.phonon_calculation.id,
         sources
             .wannier_calculation
@@ -10953,12 +11127,18 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
             .map(|calc| calc.id.as_str())
             .unwrap_or("none"),
         config.input.prefix,
-        config.input.k_mesh[0],
-        config.input.k_mesh[1],
-        config.input.k_mesh[2],
-        config.input.q_mesh[0],
-        config.input.q_mesh[1],
-        config.input.q_mesh[2],
+        epw_coarse_k_mesh(&config.input)[0],
+        epw_coarse_k_mesh(&config.input)[1],
+        epw_coarse_k_mesh(&config.input)[2],
+        epw_fine_k_mesh(&config.input)[0],
+        epw_fine_k_mesh(&config.input)[1],
+        epw_fine_k_mesh(&config.input)[2],
+        epw_coarse_q_mesh(&config.input)[0],
+        epw_coarse_q_mesh(&config.input)[1],
+        epw_coarse_q_mesh(&config.input)[2],
+        epw_fine_q_mesh(&config.input)[0],
+        epw_fine_q_mesh(&config.input)[1],
+        epw_fine_q_mesh(&config.input)[2],
         launch_ranks,
         parallel_plan.npool,
         parallel_plan.nimage,
@@ -11009,6 +11189,7 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
         &format!("{}\n{}", stdout, stderr),
         &work_path,
         artifacts.clone(),
+        true,
     );
     let mut errors: Vec<EpwErrorRecord> = Vec::new();
     if parsed_result.summary.parse_partial {
@@ -11030,6 +11211,7 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
         schema_version: EPW_SCHEMA_VERSION,
         sources: build_epw_sources_payload(&config, &sources),
         input: config.input,
+        goals: config.goals,
         runtime: config.runtime,
         extensions: config.extensions,
         artifacts,

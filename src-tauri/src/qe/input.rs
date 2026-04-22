@@ -51,6 +51,9 @@ pub fn generate_pw_input(calc: &QECalculation) -> String {
         write_cell_parameters(&mut output, &calc.system);
     }
 
+    // HUBBARD card (QE 7.3.1+ DFT+Hubbard syntax)
+    write_hubbard_card(&mut output, &calc.system);
+
     output
 }
 
@@ -135,6 +138,29 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
     }
     if !noncolin && sys.nspin != 1 {
         writeln!(out, "  nspin = {},", sys.nspin).unwrap();
+    }
+    if noncolin || sys.nspin != 1 {
+        for (index, species) in sys.species.iter().enumerate() {
+            if let Some(value) = species.starting_magnetization {
+                writeln!(out, "  starting_magnetization({}) = {},", index + 1, value).unwrap();
+            }
+        }
+        if let Some(tot_magnetization) = sys.tot_magnetization {
+            writeln!(out, "  tot_magnetization = {},", tot_magnetization).unwrap();
+        }
+        if let Some(constrained_magnetization) = sys
+            .constrained_magnetization
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "none")
+        {
+            writeln!(
+                out,
+                "  constrained_magnetization = '{}',",
+                constrained_magnetization
+            )
+            .unwrap();
+        }
     }
 
     if !matches!(sys.occupations, Occupations::Fixed) {
@@ -328,6 +354,36 @@ fn write_cell_parameters(out: &mut String, sys: &QESystem) {
         }
         writeln!(out).unwrap();
     }
+}
+
+fn write_hubbard_card(out: &mut String, sys: &QESystem) {
+    let Some(hubbard) = &sys.hubbard else {
+        return;
+    };
+
+    let parameters: Vec<_> = hubbard
+        .parameters
+        .iter()
+        .filter_map(|param| {
+            let parameter = param.parameter.trim().to_uppercase();
+            let manifold = param.manifold.trim();
+            if parameter.is_empty() || manifold.is_empty() {
+                None
+            } else {
+                Some((parameter, manifold, param.value))
+            }
+        })
+        .collect();
+
+    if parameters.is_empty() {
+        return;
+    }
+
+    writeln!(out, "HUBBARD ({})", hubbard.projector.as_str()).unwrap();
+    for (parameter, manifold, value) in parameters {
+        writeln!(out, "{} {} {}", parameter, manifold, value).unwrap();
+    }
+    writeln!(out).unwrap();
 }
 
 // ============================================================================
@@ -534,6 +590,7 @@ mod tests {
                     symbol: "Si".to_string(),
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
+                    starting_magnetization: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -556,11 +613,14 @@ mod tests {
                 nspin: 1,
                 noncolin: false,
                 lspinorb: false,
+                tot_magnetization: None,
+                constrained_magnetization: None,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::default(),
                 degauss: None,
                 nosym: false,
                 noinv: false,
+                hubbard: None,
             },
             kpoints: KPoints::Automatic {
                 grid: [4, 4, 4],
@@ -594,6 +654,30 @@ mod tests {
         assert!(input.contains("Si 28.086 Si.pz-vbc.UPF"));
         assert!(input.contains("K_POINTS {automatic}"));
         assert!(input.contains("4 4 4  1 1 1"));
+
+        let mut hubbard_calc = calc.clone();
+        hubbard_calc.system.hubbard = Some(HubbardSettings {
+            projector: HubbardProjector::OrthoAtomic,
+            parameters: vec![
+                HubbardParameter {
+                    parameter: "U".to_string(),
+                    manifold: "Fe-3d".to_string(),
+                    value: 5.0,
+                },
+                HubbardParameter {
+                    parameter: "J".to_string(),
+                    manifold: "Fe-3d".to_string(),
+                    value: 0.8,
+                },
+            ],
+        });
+        let hubbard_input = generate_pw_input(&hubbard_calc);
+
+        assert!(hubbard_input.contains("HUBBARD (ortho-atomic)"));
+        assert!(hubbard_input.contains("U Fe-3d 5"));
+        assert!(hubbard_input.contains("J Fe-3d 0.8"));
+        assert!(!hubbard_input.contains("lda_plus_u"));
+        assert!(!hubbard_input.contains("Hubbard_U"));
     }
 
     #[test]
@@ -612,6 +696,7 @@ mod tests {
                     symbol: "Bi".to_string(),
                     mass: 208.98,
                     pseudopotential: "Bi.rel-pbe.upf".to_string(),
+                    starting_magnetization: None,
                 }],
                 atoms: vec![Atom {
                     symbol: "Bi".to_string(),
@@ -627,11 +712,14 @@ mod tests {
                 nspin: 4,
                 noncolin: true,
                 lspinorb: true,
+                tot_magnetization: None,
+                constrained_magnetization: None,
                 occupations: Occupations::Smearing,
                 smearing: SmearingType::FermiDirac,
                 degauss: Some(0.02),
                 nosym: false,
                 noinv: false,
+                hubbard: None,
             },
             kpoints: KPoints::Gamma,
             conv_thr: 1.0e-8,
@@ -660,6 +748,71 @@ mod tests {
     }
 
     #[test]
+    fn test_frontend_magnetism_fields_are_written_to_system_namelist() {
+        let calc: QECalculation = serde_json::from_value(serde_json::json!({
+            "calculation": "scf",
+            "prefix": "magnetic",
+            "outdir": "./tmp",
+            "pseudo_dir": "./pseudo",
+            "system": {
+                "ibrav": "free",
+                "cell_parameters": [
+                    [2.8, 0.0, 0.0],
+                    [0.0, 2.8, 0.0],
+                    [0.0, 0.0, 2.8]
+                ],
+                "cell_units": "angstrom",
+                "species": [
+                    {
+                        "symbol": "Fe",
+                        "mass": 55.845,
+                        "pseudopotential": "Fe.upf",
+                        "starting_magnetization": 0.6
+                    },
+                    {
+                        "symbol": "O",
+                        "mass": 15.999,
+                        "pseudopotential": "O.upf",
+                        "starting_magnetization": -0.1
+                    }
+                ],
+                "atoms": [
+                    {
+                        "symbol": "Fe",
+                        "position": [0.0, 0.0, 0.0]
+                    },
+                    {
+                        "symbol": "O",
+                        "position": [0.5, 0.5, 0.5]
+                    }
+                ],
+                "position_units": "crystal",
+                "ecutwfc": 60.0,
+                "ecutrho": 480.0,
+                "nspin": 2,
+                "tot_magnetization": 4.0,
+                "constrained_magnetization": "total"
+            },
+            "kpoints": {
+                "type": "automatic",
+                "grid": [4, 4, 4],
+                "offset": [0, 0, 0]
+            }
+        }))
+        .expect("frontend-shaped magnetic SCF calculation should deserialize");
+
+        let input = generate_pw_input(&calc);
+
+        assert!(input.contains("nspin = 2"));
+        assert!(input.contains("starting_magnetization(1) = 0.6"));
+        assert!(input.contains("starting_magnetization(2) = -0.1"));
+        assert!(input.contains("tot_magnetization = 4"));
+        assert!(input.contains("constrained_magnetization = 'total'"));
+        assert!(input.contains("Fe 55.845 Fe.upf"));
+        assert!(!input.contains("Fe 55.845 Fe.upf 0.6"));
+    }
+
+    #[test]
     fn test_whitespace_only_input_dft_is_omitted() {
         let calc = QECalculation {
             calculation: CalculationType::Scf,
@@ -675,6 +828,7 @@ mod tests {
                     symbol: "Si".to_string(),
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
+                    starting_magnetization: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -697,11 +851,14 @@ mod tests {
                 nspin: 1,
                 noncolin: false,
                 lspinorb: false,
+                tot_magnetization: None,
+                constrained_magnetization: None,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::default(),
                 degauss: None,
                 nosym: false,
                 noinv: false,
+                hubbard: None,
             },
             kpoints: KPoints::Automatic {
                 grid: [4, 4, 4],
@@ -746,6 +903,7 @@ mod tests {
                     symbol: "Si".to_string(),
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
+                    starting_magnetization: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -768,11 +926,14 @@ mod tests {
                 nspin: 1,
                 noncolin: false,
                 lspinorb: false,
+                tot_magnetization: None,
+                constrained_magnetization: None,
                 occupations: Occupations::Fixed,
                 smearing: SmearingType::default(),
                 degauss: None,
                 nosym: false,
                 noinv: false,
+                hubbard: None,
             },
             kpoints: KPoints::Automatic {
                 grid: [4, 4, 4],

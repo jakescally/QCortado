@@ -18,6 +18,7 @@ import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { CifSubstitutionDialog } from "./CifSubstitutionDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
 import type { TransportResult } from "../lib/transport";
@@ -760,14 +761,16 @@ function getEpwTags(calc: CalculationRun): { label: string; type: "info" | "feat
     }
   };
 
-  if (Array.isArray(params.k_mesh) && params.k_mesh.length === 3) {
-    pushTag(`${params.k_mesh[0]}×${params.k_mesh[1]}×${params.k_mesh[2]} K`, "info");
+  const fineKMesh = Array.isArray(params.fine_k_grid) ? params.fine_k_grid : params.k_mesh;
+  const coarseQMesh = Array.isArray(params.coarse_q_grid) ? params.coarse_q_grid : params.q_mesh;
+  if (Array.isArray(fineKMesh) && fineKMesh.length === 3) {
+    pushTag(`${fineKMesh[0]}×${fineKMesh[1]}×${fineKMesh[2]} fine K`, "info");
   }
-  if (Array.isArray(params.q_mesh) && params.q_mesh.length === 3) {
-    pushTag(`${params.q_mesh[0]}×${params.q_mesh[1]}×${params.q_mesh[2]} Q`, "info");
+  if (Array.isArray(coarseQMesh) && coarseQMesh.length === 3) {
+    pushTag(`${coarseQMesh[0]}×${coarseQMesh[1]}×${coarseQMesh[2]} Q`, "info");
   }
   if (params.parse_partial === true) {
-    pushTag("Parse Partial", "feature");
+    pushTag("Limited results", "feature");
   }
   if (isHpcCalculation(calc)) {
     pushTag("HPC", "feature");
@@ -1212,6 +1215,7 @@ export function ProjectDashboard({
   // Delete project confirmation dialog state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showEditProjectDialog, setShowEditProjectDialog] = useState(false);
+  const [showCifSubstitutionDialog, setShowCifSubstitutionDialog] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -1461,6 +1465,14 @@ export function ProjectDashboard({
     } finally {
       setIsImporting(false);
     }
+  }
+
+  async function handleCifSubstitutionSaved(newVariant: Pick<CifVariant, "id" | "formula">) {
+    setShowCifSubstitutionDialog(false);
+    setInfoMessage(`Saved modified CIF ${newVariant.formula}.`);
+    setError(null);
+    await loadProject();
+    await selectCif(newVariant.id);
   }
 
   function openEditProjectDialog() {
@@ -2590,13 +2602,22 @@ function normalizeSavedKPath(value: unknown): string {
             ) : (
               <>
                 <p>Import a CIF file to get started with your calculations</p>
-                <button
-                  className="add-structure-btn primary"
-                  onClick={handleImportCIF}
-                  disabled={isImporting}
-                >
-                  {isImporting ? "Importing..." : "Import CIF File"}
-                </button>
+                <div className="empty-state-actions">
+                  <button
+                    className="add-structure-btn primary"
+                    onClick={handleImportCIF}
+                    disabled={isImporting}
+                  >
+                    {isImporting ? "Importing..." : "Import CIF File"}
+                  </button>
+                  <button
+                    className="add-structure-btn"
+                    onClick={() => setShowCifSubstitutionDialog(true)}
+                    disabled={isImporting}
+                  >
+                    Modify Existing CIF
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -2612,6 +2633,12 @@ function normalizeSavedKPath(value: unknown): string {
               initialDescription={project.description}
               onClose={() => setShowEditProjectDialog(false)}
               onSaved={handleProjectMetadataSaved}
+            />
+            <CifSubstitutionDialog
+              isOpen={showCifSubstitutionDialog}
+              projectId={projectId}
+              onClose={() => setShowCifSubstitutionDialog(false)}
+              onSaved={handleCifSubstitutionSaved}
             />
             {showDeleteDialog && renderDeleteDialog()}
           </>
@@ -2685,16 +2712,28 @@ function normalizeSavedKPath(value: unknown): string {
               ))}
             </select>
             {!readOnly && (
-              <InfoTooltip text="Add new structure">
-                <button
-                  className="add-structure-inline-btn"
-                  onClick={handleImportCIF}
-                  disabled={isImporting}
-                  aria-label="Add new structure"
-                >
-                  +
-                </button>
-              </InfoTooltip>
+              <div className="structure-selector-actions">
+                <InfoTooltip text="Import CIF file">
+                  <button
+                    className="add-structure-inline-btn"
+                    onClick={handleImportCIF}
+                    disabled={isImporting}
+                    aria-label="Import CIF file"
+                  >
+                    +
+                  </button>
+                </InfoTooltip>
+                <InfoTooltip text="Modify an existing CIF">
+                  <button
+                    className="modify-structure-inline-btn"
+                    onClick={() => setShowCifSubstitutionDialog(true)}
+                    disabled={isImporting}
+                    aria-label="Modify an existing CIF"
+                  >
+                    Modify
+                  </button>
+                </InfoTooltip>
+              </div>
             )}
           </div>
         </div>
@@ -3989,6 +4028,18 @@ function normalizeSavedKPath(value: unknown): string {
                 const runtime = getCalculationRuntime(calcData);
                 const epwData = calcData.result?.epw_data ?? null;
                 const summary = epwData?.result_summary ?? null;
+                const completed = typeof summary?.completed === "boolean"
+                  ? summary.completed
+                  : Boolean(calc.completed_at);
+                const parseLimited = typeof summary?.parse_partial === "boolean"
+                  ? summary.parse_partial
+                  : calc.parameters?.parse_partial === true;
+                const fineKMesh = Array.isArray(calc.parameters?.fine_k_grid)
+                  ? calc.parameters.fine_k_grid
+                  : calc.parameters?.k_mesh;
+                const coarseQMesh = Array.isArray(calc.parameters?.coarse_q_grid)
+                  ? calc.parameters.coarse_q_grid
+                  : calc.parameters?.q_mesh;
                 const artifactCount = Array.isArray(epwData?.artifacts)
                   ? epwData.artifacts.length
                   : calc.parameters?.artifact_count ?? "N/A";
@@ -4060,18 +4111,18 @@ function normalizeSavedKPath(value: unknown): string {
                       <div className="calculation-details">
                         <div className="details-grid">
                           <div className="detail-item">
-                            <label>K-Mesh</label>
+                            <label>Fine K-Mesh</label>
                             <span>
-                              {Array.isArray(calc.parameters?.k_mesh)
-                                ? `${calc.parameters.k_mesh[0]}×${calc.parameters.k_mesh[1]}×${calc.parameters.k_mesh[2]}`
+                              {Array.isArray(fineKMesh)
+                                ? `${fineKMesh[0]}×${fineKMesh[1]}×${fineKMesh[2]}`
                                 : "N/A"}
                             </span>
                           </div>
                           <div className="detail-item">
-                            <label>Q-Mesh</label>
+                            <label>Phonon Q-Mesh</label>
                             <span>
-                              {Array.isArray(calc.parameters?.q_mesh)
-                                ? `${calc.parameters.q_mesh[0]}×${calc.parameters.q_mesh[1]}×${calc.parameters.q_mesh[2]}`
+                              {Array.isArray(coarseQMesh)
+                                ? `${coarseQMesh[0]}×${coarseQMesh[1]}×${coarseQMesh[2]}`
                                 : "N/A"}
                             </span>
                           </div>
@@ -4089,11 +4140,11 @@ function normalizeSavedKPath(value: unknown): string {
                           </div>
                           <div className="detail-item">
                             <label>Completed</label>
-                            <span>{summary?.completed ? "Yes" : "No"}</span>
+                            <span>{completed ? "Yes" : "No"}</span>
                           </div>
                           <div className="detail-item">
-                            <label>Parse Partial</label>
-                            <span>{summary?.parse_partial ? "Yes" : "No"}</span>
+                            <label>Parsed Results</label>
+                            <span>{parseLimited ? "Limited" : "Complete"}</span>
                           </div>
                           {runtime && (
                             <div className="detail-item">
@@ -4401,6 +4452,13 @@ function normalizeSavedKPath(value: unknown): string {
             initialDescription={project.description}
             onClose={() => setShowEditProjectDialog(false)}
             onSaved={handleProjectMetadataSaved}
+          />
+
+          <CifSubstitutionDialog
+            isOpen={showCifSubstitutionDialog}
+            projectId={projectId}
+            onClose={() => setShowCifSubstitutionDialog(false)}
+            onSaved={handleCifSubstitutionSaved}
           />
 
           {showLudwigExportDialog && calcToExportLudwig && (

@@ -26,12 +26,14 @@ pub use bands::{
 };
 pub use epw::{
     build_epw_input, build_epw_input_preview, build_epw_keyword_map, collect_epw_artifacts,
+    epw_coarse_k_mesh, epw_coarse_q_mesh, epw_fine_k_mesh, epw_fine_q_mesh,
     parse_epw_result_summary, parse_epw_result_v2, render_epw_input, validate_epw_config,
     EpwArtifactManifestEntry, EpwCalculationConfig, EpwCalculationV1, EpwEliashbergIteration,
-    EpwErrorRecord, EpwExtensionsV1, EpwGapSummary, EpwInputConfig, EpwInputPreviewResult,
-    EpwMobilityDataset, EpwParsedResultV2, EpwParsedTable, EpwPrerequisiteValidation,
-    EpwResultSummaryV1, EpwRuntimeConfig, EpwSelfEnergyMode, EpwSourceRef, EpwSourcesV1,
-    EpwSpectralData, EpwSuperconductivityData, EpwTransportData, EPW_SCHEMA_VERSION,
+    EpwErrorRecord, EpwExtensionsV1, EpwGapSummary, EpwGoalSelection, EpwInputConfig,
+    EpwInputPreviewResult, EpwMobilityDataset, EpwParsedResultV2, EpwParsedTable,
+    EpwPrerequisiteValidation, EpwResultSummaryV1, EpwRuntimeConfig, EpwSelfEnergyMode,
+    EpwSourceRef, EpwSourcesV1, EpwSpectralData, EpwSuperconductivityData, EpwTransportData,
+    EPW_SCHEMA_VERSION,
 };
 pub use input::{
     generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input,

@@ -46,6 +46,10 @@ import {
   sampleHpcUtilization,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
+import {
+  getDefaultHubbardManifold,
+  getOutermostOccupiedOrbitalManifold,
+} from "../lib/electronConfigurations";
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;
@@ -112,6 +116,8 @@ interface SCFConfig {
   // DFT+U
   lda_plus_u: boolean;
   lda_plus_u_kind: 0 | 1 | 2;
+  hubbard_projector: HubbardProjector;
+  hubbard_manifold: Record<string, string>;  // per element, e.g. 3d
   hubbard_u: Record<string, number>;  // per element
   hubbard_j: Record<string, number>;  // per element (for kind=1,2)
 
@@ -133,6 +139,12 @@ interface SCFConfig {
 
 type WizardStep = "import" | "configure" | "run" | "results";
 type CellViewMode = "conventional" | "primitive";
+type HubbardProjector = "atomic" | "ortho-atomic" | "norm-atomic" | "wf" | "pseudo";
+type HubbardParameter = {
+  parameter: "U" | "J" | "J0";
+  manifold: string;
+  value: number;
+};
 
 interface DisplayCellMetrics {
   a: number;
@@ -160,6 +172,10 @@ function normalizeDefaultSmearing(
   if (lowered === "methfessel-paxton") return "methfessel-paxton";
   if (lowered === "fermi-dirac") return "fermi-dirac";
   return "marzari-vanderbilt";
+}
+
+function normalizeHubbardManifold(raw: string): string {
+  return raw.trim().replace(/\s+/g, "");
 }
 
 type CutoffStatusKind = "parsed" | "inferred" | "missing";
@@ -291,6 +307,8 @@ export function SCFWizard({
     // DFT+U
     lda_plus_u: false,
     lda_plus_u_kind: 0,
+    hubbard_projector: "ortho-atomic",
+    hubbard_manifold: {},
     hubbard_u: {},
     hubbard_j: {},
 
@@ -1252,10 +1270,81 @@ export function SCFWizard({
     return [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
   }
 
+  const hubbardDefaultElements = getUniqueElements();
+  const hubbardDefaultElementKey = hubbardDefaultElements.join("|");
+
+  useEffect(() => {
+    if (hubbardDefaultElements.length === 0) return;
+
+    setConfig((prev) => {
+      let changed = false;
+      const nextManifolds = { ...prev.hubbard_manifold };
+
+      for (const element of hubbardDefaultElements) {
+        const current = normalizeHubbardManifold(nextManifolds[element] || "");
+        const defaultManifold = getDefaultHubbardManifold(element);
+        const previousOuterShellDefault = getOutermostOccupiedOrbitalManifold(element);
+
+        if (!defaultManifold) {
+          if (current && current === previousOuterShellDefault) {
+            delete nextManifolds[element];
+            changed = true;
+          }
+          continue;
+        }
+
+        if (!current || current === previousOuterShellDefault) {
+          nextManifolds[element] = defaultManifold;
+          changed = true;
+        }
+      }
+
+      return changed ? { ...prev, hubbard_manifold: nextManifolds } : prev;
+    });
+  }, [hubbardDefaultElementKey]);
+
   function canRun(): boolean {
     if (!crystalData) return false;
     const elements = getUniqueElements();
     return elements.every((el) => selectedPseudos[el]);
+  }
+
+  function getHubbardManifoldForElement(element: string): string | null {
+    const explicit = normalizeHubbardManifold(config.hubbard_manifold[element] || "");
+    return explicit || getDefaultHubbardManifold(element);
+  }
+
+  function buildHubbardSettings(elements: string[]) {
+    if (!config.lda_plus_u) return undefined;
+
+    const parameters: HubbardParameter[] = [];
+    for (const element of elements) {
+      const uValue = config.hubbard_u[element] ?? 0;
+      const jValue = config.hubbard_j[element] ?? 0;
+      const hasJValue = config.lda_plus_u_kind > 0 && jValue !== 0;
+      if (uValue === 0 && !hasJValue) continue;
+
+      const manifold = getHubbardManifoldForElement(element);
+      if (!manifold) {
+        throw new Error(`Missing Hubbard manifold for ${element}. Enter a value such as 3d or 4f.`);
+      }
+
+      const target = `${element}-${manifold}`;
+      parameters.push({ parameter: "U", manifold: target, value: uValue });
+      if (hasJValue) {
+        parameters.push({
+          parameter: config.lda_plus_u_kind === 2 ? "J0" : "J",
+          manifold: target,
+          value: jValue,
+        });
+      }
+    }
+
+    if (parameters.length === 0) return undefined;
+    return {
+      projector: config.hubbard_projector,
+      parameters,
+    };
   }
 
   async function buildScfTaskPlan(): Promise<ScfTaskPlan> {
@@ -1304,12 +1393,11 @@ export function SCFWizard({
       mass: ELEMENT_MASSES[el] || 1.0,
       pseudopotential: selectedPseudos[el],
       starting_magnetization: config.starting_magnetization[el] || 0,
-      hubbard_u: config.lda_plus_u ? (config.hubbard_u[el] || 0) : undefined,
-      hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? (config.hubbard_j[el] || 0) : undefined,
     }));
 
     // Build system configuration based on cell type
     const normalizedInputDft = config.input_dft.trim();
+    const hubbardSettings = buildHubbardSettings(elements);
 
     const systemConfig: any = {
       // Common properties
@@ -1330,8 +1418,7 @@ export function SCFWizard({
       tot_magnetization: config.nspin === 2 && config.tot_magnetization !== null ? config.tot_magnetization : undefined,
       constrained_magnetization: config.constrained_magnetization !== "none" ? config.constrained_magnetization : undefined,
       // DFT+U
-      lda_plus_u: config.lda_plus_u || undefined,
-      lda_plus_u_kind: config.lda_plus_u ? config.lda_plus_u_kind : undefined,
+      hubbard: hubbardSettings,
       // Van der Waals
       vdw_corr: config.vdw_corr !== "none" ? config.vdw_corr : undefined,
       // Isolated systems
@@ -1954,6 +2041,10 @@ export function SCFWizard({
       : null;
     const optimizedCellSummary = optimizedStructure ? summarizeCell(optimizedStructure) : null;
     const isRemoteRun = isHpcMode || hpcMeta?.backend === "hpc";
+    const hubbardManifolds = config.lda_plus_u
+      ? Object.fromEntries(getUniqueElements().map((element) => [element, getHubbardManifoldForElement(element)]))
+      : null;
+    const hubbardSettings = config.lda_plus_u ? buildHubbardSettings(getUniqueElements()) : null;
 
     return {
       calc_type: isOptimization ? "optimization" : "scf",
@@ -1982,8 +2073,25 @@ export function SCFWizard({
         symmetry_error: symmetryError,
         // Feature flags for tags
         nspin: config.nspin,
+        noncolin: config.noncolin,
         lspinorb: config.lspinorb,
+        starting_magnetization: config.nspin === 1
+          ? {}
+          : Object.fromEntries(
+            getUniqueElements().map((element) => [
+              element,
+              config.starting_magnetization[element] ?? 0,
+            ]),
+          ),
+        tot_magnetization: config.nspin === 2 ? config.tot_magnetization : null,
+        constrained_magnetization: config.constrained_magnetization,
         lda_plus_u: config.lda_plus_u,
+        hubbard_projector: config.lda_plus_u ? config.hubbard_projector : null,
+        hubbard_formulation: config.lda_plus_u ? config.lda_plus_u_kind : null,
+        hubbard_manifold: hubbardManifolds,
+        hubbard_parameters: hubbardSettings?.parameters ?? null,
+        hubbard_u: config.lda_plus_u ? config.hubbard_u : null,
+        hubbard_j: config.lda_plus_u && config.lda_plus_u_kind > 0 ? config.hubbard_j : null,
         vdw_corr: config.vdw_corr,
         // Relaxation parameters
         forc_conv_thr: config.forc_conv_thr,
@@ -2821,40 +2929,66 @@ export function SCFWizard({
                         <>
                           <div className="param-row">
                             <label>
-                              DFT+U Type
-                              <InfoTooltip text="0: simplified rotationally invariant. 1: rotationally invariant with J. 2: DFT+U+J (full)." />
+                              Hubbard Projectors
+                              <InfoTooltip text="QE 7.3.1+ requires the projector type on the HUBBARD card. Ortho-atomic is recommended when supported by the pseudopotentials." />
+                            </label>
+                            <select value={config.hubbard_projector}
+                              onChange={(e) => setConfig((prev) => ({ ...prev, hubbard_projector: e.target.value as HubbardProjector }))}>
+                              <option value="ortho-atomic">ortho-atomic</option>
+                              <option value="atomic">atomic</option>
+                              <option value="norm-atomic">norm-atomic</option>
+                              <option value="wf">wf</option>
+                              <option value="pseudo">pseudo</option>
+                            </select>
+                          </div>
+                          <div className="param-row">
+                            <label>
+                              Hubbard Formulation
+                              <InfoTooltip text="Dudarev DFT+U writes U lines. Liechtenstein DFT+U+J writes U and J lines. Dudarev DFT+U+J0 writes U and J0 lines." />
                             </label>
                             <select value={config.lda_plus_u_kind}
                               onChange={(e) => setConfig((prev) => ({ ...prev, lda_plus_u_kind: parseInt(e.target.value) as 0 | 1 | 2 }))}>
-                              <option value={0}>Simplified (kind=0)</option>
-                              <option value={1}>Rotationally invariant (kind=1)</option>
-                              <option value={2}>Full DFT+U+J (kind=2)</option>
+                              <option value={0}>DFT+U (Dudarev)</option>
+                              <option value={1}>DFT+U+J (Liechtenstein)</option>
+                              <option value={2}>DFT+U+J0 (Dudarev)</option>
                             </select>
                           </div>
                           <div className="param-row full-width">
-                            <label>Hubbard U values (per element, in eV)</label>
+                            <label>Hubbard manifolds and values (per element, in eV)</label>
                           </div>
                           <div className="hubbard-grid">
                             {getUniqueElements().map((el) => (
                               <div key={el} className="hubbard-row">
-                                <label>{el}</label>
-                                <span>U:</span>
-                                <input type="number" step="0.1" min={0}
-                                  value={config.hubbard_u[el] ?? 0}
-                                  onChange={(e) => setConfig((prev) => ({
-                                    ...prev,
-                                    hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
-                                  }))} />
+                                <label className="hubbard-element">{el}</label>
+                                <label className="hubbard-field">
+                                  <span>Manifold</span>
+                                  <input type="text"
+                                    value={config.hubbard_manifold[el] ?? ""}
+                                    placeholder={getDefaultHubbardManifold(el) || "manual"}
+                                    onChange={(e) => setConfig((prev) => ({
+                                      ...prev,
+                                      hubbard_manifold: { ...prev.hubbard_manifold, [el]: e.target.value }
+                                    }))} />
+                                </label>
+                                <label className="hubbard-field hubbard-value-field">
+                                  <span>U</span>
+                                  <input type="number" step="0.1" min={0}
+                                    value={config.hubbard_u[el] ?? 0}
+                                    onChange={(e) => setConfig((prev) => ({
+                                      ...prev,
+                                      hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
+                                    }))} />
+                                </label>
                                 {config.lda_plus_u_kind > 0 && (
-                                  <>
-                                    <span>J:</span>
+                                  <label className="hubbard-field hubbard-value-field">
+                                    <span>{config.lda_plus_u_kind === 2 ? "J0" : "J"}</span>
                                     <input type="number" step="0.1" min={0}
                                       value={config.hubbard_j[el] ?? 0}
                                       onChange={(e) => setConfig((prev) => ({
                                         ...prev,
                                         hubbard_j: { ...prev.hubbard_j, [el]: parseFloat(e.target.value) || 0 }
                                       }))} />
-                                  </>
+                                  </label>
                                 )}
                               </div>
                             ))}

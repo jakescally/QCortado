@@ -1,8 +1,17 @@
-type SubshellOrbital = "s" | "p" | "d" | "f";
+import { ELEMENT_SYMBOLS, normalizeElementSymbol } from "./elements";
+
+export type SubshellOrbital = "s" | "p" | "d" | "f";
 
 export interface ElectronConfiguration {
   compact: string;
   full: string;
+}
+
+export interface ElectronSubshell {
+  shell: number;
+  orbital: SubshellOrbital;
+  electrons: number;
+  label: string;
 }
 
 interface SubshellDefinition {
@@ -10,22 +19,6 @@ interface SubshellDefinition {
   orbital: SubshellOrbital;
   capacity: number;
 }
-
-const ELEMENT_SYMBOLS = [
-  "H", "He",
-  "Li", "Be", "B", "C", "N", "O", "F", "Ne",
-  "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar",
-  "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-  "Ga", "Ge", "As", "Se", "Br", "Kr",
-  "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
-  "In", "Sn", "Sb", "Te", "I", "Xe",
-  "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
-  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
-  "Tl", "Pb", "Bi", "Po", "At", "Rn",
-  "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr",
-  "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn",
-  "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
-] as const;
 
 const SUBSHELL_ORDER: SubshellDefinition[] = [
   { shell: 1, orbital: "s", capacity: 2 },
@@ -84,15 +77,9 @@ const symbolToAtomicNumber = new Map<string, number>(
   ELEMENT_SYMBOLS.map((symbol, index) => [symbol, index + 1]),
 );
 
-function normalizeElementSymbol(symbol: string): string {
-  const trimmed = String(symbol || "").trim();
-  if (!trimmed) {
-    return "";
-  }
-  if (trimmed.length === 1) {
-    return trimmed.toUpperCase();
-  }
-  return `${trimmed[0].toUpperCase()}${trimmed.slice(1).toLowerCase()}`;
+function getAtomicNumber(symbol: string): number | null {
+  const normalized = normalizeElementSymbol(symbol);
+  return symbolToAtomicNumber.get(normalized) ?? null;
 }
 
 function formatSubshellToken(shell: number, orbital: SubshellOrbital, electrons: number): string {
@@ -151,6 +138,25 @@ function buildCompactConfiguration(fullTokens: string[], atomicNumber: number): 
   return [`[${nobleGas.symbol}]`, ...fullTokens.slice(coreTokens.length)].join(" ");
 }
 
+function parseSubshellToken(token: string): ElectronSubshell | null {
+  const match = token.match(/^(\d+)([spdf])(\d+)$/);
+  if (!match) return null;
+
+  const shell = Number(match[1]);
+  const orbital = match[2] as SubshellOrbital;
+  const electrons = Number(match[3]);
+  if (!Number.isFinite(shell) || !Number.isFinite(electrons) || electrons <= 0) {
+    return null;
+  }
+
+  return {
+    shell,
+    orbital,
+    electrons,
+    label: `${shell}${orbital}`,
+  };
+}
+
 export function getNeutralElectronConfiguration(symbol: string): ElectronConfiguration | null {
   const normalized = normalizeElementSymbol(symbol);
   const atomicNumber = symbolToAtomicNumber.get(normalized);
@@ -171,4 +177,50 @@ export function getNeutralElectronConfiguration(symbol: string): ElectronConfigu
     compact: buildCompactConfiguration(fullTokens, atomicNumber),
     full: fullTokens.join(" "),
   };
+}
+
+export function getNeutralElectronSubshells(symbol: string): ElectronSubshell[] {
+  const config = getNeutralElectronConfiguration(symbol);
+  if (!config) return [];
+
+  return config.full
+    .split(/\s+/)
+    .map(parseSubshellToken)
+    .filter((subshell): subshell is ElectronSubshell => Boolean(subshell));
+}
+
+export function getOutermostOccupiedOrbitalManifold(symbol: string): string | null {
+  const subshells = getNeutralElectronSubshells(symbol);
+  if (subshells.length === 0) return null;
+
+  const highestShell = Math.max(...subshells.map((subshell) => subshell.shell));
+  const outerShellSubshells = subshells.filter((subshell) => subshell.shell === highestShell);
+  const orbitalRank: Record<SubshellOrbital, number> = { s: 0, p: 1, d: 2, f: 3 };
+  outerShellSubshells.sort((a, b) => orbitalRank[b.orbital] - orbitalRank[a.orbital]);
+
+  return outerShellSubshells[0]?.label ?? null;
+}
+
+export function getOutermostOccupiedOrbital(symbol: string): SubshellOrbital | null {
+  const manifold = getOutermostOccupiedOrbitalManifold(symbol);
+  return manifold ? (manifold.slice(-1) as SubshellOrbital) : null;
+}
+
+export function getDefaultHubbardManifold(symbol: string): string | null {
+  const atomicNumber = getAtomicNumber(symbol);
+  if (!atomicNumber) return null;
+
+  if (atomicNumber >= 57 && atomicNumber <= 71) return "4f";
+  if (atomicNumber >= 89 && atomicNumber <= 103) return "5f";
+  if (atomicNumber >= 21 && atomicNumber <= 30) return "3d";
+  if (atomicNumber >= 39 && atomicNumber <= 48) return "4d";
+  if (atomicNumber >= 72 && atomicNumber <= 80) return "5d";
+  if (atomicNumber >= 104 && atomicNumber <= 112) return "6d";
+
+  return null;
+}
+
+export function getDefaultHubbardOrbital(symbol: string): SubshellOrbital | null {
+  const manifold = getDefaultHubbardManifold(symbol);
+  return manifold ? (manifold.slice(-1) as SubshellOrbital) : null;
 }
