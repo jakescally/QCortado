@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
+import { InfoTooltip } from "./InfoTooltip";
 import type { BandsMultiviewCalculation, BandsMultiviewScanProgress } from "./BandsMultiview";
 
 interface ProjectSummary {
@@ -1292,19 +1293,20 @@ export function ProjectBrowser({
                       <h3 className="project-name">{project.name}</h3>
                       {!readOnly && (
                         <div className="project-card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            className="project-card-menu-btn"
-                            type="button"
-                            onClick={() => {
-                              setOpenProjectMenuId((current) => (
-                                current === project.id ? null : project.id
-                              ));
-                            }}
-                            title="Project options"
-                            aria-label={`Open options for ${project.name}`}
-                          >
-                            ⋮
-                          </button>
+                          <InfoTooltip text="Project options">
+                            <button
+                              className="project-card-menu-btn"
+                              type="button"
+                              onClick={() => {
+                                setOpenProjectMenuId((current) => (
+                                  current === project.id ? null : project.id
+                                ));
+                              }}
+                              aria-label={`Open options for ${project.name}`}
+                            >
+                              ⋮
+                            </button>
+                          </InfoTooltip>
                           {openProjectMenuId === project.id && (
                             <div className="project-card-menu">
                               <button

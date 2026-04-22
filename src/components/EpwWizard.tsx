@@ -10,6 +10,7 @@ import type { EpwViewerData } from "./EpwViewer";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -22,15 +23,6 @@ import {
   resolveProfileRemoteQeBinDir,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
-}
 
 interface CalculationRun {
   id: string;
@@ -363,11 +355,15 @@ export function EpwWizard({
   );
 
   const hpcCommandLines = useMemo(
-    () => [
-      "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
-      `${buildHpcLauncherCommand(activeHpcProfile)} \"$QE_BIN/epw.x\" -in epw.in > epw.out 2> epw.err`,
-    ],
+    () => {
+      const remoteEpw = (activeHpcProfile?.remote_epw_path || "").trim();
+      const epwExecutable = remoteEpw.length > 0 ? `"${remoteEpw}"` : "\"$QE_BIN/epw.x\"";
+      return [
+        "cd \"$SLURM_SUBMIT_DIR\"",
+        `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
+        `${buildHpcLauncherCommand(activeHpcProfile)} ${epwExecutable} -in epw.in > epw.out 2> epw.err`,
+      ];
+    },
     [activeHpcProfile, hpcResources.resource_type],
   );
 
@@ -795,7 +791,7 @@ export function EpwWizard({
         <div className="option-section">
           <h4>
             Phonon Source
-            <Tooltip text="Choose the completed phonon run that provides dyn*/dvscf prerequisites for EPW staging." />
+            <InfoTooltip text="Choose the completed phonon run that provides dyn*/dvscf prerequisites for EPW staging." />
           </h4>
           <div className="scf-list">
             {phononCalculations.map((calc) => {
@@ -833,7 +829,7 @@ export function EpwWizard({
         <div className="option-section">
           <h4>
             Wannier Source (Optional)
-            <Tooltip text="Optional reusable Wannier outputs. Leave as none when running EPW without an upstream Wannier stage." />
+            <InfoTooltip text="Optional reusable Wannier outputs. Leave as none when running EPW without an upstream Wannier stage." />
           </h4>
           <div className="scf-list">
             <div
@@ -911,7 +907,7 @@ export function EpwWizard({
           <div className="phonon-field">
             <label>
               Run Mode
-              <Tooltip text="Select preset EPW mode logic. Advanced overrides can still set any keyword explicitly." />
+              <InfoTooltip text="Select preset EPW mode logic. Advanced overrides can still set any keyword explicitly." />
             </label>
             <select value={mode} onChange={(event) => setMode(event.target.value)}>
               <option value="standard">standard</option>
@@ -922,28 +918,28 @@ export function EpwWizard({
           <div className="phonon-field">
             <label>
               prefix
-              <Tooltip text="System prefix used for QE save paths and EPW file naming consistency." />
+              <InfoTooltip text="System prefix used for QE save paths and EPW file naming consistency." />
             </label>
             <input value={prefix} onChange={(event) => setPrefix(event.target.value)} />
           </div>
           <div className="phonon-field">
             <label>
               outdir
-              <Tooltip text="EPW runtime working outdir (QE scratch/save lookup root)." />
+              <InfoTooltip text="EPW runtime working outdir (QE scratch/save lookup root)." />
             </label>
             <input value={outdir} onChange={(event) => setOutdir(event.target.value)} />
           </div>
           <div className="phonon-field">
             <label>
               dvscf_dir
-              <Tooltip text="Relative folder where staged phonon perturbation potentials are placed for EPW." />
+              <InfoTooltip text="Relative folder where staged phonon perturbation potentials are placed for EPW." />
             </label>
             <input value={dvscfDir} onChange={(event) => setDvscfDir(event.target.value)} />
           </div>
           <div className="phonon-field">
             <label>
               wannier_dir
-              <Tooltip text="Relative folder for staged Wannier inputs/outputs when a Wannier source is selected." />
+              <InfoTooltip text="Relative folder for staged Wannier inputs/outputs when a Wannier source is selected." />
             </label>
             <input value={wannierDir} onChange={(event) => setWannierDir(event.target.value)} />
           </div>
@@ -951,7 +947,7 @@ export function EpwWizard({
           <div className="phonon-field">
             <label>
               K Mesh
-              <Tooltip text="Fine electron grid (`nk1 nk2 nk3`) used by EPW interpolation/integration." />
+              <InfoTooltip text="Fine electron grid (`nk1 nk2 nk3`) used by EPW interpolation/integration." />
             </label>
             <div className="qgrid-inputs">
               <input type="number" min={1} value={kMesh[0]} onChange={(event) => updateMesh("k", 0, event.target.value)} />
@@ -970,7 +966,7 @@ export function EpwWizard({
           <div className="phonon-field">
             <label>
               Q Mesh
-              <Tooltip text="Phonon interpolation mesh (`nq1 nq2 nq3`). Keep aligned with source phonon grid unless intentionally changing interpolation density." />
+              <InfoTooltip text="Phonon interpolation mesh (`nq1 nq2 nq3`). Keep aligned with source phonon grid unless intentionally changing interpolation density." />
             </label>
             <div className="qgrid-inputs">
               <input type="number" min={1} value={qMesh[0]} onChange={(event) => updateMesh("q", 0, event.target.value)} />
@@ -992,21 +988,21 @@ export function EpwWizard({
           <div className="phonon-field">
             <label>
               fsthick (eV)
-              <Tooltip text="Fermi-surface thickness window around EF used in EPW sampling." />
+              <InfoTooltip text="Fermi-surface thickness window around EF used in EPW sampling." />
             </label>
             <input value={fsthickInput} onChange={(event) => setFsthickInput(event.target.value)} placeholder="0.4" />
           </div>
           <div className="phonon-field">
             <label>
               degaussw (eV)
-              <Tooltip text="Smearing width used in EPW integrations (eV)." />
+              <InfoTooltip text="Smearing width used in EPW integrations (eV)." />
             </label>
             <input value={degausswInput} onChange={(event) => setDegausswInput(event.target.value)} placeholder="0.02" />
           </div>
           <div className="phonon-field">
             <label>
               nbndsub
-              <Tooltip text="Optional EPW subspace band count. Leave blank to use backend defaults." />
+              <InfoTooltip text="Optional EPW subspace band count. Leave blank to use backend defaults." />
             </label>
             <input value={nbndsubInput} onChange={(event) => setNbndsubInput(event.target.value)} placeholder="optional" />
           </div>
@@ -1015,23 +1011,23 @@ export function EpwWizard({
         <div className="option-section">
           <label className="option-checkbox">
             <input type="checkbox" checked={epbwrite} onChange={(event) => setEpbwrite(event.target.checked)} />
-            <span>epbwrite <Tooltip text="Write electron-phonon matrix elements to reusable `.epb` outputs." /></span>
+            <span>epbwrite <InfoTooltip text="Write electron-phonon matrix elements to reusable `.epb` outputs." /></span>
           </label>
           <label className="option-checkbox">
             <input type="checkbox" checked={epbread} onChange={(event) => setEpbread(event.target.checked)} />
-            <span>epbread <Tooltip text="Read existing `.epb` data instead of recomputing." /></span>
+            <span>epbread <InfoTooltip text="Read existing `.epb` data instead of recomputing." /></span>
           </label>
           <label className="option-checkbox">
             <input type="checkbox" checked={epwwrite} onChange={(event) => setEpwwrite(event.target.checked)} />
-            <span>epwwrite <Tooltip text="Write EPW intermediate restart artifacts for follow-on runs." /></span>
+            <span>epwwrite <InfoTooltip text="Write EPW intermediate restart artifacts for follow-on runs." /></span>
           </label>
           <label className="option-checkbox">
             <input type="checkbox" checked={epwread} onChange={(event) => setEpwread(event.target.checked)} />
-            <span>epwread <Tooltip text="Read EPW restart artifacts produced by previous EPW runs." /></span>
+            <span>epwread <InfoTooltip text="Read EPW restart artifacts produced by previous EPW runs." /></span>
           </label>
           <label className="option-checkbox">
             <input type="checkbox" checked={wannierize} onChange={(event) => setWannierize(event.target.checked)} />
-            <span>wannierize <Tooltip text="Enable EPW-driven wannierization flow when compatible inputs are present." /></span>
+            <span>wannierize <InfoTooltip text="Enable EPW-driven wannierization flow when compatible inputs are present." /></span>
           </label>
         </div>
 
@@ -1047,7 +1043,7 @@ export function EpwWizard({
               />
               <span>
                 Enable MPI
-                <Tooltip text="Launch `epw.x` through MPI locally. Process count is controlled below." />
+                <InfoTooltip text="Launch `epw.x` through MPI locally. Process count is controlled below." />
               </span>
             </label>
             {!mpiAvailable && (
@@ -1059,7 +1055,7 @@ export function EpwWizard({
               <div className="phonon-field inline-field">
                 <label>
                   MPI Processes
-                  <Tooltip text="Local MPI rank count. Higher values can reduce runtime but increase resource contention." />
+                  <InfoTooltip text="Local MPI rank count. Higher values can reduce runtime but increase resource contention." />
                 </label>
                 <input
                   type="number"
@@ -1080,7 +1076,7 @@ export function EpwWizard({
         <div className="option-section epw-controls-section">
           <h4>
             Advanced Overrides
-            <Tooltip text="Free-form `key=value` EPW keywords merged last; use for unsupported or new upstream options." />
+            <InfoTooltip text="Free-form `key=value` EPW keywords merged last; use for unsupported or new upstream options." />
           </h4>
           <p className="param-hint">
             One keyword per line. Blank lines and lines starting with `#` or `!` are ignored.
@@ -1102,7 +1098,7 @@ export function EpwWizard({
           <div className="epw-preview-header">
             <h4>
               Input Preview
-              <Tooltip text="Generates the final `epw.in` after applying curated controls plus advanced overrides." />
+              <InfoTooltip text="Generates the final `epw.in` after applying curated controls plus advanced overrides." />
             </h4>
             <button className="secondary-button" onClick={() => void refreshInputPreview()} disabled={isBuildingPreview}>
               {isBuildingPreview ? "Building Preview..." : "Build Input Preview"}
@@ -1121,7 +1117,7 @@ export function EpwWizard({
                 <div className="phonon-field">
                   <label>
                     Artifact Sync Mode
-                    <Tooltip text="Controls how much EPW output is synced back from HPC: minimal, epw-ready, or full archive." />
+                    <InfoTooltip text="Controls how much EPW output is synced back from HPC: minimal, epw-ready, or full archive." />
                   </label>
                   <select
                     value={artifactSyncMode}
@@ -1135,7 +1131,7 @@ export function EpwWizard({
                 <div className="phonon-field">
                   <label>
                     MPI Pools
-                    <Tooltip text="Optional EPW `npool` split hint for parallel k-point distribution." />
+                    <InfoTooltip text="Optional EPW `npool` split hint for parallel k-point distribution." />
                   </label>
                   <input
                     value={runtimePoolsInput}
@@ -1146,7 +1142,7 @@ export function EpwWizard({
                 <div className="phonon-field">
                   <label>
                     Max Seconds
-                    <Tooltip text="Optional EPW internal walltime guard. EPW exits when this budget is reached." />
+                    <InfoTooltip text="Optional EPW internal walltime guard. EPW exits when this budget is reached." />
                   </label>
                   <input
                     value={runtimeMaxSecondsInput}

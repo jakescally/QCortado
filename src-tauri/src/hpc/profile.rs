@@ -118,6 +118,8 @@ pub struct HpcProfile {
     pub remote_qe_cpu_bin_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_qe_gpu_bin_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_epw_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_wannier90_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

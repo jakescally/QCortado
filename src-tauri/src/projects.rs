@@ -22,8 +22,8 @@ use flate2::Compression;
 
 use crate::config::{self, SaveSizeMode};
 use crate::qe::{
-    collect_transport_artifacts, read_phonon_dispersion_file, read_phonon_dos_file, BandData,
-    QEResult,
+    add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
+    read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
 
 // ============================================================================
@@ -1039,7 +1039,10 @@ fn calculate_directory_size(path: &Path) -> Result<u64, String> {
 }
 
 fn calculation_json_path(project_dir: &Path, calc_id: &str) -> PathBuf {
-    project_dir.join("calculations").join(calc_id).join("calc.json")
+    project_dir
+        .join("calculations")
+        .join(calc_id)
+        .join("calc.json")
 }
 
 fn read_project_json(project_json_path: &Path) -> Result<Project, String> {
@@ -1086,10 +1089,7 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
 
 fn summarize_calculation_for_project(calc: &CalculationRun) -> CalculationRun {
     let mut summary = calc.clone();
-    summary.result = summary
-        .result
-        .as_ref()
-        .map(summarize_qe_result_for_project);
+    summary.result = summary.result.as_ref().map(summarize_qe_result_for_project);
     summary
 }
 
@@ -1124,8 +1124,8 @@ fn load_full_calculation_from_disk(
 
     let content = fs::read_to_string(&calc_json_path)
         .map_err(|e| format!("Failed to read calc.json: {}", e))?;
-    let calculation = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse calc.json: {}", e))?;
+    let calculation =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse calc.json: {}", e))?;
     Ok(Some(calculation))
 }
 
@@ -1166,8 +1166,370 @@ fn write_calculation_json(project_dir: &Path, calculation: &CalculationRun) -> R
 
     let serialized = serde_json::to_string_pretty(&full_calculation)
         .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
-    fs::write(&calc_json_path, serialized)
-        .map_err(|e| format!("Failed to write calc.json: {}", e))
+    fs::write(&calc_json_path, serialized).map_err(|e| format!("Failed to write calc.json: {}", e))
+}
+
+fn persist_full_calculation(
+    project_dir: &Path,
+    calculation: &CalculationRun,
+) -> Result<(), String> {
+    let calc_json_path = calculation_json_path(project_dir, &calculation.id);
+    if let Some(parent) = calc_json_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create calculation directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    let calc_json = serde_json::to_string_pretty(calculation)
+        .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
+    fs::write(&calc_json_path, calc_json).map_err(|e| format!("Failed to write calc.json: {}", e))
+}
+
+fn parse_q_grid_from_parameters(parameters: &serde_json::Value) -> Option<[u32; 3]> {
+    let grid = parameters.get("q_grid")?.as_array()?;
+    if grid.len() != 3 {
+        return None;
+    }
+    let mut parsed = [0_u32; 3];
+    for (index, entry) in grid.iter().enumerate() {
+        let value = entry.as_u64()?;
+        if value == 0 || value > u32::MAX as u64 {
+            return None;
+        }
+        parsed[index] = value as u32;
+    }
+    Some(parsed)
+}
+
+fn ensure_q_grid_in_parameters(parameters: &mut serde_json::Value, q_grid: [u32; 3]) -> bool {
+    let next = serde_json::json!(q_grid);
+    if parameters.get("q_grid") == Some(&next) {
+        return false;
+    }
+    if !parameters.is_object() {
+        *parameters = serde_json::json!({});
+    }
+    if let Some(map) = parameters.as_object_mut() {
+        map.insert("q_grid".to_string(), next);
+        return true;
+    }
+    false
+}
+
+fn parse_q_grid_from_ph_input(content: &str) -> Option<[u32; 3]> {
+    fn parse_assignment_u32(segment: &str, key: &str) -> Option<u32> {
+        let eq_index = segment.find('=')?;
+        let lhs = segment[..eq_index].trim();
+        if !lhs.eq_ignore_ascii_case(key) {
+            return None;
+        }
+        let rhs = segment[eq_index + 1..]
+            .trim()
+            .trim_matches(',')
+            .split_whitespace()
+            .next()?;
+        rhs.parse::<u32>().ok().filter(|value| *value > 0)
+    }
+
+    let mut nq1: Option<u32> = None;
+    let mut nq2: Option<u32> = None;
+    let mut nq3: Option<u32> = None;
+
+    for raw_line in content.lines() {
+        let without_comment = raw_line
+            .split(['!', '#'])
+            .next()
+            .map(str::trim)
+            .unwrap_or("");
+        if without_comment.is_empty() {
+            continue;
+        }
+
+        for segment in without_comment.split(',') {
+            if nq1.is_none() {
+                nq1 = parse_assignment_u32(segment, "nq1");
+            }
+            if nq2.is_none() {
+                nq2 = parse_assignment_u32(segment, "nq2");
+            }
+            if nq3.is_none() {
+                nq3 = parse_assignment_u32(segment, "nq3");
+            }
+        }
+    }
+
+    match (nq1, nq2, nq3) {
+        (Some(a), Some(b), Some(c)) => Some([a, b, c]),
+        _ => None,
+    }
+}
+
+fn infer_q_grid_from_workdir(work_dir: &Path) -> Option<[u32; 3]> {
+    let ph_input_path = work_dir.join("ph.in");
+    let content = fs::read_to_string(ph_input_path).ok()?;
+    parse_q_grid_from_ph_input(&content)
+}
+
+fn parse_q_path_label_hints(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.replace('→', "->");
+    let labels = raw
+        .split("->")
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<String>>();
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
+    }
+}
+
+fn fallback_q_path_label(index: usize, coords: [f64; 3]) -> String {
+    let is_gamma = coords.iter().all(|value| value.abs() < 1.0e-8);
+    if is_gamma {
+        "Γ".to_string()
+    } else {
+        format!("Q{}", index + 1)
+    }
+}
+
+fn parse_matdyn_bands_q_path(
+    content: &str,
+    label_hints: Option<&[String]>,
+) -> Result<Vec<QPathPoint>, String> {
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut in_namelist = false;
+
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('&') {
+            in_namelist = true;
+            continue;
+        }
+        if in_namelist {
+            if line.starts_with('/') {
+                in_namelist = false;
+            }
+            continue;
+        }
+
+        line = line.split(['!', '#']).next().map(str::trim).unwrap_or("");
+        if line.is_empty() {
+            continue;
+        }
+        data_lines.push(line.to_string());
+    }
+
+    let Some(count_line) = data_lines.first() else {
+        return Err("matdyn_bands.in does not contain q-path point data.".to_string());
+    };
+    let point_count = count_line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "matdyn_bands.in q-path point count is missing.".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "Failed to parse q-path point count in matdyn_bands.in.".to_string())?;
+    if point_count < 2 {
+        return Err(format!(
+            "matdyn_bands.in q-path has {} points; expected at least 2.",
+            point_count
+        ));
+    }
+    if data_lines.len() < point_count + 1 {
+        return Err(format!(
+            "matdyn_bands.in lists {} q-path points but only {} lines were found.",
+            point_count,
+            data_lines.len().saturating_sub(1)
+        ));
+    }
+
+    let mut q_path = Vec::with_capacity(point_count);
+    for index in 0..point_count {
+        let line = &data_lines[index + 1];
+        let parts = line.split_whitespace().collect::<Vec<&str>>();
+        if parts.len() < 4 {
+            return Err(format!(
+                "Invalid q-path line {} in matdyn_bands.in: expected at least 4 columns.",
+                index + 1
+            ));
+        }
+
+        let coords = [
+            parts[0]
+                .parse::<f64>()
+                .map_err(|_| format!("Invalid qx value on q-path line {}.", index + 1))?,
+            parts[1]
+                .parse::<f64>()
+                .map_err(|_| format!("Invalid qy value on q-path line {}.", index + 1))?,
+            parts[2]
+                .parse::<f64>()
+                .map_err(|_| format!("Invalid qz value on q-path line {}.", index + 1))?,
+        ];
+        let npoints = parts[3]
+            .parse::<u32>()
+            .map_err(|_| format!("Invalid npoints value on q-path line {}.", index + 1))?;
+        let label = label_hints
+            .and_then(|labels| labels.get(index))
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| parts.get(4).map(|entry| entry.to_string()))
+            .unwrap_or_else(|| fallback_q_path_label(index, coords));
+
+        q_path.push(QPathPoint {
+            label,
+            coords,
+            npoints,
+        });
+    }
+
+    Ok(q_path)
+}
+
+fn recover_q_path_points_from_workdir(
+    work_dir: &Path,
+    q_path_label_hint: Option<&str>,
+    q_path_points_hint: Option<&serde_json::Value>,
+) -> Option<Vec<QPathPoint>> {
+    if let Some(saved_points) = q_path_points_hint.and_then(|value| {
+        serde_json::from_value::<Vec<QPathPoint>>(value.clone())
+            .ok()
+            .filter(|points| points.len() >= 2)
+    }) {
+        return Some(saved_points);
+    }
+
+    let matdyn_input_path = work_dir.join("matdyn_bands.in");
+    let content = fs::read_to_string(matdyn_input_path).ok()?;
+    let label_hints = parse_q_path_label_hints(q_path_label_hint);
+    parse_matdyn_bands_q_path(&content, label_hints.as_deref()).ok()
+}
+
+fn ensure_q_path_points_in_parameters(
+    parameters: &mut serde_json::Value,
+    q_path_points: &[QPathPoint],
+) -> Result<bool, String> {
+    let serialized = serde_json::to_value(q_path_points)
+        .map_err(|e| format!("Failed to serialize q_path_points: {}", e))?;
+    if parameters.get("q_path_points") == Some(&serialized) {
+        return Ok(false);
+    }
+    if !parameters.is_object() {
+        *parameters = serde_json::json!({});
+    }
+    if let Some(map) = parameters.as_object_mut() {
+        map.insert("q_path_points".to_string(), serialized);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn ensure_q_path_string_in_parameters(
+    parameters: &mut serde_json::Value,
+    q_path_points: &[QPathPoint],
+) -> bool {
+    let has_existing = parameters
+        .get("q_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if has_existing {
+        return false;
+    }
+    let labels = q_path_points
+        .iter()
+        .map(|point| point.label.trim())
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<&str>>();
+    if labels.is_empty() {
+        return false;
+    }
+    if !parameters.is_object() {
+        *parameters = serde_json::json!({});
+    }
+    if let Some(map) = parameters.as_object_mut() {
+        map.insert(
+            "q_path".to_string(),
+            serde_json::Value::String(labels.join(" -> ")),
+        );
+        return true;
+    }
+    false
+}
+
+fn repair_phonon_dispersion_markers(
+    dispersion_value: &mut serde_json::Value,
+    q_path_points: &[QPathPoint],
+) -> Result<bool, String> {
+    if !dispersion_value.is_object() {
+        return Ok(false);
+    }
+    let has_markers = dispersion_value
+        .get("high_symmetry_points")
+        .and_then(|entry| entry.as_array())
+        .is_some_and(|entries| !entries.is_empty());
+    if has_markers || q_path_points.len() < 2 {
+        return Ok(false);
+    }
+
+    let mut dispersion = serde_json::from_value::<PhononDispersion>(dispersion_value.clone())
+        .map_err(|e| format!("Failed to parse saved phonon dispersion: {}", e))?;
+    add_phonon_symmetry_markers(&mut dispersion, q_path_points);
+    *dispersion_value = serde_json::to_value(dispersion)
+        .map_err(|e| format!("Failed to serialize repaired phonon dispersion: {}", e))?;
+    Ok(true)
+}
+
+fn repair_phonon_calculation_with_workdir(
+    calculation: &mut CalculationRun,
+    work_dir: &Path,
+) -> Result<bool, String> {
+    if normalize_summary_calc_type(&calculation.calc_type) != Some("phonon") {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    if parse_q_grid_from_parameters(&calculation.parameters).is_none() {
+        if let Some(q_grid) = infer_q_grid_from_workdir(work_dir) {
+            if ensure_q_grid_in_parameters(&mut calculation.parameters, q_grid) {
+                changed = true;
+            }
+        }
+    }
+
+    let q_path_label_hint = calculation
+        .parameters
+        .get("q_path")
+        .and_then(|value| value.as_str());
+    let q_path_points_hint = calculation.parameters.get("q_path_points");
+    let recovered_q_path =
+        recover_q_path_points_from_workdir(work_dir, q_path_label_hint, q_path_points_hint);
+
+    if let Some(ref q_path_points) = recovered_q_path {
+        if ensure_q_path_points_in_parameters(&mut calculation.parameters, q_path_points)? {
+            changed = true;
+        }
+        if ensure_q_path_string_in_parameters(&mut calculation.parameters, q_path_points) {
+            changed = true;
+        }
+        if let Some(result) = calculation.result.as_mut() {
+            if let Some(phonon_data) = result.phonon_data.as_mut() {
+                if let Some(dispersion_value) = phonon_data.get_mut("dispersion_data") {
+                    if repair_phonon_dispersion_markers(dispersion_value, q_path_points)? {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(changed)
 }
 
 /// Fills missing `storage_bytes` values for legacy calculations.
@@ -1726,7 +2088,8 @@ pub async fn list_multiview_band_calculations(
                 .iter()
                 .flat_map(|variant| variant.calculations.iter())
                 .any(calculation_has_embedded_project_detail);
-            if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail {
+            if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail
+            {
                 write_project_json_summary(&project_json, &project)?;
             }
 
@@ -1882,13 +2245,56 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
 
     let project_json = project_dir.join("project.json");
     let mut project = read_project_json(&project_json)?;
+    let mut repaired_phonon_entries = false;
+    for variant in &mut project.cif_variants {
+        for summary_calc in &mut variant.calculations {
+            if normalize_summary_calc_type(&summary_calc.calc_type) != Some("phonon") {
+                continue;
+            }
+            let recovered_from_tmp = summary_calc
+                .parameters
+                .get("recovered_from_tmp")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let missing_q_grid = parse_q_grid_from_parameters(&summary_calc.parameters).is_none();
+            if !recovered_from_tmp && !missing_q_grid {
+                continue;
+            }
+
+            let calc_tmp_dir = project_dir
+                .join("calculations")
+                .join(&summary_calc.id)
+                .join("tmp");
+            if !calc_tmp_dir.exists() {
+                continue;
+            }
+
+            if let Some(mut full_calc) =
+                load_full_calculation_from_disk(&project_dir, &summary_calc.id)?
+            {
+                if repair_phonon_calculation_with_workdir(&mut full_calc, &calc_tmp_dir)? {
+                    persist_full_calculation(&project_dir, &full_calc)?;
+                    summary_calc.parameters = full_calc.parameters.clone();
+                    repaired_phonon_entries = true;
+                } else if summary_calc.parameters != full_calc.parameters {
+                    summary_calc.parameters = full_calc.parameters.clone();
+                    repaired_phonon_entries = true;
+                }
+            } else if repair_phonon_calculation_with_workdir(summary_calc, &calc_tmp_dir)? {
+                repaired_phonon_entries = true;
+            }
+        }
+    }
     let has_embedded_detail = project
         .cif_variants
         .iter()
         .flat_map(|variant| variant.calculations.iter())
         .any(calculation_has_embedded_project_detail);
 
-    if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail {
+    if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
+        || has_embedded_detail
+        || repaired_phonon_entries
+    {
         write_project_json_summary(&project_json, &project)?;
     }
 
@@ -2523,7 +2929,10 @@ fn copy_compact_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> 
     Ok(())
 }
 
-fn copy_epw_ready_phonon_artifacts(src_tmp_dir: &Path, staging_tmp_dir: &Path) -> Result<(), String> {
+fn copy_epw_ready_phonon_artifacts(
+    src_tmp_dir: &Path,
+    staging_tmp_dir: &Path,
+) -> Result<(), String> {
     copy_compact_phonon_artifacts(src_tmp_dir, staging_tmp_dir)?;
 
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -2632,10 +3041,7 @@ fn copy_compact_wannier_artifacts(
             if !dir_name.ends_with(".save") {
                 continue;
             }
-            copy_dir_recursive(
-                &path,
-                &staging_tmp_dir.join("tmp").join(&dir_name),
-            )?;
+            copy_dir_recursive(&path, &staging_tmp_dir.join("tmp").join(&dir_name))?;
             copied_save_dir = true;
         }
     }
@@ -2748,13 +3154,17 @@ pub fn recover_phonon_calculation(
         return Err("Missing phonon_freq.gp / phonon_freq in recovery directory".to_string());
     };
 
-    let dispersion = read_phonon_dispersion_file(&dispersion_source).map_err(|e| {
+    let mut dispersion = read_phonon_dispersion_file(&dispersion_source).map_err(|e| {
         format!(
             "Failed to parse recovered phonon dispersion from {}: {}",
             dispersion_source.display(),
             e
         )
     })?;
+    let recovered_q_path = recover_q_path_points_from_workdir(&tmp_dir, q_path.as_deref(), None);
+    if let Some(ref q_path_points) = recovered_q_path {
+        add_phonon_symmetry_markers(&mut dispersion, q_path_points);
+    }
 
     let dos_data = {
         let dos_file = tmp_dir.join("phonon_dos");
@@ -2791,10 +3201,11 @@ pub fn recover_phonon_calculation(
     } else {
         dispersion.n_qpoints as u32
     };
+    let resolved_q_grid = q_grid.or_else(|| infer_q_grid_from_workdir(&tmp_dir));
 
     let mut parameters = serde_json::json!({
         "source_scf_id": source_scf_id,
-        "q_grid": q_grid,
+        "q_grid": resolved_q_grid,
         "tr2_ph": tr2_ph,
         "calculate_dos": dos_data.is_some(),
         "calculate_dispersion": true,
@@ -2806,6 +3217,26 @@ pub fn recover_phonon_calculation(
     });
     if let Some(path) = q_path {
         parameters["q_path"] = serde_json::Value::String(path);
+    }
+    if let Some(ref q_path_points) = recovered_q_path {
+        parameters["q_path_points"] = serde_json::to_value(q_path_points)
+            .map_err(|e| format!("Failed to serialize recovered q-path points: {}", e))?;
+        if parameters
+            .get("q_path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .map(|value| value.is_empty())
+            .unwrap_or(true)
+        {
+            let labels = q_path_points
+                .iter()
+                .map(|point| point.label.trim())
+                .filter(|label| !label.is_empty())
+                .collect::<Vec<&str>>();
+            if !labels.is_empty() {
+                parameters["q_path"] = serde_json::Value::String(labels.join(" -> "));
+            }
+        }
     }
     if let Some(backend) = execution_backend
         .map(|value| value.trim().to_ascii_lowercase())
@@ -3815,7 +4246,7 @@ pub fn get_saved_phonon_data(
     }
 
     let project_json_path = project_dir.join("project.json");
-    let project = read_project_json(&project_json_path)?;
+    let mut project = read_project_json(&project_json_path)?;
     let summary_calc = project
         .cif_variants
         .iter()
@@ -3830,9 +4261,10 @@ pub fn get_saved_phonon_data(
         ));
     }
 
-    let mut calculation = load_full_calculation_from_disk(&project_dir, &calc_id)?
-        .unwrap_or(summary_calc);
-    let mut did_recover = false;
+    let mut calculation =
+        load_full_calculation_from_disk(&project_dir, &calc_id)?.unwrap_or(summary_calc);
+    let tmp_dir = project_dir.join("calculations").join(&calc_id).join("tmp");
+    let mut did_recover = repair_phonon_calculation_with_workdir(&mut calculation, &tmp_dir)?;
     let mut dos_data = calculation
         .result
         .as_ref()
@@ -3846,8 +4278,6 @@ pub fn get_saved_phonon_data(
         .and_then(|phonon| phonon.get("dispersion_data"))
         .cloned();
 
-    let tmp_dir = project_dir.join("calculations").join(&calc_id).join("tmp");
-
     let dos_missing = match dos_data.as_ref() {
         Some(v) => v.is_null(),
         None => true,
@@ -3856,9 +4286,10 @@ pub fn get_saved_phonon_data(
         let dos_file = tmp_dir.join("phonon_dos");
         if dos_file.exists() {
             if let Ok(dos) = read_phonon_dos_file(&dos_file) {
-                dos_data = Some(serde_json::to_value(dos).map_err(|e| {
-                    format!("Failed to serialize recovered DOS data: {}", e)
-                })?);
+                dos_data = Some(
+                    serde_json::to_value(dos)
+                        .map_err(|e| format!("Failed to serialize recovered DOS data: {}", e))?,
+                );
                 did_recover = true;
             }
         }
@@ -3879,7 +4310,17 @@ pub fn get_saved_phonon_data(
             None
         };
         if let Some(source_file) = source_file {
-            if let Ok(dispersion) = read_phonon_dispersion_file(&source_file) {
+            if let Ok(mut dispersion) = read_phonon_dispersion_file(&source_file) {
+                if let Some(q_path_points) = recover_q_path_points_from_workdir(
+                    &tmp_dir,
+                    calculation
+                        .parameters
+                        .get("q_path")
+                        .and_then(|value| value.as_str()),
+                    calculation.parameters.get("q_path_points"),
+                ) {
+                    add_phonon_symmetry_markers(&mut dispersion, &q_path_points);
+                }
                 dispersion_data = Some(serde_json::to_value(dispersion).map_err(|e| {
                     format!("Failed to serialize recovered dispersion data: {}", e)
                 })?);
@@ -3896,21 +4337,25 @@ pub fn get_saved_phonon_data(
     if did_recover {
         let result = calculation.result.get_or_insert_with(QEResult::default);
         result.phonon_data = Some(merged.clone());
+        persist_full_calculation(&project_dir, &calculation)?;
 
-        let calc_json_path = calculation_json_path(&project_dir, &calc_id);
-        if let Some(parent) = calc_json_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create calculation directory {}: {}",
-                    parent.display(),
-                    e
-                )
-            })?;
+        let mut summary_updated = false;
+        for variant in &mut project.cif_variants {
+            if let Some(summary_entry) = variant
+                .calculations
+                .iter_mut()
+                .find(|calc| calc.id == calc_id)
+            {
+                if summary_entry.parameters != calculation.parameters {
+                    summary_entry.parameters = calculation.parameters.clone();
+                    summary_updated = true;
+                }
+                break;
+            }
         }
-        let calc_json = serde_json::to_string_pretty(&calculation)
-            .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
-        fs::write(&calc_json_path, calc_json)
-            .map_err(|e| format!("Failed to write calc.json: {}", e))?;
+        if summary_updated {
+            write_project_json_summary(&project_json_path, &project)?;
+        }
     }
 
     Ok(merged)
@@ -3918,7 +4363,11 @@ pub fn get_saved_phonon_data(
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_completed_phonon_run;
+    use super::{
+        looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
+        repair_phonon_calculation_with_workdir, CalculationRun,
+    };
+    use crate::qe::QEResult;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3980,5 +4429,96 @@ mod tests {
 
         assert!(!looks_like_completed_phonon_run(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_q_grid_from_ph_input_extracts_nq_triplet() {
+        let ph_input = r#"
+&INPUTPH
+  tr2_ph = 1.0d-14,
+  nq1 = 6, nq2 = 6,
+  nq3 = 4,
+/
+"#;
+        assert_eq!(parse_q_grid_from_ph_input(ph_input), Some([6, 6, 4]));
+    }
+
+    #[test]
+    fn repair_phonon_calculation_backfills_q_grid_and_markers() {
+        let work_dir = make_temp_test_dir("repair_metadata");
+        fs::write(
+            work_dir.join("ph.in"),
+            "&INPUTPH\n  nq1 = 4,\n  nq2 = 4,\n  nq3 = 2,\n/\n",
+        )
+        .expect("failed to write ph.in");
+        fs::write(
+            work_dir.join("matdyn_bands.in"),
+            "&INPUT\n  q_in_band_form = .true.,\n/\n3\n  0.0 0.0 0.0 2\n  0.5 0.0 0.0 2\n  0.5 0.5 0.0 0\n",
+        )
+        .expect("failed to write matdyn_bands.in");
+
+        let mut calculation = CalculationRun {
+            id: "test_calc".to_string(),
+            calc_type: "phonon".to_string(),
+            parameters: serde_json::json!({
+                "recovered_from_tmp": true
+            }),
+            result: Some(QEResult {
+                converged: true,
+                total_energy: None,
+                fermi_energy: None,
+                total_magnetization: None,
+                forces: None,
+                stress: None,
+                n_scf_steps: None,
+                wall_time_seconds: None,
+                eigenvalues: None,
+                raw_output: String::new(),
+                band_data: None,
+                dos_data: None,
+                phonon_data: Some(serde_json::json!({
+                    "dos_data": null,
+                    "dispersion_data": {
+                        "q_points": [0.0, 0.5, 1.0, 1.5, 2.0],
+                        "frequencies": [[10.0, 11.0, 12.0, 13.0, 14.0]],
+                        "high_symmetry_points": [],
+                        "n_modes": 1,
+                        "n_qpoints": 5,
+                        "frequency_range": [10.0, 14.0]
+                    }
+                })),
+                wannier_data: None,
+                transport_data: None,
+                epw_data: None,
+            }),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:01:00Z".to_string()),
+            tags: Vec::new(),
+            storage_bytes: None,
+        };
+
+        let changed = repair_phonon_calculation_with_workdir(&mut calculation, &work_dir)
+            .expect("metadata repair should succeed");
+        assert!(changed, "expected metadata repair to modify calculation");
+        assert_eq!(
+            calculation.parameters.get("q_grid"),
+            Some(&serde_json::json!([4, 4, 2]))
+        );
+
+        let markers = calculation
+            .result
+            .as_ref()
+            .and_then(|result| result.phonon_data.as_ref())
+            .and_then(|phonon| phonon.get("dispersion_data"))
+            .and_then(|dispersion| dispersion.get("high_symmetry_points"))
+            .and_then(|markers| markers.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(markers.len(), 3);
+        assert_eq!(markers[0].get("label"), Some(&serde_json::json!("Γ")));
+        assert_eq!(markers[1].get("label"), Some(&serde_json::json!("Q2")));
+        assert_eq!(markers[2].get("label"), Some(&serde_json::json!("Q3")));
+
+        let _ = fs::remove_dir_all(&work_dir);
     }
 }

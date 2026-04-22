@@ -387,7 +387,10 @@ fn parse_grid_rows(content: &str, file_name: &str) -> Result<ParsedGridRows, Str
     }
 
     if rows.is_empty() {
-        return Err(format!("Transport table {} does not contain numeric rows.", file_name));
+        return Err(format!(
+            "Transport table {} does not contain numeric rows.",
+            file_name
+        ));
     }
 
     let component_count = rows[0].2.len();
@@ -413,7 +416,10 @@ fn parse_grid_rows(content: &str, file_name: &str) -> Result<ParsedGridRows, Str
     })
 }
 
-fn build_dataset_from_rows(file_name: &str, parsed_rows: ParsedGridRows) -> Result<TransportDataset, String> {
+fn build_dataset_from_rows(
+    file_name: &str,
+    parsed_rows: ParsedGridRows,
+) -> Result<TransportDataset, String> {
     let mut mu_values_ev: Vec<f64> = Vec::new();
     let mut temperature_values_k: Vec<f64> = Vec::new();
 
@@ -427,26 +433,25 @@ fn build_dataset_from_rows(file_name: &str, parsed_rows: ParsedGridRows) -> Resu
     }
 
     let component_count = parsed_rows.rows[0].2.len();
-    let mut values = vec![
-        vec![vec![None; mu_values_ev.len()]; temperature_values_k.len()];
-        component_count
-    ];
+    let mut values =
+        vec![vec![vec![None; mu_values_ev.len()]; temperature_values_k.len()]; component_count];
 
     for (first, second, row_values) in parsed_rows.rows {
         let (mu, temp) = match parsed_rows.axis_order {
             AxisOrder::MuTemp => (first, second),
             AxisOrder::TempMu => (second, first),
         };
-        let mu_index = axis_index(&mu_values_ev, mu)
-            .ok_or_else(|| format!("Failed to locate chemical potential axis index for {}", file_name))?;
+        let mu_index = axis_index(&mu_values_ev, mu).ok_or_else(|| {
+            format!(
+                "Failed to locate chemical potential axis index for {}",
+                file_name
+            )
+        })?;
         let temp_index = axis_index(&temperature_values_k, temp)
             .ok_or_else(|| format!("Failed to locate temperature axis index for {}", file_name))?;
         for (component_index, value) in row_values.into_iter().enumerate() {
-            values[component_index][temp_index][mu_index] = if value.is_finite() {
-                Some(value)
-            } else {
-                None
-            };
+            values[component_index][temp_index][mu_index] =
+                if value.is_finite() { Some(value) } else { None };
         }
     }
 
@@ -457,10 +462,16 @@ fn build_dataset_from_rows(file_name: &str, parsed_rows: ParsedGridRows) -> Resu
     })
 }
 
-fn parse_grid_dataset_file(work_path: &Path, file_name: &str) -> Result<(TransportDataset, Vec<f64>, Vec<f64>), String> {
+fn parse_grid_dataset_file(
+    work_path: &Path,
+    file_name: &str,
+) -> Result<(TransportDataset, Vec<f64>, Vec<f64>), String> {
     let path = work_path.join(file_name);
     if !path.exists() {
-        return Err(format!("Required transport output not found: {}", path.display()));
+        return Err(format!(
+            "Required transport output not found: {}",
+            path.display()
+        ));
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -481,7 +492,10 @@ fn parse_grid_dataset_file(work_path: &Path, file_name: &str) -> Result<(Transpo
     Ok((dataset, mu_values_ev, temperature_values_k))
 }
 
-fn parse_optional_tdf_file(work_path: &Path, file_name: &str) -> Result<Option<TransportTdfData>, String> {
+fn parse_optional_tdf_file(
+    work_path: &Path,
+    file_name: &str,
+) -> Result<Option<TransportTdfData>, String> {
     let path = work_path.join(file_name);
     if !path.exists() {
         return Ok(None);
@@ -696,7 +710,8 @@ boltz_kmesh = 8 8 8
 
     #[test]
     fn parse_transport_grid_dataset_builds_axes_and_components() {
-        let temp_dir = std::env::temp_dir().join(format!("qcortado_transport_test_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("qcortado_transport_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let file_name = "seed_elcond.dat";
         std::fs::write(temp_dir.join(file_name), GRID_DATA).unwrap();
@@ -706,7 +721,10 @@ boltz_kmesh = 8 8 8
 
         assert_eq!(mu_values_ev, vec![-0.2, 0.0]);
         assert_eq!(temp_values_k, vec![300.0, 600.0]);
-        assert_eq!(dataset.component_labels, vec!["xx", "xy", "yy", "xz", "yz", "zz"]);
+        assert_eq!(
+            dataset.component_labels,
+            vec!["xx", "xy", "yy", "xz", "yz", "zz"]
+        );
         assert_eq!(dataset.values.len(), 6);
         assert_eq!(dataset.values[0][0][0], Some(1.0));
         assert_eq!(dataset.values[5][1][1], Some(120.0));
@@ -716,7 +734,8 @@ boltz_kmesh = 8 8 8
 
     #[test]
     fn parse_transport_result_collects_warnings_and_serializes() {
-        let temp_dir = std::env::temp_dir().join(format!("qcortado_transport_test_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("qcortado_transport_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         for suffix in ["_elcond.dat", "_sigmas.dat", "_seebeck.dat", "_kappa.dat"] {
             std::fs::write(temp_dir.join(format!("seed{}", suffix)), GRID_DATA).unwrap();

@@ -3652,7 +3652,8 @@ mod tests {
             num_iter: 100,
         };
 
-        validate_wannier_config(&config).expect("conventional scalar source metadata should be valid");
+        validate_wannier_config(&config)
+            .expect("conventional scalar source metadata should be valid");
     }
 
     #[test]

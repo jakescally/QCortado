@@ -16,6 +16,7 @@ import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -109,15 +110,6 @@ interface FermiSurfaceTaskPlan {
   taskLabel: string;
   taskParams: Record<string, any>;
   saveParameters: Record<string, any>;
-}
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
 }
 
 function formatBytes(bytes: number): string {
@@ -1149,7 +1141,7 @@ export function FermiSurfaceWizard({
           <h4 onClick={() => toggleSection("mesh")} className="section-header">
             <span className={`collapse-icon ${expandedSections.mesh ? "expanded" : ""}`}>▶</span>
             K-Grid & Band Count
-            <Tooltip text="Controls the `K_POINTS automatic` mesh and optional `nbnd` override used to run `fermi_velocity.x`." />
+            <InfoTooltip text="Controls the `K_POINTS automatic` mesh and optional `nbnd` override used to run `fermi_velocity.x`." />
           </h4>
           {expandedSections.mesh && (
             <div className="option-params">
@@ -1157,7 +1149,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     K-point grid
-                    <Tooltip text="Finer meshes improve Fermi-surface detail, but increase runtime and memory usage." />
+                    <InfoTooltip text="Finer meshes improve Fermi-surface detail, but increase runtime and memory usage." />
                   </label>
                   <div className="qgrid-inputs">
                     <input
@@ -1186,7 +1178,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     K-point offset (0/1)
-                    <Tooltip text="Monkhorst-Pack offset per reciprocal direction. Use 1 to shift half a grid step in that direction." />
+                    <InfoTooltip text="Monkhorst-Pack offset per reciprocal direction. Use 1 to shift half a grid step in that direction." />
                   </label>
                   <div className="qgrid-inputs">
                     <select
@@ -1218,7 +1210,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Number of bands
-                    <Tooltip text="QE variable: `nbnd` in the pw-style input used by `fermi_velocity.x`." />
+                    <InfoTooltip text="QE variable: `nbnd` in the pw-style input used by `fermi_velocity.x`." />
                   </label>
                   <div className="nbnd-input">
                     <select
@@ -1250,7 +1242,7 @@ export function FermiSurfaceWizard({
           <h4 onClick={() => toggleSection("nscf")} className="section-header">
             <span className={`collapse-icon ${expandedSections.nscf ? "expanded" : ""}`}>▶</span>
             Electronic Controls
-            <Tooltip text="Advanced controls for the generated pw-style input: `conv_thr`, `mixing_beta`, occupations/smearing/degauss, and verbosity." />
+            <InfoTooltip text="Advanced controls for the generated pw-style input: `conv_thr`, `mixing_beta`, occupations/smearing/degauss, and verbosity." />
           </h4>
           {expandedSections.nscf && (
             <div className="option-params">
@@ -1258,7 +1250,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Convergence threshold
-                    <Tooltip text="QE variable: `conv_thr` in `&ELECTRONS`." />
+                    <InfoTooltip text="QE variable: `conv_thr` in `&ELECTRONS`." />
                   </label>
                   <input
                     type="text"
@@ -1275,7 +1267,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Mixing beta
-                    <Tooltip text="QE variable: `mixing_beta`. Stable values are typically in (0, 1]." />
+                    <InfoTooltip text="QE variable: `mixing_beta`. Stable values are typically in (0, 1]." />
                   </label>
                   <input
                     type="text"
@@ -1292,7 +1284,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Occupations
-                    <Tooltip text="QE variable: `occupations`. Metals typically require smearing." />
+                    <InfoTooltip text="QE variable: `occupations`. Metals typically require smearing." />
                   </label>
                   <select
                     value={nscfOccupations}
@@ -1308,7 +1300,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Smearing type
-                    <Tooltip text="QE variable: `smearing`. Used only when occupations = smearing." />
+                    <InfoTooltip text="QE variable: `smearing`. Used only when occupations = smearing." />
                   </label>
                   <select
                     value={nscfSmearing}
@@ -1325,7 +1317,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Degauss (Ry)
-                    <Tooltip text="QE variable: `degauss`. Required with smearing occupations." />
+                    <InfoTooltip text="QE variable: `degauss`. Required with smearing occupations." />
                   </label>
                   <input
                     type="text"
@@ -1343,7 +1335,7 @@ export function FermiSurfaceWizard({
                 <div className="phonon-field">
                   <label>
                     Output detail level
-                    <Tooltip text="QE variable: `verbosity` in `&CONTROL`." />
+                    <InfoTooltip text="QE variable: `verbosity` in `&CONTROL`." />
                   </label>
                   <select
                     value={nscfVerbosity}
@@ -1425,7 +1417,7 @@ export function FermiSurfaceWizard({
             <h4 onClick={() => toggleSection("mpi")} className="section-header">
               <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
               Parallelization
-              <Tooltip text="Process-level MPI controls for `fermi_velocity.x` (`npool` is fixed to 1 per tutorial guidance)." />
+              <InfoTooltip text="Process-level MPI controls for `fermi_velocity.x` (`npool` is fixed to 1 per tutorial guidance)." />
             </h4>
             {expandedSections.mpi && (
               <div className="option-params">

@@ -36,6 +36,7 @@ import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -173,15 +174,6 @@ function getCalculationTags(
   }
 
   return tags;
-}
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
 }
 
 const BANDS_WIZARD_SETTINGS_STORAGE_KEY = "qcortado-bands-wizard-settings-v1";
@@ -1775,7 +1767,7 @@ export function BandStructureWizard({
           <h4 onClick={() => toggleSection("core")} className="section-header">
             <span className={`collapse-icon ${expandedSections.core ? "expanded" : ""}`}>▶</span>
             Core Band Sampling
-            <Tooltip text="Primary controls for the NSCF band path run, including explicit band count selection." />
+            <InfoTooltip text="Primary controls for the NSCF band path run, including explicit band count selection." />
           </h4>
           {expandedSections.core && (
             <div className="option-params">
@@ -1783,7 +1775,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Number of bands
-                    <Tooltip text="QE variable: `nbnd` in `pw.x` NSCF run. Use manual mode to force more conduction bands for crossings/high-energy features." />
+                    <InfoTooltip text="QE variable: `nbnd` in `pw.x` NSCF run. Use manual mode to force more conduction bands for crossings/high-energy features." />
                   </label>
                   <div className="nbnd-input">
                     <select
@@ -1815,7 +1807,7 @@ export function BandStructureWizard({
           <h4 onClick={() => toggleSection("nscf")} className="section-header">
             <span className={`collapse-icon ${expandedSections.nscf ? "expanded" : ""}`}>▶</span>
             NSCF Electronic Controls
-            <Tooltip text="Advanced `pw.x` NSCF settings: convergence (`conv_thr`), mixing (`mixing_beta`), occupations/smearing, and verbosity." />
+            <InfoTooltip text="Advanced `pw.x` NSCF settings: convergence (`conv_thr`), mixing (`mixing_beta`), occupations/smearing, and verbosity." />
           </h4>
           {expandedSections.nscf && (
             <div className="option-params">
@@ -1823,7 +1815,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     NSCF convergence threshold
-                    <Tooltip text="QE variable: `conv_thr` in `&ELECTRONS`. Tighter thresholds reduce numerical noise in near-degenerate regions at higher cost." />
+                    <InfoTooltip text="QE variable: `conv_thr` in `&ELECTRONS`. Tighter thresholds reduce numerical noise in near-degenerate regions at higher cost." />
                   </label>
                   <input
                     type="text"
@@ -1840,7 +1832,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Mixing beta
-                    <Tooltip text="QE variable: `mixing_beta` in `&ELECTRONS`. Typical stable range is 0.2-0.8; values above 1 are generally unstable." />
+                    <InfoTooltip text="QE variable: `mixing_beta` in `&ELECTRONS`. Typical stable range is 0.2-0.8; values above 1 are generally unstable." />
                   </label>
                   <input
                     type="text"
@@ -1857,7 +1849,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Occupations
-                    <Tooltip text="QE variable: `occupations` in `&SYSTEM`. Use smearing for metals and challenging Fermi-level crossings." />
+                    <InfoTooltip text="QE variable: `occupations` in `&SYSTEM`. Use smearing for metals and challenging Fermi-level crossings." />
                   </label>
                   <select
                     value={nscfOccupations}
@@ -1873,7 +1865,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Smearing type
-                    <Tooltip text="QE variable: `smearing`. Only used when occupations = smearing." />
+                    <InfoTooltip text="QE variable: `smearing`. Only used when occupations = smearing." />
                   </label>
                   <select
                     value={nscfSmearing}
@@ -1890,7 +1882,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Degauss (Ry)
-                    <Tooltip text="QE variable: `degauss`. Required when using smearing occupations; controls broadening width in Ry." />
+                    <InfoTooltip text="QE variable: `degauss`. Required when using smearing occupations; controls broadening width in Ry." />
                   </label>
                   <input
                     type="text"
@@ -1908,7 +1900,7 @@ export function BandStructureWizard({
                 <div className="phonon-field">
                   <label>
                     Output detail level
-                    <Tooltip text="QE variable: `verbosity` in `&CONTROL`. Higher verbosity helps debugging but increases output volume." />
+                    <InfoTooltip text="QE variable: `verbosity` in `&CONTROL`. Higher verbosity helps debugging but increases output volume." />
                   </label>
                   <select
                     value={nscfVerbosity}
@@ -1928,7 +1920,7 @@ export function BandStructureWizard({
           <h4 onClick={() => toggleSection("post")} className="section-header">
             <span className={`collapse-icon ${expandedSections.post ? "expanded" : ""}`}>▶</span>
             bands.x Post-Processing
-            <Tooltip text="Configure `bands.x` output file and ordering controls (`filband`, `lsym`, `no_overlap`)." />
+            <InfoTooltip text="Configure `bands.x` output file and ordering controls (`filband`, `lsym`, `no_overlap`)." />
           </h4>
           {expandedSections.post && (
             <div className="option-params">
@@ -1937,7 +1929,7 @@ export function BandStructureWizard({
                   <label>
                     bands.x output file
                     <span className="band-control-tech-name">filband</span>
-                    <Tooltip text="QE variable: `filband` in `&BANDS`. The parsed file is `<filband>.gnu`." />
+                    <InfoTooltip text="QE variable: `filband` in `&BANDS`. The parsed file is `<filband>.gnu`." />
                   </label>
                   <input
                     type="text"
@@ -1957,7 +1949,7 @@ export function BandStructureWizard({
                 <span>
                   Enable symmetry handling in bands.x
                   <span className="band-control-tech-name">lsym</span>
-                  <Tooltip text="QE variable: `lsym` in `&BANDS`. Reorders/classifies bands using symmetry information; this can change band index assignment across crossings." />
+                  <InfoTooltip text="QE variable: `lsym` in `&BANDS`. Reorders/classifies bands using symmetry information; this can change band index assignment across crossings." />
                 </span>
               </label>
               <label className="option-checkbox">
@@ -1970,7 +1962,7 @@ export function BandStructureWizard({
                 <span>
                   Keep default energy-order indexing
                   <span className="band-control-tech-name">no_overlap</span>
-                  <Tooltip text="QE variable: `no_overlap` in `&BANDS`. Only used when `lsym = .false.`. Keep enabled for default ordering at each k-point; disable to order by maximal overlap with neighboring k-points." />
+                  <InfoTooltip text="QE variable: `no_overlap` in `&BANDS`. Only used when `lsym = .false.`. Keep enabled for default ordering at each k-point; disable to order by maximal overlap with neighboring k-points." />
                 </span>
               </label>
               {bandsLsym && (
@@ -1984,7 +1976,7 @@ export function BandStructureWizard({
           <h4 onClick={() => toggleSection("projections")} className="section-header">
             <span className={`collapse-icon ${expandedSections.projections ? "expanded" : ""}`}>▶</span>
             Projection Controls (projwfc.x)
-            <Tooltip text="Fat-band projection settings and projwfc.x output controls." />
+            <InfoTooltip text="Fat-band projection settings and projwfc.x output controls." />
           </h4>
           {expandedSections.projections && (
             <div className="option-params">
@@ -1996,7 +1988,7 @@ export function BandStructureWizard({
                 />
                 <span>
                   Enable orbital projections (fat bands)
-                  <Tooltip text="Runs `projwfc.x` after bands.x and attaches parsed projection groups to the result." />
+                  <InfoTooltip text="Runs `projwfc.x` after bands.x and attaches parsed projection groups to the result." />
                 </span>
               </label>
 
@@ -2007,7 +1999,7 @@ export function BandStructureWizard({
                       <label>
                         projwfc output file
                         <span className="band-control-tech-name">filproj</span>
-                        <Tooltip text="QE variable: `filproj` in `&PROJWFC`. Parsed from this file when available." />
+                        <InfoTooltip text="QE variable: `filproj` in `&PROJWFC`. Parsed from this file when available." />
                       </label>
                       <input
                         type="text"
@@ -2028,7 +2020,7 @@ export function BandStructureWizard({
                     <span>
                       Symmetrize projection weights
                       <span className="band-control-tech-name">lsym</span>
-                      <Tooltip text="projwfc.x `lsym`: symmetry-averages projection weights." />
+                      <InfoTooltip text="projwfc.x `lsym`: symmetry-averages projection weights." />
                     </span>
                   </label>
 
@@ -2041,7 +2033,7 @@ export function BandStructureWizard({
                     <span>
                       Local crystal-field basis
                       <span className="band-control-tech-name">diag_basis</span>
-                      <Tooltip text="projwfc.x `diag_basis`: rotates local orbital basis into a diagonal crystal-field frame." />
+                      <InfoTooltip text="projwfc.x `diag_basis`: rotates local orbital basis into a diagonal crystal-field frame." />
                     </span>
                   </label>
 
@@ -2054,7 +2046,7 @@ export function BandStructureWizard({
                     <span>
                       PAW projection correction
                       <span className="band-control-tech-name">pawproj</span>
-                      <Tooltip text="projwfc.x `pawproj`: PAW-specific projection treatment." />
+                      <InfoTooltip text="projwfc.x `pawproj`: PAW-specific projection treatment." />
                     </span>
                   </label>
                 </div>
@@ -2074,7 +2066,7 @@ export function BandStructureWizard({
               />
               <span>
                 Auto-save calculation log to local file
-                <Tooltip text="Writes the full run log to the configured local file path after completion (success or failure)." />
+                <InfoTooltip text="Writes the full run log to the configured local file path after completion (success or failure)." />
               </span>
             </label>
 
@@ -2132,7 +2124,7 @@ export function BandStructureWizard({
             <h4 onClick={() => toggleSection("mpi")} className="section-header">
               <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
               Parallelization
-              <Tooltip text="Process-level MPI controls for the NSCF stage." />
+              <InfoTooltip text="Process-level MPI controls for the NSCF stage." />
             </h4>
             {expandedSections.mpi && (
               <div className="option-params">

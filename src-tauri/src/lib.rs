@@ -30,15 +30,14 @@ pub mod symmetry;
 use process_manager::ProcessManager;
 
 use qe::{
-    add_phonon_symmetry_markers, export_ludwig_bundle, generate_dos_input,
-    generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_q2r_input,
-    build_epw_input, build_epw_keyword_map, build_transport_win, collect_epw_artifacts, parse_epw_result_summary,
+    add_phonon_symmetry_markers, build_epw_input, build_epw_keyword_map, build_transport_win,
+    collect_epw_artifacts, export_ludwig_bundle, generate_dos_input, generate_matdyn_bands_input,
+    generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_epw_result_v2,
     parse_ph_output, parse_transport_result, parse_wannier_hamiltonian,
     prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
     read_wannier_result, validate_epw_config, validate_transport_config, validate_wannier_config,
     DosCalculation, EpwArtifactManifestEntry, EpwCalculationConfig, EpwCalculationV1,
-    EpwErrorRecord, EpwInputPreviewResult, EpwPrerequisiteValidation,
-    EpwSourceRef, EpwSourcesV1,
+    EpwErrorRecord, EpwInputPreviewResult, EpwPrerequisiteValidation, EpwSourceRef, EpwSourcesV1,
     LudwigExportConfig, LudwigExportResult, MatdynCalculation, PhononPipelineConfig, PhononResult,
     Pw2Wannier90Config, Q2RCalculation, QPathPoint, TransportCalculationConfig, TransportResult,
     WannierCalculationConfig, WannierResult, EPW_SCHEMA_VERSION,
@@ -215,7 +214,27 @@ fn resolve_local_epw_path(qe_bin_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn resolve_remote_epw_path_shell(qe_bin_dir: &str) -> String {
+fn resolve_remote_epw_path_shell(qe_bin_dir: &str, remote_epw_path: Option<&str>) -> String {
+    let remote_epw = remote_epw_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(remote_epw) = remote_epw {
+        if remote_epw.contains('/') || remote_epw.starts_with('~') {
+            return format!(
+                "tool={}; \
+if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
+if [ -x \"$tool\" ]; then echo \"$tool\"; else echo missing; fi",
+                shell_single_quote_local(remote_epw)
+            );
+        }
+
+        return format!(
+            "tool={}; if command -v \"$tool\" >/dev/null 2>&1; then command -v \"$tool\"; else echo missing; fi",
+            shell_single_quote_local(remote_epw)
+        );
+    }
+
     let quoted_bin = shell_single_quote_local(qe_bin_dir);
     format!(
         "QE_BIN={bin}; \
@@ -278,6 +297,42 @@ fn resolve_hpc_qe_bin_dir_for_resources(
         .to_string()
 }
 
+fn command_args_include_pencil_decomposition(raw_args: &str) -> bool {
+    normalize_cli_dash_text(raw_args)
+        .split_whitespace()
+        .any(|token| {
+            let lower = token.to_ascii_lowercase();
+            matches!(
+                lower.as_str(),
+                "-pd" | "-use_pd" | "-pencil_decomposition" | "-use_pencil_decomposition"
+            ) || lower.starts_with("-pd=")
+                || lower.starts_with("-use_pd=")
+                || lower.starts_with("-pencil_decomposition=")
+                || lower.starts_with("-use_pencil_decomposition=")
+        })
+}
+
+fn qe_executable_uses_pencil_decomposition(executable: &str) -> bool {
+    let executable_name = Path::new(executable)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(executable)
+        .to_ascii_lowercase();
+
+    matches!(
+        executable_name.as_str(),
+        "pw.x"
+            | "bands.x"
+            | "projwfc.x"
+            | "dos.x"
+            | "fermi_velocity.x"
+            | "ph.x"
+            | "q2r.x"
+            | "matdyn.x"
+            | "pw2wannier90.x"
+    )
+}
+
 fn build_hpc_qe_input_command(
     profile: &hpc::profile::HpcProfile,
     executable: &str,
@@ -290,12 +345,18 @@ fn build_hpc_qe_input_command(
         build_hpc_launcher_command(profile),
         executable
     );
-    if let Some(args) = extra_args
+    let trimmed_extra_args = extra_args
         .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    let has_pencil_decomposition_arg = trimmed_extra_args
+        .map(command_args_include_pencil_decomposition)
+        .unwrap_or(false);
+    if let Some(args) = trimmed_extra_args {
         command.push(' ');
         command.push_str(args);
+    }
+    if qe_executable_uses_pencil_decomposition(executable) && !has_pencil_decomposition_arg {
+        command.push_str(" -pd .true.");
     }
     command.push_str(&format!(" -in {} > {} 2>&1", input_file, output_file));
     command
@@ -375,6 +436,7 @@ fn sanitize_hpc_profile(
         .clone()
         .or(profile.remote_qe_gpu_bin_dir.clone())
         .unwrap_or(profile.remote_qe_bin_dir);
+    profile.remote_epw_path = sanitize_optional_hpc_field(profile.remote_epw_path);
     profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
     profile.remote_postw90_path = None;
     profile.remote_pseudo_dir =
@@ -1406,6 +1468,8 @@ struct HpcPresetBundleProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_qe_gpu_bin_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_epw_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_wannier90_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_postw90_path: Option<String>,
@@ -1650,6 +1714,7 @@ fn hpc_export_preset_bundle(
                 remote_qe_bin_dir: profile.remote_qe_bin_dir,
                 remote_qe_cpu_bin_dir: profile.remote_qe_cpu_bin_dir,
                 remote_qe_gpu_bin_dir: profile.remote_qe_gpu_bin_dir,
+                remote_epw_path: profile.remote_epw_path,
                 remote_wannier90_path: profile.remote_wannier90_path,
                 remote_postw90_path: profile.remote_postw90_path,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
@@ -1792,6 +1857,7 @@ fn hpc_import_preset_bundle(
                 remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
                 remote_qe_cpu_bin_dir: imported_profile.remote_qe_cpu_bin_dir,
                 remote_qe_gpu_bin_dir: imported_profile.remote_qe_gpu_bin_dir,
+                remote_epw_path: imported_profile.remote_epw_path,
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_postw90_path: imported_profile.remote_postw90_path,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
@@ -1840,6 +1906,7 @@ fn hpc_import_preset_bundle(
             remote_qe_bin_dir: imported_profile.remote_qe_bin_dir,
             remote_qe_cpu_bin_dir: imported_profile.remote_qe_cpu_bin_dir,
             remote_qe_gpu_bin_dir: imported_profile.remote_qe_gpu_bin_dir,
+            remote_epw_path: imported_profile.remote_epw_path,
             remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_postw90_path: imported_profile.remote_postw90_path,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
@@ -2331,7 +2398,12 @@ async fn hpc_validate_environment(
     let mut qe_pw_available = true;
     let mut qe_epw_available = true;
     let mut qe_pw2wannier_available = true;
-    for (role, qe_bin_dir) in qe_path_checks {
+    let remote_epw_override = profile
+        .remote_epw_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    for (role, qe_bin_dir) in &qe_path_checks {
         let pw_available_for_role = hpc::ssh::run_ssh_command(
             &profile,
             secret.as_deref(),
@@ -2347,30 +2419,6 @@ async fn hpc_validate_environment(
             ));
         }
         qe_pw_available &= pw_available_for_role;
-
-        let epw_resolved_for_role = hpc::ssh::run_ssh_command(
-            &profile,
-            secret.as_deref(),
-            &resolve_remote_epw_path_shell(&qe_bin_dir),
-        )
-        .await
-        .ok()
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() || trimmed == "missing" {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-        let epw_available_for_role = epw_resolved_for_role.is_some();
-        if !epw_available_for_role {
-            messages.push(format!(
-                "epw.x not found/executable at {} or fallback EPW/bin locations ({} QE path)",
-                qe_bin_dir, role
-            ));
-        }
-        qe_epw_available &= epw_available_for_role;
 
         let pw2wannier_available_for_role = hpc::ssh::run_ssh_command(
             &profile,
@@ -2390,6 +2438,57 @@ async fn hpc_validate_environment(
             ));
         }
         qe_pw2wannier_available &= pw2wannier_available_for_role;
+    }
+
+    if let Some(remote_epw_override) = remote_epw_override {
+        let epw_override_resolved = hpc::ssh::run_ssh_command(
+            &profile,
+            secret.as_deref(),
+            &resolve_remote_epw_path_shell("", Some(remote_epw_override)),
+        )
+        .await
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "missing" {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        qe_epw_available = epw_override_resolved.is_some();
+        if !qe_epw_available {
+            messages.push(format!(
+                "epw.x not found/executable at configured path '{}'. EPW requires manual compilation.",
+                remote_epw_override
+            ));
+        }
+    } else {
+        for (role, qe_bin_dir) in &qe_path_checks {
+            let epw_resolved_for_role = hpc::ssh::run_ssh_command(
+                &profile,
+                secret.as_deref(),
+                &resolve_remote_epw_path_shell(qe_bin_dir, None),
+            )
+            .await
+            .ok()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() || trimmed == "missing" {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+            let epw_available_for_role = epw_resolved_for_role.is_some();
+            if !epw_available_for_role {
+                messages.push(format!(
+                    "epw.x not found/executable at {} or fallback EPW/bin locations ({} QE path). EPW requires manual compilation.",
+                    qe_bin_dir, role
+                ));
+            }
+            qe_epw_available &= epw_available_for_role;
+        }
     }
 
     let remote_wannier90 = profile
@@ -2437,11 +2536,10 @@ test -x \"$tool\" && echo ok || echo missing",
             remote_postw90
         )
     };
-    let postw90_available =
-        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &postw90_check)
-            .await
-            .map(|value| value.contains("ok"))
-            .unwrap_or(false);
+    let postw90_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &postw90_check)
+        .await
+        .map(|value| value.contains("ok"))
+        .unwrap_or(false);
     if !postw90_available {
         messages.push(format!(
             "postw90.x not found/executable at {}",
@@ -3710,6 +3808,7 @@ async fn run_calculation_streaming(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -3890,10 +3989,7 @@ fn parse_upf_cutoff(text: &str, label: &str) -> Option<f64> {
         .filter(|value| *value > 0.0)
 }
 
-fn insert_valid_angular_channel(
-    channels: &mut std::collections::BTreeSet<u8>,
-    raw: &str,
-) {
+fn insert_valid_angular_channel(channels: &mut std::collections::BTreeSet<u8>, raw: &str) {
     if let Ok(value) = raw.trim().parse::<i32>() {
         if (0..=6).contains(&value) {
             channels.insert(value as u8);
@@ -3908,10 +4004,18 @@ struct AngularMomentumParseDetails {
 }
 
 fn parse_upf_max_angular_momentum(content: &str) -> Option<u8> {
-    capture_group(content, r#"(?is)<PP_HEADER\b[^>]*\bl_max\s*=\s*["']?([0-9]+)"#)
-        .or_else(|| capture_group(content, r"(?im)^\s*([0-9]+)\s+Max angular momentum component\s*$"))
-        .and_then(|value| value.trim().parse::<u8>().ok())
-        .filter(|value| *value <= 6)
+    capture_group(
+        content,
+        r#"(?is)<PP_HEADER\b[^>]*\bl_max\s*=\s*["']?([0-9]+)"#,
+    )
+    .or_else(|| {
+        capture_group(
+            content,
+            r"(?im)^\s*([0-9]+)\s+Max angular momentum component\s*$",
+        )
+    })
+    .and_then(|value| value.trim().parse::<u8>().ok())
+    .filter(|value| *value <= 6)
 }
 
 fn parse_upf_angular_momentum_details(
@@ -4157,9 +4261,7 @@ fn parse_pseudopotential_metadata_from_content(
         cutoff_wfc_source,
         cutoff_rho_source,
         available_angular_momenta,
-        available_angular_momenta_source: angular_momentum_details
-            .source
-            .map(str::to_string),
+        available_angular_momenta_source: angular_momentum_details.source.map(str::to_string),
         max_angular_momentum: angular_momentum_details.max_angular_momentum,
     }
 }
@@ -4254,10 +4356,8 @@ nl pn  l   occ               Rcut            Rcut US             E pseu
   <PP_BETA.3 angular_momentum="2" />
 </UPF>
 "#;
-        let si_metadata = super::parse_pseudopotential_metadata_from_content(
-            "Si.UPF".to_string(),
-            si_like,
-        );
+        let si_metadata =
+            super::parse_pseudopotential_metadata_from_content("Si.UPF".to_string(), si_like);
         assert_eq!(
             si_metadata.available_angular_momenta_source.as_deref(),
             Some("upf_tags")
@@ -4270,7 +4370,9 @@ nl pn  l   occ               Rcut            Rcut US             E pseu
             fallback_only,
         );
         assert_eq!(
-            fallback_metadata.available_angular_momenta_source.as_deref(),
+            fallback_metadata
+                .available_angular_momenta_source
+                .as_deref(),
             Some("upf_l_max_fallback")
         );
         assert_eq!(fallback_metadata.available_angular_momenta, vec![0, 1, 2]);
@@ -5055,10 +5157,7 @@ fn find_qe_save_directory(
     first_any
 }
 
-fn find_preferred_wannier_save_directory(
-    root: &Path,
-    preferred_dir_name: &str,
-) -> Option<PathBuf> {
+fn find_preferred_wannier_save_directory(root: &Path, preferred_dir_name: &str) -> Option<PathBuf> {
     let tmp_root = root.join("tmp");
     find_qe_save_directory(&tmp_root, 2, Some(preferred_dir_name))
         .or_else(|| find_qe_save_directory(&tmp_root, 2, None))
@@ -5174,6 +5273,19 @@ fn insert_system_namelist_line(input: &str, line_to_insert: &str) -> Result<Stri
     }
 }
 
+fn executable_uses_pencil_decomposition(executable: &Path) -> bool {
+    executable
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(qe_executable_uses_pencil_decomposition)
+        .unwrap_or(false)
+}
+
+fn stage_args_include_pencil_decomposition(args: &[&str]) -> bool {
+    args.iter()
+        .any(|value| command_args_include_pencil_decomposition(value))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_local_stage_capture_stdout(
     app: &AppHandle,
@@ -5190,6 +5302,8 @@ async fn run_local_stage_capture_stdout(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let force_pencil_decomposition = executable_uses_pencil_decomposition(executable)
+        && !stage_args_include_pencil_decomposition(args);
     let mut child = if allow_mpi
         && mpi_config
             .map(|mpi| mpi.enabled && mpi.nprocs > 1)
@@ -5200,6 +5314,9 @@ async fn run_local_stage_capture_stdout(
         command.args(["-np", &mpi.nprocs.to_string()]);
         command.arg(executable);
         command.args(args);
+        if force_pencil_decomposition {
+            command.args(["-pd", ".true."]);
+        }
         command
     } else {
         let mut command = tokio_command_with_prefix(executable, execution_prefix);
@@ -5277,6 +5394,8 @@ async fn run_local_stage_capture_streams(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let force_pencil_decomposition = executable_uses_pencil_decomposition(executable)
+        && !stage_args_include_pencil_decomposition(args);
     let mut child = if allow_mpi
         && mpi_config
             .map(|mpi| mpi.enabled && mpi.nprocs > 1)
@@ -5287,6 +5406,9 @@ async fn run_local_stage_capture_streams(
         command.args(["-np", &mpi.nprocs.to_string()]);
         command.arg(executable);
         command.args(args);
+        if force_pencil_decomposition {
+            command.args(["-pd", ".true."]);
+        }
         command
     } else {
         let mut command = tokio_command_with_prefix(executable, execution_prefix);
@@ -5932,6 +6054,7 @@ async fn run_bands_calculation(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -6045,6 +6168,7 @@ async fn run_bands_calculation(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&bands_x_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -7043,8 +7167,11 @@ fn validate_transport_source(
     project_id: &str,
     calc_id: &str,
 ) -> Result<ValidatedTransportSource, String> {
-    let calculation =
-        projects::get_project_calculation(app.clone(), project_id.to_string(), calc_id.to_string())?;
+    let calculation = projects::get_project_calculation(
+        app.clone(),
+        project_id.to_string(),
+        calc_id.to_string(),
+    )?;
     if calculation.calc_type.trim().to_ascii_lowercase() != "wannier" {
         return Err(format!(
             "Transport source {} is not a saved Wannier calculation.",
@@ -7059,9 +7186,8 @@ fn validate_transport_source(
         .ok_or_else(|| {
             "Selected Wannier calculation does not have a saved Fermi energy.".to_string()
         })?;
-    let seedname = resolve_transport_seedname(&calculation).ok_or_else(|| {
-        "Selected Wannier calculation is missing a saved seedname.".to_string()
-    })?;
+    let seedname = resolve_transport_seedname(&calculation)
+        .ok_or_else(|| "Selected Wannier calculation is missing a saved seedname.".to_string())?;
 
     let source_tmp_dir = projects::get_projects_dir(app)?
         .join(project_id)
@@ -7090,7 +7216,12 @@ fn validate_transport_source(
     let source_win_content = std::fs::read_to_string(&win_path)
         .map_err(|e| format!("Failed to read {}: {}", win_path.display(), e))?;
     let use_ws_distance = parse_wannier_win_bool(&source_win_content, "use_ws_distance")
-        .or_else(|| calculation.parameters.get("use_ws_distance").and_then(|value| value.as_bool()))
+        .or_else(|| {
+            calculation
+                .parameters
+                .get("use_ws_distance")
+                .and_then(|value| value.as_bool())
+        })
         .unwrap_or(false);
     if use_ws_distance {
         let wsvec_path = source_tmp_dir.join(format!("{}_wsvec.dat", seedname));
@@ -7260,7 +7391,11 @@ where
                 continue;
             }
             let metadata = entry.metadata().map_err(|e| {
-                format!("Failed to inspect prerequisite file {}: {}", path.display(), e)
+                format!(
+                    "Failed to inspect prerequisite file {}: {}",
+                    path.display(),
+                    e
+                )
             })?;
             entries.push(EpwArtifactManifestEntry {
                 source_calc_id: source_calc_id.to_string(),
@@ -7411,7 +7546,9 @@ fn stage_epw_source_files(
             )?,
             "wannier" => {
                 let Some(wannier_root) = source.wannier_tmp_dir.as_ref() else {
-                    return Err("Internal EPW staging error: missing Wannier source root.".to_string());
+                    return Err(
+                        "Internal EPW staging error: missing Wannier source root.".to_string()
+                    );
                 };
                 // EPW 6.0 expects Wannier interface files in the run root (no `wannier_dir` keyword).
                 copy_epw_source_manifest_entry(
@@ -7502,17 +7639,20 @@ fn validate_epw_prerequisites_detailed(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
 
-    let phonon_calculation =
-        match projects::get_project_calculation(app.clone(), project_id.to_string(), phonon_calc_id.to_string()) {
-            Ok(calc) => calc,
-            Err(err) => {
-                validation.errors.push(format!(
-                    "Unable to load phonon source calculation {}: {}",
-                    phonon_calc_id, err
-                ));
-                return (validation, None);
-            }
-        };
+    let phonon_calculation = match projects::get_project_calculation(
+        app.clone(),
+        project_id.to_string(),
+        phonon_calc_id.to_string(),
+    ) {
+        Ok(calc) => calc,
+        Err(err) => {
+            validation.errors.push(format!(
+                "Unable to load phonon source calculation {}: {}",
+                phonon_calc_id, err
+            ));
+            return (validation, None);
+        }
+    };
     if phonon_calculation.calc_type.trim().to_ascii_lowercase() != "phonon" {
         validation.errors.push(format!(
             "EPW source {} is not a phonon calculation.",
@@ -7567,7 +7707,7 @@ fn validate_epw_prerequisites_detailed(
         phonon_calc_id,
         "phonon",
         |lower_rel, file_name| {
-                file_name.starts_with("dyn")
+            file_name.starts_with("dyn")
                 || file_name.contains("dvscf")
                 || file_name.ends_with(".ukk")
                 || matches!(
@@ -7605,12 +7745,12 @@ fn validate_epw_prerequisites_detailed(
             || lower.ends_with("patterns.xml")
     });
     if !has_dyn {
-        validation.errors.push(
-            "Phonon source is missing required `dyn*` artifacts for EPW.".to_string(),
-        );
         validation
-            .remediation_hints
-            .push("Re-run phonons and keep `dyn*` outputs using save policy `epw-ready`.".to_string());
+            .errors
+            .push("Phonon source is missing required `dyn*` artifacts for EPW.".to_string());
+        validation.remediation_hints.push(
+            "Re-run phonons and keep `dyn*` outputs using save policy `epw-ready`.".to_string(),
+        );
     }
     if !has_dvscf {
         validation.errors.push(
@@ -7703,9 +7843,15 @@ fn validate_epw_prerequisites_detailed(
             ));
             return (validation, None);
         }
-        let seedname = resolve_transport_seedname(&source).unwrap_or_else(|| "qcortado_wannier".to_string());
+        let seedname =
+            resolve_transport_seedname(&source).unwrap_or_else(|| "qcortado_wannier".to_string());
         let source_tmp_dir = projects::get_projects_dir(app)
-            .map(|root| root.join(project_id).join("calculations").join(wannier_id).join("tmp"))
+            .map(|root| {
+                root.join(project_id)
+                    .join("calculations")
+                    .join(wannier_id)
+                    .join("tmp")
+            })
             .unwrap_or_else(|_| PathBuf::from(""));
         if !source_tmp_dir.exists() {
             validation.errors.push(format!(
@@ -7830,7 +7976,8 @@ fn validate_epw_prerequisites_detailed(
         if let (Some(left), Some(right)) = (phonon_soc, wannier_soc) {
             if left != right {
                 validation.errors.push(
-                    "SOC mismatch between phonon and Wannier prerequisites (`lspinorb`).".to_string(),
+                    "SOC mismatch between phonon and Wannier prerequisites (`lspinorb`)."
+                        .to_string(),
                 );
             }
         }
@@ -7839,7 +7986,8 @@ fn validate_epw_prerequisites_detailed(
         wannier_tmp_dir = Some(source_tmp_dir);
     } else {
         validation.warnings.push(
-            "No Wannier source was provided. EPW will run with phonon-only prerequisites.".to_string(),
+            "No Wannier source was provided. EPW will run with phonon-only prerequisites."
+                .to_string(),
         );
     }
 
@@ -7856,45 +8004,50 @@ fn validate_epw_prerequisites_detailed(
 
     if scf_save_dir.is_none() {
         if let Some(scf_calc_id) = resolved_scf_calc_id.as_ref() {
-        match projects::get_project_calculation(
-            app.clone(),
-            project_id.to_string(),
-            scf_calc_id.to_string(),
-        ) {
-            Ok(source) => {
-                let source_tmp_dir = projects::get_projects_dir(app)
-                    .map(|root| root.join(project_id).join("calculations").join(scf_calc_id).join("tmp"))
-                    .unwrap_or_else(|_| PathBuf::from(""));
-                if !source_tmp_dir.exists() {
-                    validation
-                        .errors
-                        .push(missing_scf_tmp_error(&source_tmp_dir));
-                } else {
-                    let found_save_dir = find_qe_save_directory(
-                        &source_tmp_dir,
-                        4,
-                        Some(&expected_save_dir_name),
-                    )
-                    .or_else(|| find_qe_save_directory(&source_tmp_dir, 4, None));
-                    if let Some(found_save_dir) = found_save_dir {
-                        let schema_path = found_save_dir.join("data-file-schema.xml");
-                        if !schema_path.exists() {
-                            validation.errors.push(format!(
-                                "Resolved SCF save payload is missing {}.",
-                                schema_path.display()
-                            ));
-                            validation.remediation_hints.push(
+            match projects::get_project_calculation(
+                app.clone(),
+                project_id.to_string(),
+                scf_calc_id.to_string(),
+            ) {
+                Ok(source) => {
+                    let source_tmp_dir = projects::get_projects_dir(app)
+                        .map(|root| {
+                            root.join(project_id)
+                                .join("calculations")
+                                .join(scf_calc_id)
+                                .join("tmp")
+                        })
+                        .unwrap_or_else(|_| PathBuf::from(""));
+                    if !source_tmp_dir.exists() {
+                        validation
+                            .errors
+                            .push(missing_scf_tmp_error(&source_tmp_dir));
+                    } else {
+                        let found_save_dir = find_qe_save_directory(
+                            &source_tmp_dir,
+                            4,
+                            Some(&expected_save_dir_name),
+                        )
+                        .or_else(|| find_qe_save_directory(&source_tmp_dir, 4, None));
+                        if let Some(found_save_dir) = found_save_dir {
+                            let schema_path = found_save_dir.join("data-file-schema.xml");
+                            if !schema_path.exists() {
+                                validation.errors.push(format!(
+                                    "Resolved SCF save payload is missing {}.",
+                                    schema_path.display()
+                                ));
+                                validation.remediation_hints.push(
                                 "Re-run SCF/NSCF source and preserve the full `.save` directory."
                                     .to_string(),
                             );
-                        } else {
-                            if found_save_dir
-                                .file_name()
-                                .and_then(|value| value.to_str())
-                                .map(|value| value != expected_save_dir_name)
-                                .unwrap_or(true)
-                            {
-                                validation.warnings.push(format!(
+                            } else {
+                                if found_save_dir
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .map(|value| value != expected_save_dir_name)
+                                    .unwrap_or(true)
+                                {
+                                    validation.warnings.push(format!(
                                     "Resolved SCF save directory is '{}', while EPW prefix expects '{}'.",
                                     found_save_dir
                                         .file_name()
@@ -7902,39 +8055,36 @@ fn validate_epw_prerequisites_detailed(
                                         .unwrap_or("<unknown>"),
                                     expected_save_dir_name
                                 ));
+                                }
+                                scf_save_dir = Some(found_save_dir);
+                                scf_calculation = Some(source);
                             }
-                            scf_save_dir = Some(found_save_dir);
-                            scf_calculation = Some(source);
+                        } else {
+                            validation.errors.push(format!(
+                                "Resolved SCF source {} does not contain a QE `.save` directory.",
+                                scf_calc_id
+                            ));
+                            validation.remediation_hints.push(
+                                "Re-run SCF and keep the `.save` payload, then retry EPW."
+                                    .to_string(),
+                            );
                         }
-                    } else {
-                        validation.errors.push(format!(
-                            "Resolved SCF source {} does not contain a QE `.save` directory.",
-                            scf_calc_id
-                        ));
-                        validation.remediation_hints.push(
-                            "Re-run SCF and keep the `.save` payload, then retry EPW."
-                                .to_string(),
-                        );
                     }
                 }
+                Err(err) => {
+                    validation.errors.push(format!(
+                        "Unable to load resolved SCF source calculation {}: {}",
+                        scf_calc_id, err
+                    ));
+                }
             }
-            Err(err) => {
-                validation.errors.push(format!(
-                    "Unable to load resolved SCF source calculation {}: {}",
-                    scf_calc_id, err
-                ));
-            }
-        }
         }
     }
 
     if scf_save_dir.is_none() {
-        let fallback_save_dir = find_qe_save_directory(
-            &phonon_tmp_dir,
-            4,
-            Some(&expected_save_dir_name),
-        )
-        .or_else(|| find_qe_save_directory(&phonon_tmp_dir, 4, None));
+        let fallback_save_dir =
+            find_qe_save_directory(&phonon_tmp_dir, 4, Some(&expected_save_dir_name))
+                .or_else(|| find_qe_save_directory(&phonon_tmp_dir, 4, None));
         if let Some(found_save_dir) = fallback_save_dir {
             let schema_path = found_save_dir.join("data-file-schema.xml");
             if schema_path.exists() {
@@ -8264,6 +8414,7 @@ async fn run_scf_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -8819,6 +8970,7 @@ async fn run_bands_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -8936,6 +9088,7 @@ async fn run_bands_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&bands_x_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -9556,16 +9709,13 @@ async fn run_wannier_hpc_background(
     )?;
 
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
-    let launcher = build_hpc_launcher_command(&profile);
     let pre_cmd = format!(
-        "{} {} -pp {} > wannier90_pre.out 2>&1",
-        launcher,
+        "{} -pp {} > wannier90_pre.out 2>&1",
         shell_single_quote_local(&remote_wannier90),
         shell_single_quote_local(&config.seedname)
     );
     let final_cmd = format!(
-        "{} {} {} > wannier90.out 2>&1",
-        launcher,
+        "{} {} > wannier90.out 2>&1",
         shell_single_quote_local(&remote_wannier90),
         shell_single_quote_local(&config.seedname)
     );
@@ -9821,8 +9971,11 @@ async fn run_transport_background(
         &config,
         source.reference_fermi_energy_ev,
     )?;
-    std::fs::write(work_path.join(format!("{}.win", source.seedname)), &transport_win)
-        .map_err(|e| format!("Failed to write transport .win file: {}", e))?;
+    std::fs::write(
+        work_path.join(format!("{}.win", source.seedname)),
+        &transport_win,
+    )
+    .map_err(|e| format!("Failed to write transport .win file: {}", e))?;
     check_cancel!();
 
     emit_line!("Step 1/2: Running postw90.x / BoltzWann...".to_string());
@@ -9980,11 +10133,9 @@ fn build_epw_sources_payload(
     config: &EpwCalculationConfig,
     sources: &ValidatedEpwSources,
 ) -> EpwSourcesV1 {
-    let fallback_scf_id = extract_string_param(&sources.phonon_calculation.parameters, "source_scf_id");
-    let resolved_scf_id = sources
-        .scf_calculation
-        .as_ref()
-        .map(|calc| calc.id.clone());
+    let fallback_scf_id =
+        extract_string_param(&sources.phonon_calculation.parameters, "source_scf_id");
+    let resolved_scf_id = sources.scf_calculation.as_ref().map(|calc| calc.id.clone());
     let scf_ref = config
         .source_scf_calc_id
         .as_deref()
@@ -10003,16 +10154,23 @@ fn build_epw_sources_payload(
             calc_id: sources.phonon_calculation.id.clone(),
             calc_type: "phonon".to_string(),
         },
-        wannier: sources.wannier_calculation.as_ref().map(|calculation| EpwSourceRef {
-            calc_id: calculation.id.clone(),
-            calc_type: "wannier".to_string(),
-        }),
+        wannier: sources
+            .wannier_calculation
+            .as_ref()
+            .map(|calculation| EpwSourceRef {
+                calc_id: calculation.id.clone(),
+                calc_type: "wannier".to_string(),
+            }),
         scf: scf_ref,
         manifests: sources.manifests.clone(),
     }
 }
 
-fn build_epw_taxonomy_error(code: &str, message: impl Into<String>, hint: Option<String>) -> String {
+fn build_epw_taxonomy_error(
+    code: &str,
+    message: impl Into<String>,
+    hint: Option<String>,
+) -> String {
     let message = message.into();
     match hint {
         Some(hint) if !hint.trim().is_empty() => {
@@ -10149,10 +10307,7 @@ fn parse_epw_positive_u32_keyword(raw_value: &str, key: &str) -> Result<u32, Str
         )
     })?;
     if parsed == 0 {
-        return Err(format!(
-            "EPW keyword `{}` must be greater than zero.",
-            key
-        ));
+        return Err(format!("EPW keyword `{}` must be greater than zero.", key));
     }
     Ok(parsed)
 }
@@ -10273,7 +10428,8 @@ async fn start_epw_calculation(
                 }
                 Err(err) => {
                     pm.fail(&tid, err.clone()).await;
-                    let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
                 }
             }
         });
@@ -10311,7 +10467,8 @@ async fn start_epw_calculation(
             }
             Err(err) => {
                 pm.fail(&tid, err.clone()).await;
-                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                let _ =
+                    app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
             }
         }
     });
@@ -10459,7 +10616,11 @@ async fn run_epw_background(
     stage_epw_source_files(&sources, &work_path, &config)?;
     check_cancel!();
 
-    let total_steps = if sources.rebuild_wannier_nscf_save { 3 } else { 2 };
+    let total_steps = if sources.rebuild_wannier_nscf_save {
+        3
+    } else {
+        2
+    };
     if sources.rebuild_wannier_nscf_save {
         let nscf_input_path = work_path.join("nscf.in");
         if !nscf_input_path.exists() {
@@ -10554,7 +10715,11 @@ async fn run_epw_background(
 
     emit_line!(format!(
         "Step {}/{}: Running epw.x...",
-        if sources.rebuild_wannier_nscf_save { 2 } else { 1 },
+        if sources.rebuild_wannier_nscf_save {
+            2
+        } else {
+            1
+        },
         total_steps
     ));
     let run_started = std::time::Instant::now();
@@ -10591,15 +10756,19 @@ async fn run_epw_background(
 
     emit_line!(format!(
         "Step {}/{}: Parsing EPW outputs...",
-        if sources.rebuild_wannier_nscf_save { 3 } else { 2 },
+        if sources.rebuild_wannier_nscf_save {
+            3
+        } else {
+            2
+        },
         total_steps
     ));
     let parse_started = std::time::Instant::now();
     let artifacts = collect_epw_artifacts(&work_path);
     let combined_output = format!("{}\n{}", stage_output.stdout, stage_output.stderr);
-    let summary = parse_epw_result_summary(&combined_output, artifacts.clone());
+    let parsed_result = parse_epw_result_v2(&combined_output, &work_path, artifacts.clone());
     let mut errors: Vec<EpwErrorRecord> = Vec::new();
-    if summary.parse_partial {
+    if parsed_result.summary.parse_partial {
         errors.push(EpwErrorRecord {
             code: "parse-partial".to_string(),
             message: "EPW output parse is partial.".to_string(),
@@ -10622,7 +10791,11 @@ async fn run_epw_background(
         runtime: config.runtime,
         extensions: config.extensions,
         artifacts,
-        result_summary: summary,
+        result_summary: parsed_result.summary,
+        transport: parsed_result.transport,
+        superconductivity: parsed_result.superconductivity,
+        spectral: parsed_result.spectral,
+        parsed_tables: parsed_result.parsed_tables,
         errors,
     })
 }
@@ -10642,7 +10815,9 @@ async fn run_epw_hpc_background(
 ) -> Result<EpwCalculationV1, String> {
     let mut config = config;
     let pipeline_start = std::time::Instant::now();
-    let stage_dir = PathBuf::from(&working_dir).join("epw_source_stage").join(task_id);
+    let stage_dir = PathBuf::from(&working_dir)
+        .join("epw_source_stage")
+        .join(task_id);
     prepare_working_directory(&stage_dir, false)?;
     stage_epw_source_files(&sources, &stage_dir, &config)?;
     let wannierization_plan = resolve_epw_wannierization_plan(&config).map_err(|message| {
@@ -10689,22 +10864,51 @@ async fn run_epw_hpc_background(
         )
     })?;
     let input_text = build_epw_input(&config)?;
-    let total_steps = if sources.rebuild_wannier_nscf_save { 3 } else { 2 };
+    let total_steps = if sources.rebuild_wannier_nscf_save {
+        3
+    } else {
+        2
+    };
 
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let launcher = build_hpc_launcher_command(&profile);
+    let remote_epw_override = profile
+        .remote_epw_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let epw_cmd = format!(
         "{} \"$EPW_EXE\" -npool {} -in epw.in > epw.out 2> epw.err",
         launcher, parallel_plan.npool
     );
-    let mut commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+    let epw_resolver_cmd = if let Some(remote_epw) = remote_epw_override {
+        if remote_epw.contains('/') || remote_epw.starts_with('~') {
+            format!(
+                "tool={}; \
+if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
+if [ -x \"$tool\" ]; then EPW_EXE=\"$tool\"; \
+else echo \"[QCortado] ERROR: epw.x not found/executable at configured path $tool\" >&2; exit 1; fi",
+                shell_single_quote_local(remote_epw)
+            )
+        } else {
+            format!(
+                "tool={}; \
+if command -v \"$tool\" >/dev/null 2>&1; then EPW_EXE=\"$(command -v \"$tool\")\"; \
+else echo \"[QCortado] ERROR: epw.x command '$tool' not found in PATH\" >&2; exit 1; fi",
+                shell_single_quote_local(remote_epw)
+            )
+        }
+    } else {
         "if [ -x \"$QE_BIN/epw.x\" ]; then EPW_EXE=\"$QE_BIN/epw.x\"; \
 elif [ -x \"$QE_BIN/EPW/bin/epw.x\" ]; then EPW_EXE=\"$QE_BIN/EPW/bin/epw.x\"; \
 elif [ -x \"$(dirname \"$QE_BIN\")/EPW/bin/epw.x\" ]; then EPW_EXE=\"$(dirname \"$QE_BIN\")/EPW/bin/epw.x\"; \
 else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback paths\" >&2; exit 1; fi"
-            .to_string(),
+            .to_string()
+    };
+    let mut commands = vec![
+        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
+        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
+        epw_resolver_cmd,
     ];
     if sources.rebuild_wannier_nscf_save {
         if !stage_dir.join("nscf.in").exists() {
@@ -10801,9 +11005,13 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
         std::fs::read_to_string(work_path.join("slurm.err")).unwrap_or_default()
     });
     let artifacts = collect_epw_artifacts(&work_path);
-    let summary = parse_epw_result_summary(&format!("{}\n{}", stdout, stderr), artifacts.clone());
+    let parsed_result = parse_epw_result_v2(
+        &format!("{}\n{}", stdout, stderr),
+        &work_path,
+        artifacts.clone(),
+    );
     let mut errors: Vec<EpwErrorRecord> = Vec::new();
-    if summary.parse_partial {
+    if parsed_result.summary.parse_partial {
         errors.push(EpwErrorRecord {
             code: "parse-partial".to_string(),
             message: "EPW output parse is partial.".to_string(),
@@ -10825,7 +11033,11 @@ else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback pat
         runtime: config.runtime,
         extensions: config.extensions,
         artifacts,
-        result_summary: summary,
+        result_summary: parsed_result.summary,
+        transport: parsed_result.transport,
+        superconductivity: parsed_result.superconductivity,
+        spectral: parsed_result.spectral,
+        parsed_tables: parsed_result.parsed_tables,
         errors,
     })
 }
@@ -11167,6 +11379,7 @@ async fn run_dos_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -11716,6 +11929,7 @@ async fn run_fermi_surface_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&pw_path)
+                .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -12162,8 +12376,8 @@ async fn run_phonon_hpc_background(
     )
     .await?;
 
-    ensure_phonon_restart_inputs(&work_path)?;
-
+    // Do not re-run local `.save` validation here: minimal HPC artifact sync intentionally omits
+    // heavy `tmp/*.save` payloads after the remote run has already completed.
     let ph_output = std::fs::read_to_string(work_path.join("ph.out")).unwrap_or_else(|_| {
         std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
     });

@@ -67,6 +67,10 @@ interface BandPlotProps {
   comparisonOptions?: BandPlotComparisonOption[];
   comparisonTitle?: string;
   comparisonNoneLabel?: string;
+  windowOverlays?: BandPlotWindowOverlay[];
+  onWindowOverlayChange?: (update: BandPlotWindowOverlayUpdate) => void;
+  windowOverlayHint?: string;
+  showBandGapOverlayOverride?: boolean;
 }
 
 interface HoveredPoint {
@@ -77,6 +81,15 @@ interface HoveredPoint {
   y: number;
   projectionWeight?: number;
   projectionWeightNormalized?: number;
+}
+
+interface OverlayDragState {
+  overlayId: string;
+  pointerId: number;
+  mode: BandPlotWindowOverlayInteraction;
+  startClientY: number;
+  startMin: number;
+  startMax: number;
 }
 
 export type ColorMode = "single" | "rainbow";
@@ -107,6 +120,30 @@ export interface BandPlotComparisonOption {
   id: string;
   label: string;
   data: BandData;
+}
+
+export type BandPlotWindowOverlaySide = "left" | "right";
+export type BandPlotWindowOverlayInteraction =
+  | "move"
+  | "resize-min"
+  | "resize-max"
+  | "slider-min"
+  | "slider-max";
+
+export interface BandPlotWindowOverlay {
+  id: string;
+  min: number;
+  max: number;
+  color: string;
+  side: BandPlotWindowOverlaySide;
+  label: string;
+}
+
+export interface BandPlotWindowOverlayUpdate {
+  id: string;
+  min: number;
+  max: number;
+  interaction: BandPlotWindowOverlayInteraction;
 }
 
 interface OrbitalElementOption {
@@ -146,6 +183,8 @@ function clamp01(value: number): number {
 function clampToRange(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
+
+const MIN_WINDOW_SPAN_EV = 1e-4;
 
 function rgbString(r: number, g: number, b: number): string {
   const rc = Math.round(Math.max(0, Math.min(255, r)));
@@ -720,6 +759,10 @@ export function BandPlot({
   comparisonOptions,
   comparisonTitle = "Band Comparison",
   comparisonNoneLabel = "None",
+  windowOverlays,
+  onWindowOverlayChange,
+  windowOverlayHint = "Drag window edges or side sliders to tune selected ranges.",
+  showBandGapOverlayOverride,
 }: BandPlotProps) {
   const { isDark } = useTheme();
   const colors = useMemo(() => isDark
@@ -799,6 +842,7 @@ export function BandPlot({
   const [projectionExpanded, setProjectionExpanded] = useState(false);
   const [exportNote, setExportNote] = useState("");
   const [selectedComparisonId, setSelectedComparisonId] = useState("");
+  const [overlayDragState, setOverlayDragState] = useState<OverlayDragState | null>(null);
 
   const requestedFermiReferenceMode = sharedSettings?.fermiReferenceMode ?? null;
   const fallbackFermiReferenceMode = (
@@ -845,12 +889,34 @@ export function BandPlot({
   const effectiveSingleBandColor = sharedSettings?.singleBandColor ?? singleBandColor;
   const effectiveRainbowPalette = sharedSettings?.rainbowPalette ?? rainbowPalette;
   const effectivePlotBgWhite = sharedSettings?.plotBgWhite ?? plotBgWhite;
-  const effectiveShowBandGapOverlay = sharedSettings?.showBandGapOverlay ?? showBandGapOverlay;
+  const effectiveShowBandGapOverlay = showBandGapOverlayOverride
+    ?? sharedSettings?.showBandGapOverlay
+    ?? showBandGapOverlay;
 
   const activeFermiSourceLabel = resolvedFermiReferenceMode === "scf" ? "SCF" : "Bands run";
   const activeFermiDisplay = Number.isFinite(fermiEnergy) ? `${fermiEnergy.toFixed(3)} eV` : "N/A";
   const availableComparisonOptions = comparisonOptions ?? [];
   const hasComparisonControls = comparisonOptions !== undefined;
+  const editableWindowOverlays = useMemo(
+    () =>
+      (windowOverlays ?? [])
+        .filter((overlay) =>
+          Number.isFinite(overlay.min)
+          && Number.isFinite(overlay.max)
+          && Number.isFinite(overlay.max - overlay.min),
+        )
+        .map((overlay) => ({
+          ...overlay,
+          min: Math.min(overlay.min, overlay.max),
+          max: Math.max(overlay.min, overlay.max),
+        })),
+    [windowOverlays],
+  );
+  const windowOverlayById = useMemo(
+    () => new Map(editableWindowOverlays.map((overlay) => [overlay.id, overlay])),
+    [editableWindowOverlays],
+  );
+  const overlayEditorEnabled = editableWindowOverlays.length > 0 && typeof onWindowOverlayChange === "function";
 
   useEffect(() => {
     if (availableComparisonOptions.length === 0) {
@@ -865,6 +931,15 @@ export function BandPlot({
       setSelectedComparisonId("");
     }
   }, [availableComparisonOptions, selectedComparisonId]);
+
+  useEffect(() => {
+    if (!overlayDragState) {
+      return;
+    }
+    if (!windowOverlayById.has(overlayDragState.overlayId)) {
+      setOverlayDragState(null);
+    }
+  }, [overlayDragState, windowOverlayById]);
 
   // Shift all energies relative to Fermi level (E - E_F)
   const shiftedEnergies = useMemo(() => {
@@ -991,6 +1066,134 @@ export function BandPlot({
       yScale: (e: number) => plotHeight - ((e - eMin) / eSpan) * plotHeight,
     };
   }, [data.k_points, plotWidth, plotHeight, yDomain]);
+
+  const beginOverlayDrag = useCallback(
+    (
+      event: React.PointerEvent<SVGElement>,
+      overlay: BandPlotWindowOverlay,
+      mode: BandPlotWindowOverlayInteraction,
+    ) => {
+      if (!overlayEditorEnabled) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOverlayDragState({
+        overlayId: overlay.id,
+        pointerId: event.pointerId,
+        mode,
+        startClientY: event.clientY,
+        startMin: overlay.min,
+        startMax: overlay.max,
+      });
+    },
+    [overlayEditorEnabled],
+  );
+
+  useEffect(() => {
+    if (!overlayDragState || !onWindowOverlayChange) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerId !== overlayDragState.pointerId) {
+        return;
+      }
+      const activeOverlay = windowOverlayById.get(overlayDragState.overlayId);
+      if (!activeOverlay) {
+        return;
+      }
+      event.preventDefault();
+
+      const span = Math.max(scales.eMax - scales.eMin, 1e-12);
+      const deltaEnergy = -((event.clientY - overlayDragState.startClientY) / Math.max(plotHeight, 1)) * span;
+      const minLimit = Math.min(scales.eMin, scales.eMax);
+      const maxLimit = Math.max(scales.eMin, scales.eMax);
+      const minSpan = Math.max(MIN_WINDOW_SPAN_EV, (maxLimit - minLimit) * 1e-6);
+
+      let nextMin = overlayDragState.startMin;
+      let nextMax = overlayDragState.startMax;
+
+      if (overlayDragState.mode === "move") {
+        const windowSpan = Math.max(overlayDragState.startMax - overlayDragState.startMin, minSpan);
+        nextMin = overlayDragState.startMin + deltaEnergy;
+        nextMax = overlayDragState.startMax + deltaEnergy;
+        if (nextMin < minLimit) {
+          nextMin = minLimit;
+          nextMax = minLimit + windowSpan;
+        }
+        if (nextMax > maxLimit) {
+          nextMax = maxLimit;
+          nextMin = maxLimit - windowSpan;
+        }
+      } else if (overlayDragState.mode === "resize-min" || overlayDragState.mode === "slider-min") {
+        nextMin = clampToRange(
+          overlayDragState.startMin + deltaEnergy,
+          minLimit,
+          overlayDragState.startMax - minSpan,
+        );
+        nextMax = overlayDragState.startMax;
+      } else {
+        nextMax = clampToRange(
+          overlayDragState.startMax + deltaEnergy,
+          overlayDragState.startMin + minSpan,
+          maxLimit,
+        );
+        nextMin = overlayDragState.startMin;
+      }
+
+      onWindowOverlayChange({
+        id: activeOverlay.id,
+        min: nextMin,
+        max: nextMax,
+        interaction: overlayDragState.mode,
+      });
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.pointerId !== overlayDragState.pointerId) {
+        return;
+      }
+      setOverlayDragState(null);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, [
+    onWindowOverlayChange,
+    overlayDragState,
+    plotHeight,
+    scales.eMax,
+    scales.eMin,
+    windowOverlayById,
+  ]);
+
+  const windowOverlayRenderData = useMemo(
+    () =>
+      editableWindowOverlays.map((overlay) => {
+        const minEnergy = Math.min(overlay.min, overlay.max);
+        const maxEnergy = Math.max(overlay.min, overlay.max);
+        const topY = scales.yScale(maxEnergy);
+        const bottomY = scales.yScale(minEnergy);
+        const y = Math.min(topY, bottomY);
+        const heightPx = Math.max(2, Math.abs(bottomY - topY));
+        const sliderX = overlay.side === "left" ? -12 : plotWidth + 12;
+        return {
+          overlay,
+          y,
+          heightPx,
+          topY,
+          bottomY,
+          sliderX,
+        };
+      }),
+    [editableWindowOverlays, plotWidth, scales],
+  );
 
   const bandColors = useMemo(
     () =>
@@ -1653,6 +1856,144 @@ export function BandPlot({
                 ))}
               </g>
 
+              {overlayEditorEnabled && (
+                <>
+                  <g className="band-plot-window-overlays" clipPath={`url(#${clipPathId})`}>
+                    {windowOverlayRenderData.map((entry) => {
+                      const isDragging = overlayDragState?.overlayId === entry.overlay.id;
+                      return (
+                        <g key={`window-overlay-${entry.overlay.id}`}>
+                          <rect
+                            x={0}
+                            y={entry.y}
+                            width={plotWidth}
+                            height={entry.heightPx}
+                            fill={entry.overlay.color}
+                            opacity={0.18}
+                          />
+                          <line
+                            x1={0}
+                            x2={plotWidth}
+                            y1={entry.topY}
+                            y2={entry.topY}
+                            stroke={entry.overlay.color}
+                            strokeWidth={1.5}
+                            opacity={0.9}
+                          />
+                          <line
+                            x1={0}
+                            x2={plotWidth}
+                            y1={entry.bottomY}
+                            y2={entry.bottomY}
+                            stroke={entry.overlay.color}
+                            strokeWidth={1.5}
+                            opacity={0.9}
+                          />
+                          <rect
+                            x={0}
+                            y={entry.y}
+                            width={plotWidth}
+                            height={entry.heightPx}
+                            fill="transparent"
+                            onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "move")}
+                            style={{ cursor: isDragging ? "grabbing" : "grab", touchAction: "none" }}
+                          />
+                          <rect
+                            x={0}
+                            y={entry.topY - 5}
+                            width={plotWidth}
+                            height={10}
+                            fill="transparent"
+                            onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "resize-max")}
+                            style={{ cursor: "ns-resize", touchAction: "none" }}
+                          />
+                          <rect
+                            x={0}
+                            y={entry.bottomY - 5}
+                            width={plotWidth}
+                            height={10}
+                            fill="transparent"
+                            onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "resize-min")}
+                            style={{ cursor: "ns-resize", touchAction: "none" }}
+                          />
+                          <text
+                            x={8}
+                            y={Math.max(14, entry.y + 15)}
+                            fill={colors.text}
+                            fontSize={Math.max(10, 11 * effectivePlotTextScale)}
+                            fontWeight={700}
+                            pointerEvents="none"
+                          >
+                            {entry.overlay.label}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                  <g className="band-plot-window-sliders">
+                    {windowOverlayRenderData.map((entry) => {
+                      const sliderBodyRawHeight = Math.abs(entry.bottomY - entry.topY);
+                      const sliderBodyHeight = Math.max(12, sliderBodyRawHeight);
+                      const sliderBodyY = Math.min(entry.topY, entry.bottomY) - (sliderBodyHeight - sliderBodyRawHeight) / 2;
+                      return (
+                        <g key={`window-slider-${entry.overlay.id}`} transform={`translate(${entry.sliderX}, 0)`}>
+                        <line
+                          x1={0}
+                          x2={0}
+                          y1={0}
+                          y2={plotHeight}
+                          stroke={entry.overlay.color}
+                          strokeOpacity={0.3}
+                          strokeWidth={2}
+                        />
+                        <line
+                          x1={0}
+                          x2={0}
+                          y1={entry.topY}
+                          y2={entry.bottomY}
+                          stroke={entry.overlay.color}
+                          strokeOpacity={0.85}
+                          strokeWidth={5}
+                        />
+                        <rect
+                          x={-8}
+                          y={sliderBodyY}
+                          width={16}
+                          height={sliderBodyHeight}
+                          fill="transparent"
+                          onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "move")}
+                          style={{
+                            cursor: overlayDragState?.overlayId === entry.overlay.id ? "grabbing" : "grab",
+                            touchAction: "none",
+                          }}
+                        />
+                        <circle
+                          cx={0}
+                          cy={entry.topY}
+                          r={6}
+                          fill={entry.overlay.color}
+                          stroke={svgBgFill}
+                          strokeWidth={1.5}
+                          onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "slider-max")}
+                          style={{ cursor: "ns-resize", touchAction: "none" }}
+                        />
+                        <circle
+                          cx={0}
+                          cy={entry.bottomY}
+                          r={6}
+                          fill={entry.overlay.color}
+                          stroke={svgBgFill}
+                          strokeWidth={1.5}
+                          onPointerDown={(event) => beginOverlayDrag(event, entry.overlay, "slider-min")}
+                          style={{ cursor: "ns-resize", touchAction: "none" }}
+                        />
+                        </g>
+                      );
+                    })}
+                  </g>
+                </>
+              )}
+
               {/* High-symmetry point vertical lines */}
               {data.high_symmetry_points.map((point, i) => (
                 <g key={i}>
@@ -2011,6 +2352,9 @@ export function BandPlot({
             <span className="band-plot-projection-pill">
               Overlay: {selectedComparison.label}
             </span>
+          )}
+          {overlayEditorEnabled && (
+            <span className="band-plot-overlay-hint">{windowOverlayHint}</span>
           )}
         </div>
       </div>

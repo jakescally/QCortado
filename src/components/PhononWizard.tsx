@@ -14,6 +14,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -41,15 +42,6 @@ import {
   saveExecutionMode,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
-}
 
 function parseOptionalPositiveNumber(value: string): number | null {
   const trimmed = value.trim();
@@ -1322,7 +1314,7 @@ export function PhononWizard({
             <div className="phonon-field">
               <label>
                 Q-point grid
-                <Tooltip text="Phonon dynamical matrices are computed on this coarse reciprocal-space mesh (`nq1`, `nq2`, `nq3`). Larger meshes improve interpolation and thermodynamics, but cost scales quickly." />
+                <InfoTooltip text="Phonon dynamical matrices are computed on this coarse reciprocal-space mesh (`nq1`, `nq2`, `nq3`). Larger meshes improve interpolation and thermodynamics, but cost scales quickly." />
               </label>
               <div className="qgrid-inputs">
                 <input
@@ -1355,7 +1347,7 @@ export function PhononWizard({
             <div className="phonon-field">
               <label>
                 DFPT convergence threshold
-                <Tooltip text="QE variable: `tr2_ph`. Linear-response convergence threshold. Tighter values reduce force-constant noise but increase SCF iterations per perturbation." />
+                <InfoTooltip text="QE variable: `tr2_ph`. Linear-response convergence threshold. Tighter values reduce force-constant noise but increase SCF iterations per perturbation." />
               </label>
               <input
                 type="text"
@@ -1379,7 +1371,7 @@ export function PhononWizard({
             <div className="phonon-field">
               <label>
                 Acoustic sum rule
-                <Tooltip text="QE variable: `asr` (used by `q2r.x`/`matdyn.x`). Enforces translational invariance of acoustic modes. `crystal` is typically best for periodic bulk systems." />
+                <InfoTooltip text="QE variable: `asr` (used by `q2r.x`/`matdyn.x`). Enforces translational invariance of acoustic modes. `crystal` is typically best for periodic bulk systems." />
               </label>
               <select
                 value={asr}
@@ -1399,7 +1391,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("solver")} className="section-header">
             <span className={`collapse-icon ${expandedSections.solver ? "expanded" : ""}`}>▶</span>
             Convergence & Solver Settings
-            <Tooltip text="Advanced `ph.x` solver controls (`nmix_ph`, `niter_ph`, `alpha_mix(1)`, `verbosity`)." />
+            <InfoTooltip text="Advanced `ph.x` solver controls (`nmix_ph`, `niter_ph`, `alpha_mix(1)`, `verbosity`)." />
           </h4>
           {expandedSections.solver && (
             <div className="option-params">
@@ -1407,7 +1399,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Response mixing history
-                    <Tooltip text="QE variable: `nmix_ph`. Number of mixed iterations retained in linear-response SCF. Larger values can stabilize difficult cases but cost more memory/time." />
+                    <InfoTooltip text="QE variable: `nmix_ph`. Number of mixed iterations retained in linear-response SCF. Larger values can stabilize difficult cases but cost more memory/time." />
                   </label>
                   <input
                     type="text"
@@ -1422,7 +1414,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Max DFPT iterations
-                    <Tooltip text="QE variable: `niter_ph`. Maximum DFPT self-consistency iterations per perturbation. Raise for hard-to-converge metallic or magnetic systems." />
+                    <InfoTooltip text="QE variable: `niter_ph`. Maximum DFPT self-consistency iterations per perturbation. Raise for hard-to-converge metallic or magnetic systems." />
                   </label>
                   <input
                     type="text"
@@ -1437,7 +1429,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Initial response mixing factor
-                    <Tooltip text="QE variable: `alpha_mix(1)`. Lower values can help convergence in difficult cases, but usually require more iterations." />
+                    <InfoTooltip text="QE variable: `alpha_mix(1)`. Lower values can help convergence in difficult cases, but usually require more iterations." />
                   </label>
                   <input
                     type="text"
@@ -1452,7 +1444,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Output detail level
-                    <Tooltip text="QE variable: `verbosity`. Higher verbosity helps debugging but increases output size." />
+                    <InfoTooltip text="QE variable: `verbosity`. Higher verbosity helps debugging but increases output size." />
                   </label>
                   <select
                     value={verbosity}
@@ -1472,7 +1464,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("longRange")} className="section-header">
             <span className={`collapse-icon ${expandedSections.longRange ? "expanded" : ""}`}>▶</span>
             Long-Range & Spectroscopy
-            <Tooltip text="Optional long-range electrostatics and spectroscopy outputs (`epsil`, `fpol`, `lraman`)." />
+            <InfoTooltip text="Optional long-range electrostatics and spectroscopy outputs (`epsil`, `fpol`, `lraman`)." />
           </h4>
           {expandedSections.longRange && (
             <div className="option-params">
@@ -1484,7 +1476,7 @@ export function PhononWizard({
                 />
                 <span>
                   Compute dielectric tensor and Born charges
-                  <Tooltip text="QE variable: `epsil`. Computes dielectric tensor and Born effective charges for non-metallic systems; required for LO-TO splitting analysis at Γ." />
+                  <InfoTooltip text="QE variable: `epsil`. Computes dielectric tensor and Born effective charges for non-metallic systems; required for LO-TO splitting analysis at Γ." />
                 </span>
               </label>
               <label className="option-checkbox">
@@ -1495,7 +1487,7 @@ export function PhononWizard({
                 />
                 <span>
                   Compute polarizability derivatives
-                  <Tooltip text="QE variable: `fpol`. Enables additional response quantities used by optical analyses; adds DFPT workload." />
+                  <InfoTooltip text="QE variable: `fpol`. Enables additional response quantities used by optical analyses; adds DFPT workload." />
                 </span>
               </label>
               <label className="option-checkbox">
@@ -1506,7 +1498,7 @@ export function PhononWizard({
                 />
                 <span>
                   Compute Raman tensors
-                  <Tooltip text="QE variable: `lraman`. Computes Raman tensors from DFPT response. Useful for spectroscopy, but significantly increases runtime." />
+                  <InfoTooltip text="QE variable: `lraman`. Computes Raman tensors from DFPT response. Useful for spectroscopy, but significantly increases runtime." />
                 </span>
               </label>
             </div>
@@ -1517,7 +1509,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("electronPhonon")} className="section-header">
             <span className={`collapse-icon ${expandedSections.electronPhonon ? "expanded" : ""}`}>▶</span>
             Electron-Phonon & Partial Run
-            <Tooltip text="Electron-phonon mode and optional partial-range execution (`electron_phonon`, `el_ph_sigma`, `el_ph_nsigma`, `start_q`, `last_q`, `start_irr`, `last_irr`)." />
+            <InfoTooltip text="Electron-phonon mode and optional partial-range execution (`electron_phonon`, `el_ph_sigma`, `el_ph_nsigma`, `start_q`, `last_q`, `start_irr`, `last_irr`)." />
           </h4>
           {expandedSections.electronPhonon && (
             <div className="option-params">
@@ -1525,7 +1517,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Electron-phonon mode
-                    <Tooltip text="QE variable: `electron_phonon`. Keep `none` for pure vibrational runs; enable for coupling workflows." />
+                    <InfoTooltip text="QE variable: `electron_phonon`. Keep `none` for pure vibrational runs; enable for coupling workflows." />
                   </label>
                   <select
                     value={electronPhononMode}
@@ -1541,7 +1533,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     E-ph smearing width
-                    <Tooltip text="QE variable: `el_ph_sigma`. Smearing width used in electron-phonon integrations. Larger broadening smooths noisy integrals but can blur fine features." />
+                    <InfoTooltip text="QE variable: `el_ph_sigma`. Smearing width used in electron-phonon integrations. Larger broadening smooths noisy integrals but can blur fine features." />
                   </label>
                   <input
                     type="text"
@@ -1558,7 +1550,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Number of smearing samples
-                    <Tooltip text="QE variable: `el_ph_nsigma`. Number of sigma values sampled in electron-phonon integrations. More values improve convergence checks but increase cost." />
+                    <InfoTooltip text="QE variable: `el_ph_nsigma`. Number of sigma values sampled in electron-phonon integrations. More values improve convergence checks but increase cost." />
                   </label>
                   <input
                     type="text"
@@ -1575,7 +1567,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Q-point index range
-                    <Tooltip text="QE variables: `start_q`, `last_q`. Run only a subset of irreducible q-points (1-based indices). Useful for restart/debug or distributed job splitting." />
+                    <InfoTooltip text="QE variables: `start_q`, `last_q`. Run only a subset of irreducible q-points (1-based indices). Useful for restart/debug or distributed job splitting." />
                   </label>
                   <div className="dual-input">
                     <input
@@ -1604,7 +1596,7 @@ export function PhononWizard({
                 <div className="phonon-field">
                   <label>
                     Irreducible-representation range
-                    <Tooltip text="QE variables: `start_irr`, `last_irr`. Restrict irreducible representation range for each q-point. Primarily for advanced restart and debugging workflows." />
+                    <InfoTooltip text="QE variables: `start_irr`, `last_irr`. Restrict irreducible representation range for each q-point. Primarily for advanced restart and debugging workflows." />
                   </label>
                   <div className="dual-input">
                     <input
@@ -1638,14 +1630,14 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("epw")} className="section-header">
             <span className={`collapse-icon ${expandedSections.epw ? "expanded" : ""}`}>▶</span>
             EPW Preparation
-            <Tooltip text="Prepare additional artifacts for later EPW workflows (`fildvscf`, artifact retention)." />
+            <InfoTooltip text="Prepare additional artifacts for later EPW workflows (`fildvscf`, artifact retention)." />
           </h4>
           {expandedSections.epw && (
             <div className="option-params">
               <div className="phonon-field">
                 <label>
                   Artifact Save Policy
-                  <Tooltip text="Controls which phonon artifacts are retained in project history after saving. Choose `epw-ready` or `full-archive` for EPW workflows." />
+                  <InfoTooltip text="Controls which phonon artifacts are retained in project history after saving. Choose `epw-ready` or `full-archive` for EPW workflows." />
                 </label>
                 <select
                   value={phononSavePolicy}
@@ -1666,14 +1658,14 @@ export function PhononWizard({
                   />
                   <span>
                     Write perturbation potentials
-                    <Tooltip text="QE variable: `fildvscf`. Stores dvscf files used by electron-phonon workflows. Increases on-disk data substantially." />
+                    <InfoTooltip text="QE variable: `fildvscf`. Stores dvscf files used by electron-phonon workflows. Increases on-disk data substantially." />
                   </span>
                 </label>
                 {fildvscfEnabled && (
                   <div className="phonon-field inline-field">
                     <label>
                       Perturbation potential filename root
-                      <Tooltip text="QE variable: `fildvscf`. Base filename used for perturbation-potential files." />
+                      <InfoTooltip text="QE variable: `fildvscf`. Base filename used for perturbation-potential files." />
                     </label>
                     <input
                       type="text"
@@ -1701,7 +1693,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("execution")} className="section-header">
             <span className={`collapse-icon ${expandedSections.execution ? "expanded" : ""}`}>▶</span>
             Execution Behavior
-            <Tooltip text="Runtime behavior flags (`recover`, `trans`)." />
+            <InfoTooltip text="Runtime behavior flags (`recover`, `trans`)." />
           </h4>
           {expandedSections.execution && (
             <div className="option-params">
@@ -1713,7 +1705,7 @@ export function PhononWizard({
                 />
                 <span>
                   Resume from checkpoints
-                  <Tooltip text="QE variable: `recover`. Attempts to resume from existing phonon checkpoints in the working directory. Helpful after interrupted long runs." />
+                  <InfoTooltip text="QE variable: `recover`. Attempts to resume from existing phonon checkpoints in the working directory. Helpful after interrupted long runs." />
                 </span>
               </label>
               <label className="option-checkbox">
@@ -1724,7 +1716,7 @@ export function PhononWizard({
                 />
                 <span>
                   Use Cartesian-transform output
-                  <Tooltip text="QE variable: `trans`. Controls representation transform in `ph.x` output. Leave enabled unless you need specific low-level output conventions." />
+                  <InfoTooltip text="QE variable: `trans`. Controls representation transform in `ph.x` output. Leave enabled unless you need specific low-level output conventions." />
                 </span>
               </label>
             </div>
@@ -1770,7 +1762,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("dos")} className="section-header">
             <span className={`collapse-icon ${expandedSections.dos ? "expanded" : ""}`}>▶</span>
             Phonon Density of States (matdyn.x)
-            <Tooltip text="Configure DOS post-processing with `matdyn.x` (`dos=.true.`, `nk1/nk2/nk3`, `deltaE`)." />
+            <InfoTooltip text="Configure DOS post-processing with `matdyn.x` (`dos=.true.`, `nk1/nk2/nk3`, `deltaE`)." />
           </h4>
           {expandedSections.dos && (
             <div className="option-params">
@@ -1782,7 +1774,7 @@ export function PhononWizard({
                 />
                 <span>
                   Compute phonon density of states
-                  <Tooltip text="Computes vibrational density of states from force constants. Useful for thermodynamics and spectral comparisons." />
+                  <InfoTooltip text="Computes vibrational density of states from force constants. Useful for thermodynamics and spectral comparisons." />
                 </span>
               </label>
 
@@ -1792,7 +1784,7 @@ export function PhononWizard({
                     <div className="phonon-field">
                       <label>
                         DOS sampling grid
-                        <Tooltip text="`matdyn.x` integration grid (`nk1`, `nk2`, `nk3`). Dense q sampling smooths DOS and improves integrated thermodynamic quantities, at additional cost." />
+                        <InfoTooltip text="`matdyn.x` integration grid (`nk1`, `nk2`, `nk3`). Dense q sampling smooths DOS and improves integrated thermodynamic quantities, at additional cost." />
                       </label>
                       <div className="qgrid-inputs">
                         <input
@@ -1823,7 +1815,7 @@ export function PhononWizard({
                     <div className="phonon-field">
                       <label>
                         DOS frequency bin width (cm^-1)
-                        <Tooltip text="`matdyn.x` variable: `deltaE`. Smaller values give finer spectra but larger files and potentially noisier curves." />
+                        <InfoTooltip text="`matdyn.x` variable: `deltaE`. Smaller values give finer spectra but larger files and potentially noisier curves." />
                       </label>
                       <input
                         type="text"
@@ -1847,7 +1839,7 @@ export function PhononWizard({
           <h4 onClick={() => toggleSection("dispersion")} className="section-header">
             <span className={`collapse-icon ${expandedSections.dispersion ? "expanded" : ""}`}>▶</span>
             Phonon Dispersion (matdyn.x)
-            <Tooltip text="Configure band-structure-style phonon interpolation along a high-symmetry path." />
+            <InfoTooltip text="Configure band-structure-style phonon interpolation along a high-symmetry path." />
           </h4>
           {expandedSections.dispersion && (
             <div className="option-params">
@@ -1859,7 +1851,7 @@ export function PhononWizard({
                 />
                 <span>
                   Compute phonon dispersion
-                  <Tooltip text="Computes phonon branches along a high-symmetry path. Essential for diagnosing dynamical stability and mode character." />
+                  <InfoTooltip text="Computes phonon branches along a high-symmetry path. Essential for diagnosing dynamical stability and mode character." />
                 </span>
               </label>
 
@@ -1952,7 +1944,7 @@ export function PhononWizard({
             <h4 onClick={() => toggleSection("mpi")} className="section-header">
               <span className={`collapse-icon ${expandedSections.mpi ? "expanded" : ""}`}>▶</span>
               Parallelization
-              <Tooltip text="Controls process-level parallel execution. More MPI processes often reduce wall time, but scaling depends on system size and workload balance." />
+              <InfoTooltip text="Controls process-level parallel execution. More MPI processes often reduce wall time, but scaling depends on system size and workload balance." />
             </h4>
             {expandedSections.mpi && (
               <div className="option-params">

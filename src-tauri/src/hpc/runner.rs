@@ -563,8 +563,7 @@ pub async fn sync_remote_artifacts(
                 &request.task_id,
                 format!(
                     "[QCortado] {} sync selected {} files ({} skipped as heavy/scratch).",
-                    mode_title,
-                    total_candidates, report.skipped_files
+                    mode_title, total_candidates, report.skipped_files
                 ),
             )
             .await;
@@ -635,8 +634,7 @@ pub async fn sync_remote_artifacts(
                     &request.task_id,
                     format!(
                         "HPC_WARNING|Some artifacts were not downloaded during {} sync ({}).",
-                        mode_label,
-                        preview
+                        mode_label, preview
                     ),
                 )
                 .await;

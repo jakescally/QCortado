@@ -29,6 +29,7 @@ import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -45,17 +46,6 @@ import {
   sampleHpcUtilization,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
-
-// Tooltip component for help icons
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
-}
-
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;
@@ -2102,22 +2092,26 @@ export function SCFWizard({
                   <h3>Crystal Structure</h3>
                   {hasPrimitiveDisplay && (
                     <div className="preset-buttons">
-                      <button
-                        type="button"
-                        className={`preset-btn ${cellViewMode === "conventional" ? "active" : ""}`}
-                        onClick={() => setCellViewMode("conventional")}
-                        title="Show conventional CIF lattice parameters"
-                      >
-                        Conventional
-                      </button>
-                      <button
-                        type="button"
-                        className={`preset-btn ${cellViewMode === "primitive" ? "active" : ""}`}
-                        onClick={() => setCellViewMode("primitive")}
-                        title="Show primitive lattice parameters used by QE (when detected)"
-                      >
-                        Primitive
-                      </button>
+                      <InfoTooltip text="Show conventional CIF lattice parameters">
+                        <button
+                          type="button"
+                          className={`preset-btn ${cellViewMode === "conventional" ? "active" : ""}`}
+                          onClick={() => setCellViewMode("conventional")}
+                          aria-label="Show conventional CIF lattice parameters"
+                        >
+                          Conventional
+                        </button>
+                      </InfoTooltip>
+                      <InfoTooltip text="Show primitive lattice parameters used by QE (when detected)">
+                        <button
+                          type="button"
+                          className={`preset-btn ${cellViewMode === "primitive" ? "active" : ""}`}
+                          onClick={() => setCellViewMode("primitive")}
+                          aria-label="Show primitive lattice parameters used by QE (when detected)"
+                        >
+                          Primitive
+                        </button>
+                      </InfoTooltip>
                     </div>
                   )}
                   <div className="info-grid">
@@ -2162,7 +2156,7 @@ export function SCFWizard({
                 <section className="config-section">
                   <h3>
                     Pseudopotentials
-                    <Tooltip text="Pseudopotentials approximate the effect of core electrons (those tightly bound to the nucleus) so the calculation only needs to explicitly handle valence electrons. This dramatically reduces computation cost while maintaining accuracy for chemical bonding and material properties. Each element needs its own pseudopotential file, typically generated with a specific exchange-correlation functional (like PBE)." />
+                    <InfoTooltip text="Pseudopotentials approximate the effect of core electrons (those tightly bound to the nucleus) so the calculation only needs to explicitly handle valence electrons. This dramatically reduces computation cost while maintaining accuracy for chemical bonding and material properties. Each element needs its own pseudopotential file, typically generated with a specific exchange-correlation functional (like PBE)." />
                   </h3>
                   {socPresetSelected && (
                     <p className="pseudo-hint">
@@ -2255,7 +2249,7 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("basic")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.basic ? "expanded" : ""}`}>▶</span>
                     Basic Parameters
-                    <Tooltip text="Essential parameters for any SCF calculation: energy cutoffs and k-point sampling." />
+                    <InfoTooltip text="Essential parameters for any SCF calculation: energy cutoffs and k-point sampling." />
                   </h3>
                   {expandedSections.basic && (
                     <div className="param-grid">
@@ -2264,17 +2258,33 @@ export function SCFWizard({
                           <label>Presets</label>
                           <div className="preset-buttons">
                             {showStandardPreset && (
-                              <button
-                                type="button"
-                                className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
-                                onClick={() => applyPreset("standard")}
-                                title="Standard SCF calculation"
-                              >
-                                Standard
-                              </button>
+                              <InfoTooltip text="Standard SCF calculation">
+                                <button
+                                  type="button"
+                                  className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
+                                  onClick={() => applyPreset("standard")}
+                                  aria-label="Standard SCF calculation"
+                                >
+                                  Standard
+                                </button>
+                              </InfoTooltip>
                             )}
                             {showPhononPreset && (
-                              <span className="preset-tooltip-container">
+                              (phononPresetDisabled ? (
+                                <InfoTooltip
+                                  text={phononPresetDisabledMessage || "Phonon-ready preset is unavailable."}
+                                  className="preset-disabled-tooltip"
+                                >
+                                  <button
+                                    type="button"
+                                    className={`preset-btn preset-phonon ${selectedPreset === "phonon" && !phononPresetDisabled ? "active" : ""} ${phononPresetDisabled ? "preset-disabled" : ""}`}
+                                    onClick={() => applyPreset("phonon")}
+                                    aria-disabled={phononPresetDisabled}
+                                  >
+                                    Phonon-Ready
+                                  </button>
+                                </InfoTooltip>
+                              ) : (
                                 <button
                                   type="button"
                                   className={`preset-btn preset-phonon ${selectedPreset === "phonon" && !phononPresetDisabled ? "active" : ""} ${phononPresetDisabled ? "preset-disabled" : ""}`}
@@ -2283,32 +2293,31 @@ export function SCFWizard({
                                 >
                                   Phonon-Ready
                                 </button>
-                                {phononPresetDisabled && (
-                                  <span className="tooltip-text preset-disabled-tooltip">
-                                    {phononPresetDisabledMessage}
-                                  </span>
-                                )}
-                              </span>
+                              ))
                             )}
                             {showRelaxPreset && (
-                              <button
-                                type="button"
-                                className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
-                                onClick={() => applyPreset("relax")}
-                                title="Variable-cell relaxation for structure optimization"
-                              >
-                                Optimize Structure
-                              </button>
+                              <InfoTooltip text="Variable-cell relaxation for structure optimization">
+                                <button
+                                  type="button"
+                                  className={`preset-btn preset-relax ${selectedPreset === "relax" ? "active" : ""}`}
+                                  onClick={() => applyPreset("relax")}
+                                  aria-label="Variable-cell relaxation for structure optimization"
+                                >
+                                  Optimize Structure
+                                </button>
+                              </InfoTooltip>
                             )}
                             {showSocPreset && (
-                              <button
-                                type="button"
-                                className={`preset-btn ${selectedPreset === "soc" ? "active" : ""}`}
-                                onClick={() => applyPreset("soc")}
-                                title="SOC-enabled SCF calculation"
-                              >
-                                SOC
-                              </button>
+                              <InfoTooltip text="SOC-enabled SCF calculation">
+                                <button
+                                  type="button"
+                                  className={`preset-btn ${selectedPreset === "soc" ? "active" : ""}`}
+                                  onClick={() => applyPreset("soc")}
+                                  aria-label="SOC-enabled SCF calculation"
+                                >
+                                  SOC
+                                </button>
+                              </InfoTooltip>
                             )}
                           </div>
                         </div>
@@ -2318,7 +2327,7 @@ export function SCFWizard({
                         <div className="param-row">
                           <label>
                             Structure Source
-                            <Tooltip text="Choose the geometry used for this SCF. 'From CIF' uses the original imported structure; optimized structures come from saved geometry optimization runs." />
+                            <InfoTooltip text="Choose the geometry used for this SCF. 'From CIF' uses the original imported structure; optimized structures come from saved geometry optimization runs." />
                           </label>
                           <select
                             value={structureSource}
@@ -2337,7 +2346,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Calculation Type
-                          <Tooltip text="scf: ground state energy only. relax: optimize atomic positions. vcrelax: optimize both positions and cell shape/size." />
+                          <InfoTooltip text="scf: ground state energy only. relax: optimize atomic positions. vcrelax: optimize both positions and cell shape/size." />
                         </label>
                         <select
                           value={config.calculation}
@@ -2356,7 +2365,7 @@ export function SCFWizard({
                           <div className="param-row">
                             <label>
                               Force Convergence
-                              <Tooltip text="Convergence threshold for forces (Ry/Bohr). Relaxation stops when all forces are below this value. Use 1e-4 for rough optimization, 1e-5 for phonon calculations." />
+                              <InfoTooltip text="Convergence threshold for forces (Ry/Bohr). Relaxation stops when all forces are below this value. Use 1e-4 for rough optimization, 1e-5 for phonon calculations." />
                             </label>
                             <div className="param-input-group">
                               <input
@@ -2375,7 +2384,7 @@ export function SCFWizard({
                           <div className="param-row">
                             <label>
                               Energy Convergence
-                              <Tooltip text="Convergence threshold for total energy change between ionic steps (Ry)." />
+                              <InfoTooltip text="Convergence threshold for total energy change between ionic steps (Ry)." />
                             </label>
                             <div className="param-input-group">
                               <input
@@ -2399,7 +2408,7 @@ export function SCFWizard({
                         <div className="param-row">
                           <label>
                             Target Pressure
-                            <Tooltip text="Target external pressure in kbar. Use 0 for ambient pressure, positive for compression." />
+                            <InfoTooltip text="Target external pressure in kbar. Use 0 for ambient pressure, positive for compression." />
                           </label>
                           <div className="param-input-group">
                             <input
@@ -2415,7 +2424,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Wavefunction Cutoff
-                          <Tooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher = more accurate but slower. Typical: 30-80 Ry." />
+                          <InfoTooltip text="Energy cutoff for plane-wave expansion of wavefunctions (in Rydberg). Higher = more accurate but slower. Typical: 30-80 Ry." />
                         </label>
                         <div className="param-input-group">
                           <input
@@ -2439,7 +2448,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Charge Density Cutoff
-                          <Tooltip text="Energy cutoff for charge density (in Rydberg). Typical fallback is 4x ecutwfc for NC/PAW and 8x for US pseudopotentials." />
+                          <InfoTooltip text="Energy cutoff for charge density (in Rydberg). Typical fallback is 4x ecutwfc for NC/PAW and 8x for US pseudopotentials." />
                         </label>
                         <div className="param-input-group">
                           <input
@@ -2473,7 +2482,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           K-point Grid
-                          <Tooltip text="Monkhorst-Pack grid for Brillouin zone sampling. Denser = more accurate. Metals need denser grids." />
+                          <InfoTooltip text="Monkhorst-Pack grid for Brillouin zone sampling. Denser = more accurate. Metals need denser grids." />
                         </label>
                         <div className="kgrid-inputs">
                           <input type="number" value={config.kgrid[0]}
@@ -2489,7 +2498,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           K-point Offset
-                          <Tooltip text="Shift the k-point grid. Use (1,1,1) for metals to avoid high-symmetry points, (0,0,0) for insulators." />
+                          <InfoTooltip text="Shift the k-point grid. Use (1,1,1) for metals to avoid high-symmetry points, (0,0,0) for insulators." />
                         </label>
                         <div className="kgrid-inputs">
                           <input type="number" value={config.kgrid_offset[0]} min={0} max={1}
@@ -2520,14 +2529,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("electronic")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.electronic ? "expanded" : ""}`}>▶</span>
                     Electronic Structure
-                    <Tooltip text="Control how electronic states are occupied and how the Fermi level is determined." />
+                    <InfoTooltip text="Control how electronic states are occupied and how the Fermi level is determined." />
                   </h3>
                   {expandedSections.electronic && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           Occupations
-                          <Tooltip text="How to fill electronic states. 'smearing' for metals, 'tetrahedra' for accurate DOS, 'fixed' for insulators with gap." />
+                          <InfoTooltip text="How to fill electronic states. 'smearing' for metals, 'tetrahedra' for accurate DOS, 'fixed' for insulators with gap." />
                         </label>
                         <select value={config.occupations}
                           onChange={(e) => setConfig((prev) => ({ ...prev, occupations: e.target.value as any }))}>
@@ -2543,7 +2552,7 @@ export function SCFWizard({
                           <div className="param-row">
                             <label>
                               Smearing Type
-                              <Tooltip text="gaussian: simple, good for most cases. methfessel-paxton: better for metals. marzari-vanderbilt: 'cold smearing', good for forces. fermi-dirac: physical but needs higher temp." />
+                              <InfoTooltip text="gaussian: simple, good for most cases. methfessel-paxton: better for metals. marzari-vanderbilt: 'cold smearing', good for forces. fermi-dirac: physical but needs higher temp." />
                             </label>
                             <select value={config.smearing}
                               onChange={(e) => setConfig((prev) => ({ ...prev, smearing: e.target.value as any }))}>
@@ -2556,7 +2565,7 @@ export function SCFWizard({
                           <div className="param-row">
                             <label>
                               Smearing Width (degauss)
-                              <Tooltip text="Smearing width in Ry. Smaller = more accurate but harder to converge. Typical: 0.005-0.02 Ry for metals." />
+                              <InfoTooltip text="Smearing width in Ry. Smaller = more accurate but harder to converge. Typical: 0.005-0.02 Ry for metals." />
                             </label>
                             <div className="param-input-group">
                               <input type="number" step="0.001" value={config.degauss}
@@ -2569,7 +2578,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Number of Bands
-                          <Tooltip text="Total number of Kohn-Sham states. Leave empty for automatic (occupied + some empty). Increase for accurate DOS or optical properties." />
+                          <InfoTooltip text="Total number of Kohn-Sham states. Leave empty for automatic (occupied + some empty). Increase for accurate DOS or optical properties." />
                         </label>
                         <div className="param-input-group">
                           <input type="number" value={config.nbnd ?? ""} placeholder="auto"
@@ -2579,7 +2588,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Total Charge
-                          <Tooltip text="Total charge of the system in units of e. Positive = remove electrons, negative = add electrons. 0 = neutral." />
+                          <InfoTooltip text="Total charge of the system in units of e. Positive = remove electrons, negative = add electrons. 0 = neutral." />
                         </label>
                         <div className="param-input-group">
                           <input type="number" step="0.1" value={config.tot_charge}
@@ -2590,7 +2599,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           XC Functional Override
-                          <Tooltip text="Override the exchange-correlation functional from pseudopotentials. Leave empty to use pseudopotential default. Examples: PBE, PBEsol, SCAN, HSE, B3LYP." />
+                          <InfoTooltip text="Override the exchange-correlation functional from pseudopotentials. Leave empty to use pseudopotential default. Examples: PBE, PBEsol, SCAN, HSE, B3LYP." />
                         </label>
                         <input type="text" value={config.input_dft} placeholder="(use pseudopotential default)"
                           onChange={(e) => setConfig((prev) => ({ ...prev, input_dft: e.target.value }))} />
@@ -2604,14 +2613,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("magnetism")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.magnetism ? "expanded" : ""}`}>▶</span>
                     Magnetism & Spin
-                    <Tooltip text="Enable spin-polarized calculations for magnetic materials and spin-orbit coupling for heavy elements." />
+                    <InfoTooltip text="Enable spin-polarized calculations for magnetic materials and spin-orbit coupling for heavy elements." />
                   </h3>
                   {expandedSections.magnetism && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           Spin Polarization
-                          <Tooltip text="nspin=1: non-magnetic. nspin=2: collinear magnetic (spin up/down). nspin=4: non-collinear (required for spin-orbit)." />
+                          <InfoTooltip text="nspin=1: non-magnetic. nspin=2: collinear magnetic (spin up/down). nspin=4: non-collinear (required for spin-orbit)." />
                         </label>
                         <select value={config.nspin}
                           onChange={(e) => {
@@ -2632,7 +2641,7 @@ export function SCFWizard({
                         <div className="param-row">
                           <label>
                             Spin-Orbit Coupling
-                            <Tooltip text="Include spin-orbit interaction. Required for topological properties and heavy elements. Needs fully-relativistic pseudopotentials." />
+                            <InfoTooltip text="Include spin-orbit interaction. Required for topological properties and heavy elements. Needs fully-relativistic pseudopotentials." />
                           </label>
                           <label className="toggle-label">
                             <input type="checkbox" checked={config.lspinorb}
@@ -2645,7 +2654,7 @@ export function SCFWizard({
                         <div className="param-row">
                           <label>
                             Total Magnetization
-                            <Tooltip text="Fix total magnetization (N_up - N_down). Leave empty for unconstrained." />
+                            <InfoTooltip text="Fix total magnetization (N_up - N_down). Leave empty for unconstrained." />
                           </label>
                           <div className="param-input-group">
                             <input type="number" step="0.1" value={config.tot_magnetization ?? ""} placeholder="auto"
@@ -2659,7 +2668,7 @@ export function SCFWizard({
                           <div className="param-row full-width">
                             <label>
                               Starting Magnetization (per element)
-                              <Tooltip text="Initial spin polarization for each element (-1 to +1). Helps SCF converge to correct magnetic state." />
+                              <InfoTooltip text="Initial spin polarization for each element (-1 to +1). Helps SCF converge to correct magnetic state." />
                             </label>
                           </div>
                           <div className="magnetization-grid">
@@ -2686,14 +2695,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("convergence")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.convergence ? "expanded" : ""}`}>▶</span>
                     SCF Convergence
-                    <Tooltip text="Parameters controlling how the self-consistent field iteration converges." />
+                    <InfoTooltip text="Parameters controlling how the self-consistent field iteration converges." />
                   </h3>
                   {expandedSections.convergence && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           Convergence Threshold
-                          <Tooltip text="SCF stops when energy change falls below this value (Ry). 1e-12 is the default for the built-in presets, and 1e-12+ remains appropriate for phonons." />
+                          <InfoTooltip text="SCF stops when energy change falls below this value (Ry). 1e-12 is the default for the built-in presets, and 1e-12+ remains appropriate for phonons." />
                         </label>
                         <div className="param-input-group">
                           <input type="text" value={convThrInput}
@@ -2713,7 +2722,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Max SCF Iterations
-                          <Tooltip text="Maximum number of SCF iterations before giving up." />
+                          <InfoTooltip text="Maximum number of SCF iterations before giving up." />
                         </label>
                         <input type="number" value={config.electron_maxstep}
                           onChange={(e) => setConfig((prev) => ({ ...prev, electron_maxstep: parseInt(e.target.value) }))} />
@@ -2721,7 +2730,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Mixing Mode
-                          <Tooltip text="How to mix old and new charge density. 'plain' is default, 'TF' or 'local-TF' can help metals converge." />
+                          <InfoTooltip text="How to mix old and new charge density. 'plain' is default, 'TF' or 'local-TF' can help metals converge." />
                         </label>
                         <select value={config.mixing_mode}
                           onChange={(e) => setConfig((prev) => ({ ...prev, mixing_mode: e.target.value as any }))}>
@@ -2733,7 +2742,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Mixing Beta
-                          <Tooltip text="Fraction of new density to mix in (0-1). Lower = more stable but slower. 0.7 default, use 0.1-0.3 for difficult cases." />
+                          <InfoTooltip text="Fraction of new density to mix in (0-1). Lower = more stable but slower. 0.7 default, use 0.1-0.3 for difficult cases." />
                         </label>
                         <input type="number" step="0.05" min={0} max={1} value={config.mixing_beta}
                           onChange={(e) => setConfig((prev) => ({ ...prev, mixing_beta: parseFloat(e.target.value) }))} />
@@ -2741,7 +2750,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Mixing Dimensions
-                          <Tooltip text="Number of previous iterations used in Broyden mixing. Higher can help difficult cases converge." />
+                          <InfoTooltip text="Number of previous iterations used in Broyden mixing. Higher can help difficult cases converge." />
                         </label>
                         <input type="number" min={2} max={20} value={config.mixing_ndim}
                           onChange={(e) => setConfig((prev) => ({ ...prev, mixing_ndim: parseInt(e.target.value) }))} />
@@ -2749,7 +2758,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Diagonalization
-                          <Tooltip text="Algorithm for solving eigenvalue problem. 'david' is fast for most cases, 'cg' for difficult cases, 'ppcg'/'paro' for large parallel runs." />
+                          <InfoTooltip text="Algorithm for solving eigenvalue problem. 'david' is fast for most cases, 'cg' for difficult cases, 'ppcg'/'paro' for large parallel runs." />
                         </label>
                         <select value={config.diagonalization}
                           onChange={(e) => setConfig((prev) => ({ ...prev, diagonalization: e.target.value as any }))}>
@@ -2763,7 +2772,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Starting Potential
-                          <Tooltip text="'atomic': superposition of atomic potentials (default). 'file': read from previous calculation." />
+                          <InfoTooltip text="'atomic': superposition of atomic potentials (default). 'file': read from previous calculation." />
                         </label>
                         <select value={config.startingpot}
                           onChange={(e) => setConfig((prev) => ({ ...prev, startingpot: e.target.value as any }))}>
@@ -2774,7 +2783,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Starting Wavefunctions
-                          <Tooltip text="Initial guess for wavefunctions. 'atomic': atomic orbitals. 'atomic+random': with randomization. 'random': fully random." />
+                          <InfoTooltip text="Initial guess for wavefunctions. 'atomic': atomic orbitals. 'atomic+random': with randomization. 'random': fully random." />
                         </label>
                         <select value={config.startingwfc}
                           onChange={(e) => setConfig((prev) => ({ ...prev, startingwfc: e.target.value as any }))}>
@@ -2793,14 +2802,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("dftu")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.dftu ? "expanded" : ""}`}>▶</span>
                     DFT+U (Hubbard Correction)
-                    <Tooltip text="Add Hubbard U correction to improve description of localized d and f electrons in transition metals and lanthanides." />
+                    <InfoTooltip text="Add Hubbard U correction to improve description of localized d and f electrons in transition metals and lanthanides." />
                   </h3>
                   {expandedSections.dftu && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           Enable DFT+U
-                          <Tooltip text="Apply Hubbard U correction. Essential for correlated materials like transition metal oxides." />
+                          <InfoTooltip text="Apply Hubbard U correction. Essential for correlated materials like transition metal oxides." />
                         </label>
                         <label className="toggle-label">
                           <input type="checkbox" checked={config.lda_plus_u}
@@ -2813,7 +2822,7 @@ export function SCFWizard({
                           <div className="param-row">
                             <label>
                               DFT+U Type
-                              <Tooltip text="0: simplified rotationally invariant. 1: rotationally invariant with J. 2: DFT+U+J (full)." />
+                              <InfoTooltip text="0: simplified rotationally invariant. 1: rotationally invariant with J. 2: DFT+U+J (full)." />
                             </label>
                             <select value={config.lda_plus_u_kind}
                               onChange={(e) => setConfig((prev) => ({ ...prev, lda_plus_u_kind: parseInt(e.target.value) as 0 | 1 | 2 }))}>
@@ -2861,14 +2870,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("vdw")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.vdw ? "expanded" : ""}`}>▶</span>
                     Van der Waals Corrections
-                    <Tooltip text="Add dispersion corrections for systems where van der Waals interactions are important (layered materials, molecules, etc.)." />
+                    <InfoTooltip text="Add dispersion corrections for systems where van der Waals interactions are important (layered materials, molecules, etc.)." />
                   </h3>
                   {expandedSections.vdw && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           vdW Correction Method
-                          <Tooltip text="None: standard DFT. DFT-D2/D3: Grimme's empirical corrections. TS-vdW: Tkatchenko-Scheffler. XDM: exchange-hole dipole moment." />
+                          <InfoTooltip text="None: standard DFT. DFT-D2/D3: Grimme's empirical corrections. TS-vdW: Tkatchenko-Scheffler. XDM: exchange-hole dipole moment." />
                         </label>
                         <select value={config.vdw_corr}
                           onChange={(e) => setConfig((prev) => ({ ...prev, vdw_corr: e.target.value as any }))}>
@@ -2888,14 +2897,14 @@ export function SCFWizard({
                   <h3 onClick={() => toggleSection("advanced")} className="section-header">
                     <span className={`collapse-icon ${expandedSections.advanced ? "expanded" : ""}`}>▶</span>
                     Advanced Options
-                    <Tooltip text="Additional settings for special cases: isolated systems, output control, etc." />
+                    <InfoTooltip text="Additional settings for special cases: isolated systems, output control, etc." />
                   </h3>
                   {expandedSections.advanced && (
                     <div className="param-grid">
                       <div className="param-row">
                         <label>
                           Isolated System
-                          <Tooltip text="For molecules or slabs, remove spurious interactions with periodic images. 'martyna-tuckerman' for molecules, 'esm' or '2D' for slabs." />
+                          <InfoTooltip text="For molecules or slabs, remove spurious interactions with periodic images. 'martyna-tuckerman' for molecules, 'esm' or '2D' for slabs." />
                         </label>
                         <select value={config.assume_isolated}
                           onChange={(e) => setConfig((prev) => ({ ...prev, assume_isolated: e.target.value as any }))}>
@@ -2909,7 +2918,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Verbosity
-                          <Tooltip text="Amount of output. 'high' gives more detail for debugging." />
+                          <InfoTooltip text="Amount of output. 'high' gives more detail for debugging." />
                         </label>
                         <select value={config.verbosity}
                           onChange={(e) => setConfig((prev) => ({ ...prev, verbosity: e.target.value as any }))}>
@@ -2920,7 +2929,7 @@ export function SCFWizard({
                       <div className="param-row">
                         <label>
                           Disk I/O
-                          <Tooltip text="How much to write to disk. 'low' saves space, 'nowf' doesn't save wavefunctions (can't restart)." />
+                          <InfoTooltip text="How much to write to disk. 'low' saves space, 'nowf' doesn't save wavefunctions (can't restart)." />
                         </label>
                         <select value={config.disk_io}
                           onChange={(e) => setConfig((prev) => ({ ...prev, disk_io: e.target.value as any }))}>
@@ -2967,7 +2976,7 @@ export function SCFWizard({
                   <section className="config-section">
                     <h3>
                       Parallelization
-                      <Tooltip text="MPI (Message Passing Interface) allows running calculations in parallel across multiple CPU cores, significantly speeding up large calculations. Your Quantum ESPRESSO installation must be compiled with MPI support for this to work." />
+                      <InfoTooltip text="MPI (Message Passing Interface) allows running calculations in parallel across multiple CPU cores, significantly speeding up large calculations. Your Quantum ESPRESSO installation must be compiled with MPI support for this to work." />
                     </h3>
 
                     <div className="mpi-toggle-row">
@@ -2992,7 +3001,7 @@ export function SCFWizard({
                         <div className="param-row">
                           <label>
                             Number of processes
-                            <Tooltip text="Number of parallel MPI processes to use. More processes can speed up large calculations but have overhead for small systems. Using too many processes for a small system may actually slow things down." />
+                            <InfoTooltip text="Number of parallel MPI processes to use. More processes can speed up large calculations but have overhead for small systems. Using too many processes for a small system may actually slow things down." />
                           </label>
                           <div className="mpi-input-group">
                             <input

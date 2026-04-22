@@ -19,6 +19,7 @@ import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattic
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
 import { EditProjectDialog } from "./EditProjectDialog";
+import { InfoTooltip } from "./InfoTooltip";
 import type { TransportResult } from "../lib/transport";
 
 interface QEResult {
@@ -2532,30 +2533,31 @@ function normalizeSavedKPath(value: unknown): string {
             <div className="dashboard-title-row">
               <h2>{project.name}</h2>
               {!readOnly && (
-                <button
-                  className="project-title-edit-btn"
-                  type="button"
-                  onClick={openEditProjectDialog}
-                  title="Edit project"
-                  aria-label="Edit project"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                      d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M13.5 6.5l4 4"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
+                <InfoTooltip text="Edit project">
+                  <button
+                    className="project-title-edit-btn"
+                    type="button"
+                    onClick={openEditProjectDialog}
+                    aria-label="Edit project"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M13.5 6.5l4 4"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </InfoTooltip>
               )}
             </div>
             {project.description && (
@@ -2563,14 +2565,16 @@ function normalizeSavedKPath(value: unknown): string {
             )}
           </div>
           <div className="dashboard-header-actions">
-            <button
-              className="dashboard-refresh-btn"
-              onClick={() => void handleRefreshProject()}
-              disabled={isRefreshingProject}
-              title="Reload project data"
-            >
-              {isRefreshingProject ? "Refreshing..." : "Refresh"}
-            </button>
+            <InfoTooltip text="Reload project data">
+              <button
+                className="dashboard-refresh-btn"
+                onClick={() => void handleRefreshProject()}
+                disabled={isRefreshingProject}
+                aria-label="Reload project data"
+              >
+                {isRefreshingProject ? "Refreshing..." : "Refresh"}
+              </button>
+            </InfoTooltip>
           </div>
         </div>
 
@@ -2626,30 +2630,31 @@ function normalizeSavedKPath(value: unknown): string {
           <div className="dashboard-title-row">
             <h2>{project.name}</h2>
             {!readOnly && (
-              <button
-                className="project-title-edit-btn"
-                type="button"
-                onClick={openEditProjectDialog}
-                title="Edit project"
-                aria-label="Edit project"
-              >
-                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path
-                    d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M13.5 6.5l4 4"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
+              <InfoTooltip text="Edit project">
+                <button
+                  className="project-title-edit-btn"
+                  type="button"
+                  onClick={openEditProjectDialog}
+                  aria-label="Edit project"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path
+                      d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path
+                      d="M13.5 6.5l4 4"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </InfoTooltip>
             )}
           </div>
           {project.description && (
@@ -2657,14 +2662,16 @@ function normalizeSavedKPath(value: unknown): string {
           )}
         </div>
         <div className="dashboard-header-actions">
-          <button
-            className="dashboard-refresh-btn"
-            onClick={() => void handleRefreshProject()}
-            disabled={isRefreshingProject}
-            title="Reload project data"
-          >
-            {isRefreshingProject ? "Refreshing..." : "Refresh"}
-          </button>
+          <InfoTooltip text="Reload project data">
+            <button
+              className="dashboard-refresh-btn"
+              onClick={() => void handleRefreshProject()}
+              disabled={isRefreshingProject}
+              aria-label="Reload project data"
+            >
+              {isRefreshingProject ? "Refreshing..." : "Refresh"}
+            </button>
+          </InfoTooltip>
           <div className="structure-selector">
             <label className="structure-selector-label">Structure</label>
             <select
@@ -2678,14 +2685,16 @@ function normalizeSavedKPath(value: unknown): string {
               ))}
             </select>
             {!readOnly && (
-              <button
-                className="add-structure-inline-btn"
-                onClick={handleImportCIF}
-                disabled={isImporting}
-                title="Add new structure"
-              >
-                +
-              </button>
+              <InfoTooltip text="Add new structure">
+                <button
+                  className="add-structure-inline-btn"
+                  onClick={handleImportCIF}
+                  disabled={isImporting}
+                  aria-label="Add new structure"
+                >
+                  +
+                </button>
+              </InfoTooltip>
             )}
           </div>
         </div>
@@ -2703,22 +2712,26 @@ function normalizeSavedKPath(value: unknown): string {
             </div>
             {hasPrimitiveDisplay && (
               <div className="hero-cell-toggle">
-                <button
-                  type="button"
-                  className={`hero-cell-toggle-btn ${cellViewMode === "conventional" ? "active" : ""}`}
-                  onClick={() => setCellViewMode("conventional")}
-                  title="Show conventional CIF lattice parameters"
-                >
-                  Conventional
-                </button>
-                <button
-                  type="button"
-                  className={`hero-cell-toggle-btn ${cellViewMode === "primitive" ? "active" : ""}`}
-                  onClick={() => setCellViewMode("primitive")}
-                  title="Show primitive lattice parameters used by QE (when detected)"
-                >
-                  Primitive
-                </button>
+                <InfoTooltip text="Show conventional CIF lattice parameters">
+                  <button
+                    type="button"
+                    className={`hero-cell-toggle-btn ${cellViewMode === "conventional" ? "active" : ""}`}
+                    onClick={() => setCellViewMode("conventional")}
+                    aria-label="Show conventional CIF lattice parameters"
+                  >
+                    Conventional
+                  </button>
+                </InfoTooltip>
+                <InfoTooltip text="Show primitive lattice parameters used by QE (when detected)">
+                  <button
+                    type="button"
+                    className={`hero-cell-toggle-btn ${cellViewMode === "primitive" ? "active" : ""}`}
+                    onClick={() => setCellViewMode("primitive")}
+                    aria-label="Show primitive lattice parameters used by QE (when detected)"
+                  >
+                    Primitive
+                  </button>
+                </InfoTooltip>
               </div>
             )}
             <div className="hero-details">
@@ -4092,7 +4105,7 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {epwData && (
+                          {(epwData || calc.result) && (
                             <button
                               className="view-dos-btn"
                               onClick={(e) => {
@@ -4100,7 +4113,7 @@ function normalizeSavedKPath(value: unknown): string {
                                 void handleViewEPW(calc);
                               }}
                             >
-                              View EPW
+                              View EPW Results
                             </button>
                           )}
                           {renderHpcDownloadButton(calc)}

@@ -223,6 +223,42 @@ export function buildHpcLauncherCommand(profile: HpcProfile | null | undefined):
   return `${launcherBase} ${extraArgs}`;
 }
 
+const QE_PENCIL_DECOMPOSITION_EXECUTABLES = new Set([
+  "pw.x",
+  "bands.x",
+  "projwfc.x",
+  "dos.x",
+  "fermi_velocity.x",
+  "ph.x",
+  "q2r.x",
+  "matdyn.x",
+  "pw2wannier90.x",
+]);
+
+function commandArgsIncludePencilDecomposition(rawArgs: string): boolean {
+  const normalized = rawArgs
+    .replace(/\u2014/g, "--")
+    .replace(/[\u2013\u2010\u2011\u2012\u2212\uFE63\uFF0D]/g, "-");
+  return normalized
+    .split(/\s+/)
+    .some((token) => {
+      const lower = token.toLowerCase();
+      return lower === "-pd"
+        || lower === "-use_pd"
+        || lower === "-pencil_decomposition"
+        || lower === "-use_pencil_decomposition"
+        || lower.startsWith("-pd=")
+        || lower.startsWith("-use_pd=")
+        || lower.startsWith("-pencil_decomposition=")
+        || lower.startsWith("-use_pencil_decomposition=");
+    });
+}
+
+function qeExecutableUsesPencilDecomposition(executable: string): boolean {
+  const executableName = executable.trim().split(/[\\/]/).pop()?.toLowerCase() || "";
+  return QE_PENCIL_DECOMPOSITION_EXECUTABLES.has(executableName);
+}
+
 export function buildHpcQeInputCommandLine(
   profile: HpcProfile | null | undefined,
   executable: string,
@@ -233,7 +269,11 @@ export function buildHpcQeInputCommandLine(
   const launcher = buildHpcLauncherCommand(profile);
   const args = (extraArgs || "").trim();
   const argSegment = args.length > 0 ? ` ${args}` : "";
-  return `${launcher} "$QE_BIN/${executable}"${argSegment} -in ${inputFile} > ${outputFile} 2>&1`;
+  const hasPencilDecomposition = commandArgsIncludePencilDecomposition(args);
+  const pdSegment = qeExecutableUsesPencilDecomposition(executable) && !hasPencilDecomposition
+    ? " -pd .true."
+    : "";
+  return `${launcher} "$QE_BIN/${executable}"${argSegment}${pdSegment} -in ${inputFile} > ${outputFile} 2>&1`;
 }
 
 export async function loadExecutionMode(): Promise<ExecutionMode> {

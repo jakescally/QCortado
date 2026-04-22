@@ -22,6 +22,26 @@ interface HpcSetupWizardProps {
 }
 
 const STEP_TITLES = ["Connection", "Authentication", "Paths", "Scheduler", "Validation"];
+const DEFAULT_REMOTE_QE_CPU_BIN_DIR = "~/qe/bin";
+const DEFAULT_REMOTE_WANNIER90_PATH = "~/qe/external/wannier90/wannier90.x";
+
+function deriveRemoteWannier90PathFromQeBinDir(remoteQeBinDir: string | null | undefined): string {
+  const remoteQeBin = String(remoteQeBinDir || "").trim();
+  if (!remoteQeBin) {
+    return DEFAULT_REMOTE_WANNIER90_PATH;
+  }
+
+  const normalized = remoteQeBin.replace(/\/+$/, "");
+  const segments = normalized.split("/");
+  if (segments[segments.length - 1] === "bin") {
+    segments.pop();
+  }
+  const qeRoot = segments.join("/").trim();
+  if (!qeRoot) {
+    return DEFAULT_REMOTE_WANNIER90_PATH;
+  }
+  return `${qeRoot}/external/wannier90/wannier90.x`;
+}
 
 function deriveRemotePostw90Path(remoteWannier90Path: string | null | undefined): string {
   const remoteWannier90 = String(remoteWannier90Path || "").trim();
@@ -35,6 +55,7 @@ function deriveRemotePostw90Path(remoteWannier90Path: string | null | undefined)
 }
 
 function makeDefaultProfile(): HpcProfile {
+  const defaultCpuBin = DEFAULT_REMOTE_QE_CPU_BIN_DIR;
   return {
     id: "",
     name: "BC Andromeda",
@@ -44,10 +65,11 @@ function makeDefaultProfile(): HpcProfile {
     username: "",
     auth_method: "ssh_key",
     ssh_key_path: "~/.ssh/id_rsa",
-    remote_qe_bin_dir: "~/qe/bin",
-    remote_qe_cpu_bin_dir: "~/qe/bin",
+    remote_qe_bin_dir: defaultCpuBin,
+    remote_qe_cpu_bin_dir: defaultCpuBin,
     remote_qe_gpu_bin_dir: "~/qe-gpu/bin",
-    remote_wannier90_path: "wannier90.x",
+    remote_epw_path: null,
+    remote_wannier90_path: deriveRemoteWannier90PathFromQeBinDir(defaultCpuBin),
     remote_pseudo_dir: "~/qe/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
@@ -65,7 +87,7 @@ function makeDefaultProfile(): HpcProfile {
 
 function normalizeQeProfilePaths(profile: HpcProfile): HpcProfile {
   const legacy = (profile.remote_qe_bin_dir || "").trim();
-  const fallback = legacy.length > 0 ? legacy : "~/qe/bin";
+  const fallback = legacy.length > 0 ? legacy : DEFAULT_REMOTE_QE_CPU_BIN_DIR;
   const cpu = (profile.remote_qe_cpu_bin_dir || "").trim();
   const gpu = (profile.remote_qe_gpu_bin_dir || "").trim();
   const primary = cpu.length > 0
@@ -168,7 +190,7 @@ export function HpcSetupWizard({
         if (!validation.squeue_available) detail.push("`squeue` is not available.");
         if (!validation.sacct_available) detail.push("`sacct` is not available.");
         if (!validation.qe_pw_available) detail.push("`pw.x` is not executable at configured QE path.");
-        if (!validation.qe_epw_available) detail.push("`epw.x` is not executable at configured QE path.");
+        if (!validation.qe_epw_available) detail.push("`epw.x` is not executable. EPW requires manual compilation. If a custom EPW path is set, verify it.");
         if (!validation.qe_pw2wannier_available) detail.push("`pw2wannier90.x` is not executable at configured QE path.");
         if (!validation.wannier90_available) detail.push("`wannier90.x` is not executable at configured path or on `PATH`.");
         if (!validation.postw90_available) detail.push("Derived `postw90.x` is not executable from the configured `wannier90.x` location.");
@@ -372,38 +394,46 @@ export function HpcSetupWizard({
 
           {step === 2 && (
             <div className="settings-menu-section">
-              <div className="hpc-path-grid">
-                <label className="settings-menu-label">Remote QE CPU Bin Directory</label>
-                <input
-                  className="settings-menu-input"
-                  value={profile.remote_qe_cpu_bin_dir || ""}
-                  onChange={(event) =>
-                    setProfile((prev) => ({ ...prev, remote_qe_cpu_bin_dir: event.target.value || null }))
-                  }
-                  placeholder="~/qe/bin"
-                />
-                <label className="settings-menu-label">Remote QE GPU Bin Directory</label>
-                <input
-                  className="settings-menu-input"
-                  value={profile.remote_qe_gpu_bin_dir || ""}
-                  onChange={(event) =>
-                    setProfile((prev) => ({ ...prev, remote_qe_gpu_bin_dir: event.target.value || null }))
-                  }
-                  placeholder="~/qe-gpu/bin"
-                />
-              </div>
+              <label className="settings-menu-label">Remote QE CPU Bin Directory</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_qe_cpu_bin_dir || ""}
+                onChange={(event) =>
+                  setProfile((prev) => ({ ...prev, remote_qe_cpu_bin_dir: event.target.value || null }))
+                }
+                placeholder="~/qe/bin"
+              />
+              <label className="settings-menu-label">Remote QE GPU Bin Directory</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_qe_gpu_bin_dir || ""}
+                onChange={(event) =>
+                  setProfile((prev) => ({ ...prev, remote_qe_gpu_bin_dir: event.target.value || null }))
+                }
+                placeholder="~/qe-gpu/bin"
+              />
               <p className="settings-menu-hint">
                 CPU runs use the CPU path and GPU runs use the GPU path. Legacy fallback path is preserved automatically.
+              </p>
+              <label className="settings-menu-label">Remote EPW Executable (optional override)</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_epw_path || ""}
+                onChange={(event) => setProfile((prev) => ({ ...prev, remote_epw_path: event.target.value || null }))}
+                placeholder="Auto: $QE_BIN/epw.x, $QE_BIN/EPW/bin/epw.x, $(dirname $QE_BIN)/EPW/bin/epw.x"
+              />
+              <p className="settings-menu-hint">
+                Leave blank to use automatic EPW search in QE fallback locations. Set a full path or command name to force a specific executable.
               </p>
               <label className="settings-menu-label">Remote Wannier90 Executable</label>
               <input
                 className="settings-menu-input"
                 value={profile.remote_wannier90_path || ""}
                 onChange={(event) => setProfile((prev) => ({ ...prev, remote_wannier90_path: event.target.value || null }))}
-                placeholder="wannier90.x or /path/to/wannier90.x"
+                placeholder="~/qe/external/wannier90/wannier90.x"
               />
               <p className="settings-menu-hint">
-                Leave as <code>wannier90.x</code> to resolve from the remote <code>PATH</code>, or set an absolute path.
+                Default points to the QE-bundled executable (for example <code>~/qe/external/wannier90/wannier90.x</code>). You can still use <code>wannier90.x</code> to resolve from remote <code>PATH</code>.
               </p>
               <label className="settings-menu-label">Remote postw90 Executable (auto-derived)</label>
               <input

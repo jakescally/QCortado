@@ -18,6 +18,7 @@ import {
   FermiReferenceMode,
   getDefaultBandPlotEnergyRange,
 } from "./BandPlot";
+import { InfoTooltip } from "./InfoTooltip";
 
 export interface BandsMultiviewCalculation {
   folder_id?: string | null;
@@ -884,16 +885,17 @@ export function BandsMultiview({
                         </div>
                         <div className="bands-multiview-card-header-side">
                           <span>{formatDate(calc.completed_at)}</span>
-                          <button
-                            type="button"
-                            className="bands-multiview-reorder-handle"
-                            disabled={selectedCalculations.length < 2}
-                            onPointerDown={(event) => handleTileHandlePointerDown(event, calc.calc_id)}
-                            title="Drag to reorder"
-                            aria-label={`Drag to reorder ${calc.cif_formula || calc.cif_filename}`}
-                          >
-                            ⋮⋮
-                          </button>
+                          <InfoTooltip text="Drag to reorder">
+                            <button
+                              type="button"
+                              className="bands-multiview-reorder-handle"
+                              disabled={selectedCalculations.length < 2}
+                              onPointerDown={(event) => handleTileHandlePointerDown(event, calc.calc_id)}
+                              aria-label={`Drag to reorder ${calc.cif_formula || calc.cif_filename}`}
+                            >
+                              ⋮⋮
+                            </button>
+                          </InfoTooltip>
                         </div>
                       </div>
 

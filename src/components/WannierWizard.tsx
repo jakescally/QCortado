@@ -10,6 +10,8 @@ import {
 import {
   BandData,
   BandPlot,
+  BandPlotWindowOverlay,
+  BandPlotWindowOverlayUpdate,
   buildBandPlotProjectionOptions,
   getDefaultBandPlotEnergyRange,
 } from "./BandPlot";
@@ -35,6 +37,7 @@ import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { useTaskContext } from "../lib/TaskContext";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
@@ -42,7 +45,6 @@ import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
-  buildHpcLauncherCommand,
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
 } from "../lib/hpcConfig";
@@ -167,15 +169,6 @@ interface WannierWizardProps {
 
 const WANNIER_WORK_DIR = "/tmp/qcortado_wannier";
 const ORBITAL_OPTIONS: ProjectionOrbital[] = ["s", "p", "d", "f", "sp", "sp2", "sp3", "sp3d", "sp3d2"];
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
-}
 
 function getBaseElement(symbol: string): string {
   return symbol.replace(/[\d+-]+$/, "");
@@ -328,6 +321,26 @@ function parseExcludeBandsInput(raw: string): number[] {
     }
   }
   return [...new Set(values)].sort((a, b) => a - b);
+}
+
+function parseFiniteInput(input: string): number | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatEnergyInputValue(value: number): string {
+  if (!Number.isFinite(value)) return "";
+  return Number.parseFloat(value.toFixed(6)).toString();
+}
+
+function toAscendingPair(first: number, second: number): [number, number] {
+  return first <= second ? [first, second] : [second, first];
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
@@ -551,10 +564,7 @@ export function WannierWizard({
   const [disFrozMaxInput, setDisFrozMaxInput] = useState("");
   const [referenceBandsCalcId, setReferenceBandsCalcId] = useState("");
   const [referenceEnergyMode, setReferenceEnergyMode] = useState<ReferenceEnergyMode>("absolute");
-  const [referenceEnergyMinInput, setReferenceEnergyMinInput] = useState("");
-  const [referenceEnergyMaxInput, setReferenceEnergyMaxInput] = useState("");
-  const [referenceEnergyRange, setReferenceEnergyRange] = useState<[number, number] | null>(null);
-  const [referenceEnergyError, setReferenceEnergyError] = useState<string | null>(null);
+  const [referenceShowBandGapOverlay, setReferenceShowBandGapOverlay] = useState(true);
   const [referenceProjectionSelection, setReferenceProjectionSelection] = useState("none");
   const [detailedBandsById, setDetailedBandsById] = useState<Record<string, CalculationRun>>({});
   const [referenceBandsLoading, setReferenceBandsLoading] = useState(false);
@@ -851,31 +861,289 @@ export function WannierWizard({
   }, [referenceBandsCalcId, selectedReferenceBandsCalculation]);
 
   useEffect(() => {
-    if (!selectedReferenceBandData) {
-      setReferenceEnergyRange(null);
-      setReferenceEnergyMinInput("");
-      setReferenceEnergyMaxInput("");
-      setReferenceEnergyError(null);
-      setReferenceProjectionSelection("none");
-      return;
-    }
-    const [defaultMin, defaultMax] = getDefaultBandPlotEnergyRange(
-      selectedReferenceBandData,
-      referencePlotFermi,
-      "scf",
-    );
-    setReferenceEnergyRange([defaultMin, defaultMax]);
-    setReferenceEnergyMinInput(Number.parseFloat(defaultMin.toFixed(3)).toString());
-    setReferenceEnergyMaxInput(Number.parseFloat(defaultMax.toFixed(3)).toString());
-    setReferenceEnergyError(null);
-    setReferenceProjectionSelection("none");
-  }, [selectedReferenceBandData, selectedReferenceBandsCalculation?.id, referencePlotFermi]);
-
-  useEffect(() => {
     if (!referenceProjectionOptions.some((option) => option.value === referenceProjectionSelection)) {
       setReferenceProjectionSelection("none");
     }
   }, [referenceProjectionOptions, referenceProjectionSelection]);
+
+  const referenceDefaultDisplayRange = useMemo<[number, number] | null>(() => {
+    if (!selectedReferenceBandData) {
+      return null;
+    }
+    return getDefaultBandPlotEnergyRange(
+      selectedReferenceBandData,
+      referencePlotFermi,
+      "scf",
+    );
+  }, [referencePlotFermi, selectedReferenceBandData]);
+
+  const displayEnergyToAbsolute = useCallback((value: number) => {
+    if (!Number.isFinite(value)) {
+      return value;
+    }
+    return referenceEnergyMode === "absolute"
+      ? value
+      : value + selectedReferenceFermiEnergy;
+  }, [referenceEnergyMode, selectedReferenceFermiEnergy]);
+
+  const absoluteEnergyToDisplay = useCallback((value: number) => {
+    if (!Number.isFinite(value)) {
+      return value;
+    }
+    return referenceEnergyMode === "absolute"
+      ? value
+      : value - selectedReferenceFermiEnergy;
+  }, [referenceEnergyMode, selectedReferenceFermiEnergy]);
+
+  const defaultDisWindowAbsolute = useMemo<[number, number]>(() => {
+    if (!referenceDefaultDisplayRange) {
+      return [selectedReferenceFermiEnergy - 4, selectedReferenceFermiEnergy + 4];
+    }
+    const converted = toAscendingPair(
+      displayEnergyToAbsolute(referenceDefaultDisplayRange[0]),
+      displayEnergyToAbsolute(referenceDefaultDisplayRange[1]),
+    );
+    if (converted[1] - converted[0] < 1e-4) {
+      return [converted[0] - 1, converted[1] + 1];
+    }
+    return converted;
+  }, [displayEnergyToAbsolute, referenceDefaultDisplayRange, selectedReferenceFermiEnergy]);
+
+  const defaultFrozenWindowAbsolute = useMemo<[number, number]>(() => {
+    const [disMin, disMax] = defaultDisWindowAbsolute;
+    const disSpan = Math.max(disMax - disMin, 1e-4);
+    const halfSpan = Math.min(1, disSpan * 0.2);
+    let min = selectedReferenceFermiEnergy - halfSpan;
+    let max = selectedReferenceFermiEnergy + halfSpan;
+    min = clampNumber(min, disMin, disMax);
+    max = clampNumber(max, disMin, disMax);
+    if (max <= min) {
+      min = disMin + disSpan * 0.25;
+      max = disMax - disSpan * 0.25;
+      if (max <= min) {
+        min = disMin;
+        max = disMax;
+      }
+    }
+    return [min, max];
+  }, [defaultDisWindowAbsolute, selectedReferenceFermiEnergy]);
+
+  const clampFrozenInsideDisWindow = useCallback(
+    (frozenCandidate: [number, number], disWindow: [number, number]): [number, number] => {
+      const [disMin, disMax] = toAscendingPair(disWindow[0], disWindow[1]);
+      const minSpan = Math.max(1e-4, (disMax - disMin) * 1e-6);
+      let [frozenMin, frozenMax] = toAscendingPair(frozenCandidate[0], frozenCandidate[1]);
+      frozenMin = clampNumber(frozenMin, disMin, disMax);
+      frozenMax = clampNumber(frozenMax, disMin, disMax);
+
+      if (frozenMax - frozenMin < minSpan) {
+        if (disMax - disMin <= minSpan) {
+          return [disMin, disMax];
+        }
+        const center = clampNumber((frozenMin + frozenMax) / 2, disMin, disMax);
+        frozenMin = clampNumber(center - minSpan / 2, disMin, disMax);
+        frozenMax = clampNumber(center + minSpan / 2, disMin, disMax);
+        if (frozenMax - frozenMin < minSpan) {
+          frozenMin = disMin;
+          frozenMax = disMax;
+        }
+      }
+
+      return [frozenMin, frozenMax];
+    },
+    [],
+  );
+
+  const clampDisWindowAroundFrozen = useCallback(
+    (disCandidate: [number, number], frozenWindow: [number, number]): [number, number] => {
+      const minSpan = 1e-4;
+      let [disMin, disMax] = toAscendingPair(disCandidate[0], disCandidate[1]);
+      if (disMax - disMin < minSpan) {
+        disMax = disMin + minSpan;
+      }
+      const [frozenMin, frozenMax] = toAscendingPair(frozenWindow[0], frozenWindow[1]);
+      if (disMin > frozenMin) {
+        disMin = frozenMin;
+      }
+      if (disMax < frozenMax) {
+        disMax = frozenMax;
+      }
+      if (disMax - disMin < minSpan) {
+        disMax = disMin + minSpan;
+      }
+      return [disMin, disMax];
+    },
+    [],
+  );
+
+  const disWinMinParsed = parseFiniteInput(disWinMinInput);
+  const disWinMaxParsed = parseFiniteInput(disWinMaxInput);
+  const disFrozMinParsed = parseFiniteInput(disFrozMinInput);
+  const disFrozMaxParsed = parseFiniteInput(disFrozMaxInput);
+
+  const effectiveFrozenWindowAbsoluteBase = useMemo<[number, number]>(() => {
+    return toAscendingPair(
+      disFrozMinParsed ?? defaultFrozenWindowAbsolute[0],
+      disFrozMaxParsed ?? defaultFrozenWindowAbsolute[1],
+    );
+  }, [defaultFrozenWindowAbsolute, disFrozMaxParsed, disFrozMinParsed]);
+
+  const effectiveDisWindowAbsolute = useMemo<[number, number]>(() => {
+    const candidate: [number, number] = [
+      disWinMinParsed ?? defaultDisWindowAbsolute[0],
+      disWinMaxParsed ?? defaultDisWindowAbsolute[1],
+    ];
+    return clampDisWindowAroundFrozen(candidate, effectiveFrozenWindowAbsoluteBase);
+  }, [
+    clampDisWindowAroundFrozen,
+    defaultDisWindowAbsolute,
+    disWinMaxParsed,
+    disWinMinParsed,
+    effectiveFrozenWindowAbsoluteBase,
+  ]);
+
+  const effectiveFrozenWindowAbsolute = useMemo<[number, number]>(() => {
+    return clampFrozenInsideDisWindow(
+      effectiveFrozenWindowAbsoluteBase,
+      effectiveDisWindowAbsolute,
+    );
+  }, [
+    clampFrozenInsideDisWindow,
+    effectiveDisWindowAbsolute,
+    effectiveFrozenWindowAbsoluteBase,
+  ]);
+
+  const setDisentanglementInputsFromAbsolute = useCallback(
+    (disWindow: [number, number], frozenWindow: [number, number]) => {
+      setDisWinMinInput(formatEnergyInputValue(disWindow[0]));
+      setDisWinMaxInput(formatEnergyInputValue(disWindow[1]));
+      setDisFrozMinInput(formatEnergyInputValue(frozenWindow[0]));
+      setDisFrozMaxInput(formatEnergyInputValue(frozenWindow[1]));
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!selectedReferenceBandData) {
+      setReferenceProjectionSelection("none");
+      return;
+    }
+    setReferenceProjectionSelection("none");
+  }, [selectedReferenceBandData, selectedReferenceBandsCalculation?.id]);
+
+  useEffect(() => {
+    if (!selectedReferenceBandData) {
+      return;
+    }
+    const hasAnyDisWindowInput = [
+      disWinMinInput,
+      disWinMaxInput,
+      disFrozMinInput,
+      disFrozMaxInput,
+    ].some((value) => value.trim().length > 0);
+    if (hasAnyDisWindowInput) {
+      return;
+    }
+    setDisentanglementInputsFromAbsolute(defaultDisWindowAbsolute, defaultFrozenWindowAbsolute);
+  }, [
+    defaultDisWindowAbsolute,
+    defaultFrozenWindowAbsolute,
+    disFrozMaxInput,
+    disFrozMinInput,
+    disWinMaxInput,
+    disWinMinInput,
+    selectedReferenceBandData,
+    selectedReferenceBandsCalculation?.id,
+    setDisentanglementInputsFromAbsolute,
+  ]);
+
+  const commitDisentanglementInputRanges = useCallback(() => {
+    const disCandidate: [number, number] = [
+      parseFiniteInput(disWinMinInput) ?? effectiveDisWindowAbsolute[0],
+      parseFiniteInput(disWinMaxInput) ?? effectiveDisWindowAbsolute[1],
+    ];
+    const frozenCandidate: [number, number] = [
+      parseFiniteInput(disFrozMinInput) ?? effectiveFrozenWindowAbsolute[0],
+      parseFiniteInput(disFrozMaxInput) ?? effectiveFrozenWindowAbsolute[1],
+    ];
+    const nextDisWindow = clampDisWindowAroundFrozen(disCandidate, frozenCandidate);
+    const nextFrozenWindow = clampFrozenInsideDisWindow(frozenCandidate, nextDisWindow);
+    setDisentanglementInputsFromAbsolute(nextDisWindow, nextFrozenWindow);
+  }, [
+    clampDisWindowAroundFrozen,
+    clampFrozenInsideDisWindow,
+    disFrozMaxInput,
+    disFrozMinInput,
+    disWinMaxInput,
+    disWinMinInput,
+    effectiveDisWindowAbsolute,
+    effectiveFrozenWindowAbsolute,
+    setDisentanglementInputsFromAbsolute,
+  ]);
+
+  const handleDisentanglementInputKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitDisentanglementInputRanges();
+  }, [commitDisentanglementInputRanges]);
+
+  const referenceWindowOverlays = useMemo<BandPlotWindowOverlay[]>(() => {
+    if (!selectedReferenceBandData) {
+      return [];
+    }
+    return [
+      {
+        id: "disentanglement",
+        min: absoluteEnergyToDisplay(effectiveDisWindowAbsolute[0]),
+        max: absoluteEnergyToDisplay(effectiveDisWindowAbsolute[1]),
+        color: "#0ea5e9",
+        side: "left",
+        label: "Disentanglement",
+      },
+      {
+        id: "frozen",
+        min: absoluteEnergyToDisplay(effectiveFrozenWindowAbsolute[0]),
+        max: absoluteEnergyToDisplay(effectiveFrozenWindowAbsolute[1]),
+        color: "#f59e0b",
+        side: "right",
+        label: "Frozen",
+      },
+    ];
+  }, [
+    absoluteEnergyToDisplay,
+    effectiveDisWindowAbsolute,
+    effectiveFrozenWindowAbsolute,
+    selectedReferenceBandData,
+  ]);
+
+  const handleReferenceWindowOverlayChange = useCallback((update: BandPlotWindowOverlayUpdate) => {
+    const candidateAbsoluteWindow = toAscendingPair(
+      displayEnergyToAbsolute(update.min),
+      displayEnergyToAbsolute(update.max),
+    );
+    if (update.id === "disentanglement") {
+      const nextDisWindow = clampDisWindowAroundFrozen(
+        candidateAbsoluteWindow,
+        effectiveFrozenWindowAbsolute,
+      );
+      setDisentanglementInputsFromAbsolute(nextDisWindow, effectiveFrozenWindowAbsolute);
+      return;
+    }
+    if (update.id === "frozen") {
+      const nextFrozenWindow = clampFrozenInsideDisWindow(
+        candidateAbsoluteWindow,
+        effectiveDisWindowAbsolute,
+      );
+      setDisentanglementInputsFromAbsolute(effectiveDisWindowAbsolute, nextFrozenWindow);
+    }
+  }, [
+    clampDisWindowAroundFrozen,
+    clampFrozenInsideDisWindow,
+    displayEnergyToAbsolute,
+    effectiveDisWindowAbsolute,
+    effectiveFrozenWindowAbsolute,
+    setDisentanglementInputsFromAbsolute,
+  ]);
 
   const buildViewerOverlayOptions = useCallback(async (): Promise<WannierBandOverlayOption[]> => {
     const sourceScfId = String(selectedScf?.id ?? "").trim();
@@ -947,36 +1215,6 @@ export function WannierWizard({
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
       .map(({ startedAt: _startedAt, ...overlay }) => overlay);
   }, [bandCalculationSummaries, detailedBandsById, kPath, projectId, selectedScf?.id]);
-
-  const commitReferenceEnergyRange = useCallback(() => {
-    if (!selectedReferenceBandData) {
-      return;
-    }
-    const parsedMin = Number.parseFloat(referenceEnergyMinInput.trim());
-    const parsedMax = Number.parseFloat(referenceEnergyMaxInput.trim());
-    if (!Number.isFinite(parsedMin) || !Number.isFinite(parsedMax)) {
-      setReferenceEnergyError("Provide numeric energy limits.");
-      return;
-    }
-    if (parsedMin >= parsedMax) {
-      setReferenceEnergyError("Energy minimum must be smaller than energy maximum.");
-      return;
-    }
-    setReferenceEnergyRange([parsedMin, parsedMax]);
-    setReferenceEnergyMinInput(Number.parseFloat(parsedMin.toFixed(3)).toString());
-    setReferenceEnergyMaxInput(Number.parseFloat(parsedMax.toFixed(3)).toString());
-    setReferenceEnergyError(null);
-  }, [
-    referenceEnergyMaxInput,
-    referenceEnergyMinInput,
-    selectedReferenceBandData,
-  ]);
-
-  const handleReferenceEnergyKeyDown = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    commitReferenceEnergyRange();
-  }, [commitReferenceEnergyRange]);
 
   const derivedNumWann = useMemo(
     () => projectionDrafts.reduce(
@@ -1163,14 +1401,13 @@ export function WannierWizard({
   ]);
 
   const hpcCommandLines = useMemo(() => {
-    const launcher = buildHpcLauncherCommand(activeHpcProfile);
     const remoteWannier = (activeHpcProfile?.remote_wannier90_path || "wannier90.x").trim() || "wannier90.x";
     const seedname = sanitizeSeedname(seednameInput);
     return [
-      `${launcher} "${remoteWannier}" -pp ${seedname} > wannier90_pre.out 2>&1`,
+      `"${remoteWannier}" -pp ${seedname} > wannier90_pre.out 2>&1`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out"),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw2wannier90.x", "pw2wan.in", "pw2wan.out"),
-      `${launcher} "${remoteWannier}" ${seedname} > wannier90.out 2>&1`,
+      `"${remoteWannier}" ${seedname} > wannier90.out 2>&1`,
     ];
   }, [activeHpcProfile, seednameInput]);
 
@@ -1803,7 +2040,7 @@ export function WannierWizard({
             <div className="param-row">
               <label>
                 Total interpolated k-points
-                <Tooltip text="QCortado target for the full interpolation path. QCortado converts this to Wannier90 input `bands_num_points` internally; because Wannier90 scales each segment by relative length, the final plotted total may differ slightly from the requested target." />
+                <InfoTooltip text="QCortado target for the full interpolation path. QCortado converts this to Wannier90 input `bands_num_points` internally; because Wannier90 scales each segment by relative length, the final plotted total may differ slightly from the requested target." />
               </label>
               <input
                 type="number"
@@ -1823,7 +2060,7 @@ export function WannierWizard({
             <div className="param-row">
               <label>
                 Calculation file prefix
-                <Tooltip text="Wannier90 input: `seedname`. QCortado uses this prefix when writing the `.win`, `.wout`, `_band.dat`, and related Wannier files." />
+                <InfoTooltip text="Wannier90 input: `seedname`. QCortado uses this prefix when writing the `.win`, `.wout`, `_band.dat`, and related Wannier files." />
               </label>
               <input
                 type="text"
@@ -1892,448 +2129,463 @@ export function WannierWizard({
 
   const renderProjectionStep = () => {
     return (
-      <div className="wizard-step parameters-step">
-        <h3>Projections and Disentanglement</h3>
-        <p className="step-description">
-          Define the initial orbital projections and any disentanglement windows used when `num_bands` exceeds `num_wann`.
-        </p>
-        <div className="info-banner">
-          Element projections apply to every matching atom in the Wannier cell. Use site-targeted projections if you want only one atom.
-        </div>
-        <details className="wannier-guidance">
-          <summary>How to choose transport-ready projections</summary>
-          <div className="guidance-body">
-            <p>Start from the orbitals whose source bands actually cross or sit close to E_F. If the interpolated Wannier manifold misses E_F, BoltzWann transport will collapse toward zero.</p>
-            <p>For simple isolated manifolds, keep `num_bands = num_wann`. For entangled metallic manifolds, increase `num_bands`, then use `dis_win_*` to capture the full target space and `dis_froz_*` to pin the bands you must reproduce near E_F.</p>
-            <p>QCortado shows each element's neutral-atom electron configuration as a reference only. It does not restrict the orbital templates you can choose.</p>
-          </div>
-        </details>
-        {structureElectronConfigs.length > 0 && (
-          <div className="info-banner">
-            Neutral atom references:&nbsp;
-            {structureElectronConfigs.map(({ element, config }, index) => (
-              <span key={element}>
-                <strong>{element}</strong>: {config ? renderElectronConfiguration(config.compact) : "unavailable"}
-                {index < structureElectronConfigs.length - 1 ? "; " : ""}
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="param-section">
-          <div className="source-step-header">
-            <h4>
-              Reference Bands Preview
-              <Tooltip text="Load a saved bands calculation from this project to guide projection and disentanglement choices before launching Wannier90." />
-            </h4>
-          </div>
-          {referenceBandsCalculations.length === 0 ? (
+      <div className="wizard-step parameters-step parameters-step-fullscreen">
+        <div className="wannier-projection-workbench">
+          <div className="wannier-projection-controls-pane">
+            <h3>Projections and Disentanglement</h3>
+            <p className="step-description">
+              Define the initial orbital projections and tune disentanglement/frozen windows against the saved bands preview.
+            </p>
             <div className="info-banner">
-              {referenceBandsLoading
-                ? "Loading saved bands calculations..."
-                : "No saved bands calculations with plot data are available yet. Run a bands calculation first to use this preview."}
+              Element projections apply to every matching atom in the Wannier cell. Use site-targeted projections if you want only one atom.
             </div>
-          ) : (
-            <>
-              {referenceBandsLoading && (
-                <div className="info-banner">
-                  Loading additional saved bands calculations...
+            <details className="wannier-guidance">
+              <summary>How to choose transport-ready projections</summary>
+              <div className="guidance-body">
+                <p>Start from the orbitals whose source bands actually cross or sit close to E_F. If the interpolated Wannier manifold misses E_F, BoltzWann transport will collapse toward zero.</p>
+                <p>For simple isolated manifolds, keep `num_bands = num_wann`. For entangled metallic manifolds, increase `num_bands`, then use `dis_win_*` to capture the full target space and `dis_froz_*` to pin the bands you must reproduce near E_F.</p>
+                <p>QCortado shows each element's neutral-atom electron configuration as a reference only. It does not restrict the orbital templates you can choose.</p>
+              </div>
+            </details>
+            {structureElectronConfigs.length > 0 && (
+              <div className="info-banner">
+                Neutral atom references:&nbsp;
+                {structureElectronConfigs.map(({ element, config }, index) => (
+                  <span key={element}>
+                    <strong>{element}</strong>: {config ? renderElectronConfiguration(config.compact) : "unavailable"}
+                    {index < structureElectronConfigs.length - 1 ? "; " : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="param-section">
+              <div className="source-step-header">
+                <h4>
+                  Initial Projections
+                  <InfoTooltip text="Choose orbitals that span the bands you want the Wannier interpolation to reproduce. For transport, prioritize orbitals contributing near the source SCF Fermi level." />
+                </h4>
+                <button className="secondary-button" type="button" onClick={addProjection}>
+                  Add Projection
+                </button>
+              </div>
+
+              {projectionDrafts.length === 0 && (
+                <div className="warning-banner">
+                  Add at least one element- or site-targeted orbital template.
                 </div>
               )}
+
+              {projectionDrafts.map((item) => {
+                const allowedOrbitalOptions = getAllowedOrbitalOptionsForDraft(item);
+                const projectionElement = getProjectionElement(item);
+                const electronConfig = getNeutralElectronConfigSummary(projectionElement);
+                return (
+                  <div key={item.id} className="param-grid" style={{ marginBottom: "1rem" }}>
+                    <div className="param-row">
+                      <label>
+                        Target
+                        <InfoTooltip text="Element targets apply the chosen template to every matching atom. Site targets apply it to one specific atomic site." />
+                      </label>
+                      <select
+                        value={item.targetType}
+                        onChange={(event) => updateProjection(item.id, {
+                          targetType: event.target.value === "site" ? "site" : "element",
+                          siteIndex: event.target.value === "site" ? 0 : null,
+                        })}
+                      >
+                        <option value="element">Element</option>
+                        <option value="site">Site</option>
+                      </select>
+                    </div>
+                    {item.targetType === "element" ? (
+                      <div className="param-row">
+                        <label>Element</label>
+                        <select
+                          value={item.symbol}
+                          onChange={(event) => updateProjection(item.id, { symbol: event.target.value })}
+                        >
+                          {uniqueCrystalElements.map((element) => (
+                            <option key={element} value={element}>{element}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <div className="param-row">
+                        <label>Site</label>
+                        <select
+                          value={item.siteIndex ?? 0}
+                          onChange={(event) => updateProjection(item.id, { siteIndex: Number.parseInt(event.target.value, 10) })}
+                        >
+                          {crystalData.atom_sites.map((site, index) => (
+                            <option key={`${site.label}-${index}`} value={index}>
+                              {site.label} ({getBaseElement(site.type_symbol)}) [{site.fract_x.toFixed(3)}, {site.fract_y.toFixed(3)}, {site.fract_z.toFixed(3)}]
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    <div className="param-row">
+                      <label>
+                        Orbital template
+                        <InfoTooltip text="QCortado leaves all Wannier projection templates available. Use the neutral-atom reference below as a reminder of the element's baseline shell filling, not as a hard rule for transport-ready choices." />
+                      </label>
+                      <select
+                        value={item.orbital}
+                        onChange={(event) => updateProjection(item.id, { orbital: event.target.value as ProjectionOrbital })}
+                      >
+                        {allowedOrbitalOptions.map((orbital) => (
+                          <option key={orbital} value={orbital}>{orbital}</option>
+                        ))}
+                      </select>
+                      <span className="param-hint">
+                        Neutral atom reference for {projectionElement}:{" "}
+                        {electronConfig ? renderElectronConfiguration(electronConfig.compact) : "unavailable"}
+                      </span>
+                    </div>
+                    <div className="param-row">
+                      <label>Contribution</label>
+                      <span>{projectionContributionCount(item, wannierCellAtomSymbols)} Wannier functions</span>
+                    </div>
+                    <div className="param-row">
+                      <label>&nbsp;</label>
+                      <button className="delete-calc-btn" type="button" onClick={() => removeProjection(item.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="param-section">
+              <h4>Wannier Subspace</h4>
               <div className="param-grid">
                 <div className="param-row">
                   <label>
-                    Bands calculation
-                    <Tooltip text="Choose which saved bands result to preview. This list includes bands runs for the current structure only." />
-                  </label>
-                  <select
-                    value={selectedReferenceBandsCalculation?.id ?? ""}
-                    onChange={(event) => setReferenceBandsCalcId(event.target.value)}
-                  >
-                    {referenceBandsCalculations.map((calc) => (
-                      <option key={calc.id} value={calc.id}>
-                        {formatReferenceBandsLabel(calc)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="param-row">
-                  <label>
-                    Energy mode
-                    <Tooltip text="Toggle between plotting E − E_F and absolute energies in eV for the reference bands preview." />
-                  </label>
-                  <select
-                    value={referenceEnergyMode}
-                    onChange={(event) => setReferenceEnergyMode(event.target.value as ReferenceEnergyMode)}
-                  >
-                    <option value="relative">E − E_F (eV)</option>
-                    <option value="absolute">Absolute energy (eV)</option>
-                  </select>
-                </div>
-                <div className="param-row">
-                  <label>
-                    Energy minimum (eV)
-                    <Tooltip text="Lower bound for the previewed energy window in the selected mode." />
+                    Total Wannier functions
+                    <InfoTooltip text="Wannier90 input: `num_wann`. QCortado derives this from the selected projections. Override it only if you are deliberately matching that same total by hand." />
                   </label>
                   <input
                     type="number"
-                    step="0.1"
-                    value={referenceEnergyMinInput}
-                    onChange={(event) => setReferenceEnergyMinInput(event.target.value)}
-                    onBlur={commitReferenceEnergyRange}
-                    onKeyDown={handleReferenceEnergyKeyDown}
+                    min={1}
+                    value={numWannOverrideInput}
+                    placeholder={`${derivedNumWann}`}
+                    onChange={(event) => setNumWannOverrideInput(event.target.value)}
                   />
                 </div>
                 <div className="param-row">
                   <label>
-                    Energy maximum (eV)
-                    <Tooltip text="Upper bound for the previewed energy window in the selected mode. Use this with the minimum field to focus on the target manifold." />
+                    Bands included in Wannierization
+                    <InfoTooltip text="Wannier90 input: `num_bands`. Increase this above `num_wann` when the target bands are entangled. This enlarges the space that Wannier90 may disentangle before constructing the final subspace." />
                   </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={referenceEnergyMaxInput}
-                    onChange={(event) => setReferenceEnergyMaxInput(event.target.value)}
-                    onBlur={commitReferenceEnergyRange}
-                    onKeyDown={handleReferenceEnergyKeyDown}
-                  />
-                </div>
-                <div className="param-row">
-                  <label>
-                    Fat-band projection
-                    <Tooltip text="Select the saved projection group to render as fat bands. This control is disabled if the chosen bands run has no projection data." />
-                  </label>
-                  <select
-                    value={referenceProjectionSelection}
-                    onChange={(event) => setReferenceProjectionSelection(event.target.value)}
-                    disabled={referenceProjectionOptions.length <= 1}
-                  >
-                    {referenceProjectionOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {referenceEnergyError && (
-                <div className="warning-banner">{referenceEnergyError}</div>
-              )}
-              {selectedReferenceBandData && (
-                <div className="wannier-reference-bands-plot">
-                  <BandPlot
-                    data={selectedReferenceBandData}
-                    scfFermiEnergy={referencePlotFermi}
-                    energyRange={referenceEnergyRange ?? undefined}
-                    projectionSelection={referenceProjectionSelection}
-                    viewerType="electronic"
-                    yAxisLabel={referenceEnergyMode === "absolute" ? "Energy (eV)" : "E − E_F (eV)"}
-                    valueLabel={referenceEnergyMode === "absolute" ? "Energy" : "E − E_F"}
-                    showFermiLevel={referenceEnergyMode !== "absolute"}
-                    showSidebar={false}
-                    enableWheelRangeControl={false}
-                    enableHoverScrollLock={false}
-                    height={360}
-                    scrollHint="Use the controls above to set range and projection."
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="param-section">
-          <div className="source-step-header">
-            <h4>
-              Initial Projections
-              <Tooltip text="Choose orbitals that span the bands you want the Wannier interpolation to reproduce. For transport, prioritize orbitals contributing near the source SCF Fermi level." />
-            </h4>
-            <button className="secondary-button" type="button" onClick={addProjection}>
-              Add Projection
-            </button>
-          </div>
-
-          {projectionDrafts.length === 0 && (
-            <div className="warning-banner">
-              Add at least one element- or site-targeted orbital template.
-            </div>
-          )}
-
-          {projectionDrafts.map((item) => {
-            const allowedOrbitalOptions = getAllowedOrbitalOptionsForDraft(item);
-            const projectionElement = getProjectionElement(item);
-            const electronConfig = getNeutralElectronConfigSummary(projectionElement);
-            return (
-            <div key={item.id} className="param-grid" style={{ marginBottom: "1rem" }}>
-              <div className="param-row">
-                <label>
-                  Target
-                  <Tooltip text="Element targets apply the chosen template to every matching atom. Site targets apply it to one specific atomic site." />
-                </label>
-                <select
-                  value={item.targetType}
-                  onChange={(event) => updateProjection(item.id, {
-                    targetType: event.target.value === "site" ? "site" : "element",
-                    siteIndex: event.target.value === "site" ? 0 : null,
-                  })}
-                >
-                  <option value="element">Element</option>
-                  <option value="site">Site</option>
-                </select>
-              </div>
-              {item.targetType === "element" ? (
-                <div className="param-row">
-                  <label>Element</label>
-                  <select
-                    value={item.symbol}
-                    onChange={(event) => updateProjection(item.id, { symbol: event.target.value })}
-                  >
-                    {uniqueCrystalElements.map((element) => (
-                      <option key={element} value={element}>{element}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <div className="param-row">
-                  <label>Site</label>
-                  <select
-                    value={item.siteIndex ?? 0}
-                    onChange={(event) => updateProjection(item.id, { siteIndex: Number.parseInt(event.target.value, 10) })}
-                  >
-                    {crystalData.atom_sites.map((site, index) => (
-                      <option key={`${site.label}-${index}`} value={index}>
-                        {site.label} ({getBaseElement(site.type_symbol)}) [{site.fract_x.toFixed(3)}, {site.fract_y.toFixed(3)}, {site.fract_z.toFixed(3)}]
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <div className="param-row">
-                <label>
-                  Orbital template
-                  <Tooltip text="QCortado leaves all Wannier projection templates available. Use the neutral-atom reference below as a reminder of the element's baseline shell filling, not as a hard rule for transport-ready choices." />
-                </label>
-                <select
-                  value={item.orbital}
-                  onChange={(event) => updateProjection(item.id, { orbital: event.target.value as ProjectionOrbital })}
-                >
-                  {allowedOrbitalOptions.map((orbital) => (
-                    <option key={orbital} value={orbital}>{orbital}</option>
-                  ))}
-                </select>
-                <span className="param-hint">
-                  Neutral atom reference for {projectionElement}:{" "}
-                  {electronConfig ? renderElectronConfiguration(electronConfig.compact) : "unavailable"}
-                </span>
-              </div>
-              <div className="param-row">
-                <label>Contribution</label>
-                <span>{projectionContributionCount(item, wannierCellAtomSymbols)} Wannier functions</span>
-              </div>
-              <div className="param-row">
-                <label>&nbsp;</label>
-                <button className="delete-calc-btn" type="button" onClick={() => removeProjection(item.id)}>
-                  Remove
-                </button>
-              </div>
-            </div>
-          );
-          })}
-        </div>
-
-        <div className="param-section">
-          <h4>Wannier Subspace</h4>
-          <div className="param-grid">
-            <div className="param-row">
-              <label>
-                Total Wannier functions
-                <Tooltip text="Wannier90 input: `num_wann`. QCortado derives this from the selected projections. Override it only if you are deliberately matching that same total by hand." />
-              </label>
-              <input
-                type="number"
-                min={1}
-                value={numWannOverrideInput}
-                placeholder={`${derivedNumWann}`}
-                onChange={(event) => setNumWannOverrideInput(event.target.value)}
-              />
-            </div>
-            <div className="param-row">
-              <label>
-                Bands included in Wannierization
-                <Tooltip text="Wannier90 input: `num_bands`. Increase this above `num_wann` when the target bands are entangled. This enlarges the space that Wannier90 may disentangle before constructing the final subspace." />
-              </label>
-              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-                <input
-                  type="number"
-                  min={1}
-                  value={effectiveNumBandsInput}
-                  onChange={(event) => {
-                    setNumBandsMode("manual");
-                    setNumBandsInput(event.target.value);
-                  }}
-                />
-                <label className="toggle-label" style={{ minWidth: "auto", fontSize: "0.85rem" }}>
-                  <input
-                    type="checkbox"
-                    checked={numBandsMode === "auto"}
-                    onChange={(event) => {
-                      if (event.target.checked) {
-                        setNumBandsMode("auto");
-                        return;
-                      }
-                      setNumBandsInput(effectiveNumBandsInput);
-                      setNumBandsMode("manual");
-                    }}
-                  />
-                  Auto
-                </label>
-              </div>
-            </div>
-            <div className="param-row" style={{ alignItems: "flex-start" }}>
-              <label>Auto-fill logic</label>
-              <span className="help-text" style={{ margin: 0, maxWidth: "720px" }}>
-                {numBandsHelpText}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="param-section">
-          <h4>
-            Disentanglement Controls
-            <Tooltip text="Wannier90 inputs: `exclude_bands`, `dis_win_min`, `dis_win_max`, `dis_froz_min`, and `dis_froz_max`. Use the outer window to include all bands that may mix into the target space, and the frozen window to enforce an exact match for the bands you care about most, usually near E_F." />
-          </h4>
-          <div className="param-grid">
-            <div className="param-row">
-              <label>
-                Excluded source bands
-                <Tooltip text="Wannier90 input: `exclude_bands`. Exclude low-lying semicore or otherwise irrelevant bands from the disentanglement pool. Use QE/Wannier band plots to identify them first." />
-              </label>
-              <input
-                type="text"
-                value={excludeBandsInput}
-                placeholder="e.g. 1-4, 12"
-                onChange={(event) => setExcludeBandsInput(event.target.value)}
-              />
-            </div>
-            <div className="param-row">
-              <label>
-                Outer window minimum (eV)
-                <Tooltip text="Wannier90 input: `dis_win_min`. This is the lower edge of the outer disentanglement window in absolute eV. Set it low enough to include every band that may contribute to the target manifold." />
-              </label>
-              <input value={disWinMinInput} onChange={(event) => setDisWinMinInput(event.target.value)} />
-            </div>
-            <div className="param-row">
-              <label>
-                Outer window maximum (eV)
-                <Tooltip text="Wannier90 input: `dis_win_max`. This is the upper edge of the outer disentanglement window in absolute eV and should cover the full band manifold you want to interpolate." />
-              </label>
-              <input value={disWinMaxInput} onChange={(event) => setDisWinMaxInput(event.target.value)} />
-            </div>
-            <div className="param-row">
-              <label>
-                Frozen window minimum (eV)
-                <Tooltip text="Wannier90 input: `dis_froz_min`. This is the lower edge of the frozen window. Bands inside the frozen window are reproduced as exactly as possible and should usually include the transport-relevant region." />
-              </label>
-              <input value={disFrozMinInput} onChange={(event) => setDisFrozMinInput(event.target.value)} />
-            </div>
-            <div className="param-row">
-              <label>
-                Frozen window maximum (eV)
-                <Tooltip text="Wannier90 input: `dis_froz_max`. This is the upper edge of the frozen window. Keep the frozen window inside the outer window, and choose it to cover the part of the spectrum you trust most." />
-              </label>
-              <input value={disFrozMaxInput} onChange={(event) => setDisFrozMaxInput(event.target.value)} />
-            </div>
-          </div>
-        </div>
-
-        <div className="calculation-summary">
-          <h4>Summary</h4>
-          <div className="summary-row">
-            <span>Source SCF:</span>
-            <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
-          </div>
-          <div className="summary-row">
-            <span>NSCF mesh:</span>
-            <span>{kGridInput.join("×")}</span>
-          </div>
-          <div className="summary-row">
-            <span>num_wann:</span>
-            <span>{resolvedNumWann}</span>
-          </div>
-          <div className="summary-row">
-            <span>num_bands:</span>
-            <span>{effectiveNumBandsInput || "N/A"}{numBandsMode === "auto" ? " (auto)" : ""}</span>
-          </div>
-          <div className="summary-row">
-            <span>Projections:</span>
-            <span>{projectionSummary.length > 0 ? projectionSummary.join("; ") : "None"}</span>
-          </div>
-        </div>
-
-        {isHpcMode ? (
-          <HpcRunSettings
-            profileId={activeHpcProfile?.id ?? null}
-            profileName={activeHpcProfile?.name ?? "Andromeda"}
-            taskKind="wannier"
-            commandLines={hpcCommandLines}
-            resources={hpcResources}
-            onResourcesChange={setHpcResources}
-            resourceMode={activeHpcProfile?.resource_mode ?? "both"}
-            defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
-            defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
-            disabled={isRunning}
-          />
-        ) : (
-          <div className="mpi-section">
-            <h4>Parallelization</h4>
-            {mpiAvailable ? (
-              <div className="mpi-toggle">
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={mpiEnabled}
-                    onChange={(e) => setMpiEnabled(e.target.checked)}
-                  />
-                  Enable MPI ({cpuCount} cores available)
-                </label>
-                {mpiEnabled && (
-                  <div className="mpi-procs">
-                    <label>
-                      Number of processes:
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                    <input
+                      type="number"
+                      min={1}
+                      value={effectiveNumBandsInput}
+                      onChange={(event) => {
+                        setNumBandsMode("manual");
+                        setNumBandsInput(event.target.value);
+                      }}
+                    />
+                    <label className="toggle-label" style={{ minWidth: "auto", fontSize: "0.85rem" }}>
                       <input
-                        type="number"
-                        min={1}
-                        max={cpuCount}
-                        value={mpiProcs}
-                        onChange={(e) => setMpiProcs(Math.max(1, Number.parseInt(e.target.value, 10) || 1))}
+                        type="checkbox"
+                        checked={numBandsMode === "auto"}
+                        onChange={(event) => {
+                          if (event.target.checked) {
+                            setNumBandsMode("auto");
+                            return;
+                          }
+                          setNumBandsInput(effectiveNumBandsInput);
+                          setNumBandsMode("manual");
+                        }}
                       />
+                      Auto
                     </label>
                   </div>
+                </div>
+                <div className="param-row" style={{ alignItems: "flex-start" }}>
+                  <label>Auto-fill logic</label>
+                  <span className="help-text" style={{ margin: 0, maxWidth: "720px" }}>
+                    {numBandsHelpText}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="param-section">
+              <h4>
+                Disentanglement Controls
+                <InfoTooltip text="Wannier90 inputs: `exclude_bands`, `dis_win_min`, `dis_win_max`, `dis_froz_min`, and `dis_froz_max`. Use the outer window to include all bands that may mix into the target space, and the frozen window to enforce an exact match for the bands you care about most, usually near E_F." />
+              </h4>
+              <div className="param-grid">
+                <div className="param-row">
+                  <label>
+                    Excluded source bands
+                    <InfoTooltip text="Wannier90 input: `exclude_bands`. Exclude low-lying semicore or otherwise irrelevant bands from the disentanglement pool. Use QE/Wannier band plots to identify them first." />
+                  </label>
+                  <input
+                    type="text"
+                    value={excludeBandsInput}
+                    placeholder="e.g. 1-4, 12"
+                    onChange={(event) => setExcludeBandsInput(event.target.value)}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Outer window minimum (eV)
+                    <InfoTooltip text="Wannier90 input: `dis_win_min`. Lower edge of the outer disentanglement window in absolute eV." />
+                  </label>
+                  <input
+                    value={disWinMinInput}
+                    onChange={(event) => setDisWinMinInput(event.target.value)}
+                    onBlur={commitDisentanglementInputRanges}
+                    onKeyDown={handleDisentanglementInputKeyDown}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Outer window maximum (eV)
+                    <InfoTooltip text="Wannier90 input: `dis_win_max`. Upper edge of the outer disentanglement window in absolute eV." />
+                  </label>
+                  <input
+                    value={disWinMaxInput}
+                    onChange={(event) => setDisWinMaxInput(event.target.value)}
+                    onBlur={commitDisentanglementInputRanges}
+                    onKeyDown={handleDisentanglementInputKeyDown}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Frozen window minimum (eV)
+                    <InfoTooltip text="Wannier90 input: `dis_froz_min`. Lower edge of the frozen window in absolute eV." />
+                  </label>
+                  <input
+                    value={disFrozMinInput}
+                    onChange={(event) => setDisFrozMinInput(event.target.value)}
+                    onBlur={commitDisentanglementInputRanges}
+                    onKeyDown={handleDisentanglementInputKeyDown}
+                  />
+                </div>
+                <div className="param-row">
+                  <label>
+                    Frozen window maximum (eV)
+                    <InfoTooltip text="Wannier90 input: `dis_froz_max`. Upper edge of the frozen window in absolute eV." />
+                  </label>
+                  <input
+                    value={disFrozMaxInput}
+                    onChange={(event) => setDisFrozMaxInput(event.target.value)}
+                    onBlur={commitDisentanglementInputRanges}
+                    onKeyDown={handleDisentanglementInputKeyDown}
+                  />
+                </div>
+              </div>
+              <p className="help-text" style={{ marginBottom: 0 }}>
+                Drag the cyan/orange windows in the reference plot or use left/right side sliders; numeric fields stay synchronized in absolute eV.
+              </p>
+            </div>
+
+            <div className="calculation-summary">
+              <h4>Summary</h4>
+              <div className="summary-row">
+                <span>Source SCF:</span>
+                <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
+              </div>
+              <div className="summary-row">
+                <span>NSCF mesh:</span>
+                <span>{kGridInput.join("×")}</span>
+              </div>
+              <div className="summary-row">
+                <span>num_wann:</span>
+                <span>{resolvedNumWann}</span>
+              </div>
+              <div className="summary-row">
+                <span>num_bands:</span>
+                <span>{effectiveNumBandsInput || "N/A"}{numBandsMode === "auto" ? " (auto)" : ""}</span>
+              </div>
+              <div className="summary-row">
+                <span>Projections:</span>
+                <span>{projectionSummary.length > 0 ? projectionSummary.join("; ") : "None"}</span>
+              </div>
+            </div>
+
+            {isHpcMode ? (
+              <HpcRunSettings
+                profileId={activeHpcProfile?.id ?? null}
+                profileName={activeHpcProfile?.name ?? "Andromeda"}
+                taskKind="wannier"
+                commandLines={hpcCommandLines}
+                resources={hpcResources}
+                onResourcesChange={setHpcResources}
+                resourceMode={activeHpcProfile?.resource_mode ?? "both"}
+                defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
+                defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+                disabled={isRunning}
+              />
+            ) : (
+              <div className="mpi-section">
+                <h4>Parallelization</h4>
+                {mpiAvailable ? (
+                  <div className="mpi-toggle">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={mpiEnabled}
+                        onChange={(e) => setMpiEnabled(e.target.checked)}
+                      />
+                      Enable MPI ({cpuCount} cores available)
+                    </label>
+                    {mpiEnabled && (
+                      <div className="mpi-procs">
+                        <label>
+                          Number of processes:
+                          <input
+                            type="number"
+                            min={1}
+                            max={cpuCount}
+                            value={mpiProcs}
+                            onChange={(e) => setMpiProcs(Math.max(1, Number.parseInt(e.target.value, 10) || 1))}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mpi-unavailable">
+                    MPI not available. Running in serial mode.
+                  </p>
                 )}
               </div>
+            )}
+
+            {error && <div className="error-message">{error}</div>}
+            {parameterValidationError && <div className="error-message">{parameterValidationError}</div>}
+
+            <div className="step-actions step-actions-sticky">
+              <button className="secondary-button" onClick={() => setStep("mesh")}>
+                Back
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => void runCalculation()}
+                disabled={Boolean(parameterValidationError) || hasBlockingExternalTask}
+              >
+                {isHpcMode ? "Submit Wannier to Andromeda" : "Run Calculation"}
+              </button>
+            </div>
+          </div>
+
+          <div className="wannier-projection-plot-pane">
+            <div className="source-step-header">
+              <h4>
+                Reference Bands Plotter
+                <InfoTooltip text="Load a saved bands calculation and interactively drag disentanglement/frozen windows." />
+              </h4>
+            </div>
+
+            {referenceBandsCalculations.length === 0 ? (
+              <div className="info-banner">
+                {referenceBandsLoading
+                  ? "Loading saved bands calculations..."
+                  : "No saved bands calculations with plot data are available yet. Run a bands calculation first to use this plotter."}
+              </div>
             ) : (
-              <p className="mpi-unavailable">
-                MPI not available. Running in serial mode.
-              </p>
+              <>
+                {referenceBandsLoading && (
+                  <div className="info-banner">
+                    Loading additional saved bands calculations...
+                  </div>
+                )}
+                <div className="param-grid">
+                  <div className="param-row">
+                    <label>
+                      Bands calculation
+                      <InfoTooltip text="Choose which saved bands result to preview for window tuning." />
+                    </label>
+                    <select
+                      value={selectedReferenceBandsCalculation?.id ?? ""}
+                      onChange={(event) => setReferenceBandsCalcId(event.target.value)}
+                    >
+                      {referenceBandsCalculations.map((calc) => (
+                        <option key={calc.id} value={calc.id}>
+                          {formatReferenceBandsLabel(calc)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="param-row">
+                    <label>
+                      Energy mode
+                      <InfoTooltip text="Toggle between E − E_F and absolute eV display. `dis_*` values remain absolute eV." />
+                    </label>
+                    <select
+                      value={referenceEnergyMode}
+                      onChange={(event) => setReferenceEnergyMode(event.target.value as ReferenceEnergyMode)}
+                    >
+                      <option value="relative">E − E_F (eV)</option>
+                      <option value="absolute">Absolute energy (eV)</option>
+                    </select>
+                  </div>
+                  <div className="param-row">
+                    <label>
+                      Fat-band projection
+                      <InfoTooltip text="Select the saved projection group to render as fat bands. Disabled if the selected run has no projection data." />
+                    </label>
+                    <select
+                      value={referenceProjectionSelection}
+                      onChange={(event) => setReferenceProjectionSelection(event.target.value)}
+                      disabled={referenceProjectionOptions.length <= 1}
+                    >
+                      {referenceProjectionOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="param-row">
+                    <label>
+                      Band-gap overlay
+                      <InfoTooltip text="Show or hide the detected band-gap shading and labels on the plot." />
+                    </label>
+                    <label className="toggle-label" style={{ minWidth: "auto", fontSize: "0.85rem" }}>
+                      <input
+                        type="checkbox"
+                        checked={referenceShowBandGapOverlay}
+                        onChange={(event) => setReferenceShowBandGapOverlay(event.target.checked)}
+                      />
+                      Show
+                    </label>
+                  </div>
+                </div>
+                {selectedReferenceBandData && (
+                  <div className="wannier-reference-bands-plot wannier-reference-bands-plot-full">
+                    <BandPlot
+                      data={selectedReferenceBandData}
+                      scfFermiEnergy={referencePlotFermi}
+                      projectionSelection={referenceProjectionSelection}
+                      viewerType="electronic"
+                      yAxisLabel={referenceEnergyMode === "absolute" ? "Energy (eV)" : "E − E_F (eV)"}
+                      valueLabel={referenceEnergyMode === "absolute" ? "Energy" : "E − E_F"}
+                      showFermiLevel={referenceEnergyMode !== "absolute"}
+                      showSidebar={false}
+                      enableWheelRangeControl
+                      enableHoverScrollLock
+                      yClampRange={null}
+                      height={640}
+                      windowOverlays={referenceWindowOverlays}
+                      onWindowOverlayChange={handleReferenceWindowOverlayChange}
+                      windowOverlayHint="Drag window edges or side sliders for fine absolute-eV tuning."
+                      showBandGapOverlayOverride={referenceShowBandGapOverlay}
+                      scrollHint="Scroll: zoom Y | Shift+Scroll: pan energy"
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
-        )}
-
-        {error && <div className="error-message">{error}</div>}
-        {parameterValidationError && <div className="error-message">{parameterValidationError}</div>}
-
-        <div className="step-actions">
-          <button className="secondary-button" onClick={() => setStep("mesh")}>
-            Back
-          </button>
-          <button
-            className="primary-button"
-            onClick={() => void runCalculation()}
-            disabled={Boolean(parameterValidationError) || hasBlockingExternalTask}
-          >
-            {isHpcMode ? "Submit Wannier to Andromeda" : "Run Calculation"}
-          </button>
         </div>
       </div>
     );

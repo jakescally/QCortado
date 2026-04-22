@@ -15,6 +15,7 @@ import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
+import { InfoTooltip } from "./InfoTooltip";
 import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
@@ -98,15 +99,6 @@ interface DosTaskPlan {
   taskLabel: string;
   taskParams: Record<string, any>;
   saveParameters: Record<string, any>;
-}
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <span className="tooltip-container">
-      <span className="tooltip-icon">?</span>
-      <span className="tooltip-text">{text}</span>
-    </span>
-  );
 }
 
 function getCalculationTags(
@@ -1012,7 +1004,7 @@ export function ElectronicDOSWizard({
         <div className="param-section">
           <h4>
             NSCF Sampling Grid
-            <Tooltip text="Dense k-point sampling controls DOS quality. Denser grids reduce numerical noise and improve peak positions, but increase NSCF runtime and memory use." />
+            <InfoTooltip text="Dense k-point sampling controls DOS quality. Denser grids reduce numerical noise and improve peak positions, but increase NSCF runtime and memory use." />
           </h4>
           <div className="qgrid-inputs">
             <input
@@ -1044,7 +1036,7 @@ export function ElectronicDOSWizard({
             <div className="param-row">
               <label>
                 DeltaE (eV)
-                <Tooltip text="Energy bin width used by dos.x. Smaller DeltaE increases resolution of fine features, but also increases point count and can expose sampling noise." />
+                <InfoTooltip text="Energy bin width used by dos.x. Smaller DeltaE increases resolution of fine features, but also increases point count and can expose sampling noise." />
               </label>
               <input
                 type="text"
@@ -1056,7 +1048,7 @@ export function ElectronicDOSWizard({
             <div className="param-row">
               <label>
                 Degauss (Ry)
-                <Tooltip text="Broadening width for DOS integration. Larger values smooth the DOS; smaller values preserve sharper features but require denser k-point sampling." />
+                <InfoTooltip text="Broadening width for DOS integration. Larger values smooth the DOS; smaller values preserve sharper features but require denser k-point sampling." />
               </label>
               <input
                 type="text"
@@ -1068,7 +1060,7 @@ export function ElectronicDOSWizard({
             <div className="param-row">
               <label>
                 Emin (eV, optional)
-                <Tooltip text="Lower energy bound for DOS output. Set this to focus on valence-region features and reduce unnecessary output outside the range of interest." />
+                <InfoTooltip text="Lower energy bound for DOS output. Set this to focus on valence-region features and reduce unnecessary output outside the range of interest." />
               </label>
               <input
                 type="text"
@@ -1080,7 +1072,7 @@ export function ElectronicDOSWizard({
             <div className="param-row">
               <label>
                 Emax (eV, optional)
-                <Tooltip text="Upper energy bound for DOS output. Set this to focus on the relevant conduction-energy region instead of writing the full default range." />
+                <InfoTooltip text="Upper energy bound for DOS output. Set this to focus on the relevant conduction-energy region instead of writing the full default range." />
               </label>
               <input
                 type="text"

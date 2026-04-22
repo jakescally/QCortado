@@ -29,6 +29,7 @@ import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
 import { BandsMultiview } from "./components/BandsMultiview";
+import { InfoTooltip } from "./components/InfoTooltip";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
 import { TaskProvider } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
@@ -119,8 +120,8 @@ interface RemotePhononRecoveryContext {
 
 const DELETE_CONFIRM_TEXT = "DELETE";
 const DEFAULT_FERMI_SURFER_PATH = "/usr/local/bin/fermisurfer";
-const DEFAULT_WANNIER90_PATH = "/usr/local/bin/wannier90.x";
-const DEFAULT_POSTW90_PATH = "/usr/local/bin/postw90.x";
+const DEFAULT_WANNIER90_PATH = "qe-7.5/external/wannier90/wannier90.x";
+const DEFAULT_POSTW90_PATH = "qe-7.5/external/wannier90/postw90.x";
 const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
@@ -229,6 +230,27 @@ function derivePostw90PathFromWannier90Path(path: string | null | undefined): st
   segments[segments.length - 1] = "postw90.x";
   const derived = segments.join("/");
   return derived.trim().length > 0 ? derived : DEFAULT_POSTW90_PATH;
+}
+
+function deriveBundledWannier90PathFromQeBinDir(path: string | null | undefined): string | null {
+  const trimmed = String(path || "").trim();
+  if (!trimmed) return null;
+
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalized) return null;
+
+  const segments = normalized.split("/");
+  if (segments.length === 0) return null;
+  if (segments[segments.length - 1] === "bin") {
+    segments.pop();
+  }
+  const qeRoot = segments.join("/").trim();
+  if (!qeRoot) return null;
+  return `${qeRoot}/external/wannier90/wannier90.x`;
+}
+
+function resolveDefaultWannier90Path(qeBinDir: string | null | undefined): string {
+  return deriveBundledWannier90PathFromQeBinDir(qeBinDir) || DEFAULT_WANNIER90_PATH;
 }
 
 function normalizeQeSmearing(raw: unknown): QeSmearingType {
@@ -357,7 +379,7 @@ function AppInner() {
   const [qePath, setQePath] = useState<string | null>(null);
   const [qePathInput, setQePathInput] = useState("");
   const [fermiSurferPathInput, setFermiSurferPathInput] = useState(DEFAULT_FERMI_SURFER_PATH);
-  const [wannier90PathInput, setWannier90PathInput] = useState(DEFAULT_WANNIER90_PATH);
+  const [wannier90PathInput, setWannier90PathInput] = useState(() => resolveDefaultWannier90Path(null));
   const [isSavingQePath, setIsSavingQePath] = useState(false);
   const [isSavingFermiSurferPath, setIsSavingFermiSurferPath] = useState(false);
   const [isSavingWannier90Path, setIsSavingWannier90Path] = useState(false);
@@ -627,6 +649,9 @@ function AppInner() {
       await invoke("set_qe_path", { path: normalized });
       setQePath(normalized);
       setQePathInput(normalized);
+      if (wannier90Status === "Not configured") {
+        setWannier90PathInput(resolveDefaultWannier90Path(normalized));
+      }
       await loadExecutables();
       setError(null);
     } catch (e) {
@@ -688,17 +713,21 @@ function AppInner() {
 
   async function loadWannier90Path() {
     try {
-      const path = await invoke<string | null>("get_wannier90_path");
+      const [path, configuredQePath] = await Promise.all([
+        invoke<string | null>("get_wannier90_path"),
+        invoke<string | null>("get_qe_path"),
+      ]);
+      const defaultWannier90Path = resolveDefaultWannier90Path(configuredQePath);
       if (path) {
         setWannier90PathInput(path);
         setWannier90Status("Found");
       } else {
-        setWannier90PathInput(DEFAULT_WANNIER90_PATH);
+        setWannier90PathInput(defaultWannier90Path);
         setWannier90Status("Not configured");
       }
     } catch (e) {
       console.error("Failed to load Wannier90 path:", e);
-      setWannier90PathInput(DEFAULT_WANNIER90_PATH);
+      setWannier90PathInput(resolveDefaultWannier90Path(qePath));
       setWannier90Status("Not found");
     }
   }
@@ -764,6 +793,7 @@ function AppInner() {
 
   async function saveWannier90Path() {
     const normalized = wannier90PathInput.trim();
+    const defaultWannier90Path = resolveDefaultWannier90Path(qePath);
     setIsSavingWannier90Path(true);
     try {
       await invoke("set_wannier90_path", {
@@ -773,7 +803,7 @@ function AppInner() {
         setWannier90PathInput(normalized);
         setWannier90Status("Found");
       } else {
-        setWannier90PathInput(DEFAULT_WANNIER90_PATH);
+        setWannier90PathInput(defaultWannier90Path);
         setWannier90Status("Not configured");
       }
       setError(null);
@@ -1489,16 +1519,18 @@ function AppInner() {
   const processIndicator = <ProcessIndicator onNavigateToTask={handleNavigateToTask} />;
   const queueLauncher = (
     <div className="floating-queue" ref={queueMenuRef}>
-      <button
-        className="floating-queue-btn"
-        onClick={() => {
-          setShowSettingsMenu(false);
-          setShowQueueMenu((prev) => !prev);
-        }}
-        title={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
-      >
-        ☰
-      </button>
+      <InfoTooltip text={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}>
+        <button
+          className="floating-queue-btn"
+          onClick={() => {
+            setShowSettingsMenu(false);
+            setShowQueueMenu((prev) => !prev);
+          }}
+          aria-label={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
+        >
+          ☰
+        </button>
+      </InfoTooltip>
       {showQueueMenu && (
         <div className="floating-queue-menu">
           <button onClick={navigateToQueue}>{executionMode === "hpc" ? "View Task Manager" : "View Queue"}</button>
@@ -1512,48 +1544,51 @@ function AppInner() {
 
   const clusterActivityLauncher = executionMode === "hpc" ? (
     <div className="floating-activity">
-      <button
-        className="floating-activity-btn"
-        onClick={() => {
-          setShowQueueMenu(false);
-          setShowSettingsMenu(false);
-          void openHpcActivityWindow();
-        }}
-        title="Open cluster activity console"
-        aria-label="Open cluster activity console"
-      >
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path
-            d="M4 6.5h16a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 16V8A1.5 1.5 0 0 1 4 6.5Z"
-            stroke="currentColor"
-            strokeWidth="1.8"
-          />
-          <path
-            d="m7.5 10.5 2.5 2-2.5 2M12.5 14.5h3.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </button>
+      <InfoTooltip text="Open cluster activity console">
+        <button
+          className="floating-activity-btn"
+          onClick={() => {
+            setShowQueueMenu(false);
+            setShowSettingsMenu(false);
+            void openHpcActivityWindow();
+          }}
+          aria-label="Open cluster activity console"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M4 6.5h16a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 16V8A1.5 1.5 0 0 1 4 6.5Z"
+              stroke="currentColor"
+              strokeWidth="1.8"
+            />
+            <path
+              d="m7.5 10.5 2.5 2-2.5 2M12.5 14.5h3.5"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      </InfoTooltip>
     </div>
   ) : null;
 
   const settingsLauncher = (
     <div className="floating-settings" ref={settingsMenuRef}>
-      <button
-        className="floating-settings-btn"
-        onClick={() => {
-          setShowQueueMenu(false);
-          setShowSettingsMenu((prev) => !prev);
-        }}
-        title="Settings"
-      >
-        <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
-          <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-        </svg>
-      </button>
+      <InfoTooltip text="Settings">
+        <button
+          className="floating-settings-btn"
+          onClick={() => {
+            setShowQueueMenu(false);
+            setShowSettingsMenu((prev) => !prev);
+          }}
+          aria-label="Settings"
+        >
+          <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+          </svg>
+        </button>
+      </InfoTooltip>
 
       {showSettingsMenu && (
         <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
@@ -1704,13 +1739,19 @@ function AppInner() {
                 <>
                   <div className="settings-menu-divider" />
                   <div className="settings-menu-section settings-hpc-defaults-section">
-                    <label className="settings-menu-label">HPC Default Run Settings</label>
+                    <div className="settings-menu-label settings-field-label">
+                      HPC Default Run Settings
+                      <InfoTooltip text="In HPC mode, these become SLURM #SBATCH requests first. After allocation, QCortado launches QE inside that job with the selected launcher." />
+                    </div>
                     <p className="settings-menu-hint">
                       These values prefill the HPC run block in all calculation wizards. They remain editable per run.
                     </p>
                     <div className="settings-hpc-launcher-grid">
                       <label>
-                        Supported Resource Types
+                        <span className="settings-field-label">
+                          Supported Resource Types
+                          <InfoTooltip text="Choose whether this profile can submit CPU jobs, GPU jobs, or both. This also controls which QE bin path (CPU or GPU) is used." />
+                        </span>
                         <select
                           value={hpcResourceModeDraft}
                           onChange={(event) => {
@@ -1726,7 +1767,10 @@ function AppInner() {
                         </select>
                       </label>
                       <label>
-                        MPI Launcher
+                        <span className="settings-field-label">
+                          MPI Launcher
+                          <InfoTooltip text="How QE is started inside the SLURM allocation. With mpirun, QCortado uses the SLURM task count as MPI ranks." />
+                        </span>
                         <select
                           value={hpcLauncherDraft}
                           onChange={(event) => {
@@ -1740,7 +1784,10 @@ function AppInner() {
                         </select>
                       </label>
                       <label>
-                        Launcher Extra Args
+                        <span className="settings-field-label">
+                          Launcher Extra Args
+                          <InfoTooltip text="Optional flags appended to srun/mpirun before the QE executable command." />
+                        </span>
                         <input
                           value={hpcLauncherExtraArgsDraft}
                           onChange={(event) => {
@@ -1806,7 +1853,10 @@ function AppInner() {
                             />
                           </label>
                           <label>
-                            Tasks
+                            <span className="settings-field-label">
+                              Tasks
+                              <InfoTooltip text="SLURM --ntasks. This is the MPI rank count for the job." />
+                            </span>
                             <input
                               type="number"
                               min={1}
@@ -1821,7 +1871,10 @@ function AppInner() {
                             />
                           </label>
                           <label>
-                            CPUs / Task
+                            <span className="settings-field-label">
+                              CPUs / Task
+                              <InfoTooltip text="SLURM --cpus-per-task. CPUs per MPI rank. MPI-only runs often use 1; hybrid MPI+OpenMP runs use higher values." />
+                            </span>
                             <input
                               type="number"
                               min={1}
@@ -1981,7 +2034,10 @@ function AppInner() {
                             />
                           </label>
                           <label>
-                            Tasks
+                            <span className="settings-field-label">
+                              Tasks
+                              <InfoTooltip text="SLURM --ntasks. This is the MPI rank count for the GPU job." />
+                            </span>
                             <input
                               type="number"
                               min={1}
@@ -1996,7 +2052,10 @@ function AppInner() {
                             />
                           </label>
                           <label>
-                            CPUs / Task
+                            <span className="settings-field-label">
+                              CPUs / Task
+                              <InfoTooltip text="SLURM --cpus-per-task for each MPI rank in the GPU job. Increase if host-side work is heavy." />
+                            </span>
                             <input
                               type="number"
                               min={1}
@@ -2026,7 +2085,10 @@ function AppInner() {
                             />
                           </label>
                           <label>
-                            GPUs
+                            <span className="settings-field-label">
+                              GPUs
+                              <InfoTooltip text="SLURM --gres=gpu:N. Number of GPUs requested. A common starting point is ntasks approximately equal to gpus." />
+                            </span>
                             <input
                               type="number"
                               min={1}
@@ -2211,7 +2273,7 @@ function AppInner() {
                             setWannier90PathInput(e.target.value);
                             setError(null);
                           }}
-                          placeholder={DEFAULT_WANNIER90_PATH}
+                          placeholder={resolveDefaultWannier90Path(qePath)}
                           spellCheck={false}
                         />
                         <div className="config-row-actions">
@@ -2261,7 +2323,9 @@ function AppInner() {
                           spellCheck={false}
                         />
                         <div className="config-row-actions">
-                          <button disabled title="Derived from the configured Wannier90 path.">Auto</button>
+                          <InfoTooltip text="Derived from the configured Wannier90 path.">
+                            <button disabled aria-label="Derived from the configured Wannier90 path.">Auto</button>
+                          </InfoTooltip>
                         </div>
                       </div>
                     </div>
