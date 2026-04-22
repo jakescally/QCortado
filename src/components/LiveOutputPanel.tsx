@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 interface LiveOutputPanelProps {
   title: string;
@@ -20,6 +20,7 @@ export function LiveOutputPanel({
   outputClassName = "output-text",
 }: LiveOutputPanelProps) {
   const outputRef = useRef<HTMLPreElement>(null);
+  const scrollFrameRef = useRef<number | null>(null);
   const [isFollowing, setIsFollowing] = useState(true);
   const hiddenLineCount = Math.max(0, totalLineCount - visibleLineCount);
 
@@ -29,35 +30,48 @@ export function LiveOutputPanel({
     el.scrollTop = el.scrollHeight;
   }, []);
 
+  const scheduleScrollToBottom = useCallback(() => {
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      scrollToBottom();
+    });
+  }, [scrollToBottom]);
+
   const handleScroll = useCallback(() => {
-    if (!isFollowing) return;
     const el = outputRef.current;
     if (!el) return;
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distanceToBottom > 16) {
-      setIsFollowing(false);
-    }
-  }, [isFollowing]);
+    setIsFollowing(distanceToBottom <= 16);
+  }, []);
 
   const handleFollowModeChange = useCallback((nextFollow: boolean) => {
     setIsFollowing(nextFollow);
     if (nextFollow) {
-      requestAnimationFrame(() => {
-        scrollToBottom();
-      });
+      scheduleScrollToBottom();
     }
-  }, [scrollToBottom]);
+  }, [scheduleScrollToBottom]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isFollowing) return;
-    scrollToBottom();
-  }, [isFollowing, output, scrollToBottom]);
+    scheduleScrollToBottom();
+  }, [isFollowing, output, totalLineCount, scheduleScrollToBottom]);
 
   useEffect(() => {
     if (!output && totalLineCount === 0) {
       setIsFollowing(true);
     }
   }, [output, totalLineCount]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    };
+  }, []);
 
   return (
     <div className={panelClassName}>
@@ -69,7 +83,7 @@ export function LiveOutputPanel({
               className="output-panel-note"
               title={`${hiddenLineCount.toLocaleString()} earlier lines are hidden to keep the live view responsive.`}
             >
-              Showing last {visibleLineCount.toLocaleString()} lines
+              Newest {visibleLineCount.toLocaleString()} of {totalLineCount.toLocaleString()} lines
             </span>
           )}
           <div className="output-follow-toggle" role="group" aria-label="Output scrolling mode">
@@ -79,7 +93,7 @@ export function LiveOutputPanel({
               aria-pressed={isFollowing}
               onClick={() => handleFollowModeChange(true)}
             >
-              Lock
+              Follow
             </button>
             <button
               type="button"
@@ -87,7 +101,7 @@ export function LiveOutputPanel({
               aria-pressed={!isFollowing}
               onClick={() => handleFollowModeChange(false)}
             >
-              Free
+              Pause
             </button>
           </div>
         </div>

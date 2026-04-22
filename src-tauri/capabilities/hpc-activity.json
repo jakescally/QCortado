@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hpc-activity",
+  "description": "Capability for the cluster activity popout window",
+  "windows": ["hpc-activity"],
+  "permissions": [
+    "core:event:default"
+  ]
+}

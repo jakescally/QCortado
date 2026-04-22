@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { SCFWizard } from "./components/SCFWizard";
@@ -127,6 +128,11 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
 };
 
 type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
+
+interface OpenTaskViewRequest {
+  taskId: string;
+  taskType: string;
+}
 
 interface SCFContext {
   cifId: string;
@@ -1440,6 +1446,38 @@ function AppInner() {
       setCurrentView(view);
     }
   }
+
+  useEffect(() => {
+    if (isHpcActivityPopout) return;
+    let cancelled = false;
+    let cleanup: (() => void) | null = null;
+
+    listen<OpenTaskViewRequest>("hpc-open-task-view", async (event) => {
+      const { taskId, taskType } = event.payload;
+      if (!taskId || !taskType) return;
+      handleNavigateToTask(taskId, taskType);
+
+      try {
+        const currentWindow = getCurrentWindow();
+        await currentWindow.show();
+        await currentWindow.unminimize();
+        await currentWindow.setFocus();
+      } catch (e) {
+        console.error("Failed to focus main window for task view:", e);
+      }
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (cleanup) cleanup();
+    };
+  }, [isHpcActivityPopout]);
 
   function navigateToQueue() {
     setShowQueueMenu(false);
@@ -2877,7 +2915,11 @@ function AppInner() {
   if (currentView === "task-queue") {
     return (
       <>
-        <TaskQueuePage onBack={returnFromUtilityView} executionMode={executionMode} />
+        <TaskQueuePage
+          onBack={returnFromUtilityView}
+          executionMode={executionMode}
+          onNavigateToTask={handleNavigateToTask}
+        />
         {appChrome}
       </>
     );

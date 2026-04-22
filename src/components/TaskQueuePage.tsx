@@ -6,6 +6,7 @@ import { HpcActivityPanel } from "./HpcActivityPanel";
 interface TaskQueuePageProps {
   onBack: () => void;
   executionMode: ExecutionMode;
+  onNavigateToTask?: (taskId: string, taskType: string) => void;
 }
 
 function formatDate(iso: string | null): string {
@@ -36,7 +37,7 @@ function statusLabel(item: QueueItem): string {
   }
 }
 
-export function TaskQueuePage({ onBack, executionMode }: TaskQueuePageProps) {
+export function TaskQueuePage({ onBack, executionMode, onNavigateToTask }: TaskQueuePageProps) {
   const {
     queueItems,
     moveQueueItem,
@@ -72,7 +73,7 @@ export function TaskQueuePage({ onBack, executionMode }: TaskQueuePageProps) {
           </button>
           <h2>Task Manager</h2>
         </div>
-        <HpcActivityPanel />
+        <HpcActivityPanel onNavigateToTask={onNavigateToTask} />
       </div>
     );
   }

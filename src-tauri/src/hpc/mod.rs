@@ -5,4 +5,5 @@ pub mod runner;
 pub mod slurm;
 pub mod ssh;
 pub mod sync;
+pub mod utilization;
 pub mod viewer_library;

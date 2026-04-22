@@ -32,6 +32,7 @@ interface TaskSummary {
   started_at: string;
   status: TaskStatus;
   backend?: string | null;
+  hpc_resource_type?: "cpu" | "gpu" | null;
   remote_job_id?: string | null;
   scheduler_state?: string | null;
   remote_node?: string | null;
@@ -50,6 +51,7 @@ interface TaskInfo {
   result: any | null;
   error: string | null;
   backend?: string | null;
+  hpc_resource_type?: "cpu" | "gpu" | null;
   remote_job_id?: string | null;
   scheduler_state?: string | null;
   remote_node?: string | null;
@@ -161,6 +163,7 @@ function normalizeTaskType(taskType: string): TaskType {
 function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcTaskMeta {
   return {
     backend: info.backend ?? null,
+    hpc_resource_type: info.hpc_resource_type === "gpu" ? "gpu" : info.hpc_resource_type === "cpu" ? "cpu" : null,
     remote_job_id: info.remote_job_id ?? null,
     scheduler_state: info.scheduler_state ?? null,
     remote_node: info.remote_node ?? null,
@@ -1004,6 +1007,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     const parameters = augmentQueuedParameters(item.taskType, spec.parameters || {}, taskResult);
     if (task.hpc.backend === "hpc") {
       parameters.execution_backend = "hpc";
+      parameters.hpc_resource_type = task.hpc.hpc_resource_type ?? null;
       parameters.remote_job_id = task.hpc.remote_job_id ?? null;
       parameters.scheduler_state = task.hpc.scheduler_state ?? null;
       parameters.remote_node = task.hpc.remote_node ?? null;

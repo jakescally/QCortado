@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emitTo } from "@tauri-apps/api/event";
 import { useTaskContext } from "../lib/TaskContext";
 import { openHpcActivityWindow } from "../lib/hpcConfig";
+import { LiveOutputPanel } from "./LiveOutputPanel";
 
 interface HpcActivityPanelProps {
   standalone?: boolean;
+  onNavigateToTask?: (taskId: string, taskType: string) => void;
 }
 
 interface TimelineState {
@@ -92,7 +95,7 @@ function extractScriptData(lines: string[]): { submitCommand: string | null; scr
   };
 }
 
-export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) {
+export function HpcActivityPanel({ standalone = false, onNavigateToTask }: HpcActivityPanelProps) {
   const { tasks, cancelTask, reconnectToTask } = useTaskContext();
   const tasksRef = useRef(tasks);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -100,8 +103,7 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
   const [confirmingCancelTaskId, setConfirmingCancelTaskId] = useState<string | null>(null);
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const logRef = useRef<HTMLPreElement>(null);
-  const followLogRef = useRef(true);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
   const syncInFlightRef = useRef(false);
   const cancelConfirmTimeoutRef = useRef<number | null>(null);
 
@@ -149,13 +151,6 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
     };
   }, [syncFromBackend]);
 
-  const handleLogScroll = () => {
-    const el = logRef.current;
-    if (!el) return;
-    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    followLogRef.current = distanceToBottom <= 16;
-  };
-
   const hpcTasks = useMemo(
     () =>
       Array.from(tasks.values())
@@ -183,6 +178,10 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
     () => (selectedTask ? filterReadableOutput(selectedTask.output).slice(-1600) : []),
     [selectedTask],
   );
+  const readableOutputText = useMemo(
+    () => readableOutput.join("\n"),
+    [readableOutput],
+  );
   const scriptData = useMemo(
     () => (selectedTask ? extractScriptData(selectedTask.output) : { submitCommand: null, script: null }),
     [selectedTask],
@@ -201,17 +200,12 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
   useEffect(() => {
     setConfirmingCancelTaskId(null);
     setCancelError(null);
+    setNavigationError(null);
     if (cancelConfirmTimeoutRef.current !== null) {
       window.clearTimeout(cancelConfirmTimeoutRef.current);
       cancelConfirmTimeoutRef.current = null;
     }
   }, [selectedTask?.taskId]);
-
-  useEffect(() => {
-    const el = logRef.current;
-    if (!el || !followLogRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [selectedTask?.taskId, readableOutput.length]);
 
   const handleCancelSelectedTask = useCallback(async () => {
     if (!selectedTask || selectedTask.status !== "running" || selectedCancelIsSubmitting) return;
@@ -254,6 +248,25 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
     syncFromBackend,
   ]);
 
+  const handleOpenSelectedTaskView = useCallback(async () => {
+    if (!selectedTask) return;
+    setNavigationError(null);
+
+    if (onNavigateToTask) {
+      onNavigateToTask(selectedTask.taskId, selectedTask.taskType);
+      return;
+    }
+
+    try {
+      await emitTo("main", "hpc-open-task-view", {
+        taskId: selectedTask.taskId,
+        taskType: selectedTask.taskType,
+      });
+    } catch (e) {
+      setNavigationError(`Failed to open run view: ${e}`);
+    }
+  }, [onNavigateToTask, selectedTask]);
+
   if (hpcTasks.length === 0) {
     return (
       <section className={`hpc-activity-panel ${standalone ? "standalone" : "docked"}`}>
@@ -284,6 +297,16 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
             <button type="button" className="hpc-activity-refresh" onClick={() => void syncFromBackend()}>
               Refresh
             </button>
+            {selectedTask && (
+              <button
+                type="button"
+                className="hpc-activity-open-task"
+                onClick={() => void handleOpenSelectedTaskView()}
+                aria-label="Open selected run in main window"
+              >
+                Open run
+              </button>
+            )}
             {selectedTask && selectedTask.status === "running" && (
               <button
                 type="button"
@@ -319,6 +342,7 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
           <span className="hpc-activity-sync">{syncLabel}</span>
         </div>
         {cancelError && <div className="hpc-activity-cancel-error">{cancelError}</div>}
+        {navigationError && <div className="hpc-activity-cancel-error">{navigationError}</div>}
       </div>
 
       <div className="hpc-activity-task-list">
@@ -347,9 +371,15 @@ export function HpcActivityPanel({ standalone = false }: HpcActivityPanelProps) 
             <span>Started: {new Date(selectedTask.startedAt).toLocaleTimeString()}</span>
           </div>
 
-          <pre ref={logRef} className="hpc-activity-log" onScroll={handleLogScroll}>
-            {readableOutput.join("\n") || "Waiting for output..."}
-          </pre>
+          <LiveOutputPanel
+            title="Live Cluster Log"
+            output={readableOutputText}
+            placeholder="Waiting for output..."
+            totalLineCount={selectedTask.outputLineCount}
+            visibleLineCount={readableOutput.length}
+            panelClassName="hpc-activity-output output-panel"
+            outputClassName="hpc-activity-log output-text"
+          />
 
           <div className="hpc-activity-foot">
             <div className="hpc-activity-timeline">

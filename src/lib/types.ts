@@ -158,6 +158,7 @@ export interface QeDefaults {
 
 export interface HpcTaskMeta {
   backend?: string | null;
+  hpc_resource_type?: HpcResourceType | null;
   remote_job_id?: string | null;
   scheduler_state?: string | null;
   remote_node?: string | null;

@@ -1195,6 +1195,206 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   font-size: 0.74rem;
 }
 
+.telemetry-empty-state {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #020617;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  padding: 0.75rem;
+}
+
+.telemetry-error-state {
+  border-color: #7f1d1d;
+  color: #fecaca;
+}
+
+.telemetry-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.telemetry-metric-card {
+  min-width: 0;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #020617;
+  padding: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.telemetry-metric-card span,
+.telemetry-device-bars span,
+.telemetry-bar-group span,
+.telemetry-device-temp {
+  color: #94a3b8;
+  font-size: 0.7rem;
+}
+
+.telemetry-metric-card strong {
+  color: #f8fafc;
+  font-size: 1.02rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.telemetry-metric-card small {
+  color: #cbd5e1;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-bar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.telemetry-bar-group > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.telemetry-bar {
+  height: 0.48rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1e293b;
+}
+
+.telemetry-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #38bdf8, #22c55e);
+  transition: width 180ms ease;
+}
+
+.telemetry-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  overflow: auto;
+}
+
+.telemetry-device-row {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #020617;
+  padding: 0.62rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.telemetry-device-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.telemetry-device-heading strong {
+  color: #f8fafc;
+  font-size: 0.78rem;
+}
+
+.telemetry-device-heading span {
+  color: #cbd5e1;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.telemetry-device-bars {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(4.8rem, auto) minmax(0, 1fr);
+  gap: 0.35rem 0.55rem;
+  align-items: center;
+}
+
+.telemetry-step-table-wrap {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+}
+
+.telemetry-step-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.7rem;
+  color: #cbd5e1;
+}
+
+.telemetry-step-table th,
+.telemetry-step-table td {
+  padding: 0.42rem 0.5rem;
+  border-bottom: 1px solid #1e293b;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.telemetry-step-table th {
+  color: #94a3b8;
+  background: #020617;
+  font-weight: 700;
+}
+
+.telemetry-step-table tr:last-child td {
+  border-bottom: none;
+}
+
+.telemetry-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+}
+
+.telemetry-warning-list span {
+  border: 1px solid #713f12;
+  border-radius: 8px;
+  background: rgba(113, 63, 18, 0.25);
+  color: #fde68a;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  padding: 0.42rem 0.5rem;
+}
+
+.telemetry-raw-details {
+  border-top: 1px solid #1e293b;
+  padding-top: 0.45rem;
+}
+
+.telemetry-raw-details summary {
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.telemetry-raw-details pre {
+  margin: 0.45rem 0 0;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #020617;
+  color: #cbd5e1;
+  padding: 0.55rem;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  white-space: pre;
+}
+
 .result-grid {
   display: flex;
   flex-direction: column;
@@ -11955,6 +12155,7 @@ html[data-theme="dark"] .phonon-plot-wrapper {
 
 .hpc-activity-refresh,
 .hpc-activity-popout,
+.hpc-activity-open-task,
 .hpc-activity-cancel {
   border: 1px solid #cbd5e1;
   background: #ffffff;
@@ -11967,6 +12168,7 @@ html[data-theme="dark"] .phonon-plot-wrapper {
 
 .hpc-activity-refresh:hover,
 .hpc-activity-popout:hover,
+.hpc-activity-open-task:hover,
 .hpc-activity-cancel:hover {
   border-color: #94a3b8;
   background: #f8fafc;
@@ -11974,6 +12176,7 @@ html[data-theme="dark"] .phonon-plot-wrapper {
 
 .hpc-activity-refresh:disabled,
 .hpc-activity-popout:disabled,
+.hpc-activity-open-task:disabled,
 .hpc-activity-cancel:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -11988,6 +12191,19 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   background: #fff5f5;
   color: #b91c1c;
   min-width: 98px;
+}
+
+.hpc-activity-open-task {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  min-width: 82px;
+}
+
+.hpc-activity-open-task:hover {
+  border-color: #93c5fd;
+  background: #dbeafe;
+  color: #1e40af;
 }
 
 .hpc-activity-cancel:hover,
@@ -12050,6 +12266,13 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   flex: 1;
+}
+
+.hpc-activity-output {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  padding: 0.55rem 0.7rem;
 }
 
 .hpc-activity-meta {
@@ -12218,7 +12441,7 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   font-size: 0.75rem;
   line-height: 1.42;
   white-space: pre;
-  min-height: 220px;
+  min-height: 0;
 }
 
 .hpc-activity-standalone-shell {
@@ -12367,6 +12590,7 @@ html[data-theme="dark"] .hpc-activity-sync {
 
 html[data-theme="dark"] .hpc-activity-refresh,
 html[data-theme="dark"] .hpc-activity-popout,
+html[data-theme="dark"] .hpc-activity-open-task,
 html[data-theme="dark"] .hpc-activity-cancel {
   border-color: #475569;
   background: #1e293b;
@@ -12375,6 +12599,7 @@ html[data-theme="dark"] .hpc-activity-cancel {
 
 html[data-theme="dark"] .hpc-activity-refresh:hover,
 html[data-theme="dark"] .hpc-activity-popout:hover,
+html[data-theme="dark"] .hpc-activity-open-task:hover,
 html[data-theme="dark"] .hpc-activity-cancel:hover {
   border-color: #64748b;
   background: #334155;
@@ -12382,8 +12607,21 @@ html[data-theme="dark"] .hpc-activity-cancel:hover {
 
 html[data-theme="dark"] .hpc-activity-refresh:disabled,
 html[data-theme="dark"] .hpc-activity-popout:disabled,
+html[data-theme="dark"] .hpc-activity-open-task:disabled,
 html[data-theme="dark"] .hpc-activity-cancel:disabled {
   opacity: 0.55;
+}
+
+html[data-theme="dark"] .hpc-activity-open-task {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.18);
+  color: #bfdbfe;
+}
+
+html[data-theme="dark"] .hpc-activity-open-task:hover {
+  border-color: #3b82f6;
+  background: rgba(37, 99, 235, 0.32);
+  color: #dbeafe;
 }
 
 html[data-theme="dark"] .hpc-activity-cancel {

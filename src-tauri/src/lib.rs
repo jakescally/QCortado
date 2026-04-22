@@ -1392,15 +1392,6 @@ struct HpcScriptPreviewResult {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct HpcUtilizationSample {
-    captured_at: String,
-    source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node: Option<String>,
-    output: String,
-}
-
-#[derive(Debug, serde::Serialize)]
 struct HpcRemoteOrphanCleanupResult {
     profile_id: String,
     scanned_paths: usize,
@@ -2636,15 +2627,15 @@ async fn hpc_get_cluster_snapshot(
     })
 }
 
-/// Samples remote utilization text (GPU/CPU) for the active HPC run.
-/// Prefers nvtop output when available, with nvidia-smi/top fallbacks.
+/// Samples structured remote utilization for the active HPC run.
 #[tauri::command]
 async fn hpc_sample_utilization(
     profile_id: Option<String>,
     remote_job_id: Option<String>,
     remote_node: Option<String>,
+    resource_type: Option<hpc::profile::ResourceType>,
     state: State<'_, AppState>,
-) -> Result<HpcUtilizationSample, String> {
+) -> Result<hpc::utilization::HpcUtilizationSample, String> {
     let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
     let secret = hpc::credentials::resolve_secret(
         &profile.id,
@@ -2655,110 +2646,48 @@ async fn hpc_sample_utilization(
 
     let job_id = remote_job_id.as_deref().unwrap_or("").trim().to_string();
     let node_hint = remote_node.as_deref().unwrap_or("").trim().to_string();
+    let resolved_resource_type = resource_type.unwrap_or(hpc::profile::ResourceType::Cpu);
+    if job_id.is_empty() {
+        return Ok(hpc::utilization::HpcUtilizationSample {
+            captured_at: now_iso(),
+            resource_type: resolved_resource_type,
+            job_id: None,
+            node: if node_hint.is_empty() {
+                None
+            } else {
+                Some(node_hint)
+            },
+            sources: Vec::new(),
+            warnings: vec!["Waiting for remote job allocation.".to_string()],
+            scheduler: None,
+            cpu: None,
+            memory: None,
+            gpu: None,
+            raw: None,
+        });
+    }
 
-    let gpu_probe_inner = r#"gpu_source='unavailable';
-gpu_output='';
-nvtop_note='';
-nvtop_bad_re='unknown option|invalid option|usage:|missing argument|getopt|unhandled error|requires a terminal|inappropriate ioctl|failed to open|not found';
-if command -v nvtop >/dev/null 2>&1; then
-  gpu_output="$(timeout 4s nvtop -b 2>&1 | sed -n '1,120p')";
-  if [ -z "$gpu_output" ] || printf '%s' "$gpu_output" | grep -qiE "$nvtop_bad_re"; then
-    gpu_output="$(timeout 4s nvtop --batch 2>&1 | sed -n '1,120p')";
-  fi;
-  if [ -n "$gpu_output" ] && ! printf '%s' "$gpu_output" | grep -qiE "$nvtop_bad_re"; then
-    gpu_source='nvtop';
-  else
-    nvtop_note="$gpu_output";
-    gpu_output='';
-  fi;
-fi;
-if [ -z "$gpu_output" ] && command -v nvidia-smi >/dev/null 2>&1; then
-  gpu_source='nvidia-smi';
-  gpu_output="$(nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu --format=csv,noheader 2>&1)";
-fi;
-if [ -z "$gpu_output" ]; then
-  gpu_source='unavailable';
-  gpu_output='GPU metrics unavailable (nvtop unusable here and no nvidia-smi data).';
-  if [ -n "$nvtop_note" ]; then
-    gpu_output="$gpu_output\nnvtop note: $nvtop_note";
-  fi;
-fi;
-echo "__QCORTADO_GPU_SOURCE__:$gpu_source";
-printf '%s\n' "$gpu_output""#;
-
-    let quoted_gpu_probe = shell_single_quote_local(gpu_probe_inner);
-    let gpu_probe_cmd = if !job_id.is_empty() {
-        format!(
-            "if command -v srun >/dev/null 2>&1; then \
-srun_output=$(srun --jobid={} --overlap --nodes=1 --ntasks=1 --cpu-bind=none --quiet bash -lc {} 2>&1 || true); \
-if printf '%s' \"$srun_output\" | grep -q '__QCORTADO_GPU_SOURCE__:'; then \
-printf '%s\\n' \"$srun_output\"; \
-else \
-bash -lc {}; \
-fi; \
-else \
-bash -lc {}; \
-fi",
-            shell_single_quote_local(&job_id),
-            quoted_gpu_probe,
-            quoted_gpu_probe,
-            quoted_gpu_probe,
-        )
-    } else {
-        format!("bash -lc {}", quoted_gpu_probe)
-    };
-
-    let telemetry_cmd = format!(
-        "echo \"[QCortado] Telemetry captured $(date -u)\"; \
-if [ -n {job_id} ]; then echo \"[QCortado] Job {job_id}\"; fi; \
-if [ -n {node_hint} ]; then echo \"[QCortado] Node hint {node_hint}\"; fi; \
-echo \"--- GPU ---\"; \
-{gpu_probe}; \
-echo \"\"; \
-echo \"--- CPU ---\"; \
-if command -v top >/dev/null 2>&1; then \
-top -b -n 1 | head -n 12; \
-elif command -v vmstat >/dev/null 2>&1; then \
-vmstat 1 2 | tail -n 2; \
-else \
-echo \"CPU metrics unavailable (top/vmstat not found)\"; \
-fi",
-        job_id = shell_single_quote_local(&job_id),
-        node_hint = shell_single_quote_local(&node_hint),
-        gpu_probe = gpu_probe_cmd,
-    );
-
+    let telemetry_cmd =
+        hpc::utilization::build_utilization_command(&job_id, resolved_resource_type);
     let raw_output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &telemetry_cmd).await?;
-    let mut source = String::from("unavailable");
-    let mut cleaned_lines: Vec<&str> = Vec::new();
-    for line in raw_output.lines() {
-        if let Some(value) = line.strip_prefix("__QCORTADO_GPU_SOURCE__:") {
-            let candidate = value.trim();
-            if !candidate.is_empty() {
-                source = candidate.to_string();
-            }
-            continue;
-        }
-        cleaned_lines.push(line);
-    }
-    let mut output = cleaned_lines.join("\n");
-    if raw_output.ends_with('\n') && !output.is_empty() {
-        output.push('\n');
-    }
+    let parsed = hpc::utilization::parse_utilization_output(&raw_output, resolved_resource_type);
 
-    Ok(HpcUtilizationSample {
+    let parsed_node = parsed
+        .scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.node.clone());
+    Ok(hpc::utilization::HpcUtilizationSample {
         captured_at: now_iso(),
-        source,
-        node: if node_hint.is_empty() {
-            None
-        } else {
-            Some(node_hint)
-        },
-        output: if output.trim().is_empty() {
-            "No telemetry output received from remote host.".to_string()
-        } else {
-            output
-        },
+        resource_type: resolved_resource_type,
+        job_id: Some(job_id),
+        node: parsed_node.or_else(|| (!node_hint.is_empty()).then_some(node_hint)),
+        sources: parsed.sources,
+        warnings: parsed.warnings,
+        scheduler: parsed.scheduler,
+        cpu: parsed.cpu,
+        memory: parsed.memory,
+        gpu: parsed.gpu,
+        raw: Some(raw_output),
     })
 }
 
@@ -7060,6 +6989,12 @@ async fn run_hpc_bundle_task(
         &command_lines,
         resources,
     );
+    let effective_resource_type = match script.effective_resources.resource_type {
+        hpc::profile::ResourceType::Cpu => "cpu",
+        hpc::profile::ResourceType::Gpu => "gpu",
+    };
+    pm.set_hpc_resource_type(task_id, Some(effective_resource_type.to_string()))
+        .await;
 
     if !script.validation.warnings.is_empty() {
         for warning in &script.validation.warnings {

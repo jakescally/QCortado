@@ -1875,6 +1875,7 @@ export function WannierWizard({
         ? {
           execution_backend: "hpc",
           hpc_profile_id: activeHpcProfile?.id ?? null,
+          hpc_resource_type: finalTask.hpc.hpc_resource_type ?? hpcResources.resource_type,
           remote_job_id: finalTask.hpc.remote_job_id ?? null,
           scheduler_state: finalTask.hpc.scheduler_state ?? null,
           remote_node: finalTask.hpc.remote_node ?? null,

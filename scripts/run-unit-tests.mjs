@@ -10,6 +10,7 @@ const testEntries = [
   "tests/transport/transportUtils.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
+  "tests/hpcUtilization/hpcUtilization.test.ts",
 ];
 
 const tempDir = mkdtempSync(join(tmpdir(), "qcortado-unit-tests-"));

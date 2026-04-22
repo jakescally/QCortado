@@ -24,6 +24,8 @@ pub struct TaskInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub hpc_resource_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduler_state: Option<String>,
@@ -48,6 +50,8 @@ pub struct TaskSummary {
     pub status: TaskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hpc_resource_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,6 +80,7 @@ pub struct RunningTask {
     pub child_id: Option<u32>,
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
     pub backend: Option<String>,
+    pub hpc_resource_type: Option<String>,
     pub remote_job_id: Option<String>,
     pub scheduler_state: Option<String>,
     pub remote_node: Option<String>,
@@ -138,6 +143,7 @@ impl ProcessManager {
             child_id: None,
             cancel_flag: cancel_flag.clone(),
             backend: Some("local".to_string()),
+            hpc_resource_type: None,
             remote_job_id: None,
             scheduler_state: None,
             remote_node: None,
@@ -208,6 +214,7 @@ impl ProcessManager {
             result: t.result.clone(),
             error: t.error.clone(),
             backend: t.backend.clone(),
+            hpc_resource_type: t.hpc_resource_type.clone(),
             remote_job_id: t.remote_job_id.clone(),
             scheduler_state: t.scheduler_state.clone(),
             remote_node: t.remote_node.clone(),
@@ -229,6 +236,7 @@ impl ProcessManager {
                 started_at: t.started_at.clone(),
                 status: t.status.clone(),
                 backend: t.backend.clone(),
+                hpc_resource_type: t.hpc_resource_type.clone(),
                 remote_job_id: t.remote_job_id.clone(),
                 scheduler_state: t.scheduler_state.clone(),
                 remote_node: t.remote_node.clone(),
@@ -296,6 +304,13 @@ impl ProcessManager {
         let mut tasks = self.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
             task.backend = backend;
+        }
+    }
+
+    pub async fn set_hpc_resource_type(&self, task_id: &str, hpc_resource_type: Option<String>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.hpc_resource_type = hpc_resource_type;
         }
     }
 

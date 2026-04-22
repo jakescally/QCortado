@@ -40,9 +40,72 @@ export interface HpcScriptPreviewResult {
 
 export interface HpcUtilizationSample {
   captured_at: string;
-  source: string;
+  resource_type: HpcResourceType;
+  job_id?: string | null;
   node?: string | null;
-  output: string;
+  sources?: string[];
+  warnings?: string[];
+  scheduler?: HpcSchedulerTelemetry | null;
+  cpu?: HpcCpuTelemetry | null;
+  memory?: HpcMemoryTelemetry | null;
+  gpu?: HpcGpuTelemetry | null;
+  raw?: string | null;
+}
+
+export interface HpcSchedulerTelemetry {
+  state?: string | null;
+  node?: string | null;
+  allocated_cpus?: number | null;
+  requested_memory_bytes?: number | null;
+  nodes?: number | null;
+  elapsed?: string | null;
+  time_limit?: string | null;
+  reason?: string | null;
+}
+
+export interface HpcCpuTelemetry {
+  allocated_cpus?: number | null;
+  total_cpu_seconds?: number | null;
+  steps?: HpcCpuStepTelemetry[];
+}
+
+export interface HpcCpuStepTelemetry {
+  job_step: string;
+  n_tasks?: number | null;
+  average_cpu_seconds?: number | null;
+  average_cpu_display?: string | null;
+  average_rss_bytes?: number | null;
+  peak_rss_bytes?: number | null;
+  average_vm_bytes?: number | null;
+  peak_vm_bytes?: number | null;
+}
+
+export interface HpcMemoryTelemetry {
+  source: string;
+  current_rss_bytes?: number | null;
+  peak_rss_bytes?: number | null;
+  average_vm_bytes?: number | null;
+  peak_vm_bytes?: number | null;
+  requested_bytes?: number | null;
+}
+
+export interface HpcGpuTelemetry {
+  source: string;
+  devices?: HpcGpuDeviceTelemetry[];
+  average_utilization_percent?: number | null;
+  memory_used_bytes?: number | null;
+  memory_total_bytes?: number | null;
+  memory_used_percent?: number | null;
+}
+
+export interface HpcGpuDeviceTelemetry {
+  index: number;
+  name: string;
+  utilization_percent?: number | null;
+  memory_utilization_percent?: number | null;
+  memory_used_bytes?: number | null;
+  memory_total_bytes?: number | null;
+  temperature_c?: number | null;
 }
 
 export type HpcQueueScope = "all" | "mine";
@@ -424,11 +487,13 @@ export async function sampleHpcUtilization(
   profileId?: string | null,
   remoteJobId?: string | null,
   remoteNode?: string | null,
+  resourceType?: HpcResourceType | null,
 ): Promise<HpcUtilizationSample> {
   return invoke<HpcUtilizationSample>("hpc_sample_utilization", {
     profileId: profileId ?? null,
     remoteJobId: remoteJobId ?? null,
     remoteNode: remoteNode ?? null,
+    resourceType: resourceType ?? null,
   });
 }
 

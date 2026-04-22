@@ -50,10 +50,10 @@ import {
   defaultResourcesForProfile,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
-  sampleHpcUtilization,
   saveExecutionMode,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
+import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
 interface CalculationRun {
   id: string;
@@ -545,13 +545,6 @@ export function BandStructureWizard({
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
     defaultResourcesForProfile(activeHpcProfile),
   );
-  const [hpcTelemetryOutput, setHpcTelemetryOutput] = useState<string>(
-    "Waiting for remote job allocation...",
-  );
-  const [hpcTelemetrySource, setHpcTelemetrySource] = useState<string>("pending");
-  const [hpcTelemetryError, setHpcTelemetryError] = useState<string | null>(null);
-  const [hpcTelemetryUpdatedAt, setHpcTelemetryUpdatedAt] = useState<string | null>(null);
-  const [hpcTelemetryLoading, setHpcTelemetryLoading] = useState(false);
 
   // Pseudopotentials (pseudopotentials list used internally for auto-selection)
   const [, setPseudopotentials] = useState<string[]>([]);
@@ -792,82 +785,6 @@ export function BandStructureWizard({
     setKPathRhombohedralConvention(undefined);
   }, [crystalData]);
 
-  useEffect(() => {
-    if (!isHpcMode || step !== "run") {
-      return;
-    }
-
-    const taskIsRunning = isRunning || activeTask?.status === "running";
-    if (!taskIsRunning) {
-      return;
-    }
-
-    const profileId = activeHpcProfile?.id ?? null;
-    if (!profileId) {
-      setHpcTelemetryError("No active HPC profile selected.");
-      setHpcTelemetrySource("unavailable");
-      return;
-    }
-
-    if (activeTask?.hpc?.backend && activeTask.hpc.backend !== "hpc") {
-      return;
-    }
-
-    const remoteJobId = activeTask?.hpc?.remote_job_id?.trim() || "";
-    const remoteNode = activeTask?.hpc?.remote_node?.trim() || "";
-    if (!remoteJobId) {
-      setHpcTelemetryLoading(false);
-      setHpcTelemetryError(null);
-      setHpcTelemetrySource("pending");
-      setHpcTelemetryOutput("Waiting for remote job allocation...");
-      return;
-    }
-
-    let cancelled = false;
-    let timeoutId: number | null = null;
-
-    const pollTelemetry = async () => {
-      if (cancelled) return;
-      setHpcTelemetryLoading(true);
-      try {
-        const sample = await sampleHpcUtilization(profileId, remoteJobId, remoteNode || null);
-        if (cancelled) return;
-        setHpcTelemetryOutput(sample.output || "No telemetry output received from remote host.");
-        setHpcTelemetrySource(sample.source || "unknown");
-        setHpcTelemetryUpdatedAt(sample.captured_at || new Date().toISOString());
-        setHpcTelemetryError(null);
-      } catch (e) {
-        if (cancelled) return;
-        setHpcTelemetrySource("error");
-        setHpcTelemetryError(String(e));
-      } finally {
-        if (cancelled) return;
-        setHpcTelemetryLoading(false);
-        timeoutId = window.setTimeout(() => {
-          void pollTelemetry();
-        }, 5000);
-      }
-    };
-
-    void pollTelemetry();
-
-    return () => {
-      cancelled = true;
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [
-    isHpcMode,
-    step,
-    isRunning,
-    activeTask?.status,
-    activeTask?.hpc?.backend,
-    activeTask?.hpc?.remote_job_id,
-    activeTask?.hpc?.remote_node,
-    activeHpcProfile?.id,
-  ]);
-
   // Reconnect to a running/completed background task
   useEffect(() => {
     if (!activeTaskId) return;
@@ -909,8 +826,8 @@ export function BandStructureWizard({
     setIsRunning(task.status === "running");
   }, [
     activeTaskId,
-    taskContext.getTask(activeTaskId ?? "")?.output.length,
-    taskContext.getTask(activeTaskId ?? "")?.status,
+    activeTask?.outputLineCount,
+    activeTask?.status,
   ]);
 
   // Handle k-path changes from the BZ viewer
@@ -1369,13 +1286,6 @@ export function BandStructureWizard({
     const startTime = new Date().toISOString();
     setCalcStartTime(startTime);
     setStep("run");
-    if (isHpcMode) {
-      setHpcTelemetryOutput("Waiting for remote job allocation...");
-      setHpcTelemetrySource("pending");
-      setHpcTelemetryError(null);
-      setHpcTelemetryUpdatedAt(null);
-      setHpcTelemetryLoading(false);
-    }
 
     try {
       const plan = await buildBandTaskPlan();
@@ -1396,6 +1306,7 @@ export function BandStructureWizard({
         ? {
           execution_backend: "hpc",
           hpc_profile_id: activeHpcProfile?.id ?? null,
+          hpc_resource_type: finalTask.hpc.hpc_resource_type ?? hpcResources.resource_type,
           remote_job_id: finalTask.hpc.remote_job_id ?? null,
           scheduler_state: finalTask.hpc.scheduler_state ?? null,
           remote_node: finalTask.hpc.remote_node ?? null,
@@ -2310,25 +2221,13 @@ export function BandStructureWizard({
           />
 
           {isHpcMode && (
-            <div className="telemetry-panel">
-              <div className="telemetry-header">
-                <h3>Remote Utilization</h3>
-                <span className="telemetry-meta">
-                  {hpcTelemetryLoading
-                    ? "Refreshing..."
-                    : hpcTelemetryUpdatedAt
-                    ? `Updated ${new Date(hpcTelemetryUpdatedAt).toLocaleTimeString()}`
-                    : "Waiting for first sample..."}
-                </span>
-              </div>
-              <div className="telemetry-meta-row">
-                <span>Job: {activeTask?.hpc?.remote_job_id || "pending allocation"}</span>
-                <span>Node: {activeTask?.hpc?.remote_node || "pending"}</span>
-                <span>Source: {hpcTelemetrySource}</span>
-              </div>
-              <pre className="telemetry-output">{hpcTelemetryOutput}</pre>
-              {hpcTelemetryError && <p className="telemetry-error">{hpcTelemetryError}</p>}
-            </div>
+            <RemoteUtilizationPanel
+              enabled={isRunning || activeTask?.status === "running"}
+              profileId={activeHpcProfile?.id ?? null}
+              remoteJobId={activeTask?.hpc?.remote_job_id ?? null}
+              remoteNode={activeTask?.hpc?.remote_node ?? null}
+              resourceType={activeTask?.hpc?.hpc_resource_type ?? hpcResources.resource_type}
+            />
           )}
         </div>
       </div>
