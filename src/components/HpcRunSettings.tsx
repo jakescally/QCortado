@@ -11,6 +11,10 @@ interface HpcRunSettingsProps {
   resourceMode?: HpcResourceMode | null;
   defaultCpuResources?: SlurmResourceRequest | null;
   defaultGpuResources?: SlurmResourceRequest | null;
+  maxTasks?: {
+    value: number;
+    reason: string;
+  } | null;
   onResourcesChange: (next: SlurmResourceRequest) => void;
   disabled?: boolean;
 }
@@ -47,6 +51,7 @@ export function HpcRunSettings({
   resourceMode = "both",
   defaultCpuResources = null,
   defaultGpuResources = null,
+  maxTasks = null,
   onResourcesChange,
   disabled = false,
 }: HpcRunSettingsProps) {
@@ -69,6 +74,9 @@ export function HpcRunSettings({
         : null;
   const gpuCount = Math.max(1, resources.gpus || 1);
   const taskCount = Math.max(1, resources.ntasks || 1);
+  const maxTaskCount = maxTasks && Number.isFinite(maxTasks.value) && maxTasks.value > 0
+    ? Math.max(1, Math.floor(maxTasks.value))
+    : null;
   const gpuOversubscriptionWarning = resources.resource_type === "gpu" && taskCount > gpuCount
     ? `Tasks (${taskCount}) exceed GPUs (${gpuCount}). This can oversubscribe GPUs and hurt QE performance.`
     : null;
@@ -100,6 +108,16 @@ export function HpcRunSettings({
     defaultGpuResources,
     onResourcesChange,
   ]);
+
+  useEffect(() => {
+    if (maxTaskCount == null || taskCount <= maxTaskCount) {
+      return;
+    }
+    onResourcesChange({
+      ...resources,
+      ntasks: maxTaskCount,
+    });
+  }, [maxTaskCount, onResourcesChange, resources, taskCount]);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +167,10 @@ export function HpcRunSettings({
       ...patch,
     });
   };
+  const normalizeTaskCount = (input: string): number => {
+    const normalized = normalizePositiveInt(input, 1);
+    return maxTaskCount == null ? normalized : Math.min(normalized, maxTaskCount);
+  };
 
   const additionalSbatchText = (resources.additional_sbatch || []).join("\n");
 
@@ -174,6 +196,11 @@ export function HpcRunSettings({
         <div className="hpc-script-warnings">
           <p>{gpuOversubscriptionWarning}</p>
         </div>
+      )}
+      {maxTaskCount != null && (
+        <p className="hpc-run-settings-hint">
+          Tasks are capped at {maxTaskCount} because {maxTasks?.reason}.
+        </p>
       )}
 
       <div className="hpc-grid">
@@ -242,8 +269,9 @@ export function HpcRunSettings({
           <input
             type="number"
             min={1}
+            max={maxTaskCount ?? undefined}
             value={resources.ntasks ?? 1}
-            onChange={(event) => update({ ntasks: normalizePositiveInt(event.target.value, 1) })}
+            onChange={(event) => update({ ntasks: normalizeTaskCount(event.target.value) })}
             disabled={disabled}
           />
         </label>

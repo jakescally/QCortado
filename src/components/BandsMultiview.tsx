@@ -17,6 +17,7 @@ import {
   BandPlotSharedSettings,
   FermiReferenceMode,
   getDefaultBandPlotEnergyRange,
+  ZeroEnergyReferenceMode,
 } from "./BandPlot";
 import { InfoTooltip } from "./InfoTooltip";
 
@@ -77,6 +78,7 @@ interface TileDragSession {
 
 const DEFAULT_SHARED_SETTINGS: BandPlotSharedSettings = {
   fermiReferenceMode: "scf",
+  zeroEnergyReferenceMode: "calculated-fermi",
   lineWidth: 1.5,
   lineOpacity: 0.85,
   plotTextScale: 1,
@@ -431,6 +433,7 @@ export function BandsMultiview({
         calc.band_data,
         calc.scf_fermi_energy ?? undefined,
         sharedSettings.fermiReferenceMode,
+        sharedSettings.zeroEnergyReferenceMode,
       );
       globalMin = Math.min(globalMin, calcMin);
       globalMax = Math.max(globalMax, calcMax);
@@ -440,7 +443,7 @@ export function BandsMultiview({
       return [-5, 5];
     }
     return [globalMin, globalMax];
-  }, [selectedCalculations, sharedSettings.fermiReferenceMode]);
+  }, [selectedCalculations, sharedSettings.fermiReferenceMode, sharedSettings.zeroEnergyReferenceMode]);
 
   const resolvedEnergyRange = manualRange ?? autoEnergyRange;
 
@@ -1012,6 +1015,24 @@ export function BandsMultiview({
                       >
                         <option value="scf">SCF</option>
                         <option value="bands">Bands run</option>
+                      </select>
+                    </div>
+
+                    <div className="band-control-row">
+                      <label>Zero Energy</label>
+                      <select
+                        value={sharedSettings.zeroEnergyReferenceMode}
+                        onChange={(event) => {
+                          setSharedSettings((current) => ({
+                            ...current,
+                            zeroEnergyReferenceMode: event.target.value as ZeroEnergyReferenceMode,
+                          }));
+                          setManualRange(null);
+                          setManualRangeError(null);
+                        }}
+                      >
+                        <option value="calculated-fermi">Calculated E_F</option>
+                        <option value="vbm">VBM</option>
                       </select>
                     </div>
 

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -60,6 +61,9 @@ pub struct CifVariant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationRun {
     pub id: String,
+    /// Optional user-facing label for the saved calculation entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub calc_type: String,
     pub parameters: serde_json::Value,
     pub result: Option<QEResult>,
@@ -117,6 +121,19 @@ pub struct SaveCalculationData {
     /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// A text log/input file saved under a calculation directory.
+#[derive(Debug, Clone, Serialize)]
+pub struct CalculationLogFile {
+    pub path: String,
+    pub contents: String,
+    pub size_bytes: u64,
+}
+
+enum CalculationTextFileKind {
+    Logs,
+    Inputs,
 }
 
 /// Data about a CIF file to add to a project
@@ -201,8 +218,172 @@ pub struct BandsMultiviewScanProgress {
     pub total_projects: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageInventoryMode {
+    Local,
+    Hpc,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageEntryKind {
+    Project,
+    Temp,
+    Orphan,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageInventoryProgress {
+    pub progress_event_id: String,
+    pub phase: String,
+    pub scanned_items: usize,
+    pub total_items: usize,
+    pub bytes_seen: u64,
+    pub total_bytes_estimate: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePathEntry {
+    pub id: String,
+    pub kind: StorageEntryKind,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub bytes: u64,
+    pub path: String,
+    #[serde(default)]
+    pub delete_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageCalculationEntry {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub cif_id: String,
+    pub cif_label: String,
+    pub calc_id: String,
+    pub calc_type: String,
+    pub label: String,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hpc_profile_id: Option<String>,
+    #[serde(default)]
+    pub has_remote_artifacts: bool,
+    #[serde(default)]
+    pub can_delete: bool,
+    #[serde(default)]
+    pub can_lighten: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageInventoryResult {
+    pub mode: StorageInventoryMode,
+    pub scanned_at: String,
+    pub total_bytes: u64,
+    pub project_bytes: u64,
+    pub calculation_bytes: u64,
+    pub temp_bytes: u64,
+    pub orphan_bytes: u64,
+    pub other_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<StoragePathEntry>,
+    #[serde(default)]
+    pub calculations: Vec<StorageCalculationEntry>,
+    #[serde(default)]
+    pub temp: Vec<StoragePathEntry>,
+    #[serde(default)]
+    pub orphans: Vec<StoragePathEntry>,
+    #[serde(default)]
+    pub other: Vec<StoragePathEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageDeleteEntryTarget {
+    pub id: String,
+    pub kind: StorageEntryKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteStorageEntriesRequest {
+    pub mode: StorageInventoryMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_event_id: Option<String>,
+    #[serde(default)]
+    pub entries: Vec<StorageDeleteEntryTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageCalculationTarget {
+    pub project_id: String,
+    pub cif_id: String,
+    pub calc_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteStorageCalculationsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_event_id: Option<String>,
+    #[serde(default)]
+    pub calculations: Vec<StorageCalculationTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightenStorageCalculationsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_event_id: Option<String>,
+    #[serde(default)]
+    pub calculations: Vec<StorageCalculationTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteStorageSelectionRequest {
+    pub mode: StorageInventoryMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_event_id: Option<String>,
+    #[serde(default)]
+    pub calculations: Vec<StorageCalculationTarget>,
+    #[serde(default)]
+    pub entries: Vec<StorageDeleteEntryTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageMutationFailure {
+    pub id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageMutationResult {
+    pub bytes_freed: u64,
+    #[serde(default)]
+    pub succeeded: Vec<String>,
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub failures: Vec<StorageMutationFailure>,
+}
+
 const PROJECT_ARCHIVE_MAGIC: &[u8; 7] = b"QCPROJ1";
 const PROJECT_ARCHIVE_VERSION: u32 = 2;
+const MAX_CALCULATION_NAME_CHARS: usize = 80;
 const ARCHIVE_ENTRY_DIR: u8 = 0;
 const ARCHIVE_ENTRY_FILE: u8 = 1;
 const ARCHIVE_ENTRY_END: u8 = 255;
@@ -217,7 +398,19 @@ const EXPORT_CANCELLED_SENTINEL: &str = "__QCORTADO_EXPORT_CANCELLED__";
 const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
 const MULTIVIEW_BANDS_PROGRESS_EVENT: &str = "multiview-bands-progress";
+const STORAGE_MANAGER_PROGRESS_EVENT: &str = "storage-manager-progress";
 const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 9] = [
+    "scf",
+    "bands",
+    "dos",
+    "wannier",
+    "transport",
+    "epw",
+    "phonon",
+    "optimization",
+    "fermi_surface",
+];
+const STORAGE_REMOTE_PROJECT_TASK_KINDS: [&str; 9] = [
     "scf",
     "bands",
     "dos",
@@ -285,6 +478,25 @@ fn normalize_folder_name(name: &str) -> Result<String, String> {
         return Err("Folder name is required".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+fn normalize_calculation_name(name: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw_name) = name else {
+        return Ok(None);
+    };
+
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_CALCULATION_NAME_CHARS {
+        return Err(format!(
+            "Calculation name must be {} characters or fewer.",
+            MAX_CALCULATION_NAME_CHARS
+        ));
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 fn export_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
@@ -402,6 +614,44 @@ fn emit_multiview_band_progress(
     };
 
     let _ = app.emit(MULTIVIEW_BANDS_PROGRESS_EVENT, payload);
+}
+
+fn emit_storage_inventory_progress(
+    app: &AppHandle,
+    progress_event_id: Option<&str>,
+    phase: &str,
+    scanned_items: usize,
+    total_items: usize,
+    bytes_seen: u64,
+    total_bytes_estimate: u64,
+) {
+    let Some(progress_event_id) = progress_event_id else {
+        return;
+    };
+
+    let payload = StorageInventoryProgress {
+        progress_event_id: progress_event_id.to_string(),
+        phase: phase.to_string(),
+        scanned_items,
+        total_items,
+        bytes_seen,
+        total_bytes_estimate,
+    };
+
+    let _ = app.emit(STORAGE_MANAGER_PROGRESS_EVENT, payload);
+}
+
+#[derive(Debug, Clone)]
+struct SavedCalculationDescriptor {
+    project_id: String,
+    project_name: String,
+    cif_id: String,
+    cif_label: String,
+    calc_id: String,
+    calc_type: String,
+    calc_name: Option<String>,
+    calc_parameters: serde_json::Value,
+    calc_dir: PathBuf,
 }
 
 fn write_u32_le<W: Write>(writer: &mut W, value: u32) -> Result<(), String> {
@@ -1038,6 +1288,42 @@ fn calculate_directory_size(path: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+fn calculate_path_size(path: &Path) -> Result<u64, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_dir() {
+        return calculate_directory_size(path);
+    }
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    Ok(metadata.len())
+}
+
+fn storage_temp_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for candidate in [PathBuf::from("/tmp"), std::env::temp_dir()] {
+        if !candidate.exists() {
+            continue;
+        }
+        let normalized = candidate.canonicalize().unwrap_or(candidate);
+        if seen.insert(normalized.clone()) {
+            roots.push(normalized);
+        }
+    }
+
+    roots
+}
+
+fn is_qcortado_owned_name(name: &str) -> bool {
+    let normalized = name.trim().to_ascii_lowercase();
+    normalized.starts_with("qcortado")
+        || normalized.starts_with(".qcortado")
+        || normalized.starts_with("_qcortado")
+}
+
 fn calculation_json_path(project_dir: &Path, calc_id: &str) -> PathBuf {
     project_dir
         .join("calculations")
@@ -1130,6 +1416,7 @@ fn load_full_calculation_from_disk(
 }
 
 fn merge_summary_into_full_calculation(full: &mut CalculationRun, summary: &CalculationRun) {
+    full.name = summary.name.clone();
     full.calc_type = summary.calc_type.clone();
     full.parameters = summary.parameters.clone();
     full.started_at = summary.started_at.clone();
@@ -1186,6 +1473,106 @@ fn persist_full_calculation(
     let calc_json = serde_json::to_string_pretty(calculation)
         .map_err(|e| format!("Failed to serialize calculation: {}", e))?;
     fs::write(&calc_json_path, calc_json).map_err(|e| format!("Failed to write calc.json: {}", e))
+}
+
+fn is_calculation_input_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if file_name.is_empty() || file_name == "calc.json" {
+        return false;
+    }
+    if file_name == "run.sbatch" || file_name.ends_with(".win") {
+        return true;
+    }
+
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("in")
+    )
+}
+
+fn is_calculation_log_file(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if file_name.is_empty() || file_name == "calc.json" {
+        return false;
+    }
+
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("out" | "err" | "log" | "txt")
+    )
+}
+
+fn collect_calculation_text_files(
+    root: &Path,
+    current: &Path,
+    kind: &CalculationTextFileKind,
+    logs: &mut Vec<CalculationLogFile>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(format!(
+                "Failed to read calculation log directory {}: {}",
+                current.display(),
+                err
+            ))
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "Failed to read calculation log directory entry in {}: {}",
+                current.display(),
+                e
+            )
+        })?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+        if metadata.is_dir() {
+            collect_calculation_text_files(root, &path, kind, logs)?;
+            continue;
+        }
+        let include = match kind {
+            CalculationTextFileKind::Logs => is_calculation_log_file(&path),
+            CalculationTextFileKind::Inputs => is_calculation_input_file(&path),
+        };
+        if !metadata.is_file() || !include {
+            continue;
+        }
+
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|e| format!("Failed to resolve relative log path: {}", e))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes =
+            fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        logs.push(CalculationLogFile {
+            path: relative_path,
+            contents: String::from_utf8_lossy(&bytes).to_string(),
+            size_bytes: metadata.len(),
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_q_grid_from_parameters(parameters: &serde_json::Value) -> Option<[u32; 3]> {
@@ -1555,6 +1942,62 @@ fn hydrate_missing_calculation_sizes(
     Ok(changed)
 }
 
+fn collect_saved_calculation_descriptors(
+    app: &AppHandle,
+) -> Result<Vec<SavedCalculationDescriptor>, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let entries = fs::read_dir(&projects_dir).map_err(|e| {
+        format!(
+            "Failed to read projects directory {}: {}",
+            projects_dir.display(),
+            e
+        )
+    })?;
+    let mut descriptors: Vec<SavedCalculationDescriptor> = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read projects directory entry: {}", e))?;
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+
+        let project_json_path = project_dir.join("project.json");
+        if !project_json_path.exists() {
+            continue;
+        }
+
+        let mut project = read_project_json(&project_json_path)?;
+        let changed = hydrate_missing_calculation_sizes(&mut project, &project_dir)?;
+        if changed {
+            write_project_json_summary(&project_json_path, &project)?;
+        }
+
+        for variant in &project.cif_variants {
+            let cif_label = if !variant.formula.trim().is_empty() {
+                variant.formula.clone()
+            } else {
+                variant.filename.clone()
+            };
+            for calculation in &variant.calculations {
+                descriptors.push(SavedCalculationDescriptor {
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                    cif_id: variant.id.clone(),
+                    cif_label: cif_label.clone(),
+                    calc_id: calculation.id.clone(),
+                    calc_type: calculation.calc_type.clone(),
+                    calc_name: calculation.name.clone(),
+                    calc_parameters: calculation.parameters.clone(),
+                    calc_dir: project_dir.join("calculations").join(&calculation.id),
+                });
+            }
+        }
+    }
+
+    Ok(descriptors)
+}
+
 /// Generates a unique ID based on timestamp and random suffix
 fn generate_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1754,6 +2197,1339 @@ fn ensure_research_mode() -> Result<(), String> {
         return Err("Viewer mode is read-only; this action is disabled.".to_string());
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn scan_storage_inventory(
+    app: AppHandle,
+    state: State<'_, crate::AppState>,
+    mode: StorageInventoryMode,
+    profile_id: Option<String>,
+    progress_event_id: Option<String>,
+) -> Result<StorageInventoryResult, String> {
+    match mode {
+        StorageInventoryMode::Local => {
+            build_local_project_inventory(&app, progress_event_id.as_deref())
+        }
+        StorageInventoryMode::Hpc => {
+            build_hpc_storage_inventory(
+                &app,
+                state.inner(),
+                profile_id,
+                progress_event_id.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn delete_storage_entries(
+    app: AppHandle,
+    state: State<'_, crate::AppState>,
+    request: DeleteStorageEntriesRequest,
+) -> Result<StorageMutationResult, String> {
+    ensure_research_mode()?;
+    let progress_event_id = request.progress_event_id.clone();
+    let total_items = request.entries.len();
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "deleting-storage",
+        0,
+        total_items,
+        0,
+        0,
+    );
+    let mut emit_progress = |processed_items: usize, total_items: usize, bytes_seen: u64| {
+        emit_storage_inventory_progress(
+            &app,
+            progress_event_id.as_deref(),
+            "deleting-storage",
+            processed_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    };
+    let result = delete_storage_entries_impl(state.inner(), request, &mut emit_progress).await?;
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "done",
+        total_items,
+        total_items,
+        result.bytes_freed,
+        result.bytes_freed,
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn delete_storage_calculations(
+    app: AppHandle,
+    state: State<'_, crate::AppState>,
+    request: DeleteStorageCalculationsRequest,
+) -> Result<StorageMutationResult, String> {
+    ensure_research_mode()?;
+
+    let progress_event_id = request.progress_event_id.clone();
+    let total_items = request.calculations.len();
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "deleting-calculations",
+        0,
+        total_items,
+        0,
+        0,
+    );
+    let mut result = StorageMutationResult {
+        bytes_freed: 0,
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    for target in request.calculations {
+        let entry_id =
+            storage_calculation_entry_id(&target.project_id, &target.cif_id, &target.calc_id);
+        match delete_calculation_impl(
+            &app,
+            state.inner(),
+            &target.project_id,
+            &target.cif_id,
+            &target.calc_id,
+        )
+        .await
+        {
+            Ok(bytes) => {
+                result.bytes_freed = result.bytes_freed.saturating_add(bytes);
+                result.succeeded.push(entry_id);
+            }
+            Err(err) => {
+                result.failed.push(entry_id.clone());
+                result.failures.push(StorageMutationFailure {
+                    id: entry_id,
+                    message: err,
+                });
+            }
+        }
+        emit_storage_inventory_progress(
+            &app,
+            progress_event_id.as_deref(),
+            "deleting-calculations",
+            result.succeeded.len().saturating_add(result.failed.len()),
+            total_items,
+            result.bytes_freed,
+            0,
+        );
+    }
+
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "done",
+        total_items,
+        total_items,
+        result.bytes_freed,
+        result.bytes_freed,
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn delete_storage_selection(
+    app: AppHandle,
+    state: State<'_, crate::AppState>,
+    request: DeleteStorageSelectionRequest,
+) -> Result<StorageMutationResult, String> {
+    ensure_research_mode()?;
+
+    let total_items = request
+        .calculations
+        .len()
+        .saturating_add(request.entries.len());
+    let progress_event_id = request.progress_event_id.clone();
+    let mut processed_items = 0_usize;
+    let mut bytes_seen = 0_u64;
+    let mut combined = StorageMutationResult {
+        bytes_freed: 0,
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "deleting-selected",
+        0,
+        total_items,
+        0,
+        0,
+    );
+
+    if !request.calculations.is_empty() {
+        for target in request.calculations {
+            let entry_id =
+                storage_calculation_entry_id(&target.project_id, &target.cif_id, &target.calc_id);
+            match delete_calculation_impl(
+                &app,
+                state.inner(),
+                &target.project_id,
+                &target.cif_id,
+                &target.calc_id,
+            )
+            .await
+            {
+                Ok(bytes) => {
+                    combined.bytes_freed = combined.bytes_freed.saturating_add(bytes);
+                    combined.succeeded.push(entry_id);
+                }
+                Err(err) => {
+                    combined.failed.push(entry_id.clone());
+                    combined.failures.push(StorageMutationFailure {
+                        id: entry_id,
+                        message: err,
+                    });
+                }
+            }
+            processed_items += 1;
+            bytes_seen = combined.bytes_freed;
+            emit_storage_inventory_progress(
+                &app,
+                progress_event_id.as_deref(),
+                "deleting-selected",
+                processed_items,
+                total_items,
+                bytes_seen,
+                0,
+            );
+        }
+    }
+
+    if !request.entries.is_empty() {
+        let mut emit_progress =
+            |entry_processed: usize, entry_total: usize, entry_bytes_seen: u64| {
+                emit_storage_inventory_progress(
+                    &app,
+                    progress_event_id.as_deref(),
+                    "deleting-selected",
+                    processed_items.saturating_add(entry_processed),
+                    processed_items.saturating_add(entry_total),
+                    bytes_seen.saturating_add(entry_bytes_seen),
+                    0,
+                );
+            };
+        let entry_result = delete_storage_entries_impl(
+            state.inner(),
+            DeleteStorageEntriesRequest {
+                mode: request.mode,
+                profile_id: request.profile_id,
+                progress_event_id: None,
+                entries: request.entries,
+            },
+            &mut emit_progress,
+        )
+        .await?;
+        combined.bytes_freed = combined
+            .bytes_freed
+            .saturating_add(entry_result.bytes_freed);
+        combined.succeeded.extend(entry_result.succeeded);
+        combined.failed.extend(entry_result.failed);
+        combined.failures.extend(entry_result.failures);
+    }
+
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "done",
+        total_items,
+        total_items,
+        combined.bytes_freed,
+        combined.bytes_freed,
+    );
+    Ok(combined)
+}
+
+#[tauri::command]
+pub fn lighten_storage_calculations(
+    app: AppHandle,
+    request: LightenStorageCalculationsRequest,
+) -> Result<StorageMutationResult, String> {
+    ensure_research_mode()?;
+
+    let progress_event_id = request.progress_event_id.clone();
+    let total_items = request.calculations.len();
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "lightening-calculations",
+        0,
+        total_items,
+        0,
+        0,
+    );
+    let mut result = StorageMutationResult {
+        bytes_freed: 0,
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    for target in request.calculations {
+        let entry_id =
+            storage_calculation_entry_id(&target.project_id, &target.cif_id, &target.calc_id);
+        let operation = (|| -> Result<u64, String> {
+            let projects_dir = ensure_projects_dir(&app)?;
+            let project_dir = projects_dir.join(&target.project_id);
+            let calc_dir = project_dir.join("calculations").join(&target.calc_id);
+
+            let project_json_path = project_dir.join("project.json");
+            let project = read_project_json(&project_json_path)?;
+            let calculation = project
+                .cif_variants
+                .iter()
+                .find(|variant| variant.id == target.cif_id)
+                .and_then(|variant| {
+                    variant
+                        .calculations
+                        .iter()
+                        .find(|calc| calc.id == target.calc_id)
+                })
+                .cloned()
+                .ok_or_else(|| format!("Calculation not found: {}", target.calc_id))?;
+
+            if !calculation_can_lighten(&calculation.calc_type) {
+                return Err(format!(
+                    "{} calculations cannot be lightened.",
+                    calculation.calc_type
+                ));
+            }
+
+            if !path_contains_wavefunction_archives(&calc_dir)? {
+                return Err("No removable wavefunction archives were found.".to_string());
+            }
+
+            let freed = remove_wavefunction_archives(&calc_dir)?;
+            let new_size = calculate_path_size(&calc_dir)?;
+            update_calculation_storage_bytes(
+                &app,
+                &target.project_id,
+                &target.cif_id,
+                &target.calc_id,
+                new_size,
+            )?;
+            Ok(freed)
+        })();
+
+        match operation {
+            Ok(bytes) => {
+                result.bytes_freed = result.bytes_freed.saturating_add(bytes);
+                result.succeeded.push(entry_id);
+            }
+            Err(err) => {
+                result.failed.push(entry_id.clone());
+                result.failures.push(StorageMutationFailure {
+                    id: entry_id,
+                    message: err,
+                });
+            }
+        }
+        emit_storage_inventory_progress(
+            &app,
+            progress_event_id.as_deref(),
+            "lightening-calculations",
+            result.succeeded.len().saturating_add(result.failed.len()),
+            total_items,
+            result.bytes_freed,
+            0,
+        );
+    }
+
+    emit_storage_inventory_progress(
+        &app,
+        progress_event_id.as_deref(),
+        "done",
+        total_items,
+        total_items,
+        result.bytes_freed,
+        result.bytes_freed,
+    );
+    Ok(result)
+}
+
+fn storage_path_entry_id(kind: StorageEntryKind, path: &str) -> String {
+    format!("{:?}:{}", kind, path.trim()).to_ascii_lowercase()
+}
+
+fn storage_calculation_entry_id(project_id: &str, cif_id: &str, calc_id: &str) -> String {
+    format!(
+        "calc:{}:{}:{}",
+        project_id.trim(),
+        cif_id.trim(),
+        calc_id.trim()
+    )
+}
+
+fn calculation_display_label(calc_type: &str, name: Option<&str>) -> String {
+    let pretty_type = match calc_type.trim().to_ascii_lowercase().as_str() {
+        "scf" => "SCF",
+        "bands" => "Bands",
+        "dos" => "DOS",
+        "wannier" => "Wannier",
+        "transport" => "Transport",
+        "epw" => "EPW",
+        "phonon" => "Phonon",
+        "fermi_surface" => "Fermi Surface",
+        "optimization" => "Optimization",
+        _ => calc_type.trim(),
+    };
+    if let Some(value) = name.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("{}: {}", pretty_type, value);
+    }
+    pretty_type.to_string()
+}
+
+fn calculation_can_lighten(calc_type: &str) -> bool {
+    matches!(
+        calc_type.trim().to_ascii_lowercase().as_str(),
+        "optimization" | "bands" | "dos" | "fermi_surface"
+    )
+}
+
+fn path_contains_wavefunction_archives(path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !path.is_dir() {
+        return Ok(is_wavefunction_archive_file(path));
+    }
+
+    let entries =
+        fs::read_dir(path).map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", entry_path.display(), e))?;
+        if file_type.is_dir() && path_contains_wavefunction_archives(&entry_path)? {
+            return Ok(true);
+        }
+        if file_type.is_file() && is_wavefunction_archive_file(&entry_path) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn remove_wavefunction_archives(path: &Path) -> Result<u64, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        if !is_wavefunction_archive_file(path) {
+            return Ok(0);
+        }
+        let bytes = calculate_path_size(path)?;
+        fs::remove_file(path).map_err(|e| format!("Failed to delete {}: {}", path.display(), e))?;
+        return Ok(bytes);
+    }
+
+    let mut freed_bytes = 0_u64;
+    let entries =
+        fs::read_dir(path).map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", entry_path.display(), e))?;
+        if file_type.is_dir() {
+            freed_bytes = freed_bytes.saturating_add(remove_wavefunction_archives(&entry_path)?);
+            continue;
+        }
+        if file_type.is_file() && is_wavefunction_archive_file(&entry_path) {
+            let bytes = calculate_path_size(&entry_path)?;
+            fs::remove_file(&entry_path)
+                .map_err(|e| format!("Failed to delete {}: {}", entry_path.display(), e))?;
+            freed_bytes = freed_bytes.saturating_add(bytes);
+        }
+    }
+
+    Ok(freed_bytes)
+}
+
+fn update_calculation_storage_bytes(
+    app: &AppHandle,
+    project_id: &str,
+    cif_id: &str,
+    calc_id: &str,
+    local_storage_bytes: u64,
+) -> Result<CalculationRun, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calculation = variant
+        .calculations
+        .iter_mut()
+        .find(|calculation| calculation.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    calculation.storage_bytes = Some(local_storage_bytes);
+    if let Some(parameters) = calculation.parameters.as_object_mut() {
+        parameters.insert(
+            "local_storage_bytes".to_string(),
+            serde_json::json!(local_storage_bytes),
+        );
+    }
+
+    let updated = calculation.clone();
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated)?;
+    Ok(updated)
+}
+
+fn build_local_project_inventory(
+    app: &AppHandle,
+    progress_event_id: Option<&str>,
+) -> Result<StorageInventoryResult, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let projects_dir = ensure_projects_dir(app)?;
+    let descriptors = collect_saved_calculation_descriptors(app)?;
+
+    let project_ids: HashSet<String> = descriptors
+        .iter()
+        .map(|item| item.project_id.clone())
+        .collect();
+    let temp_roots = storage_temp_roots();
+    let mut temp_paths: Vec<PathBuf> = Vec::new();
+    for root in &temp_roots {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_qcortado_owned_name(&name) {
+                temp_paths.push(path);
+            }
+        }
+    }
+
+    let mut other_paths: Vec<PathBuf> = Vec::new();
+    if app_data_dir.exists() {
+        let entries = fs::read_dir(&app_data_dir).map_err(|e| {
+            format!(
+                "Failed to inspect app data directory {}: {}",
+                app_data_dir.display(),
+                e
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.path() == projects_dir {
+                continue;
+            }
+            other_paths.push(entry.path());
+        }
+    }
+    let folders_path = projects_dir.join(PROJECT_FOLDERS_FILE_NAME);
+    if folders_path.exists() {
+        other_paths.push(folders_path);
+    }
+    if projects_dir.exists() {
+        let entries = fs::read_dir(&projects_dir)
+            .map_err(|e| format!("Failed to inspect {}: {}", projects_dir.display(), e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.is_dir() {
+                let project_json = path.join("project.json");
+                if project_json.exists() {
+                    continue;
+                }
+            }
+            if path.file_name().and_then(|value| value.to_str()) == Some(PROJECT_FOLDERS_FILE_NAME)
+            {
+                continue;
+            }
+            other_paths.push(path);
+        }
+    }
+
+    let total_items = descriptors
+        .len()
+        .saturating_add(project_ids.len())
+        .saturating_add(temp_paths.len())
+        .saturating_add(other_paths.len());
+    let mut scanned_items = 0_usize;
+    let mut bytes_seen = 0_u64;
+    emit_storage_inventory_progress(
+        app,
+        progress_event_id,
+        "preparing",
+        scanned_items,
+        total_items,
+        bytes_seen,
+        0,
+    );
+
+    let mut calculations: Vec<StorageCalculationEntry> = Vec::new();
+    for descriptor in &descriptors {
+        let bytes = calculate_path_size(&descriptor.calc_dir)?;
+        bytes_seen = bytes_seen.saturating_add(bytes);
+        scanned_items += 1;
+        calculations.push(StorageCalculationEntry {
+            id: storage_calculation_entry_id(
+                &descriptor.project_id,
+                &descriptor.cif_id,
+                &descriptor.calc_id,
+            ),
+            project_id: descriptor.project_id.clone(),
+            project_name: descriptor.project_name.clone(),
+            cif_id: descriptor.cif_id.clone(),
+            cif_label: descriptor.cif_label.clone(),
+            calc_id: descriptor.calc_id.clone(),
+            calc_type: descriptor.calc_type.clone(),
+            label: calculation_display_label(
+                &descriptor.calc_type,
+                descriptor.calc_name.as_deref(),
+            ),
+            bytes,
+            local_path: Some(descriptor.calc_dir.display().to_string()),
+            remote_paths: Vec::new(),
+            hpc_profile_id: normalized_hpc_param_string(
+                descriptor
+                    .calc_parameters
+                    .as_object()
+                    .and_then(|map| map.get("hpc_profile_id")),
+            ),
+            has_remote_artifacts: false,
+            can_delete: true,
+            can_lighten: calculation_can_lighten(&descriptor.calc_type)
+                && path_contains_wavefunction_archives(&descriptor.calc_dir)?,
+        });
+        emit_storage_inventory_progress(
+            app,
+            progress_event_id,
+            "scanning-calculations",
+            scanned_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    }
+
+    let mut projects: Vec<StoragePathEntry> = Vec::new();
+    let project_entries = fs::read_dir(&projects_dir).map_err(|e| {
+        format!(
+            "Failed to read projects directory {}: {}",
+            projects_dir.display(),
+            e
+        )
+    })?;
+    for entry in project_entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let project_dir = entry.path();
+        if !project_dir.is_dir() || !project_dir.join("project.json").exists() {
+            continue;
+        }
+        let project_json_path = project_dir.join("project.json");
+        let project = read_project_json(&project_json_path)?;
+        let mut project_bytes = 0_u64;
+        let entries = fs::read_dir(&project_dir)
+            .map_err(|e| format!("Failed to inspect project {}: {}", project_dir.display(), e))?;
+        for child in entries {
+            let child = child.map_err(|e| e.to_string())?;
+            if child.file_name() == OsStr::new("calculations") {
+                continue;
+            }
+            project_bytes = project_bytes.saturating_add(calculate_path_size(&child.path())?);
+        }
+        bytes_seen = bytes_seen.saturating_add(project_bytes);
+        scanned_items += 1;
+        projects.push(StoragePathEntry {
+            id: storage_path_entry_id(
+                StorageEntryKind::Project,
+                &project_dir.display().to_string(),
+            ),
+            kind: StorageEntryKind::Project,
+            label: project.name,
+            description: Some(project_dir.display().to_string()),
+            bytes: project_bytes,
+            path: project_dir.display().to_string(),
+            delete_supported: false,
+        });
+        emit_storage_inventory_progress(
+            app,
+            progress_event_id,
+            "scanning-projects",
+            scanned_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    }
+
+    let mut temp: Vec<StoragePathEntry> = Vec::new();
+    for path in temp_paths {
+        let bytes = calculate_path_size(&path)?;
+        bytes_seen = bytes_seen.saturating_add(bytes);
+        scanned_items += 1;
+        temp.push(StoragePathEntry {
+            id: storage_path_entry_id(StorageEntryKind::Temp, &path.display().to_string()),
+            kind: StorageEntryKind::Temp,
+            label: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("QCortado Temp")
+                .to_string(),
+            description: Some(path.display().to_string()),
+            bytes,
+            path: path.display().to_string(),
+            delete_supported: true,
+        });
+        emit_storage_inventory_progress(
+            app,
+            progress_event_id,
+            "scanning-temp",
+            scanned_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    }
+
+    let mut other: Vec<StoragePathEntry> = Vec::new();
+    for path in other_paths {
+        let bytes = calculate_path_size(&path)?;
+        bytes_seen = bytes_seen.saturating_add(bytes);
+        scanned_items += 1;
+        other.push(StoragePathEntry {
+            id: storage_path_entry_id(StorageEntryKind::Other, &path.display().to_string()),
+            kind: StorageEntryKind::Other,
+            label: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("QCortado Metadata")
+                .to_string(),
+            description: Some(path.display().to_string()),
+            bytes,
+            path: path.display().to_string(),
+            delete_supported: false,
+        });
+        emit_storage_inventory_progress(
+            app,
+            progress_event_id,
+            "scanning-other",
+            scanned_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    }
+
+    projects.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    calculations.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    temp.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    other.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+
+    let project_bytes = projects.iter().map(|entry| entry.bytes).sum::<u64>();
+    let calculation_bytes = calculations.iter().map(|entry| entry.bytes).sum::<u64>();
+    let temp_bytes = temp.iter().map(|entry| entry.bytes).sum::<u64>();
+    let other_bytes = other.iter().map(|entry| entry.bytes).sum::<u64>();
+    let total_bytes = project_bytes
+        .saturating_add(calculation_bytes)
+        .saturating_add(temp_bytes)
+        .saturating_add(other_bytes);
+
+    emit_storage_inventory_progress(
+        app,
+        progress_event_id,
+        "done",
+        total_items,
+        total_items,
+        total_bytes,
+        total_bytes,
+    );
+
+    Ok(StorageInventoryResult {
+        mode: StorageInventoryMode::Local,
+        scanned_at: now_iso(),
+        total_bytes,
+        project_bytes,
+        calculation_bytes,
+        temp_bytes,
+        orphan_bytes: 0,
+        other_bytes,
+        profile_id: None,
+        profile_name: None,
+        warnings: Vec::new(),
+        projects,
+        calculations,
+        temp,
+        orphans: Vec::new(),
+        other,
+    })
+}
+
+async fn resolve_remote_storage_path(
+    profile: &crate::hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    raw_path: &str,
+) -> Result<String, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Remote path is empty".to_string());
+    }
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        let home = crate::hpc::ssh::run_ssh_command(profile, secret, "printf %s \"$HOME\"").await?;
+        let home = home.trim();
+        if home.is_empty() {
+            return Err("Failed to resolve remote HOME directory".to_string());
+        }
+        if trimmed == "~" {
+            return Ok(home.to_string());
+        }
+        return Ok(format!(
+            "{}/{}",
+            home.trim_end_matches('/'),
+            trimmed.trim_start_matches("~/")
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+async fn list_remote_paths(
+    profile: &crate::hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    remote_command: &str,
+) -> Result<Vec<String>, String> {
+    let output = crate::hpc::ssh::run_ssh_command(profile, secret, remote_command).await?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
+        .collect())
+}
+
+async fn remote_path_size_bytes(
+    profile: &crate::hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    path: &str,
+) -> Result<u64, String> {
+    let quoted = shell_single_quote_remote(path);
+    let cmd = format!(
+        "if [ -d {path} ]; then du -sk {path} | awk '{{print $1 * 1024}}'; elif [ -f {path} ]; then wc -c < {path}; else printf '0'; fi",
+        path = quoted
+    );
+    let output = crate::hpc::ssh::run_ssh_command(profile, secret, &cmd).await?;
+    let trimmed = output.trim();
+    trimmed
+        .parse::<u64>()
+        .map_err(|e| format!("Failed to parse remote size for {}: {}", path, e))
+}
+
+async fn build_hpc_storage_inventory(
+    app: &AppHandle,
+    state: &crate::AppState,
+    requested_profile_id: Option<String>,
+    progress_event_id: Option<&str>,
+) -> Result<StorageInventoryResult, String> {
+    let profile = resolve_hpc_profile_for_cleanup(state, requested_profile_id)?;
+    let secret = crate::hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let workspace_root = resolve_remote_storage_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_workspace_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let project_root = resolve_remote_storage_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+
+    emit_storage_inventory_progress(app, progress_event_id, "discovering-remote", 0, 0, 0, 0);
+
+    let descriptors = collect_saved_calculation_descriptors(app)?;
+    let mut calculation_path_refs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut calculations_by_id: HashMap<String, StorageCalculationEntry> = HashMap::new();
+    for descriptor in descriptors {
+        let Some(parameters) = descriptor.calc_parameters.as_object() else {
+            continue;
+        };
+        if !calculation_uses_hpc(parameters) {
+            continue;
+        }
+        let calc_profile_id = normalized_hpc_param_string(parameters.get("hpc_profile_id"));
+        if calc_profile_id.as_deref().unwrap_or(&profile.id) != profile.id {
+            continue;
+        }
+
+        let mut remote_paths: Vec<String> = Vec::new();
+        if let Some(path) = normalized_hpc_param_string(parameters.get("remote_workdir")) {
+            remote_paths.push(path);
+        }
+        if let Some(path) = normalized_hpc_param_string(parameters.get("remote_project_path")) {
+            if !remote_paths.contains(&path) {
+                remote_paths.push(path);
+            }
+        }
+        if remote_paths.is_empty() {
+            continue;
+        }
+
+        let calc_entry_id = storage_calculation_entry_id(
+            &descriptor.project_id,
+            &descriptor.cif_id,
+            &descriptor.calc_id,
+        );
+        for path in &remote_paths {
+            calculation_path_refs
+                .entry(path.clone())
+                .or_default()
+                .push(calc_entry_id.clone());
+        }
+        calculations_by_id.insert(
+            calc_entry_id.clone(),
+            StorageCalculationEntry {
+                id: calc_entry_id,
+                project_id: descriptor.project_id,
+                project_name: descriptor.project_name,
+                cif_id: descriptor.cif_id,
+                cif_label: descriptor.cif_label,
+                calc_id: descriptor.calc_id,
+                calc_type: descriptor.calc_type.clone(),
+                label: calculation_display_label(
+                    &descriptor.calc_type,
+                    descriptor.calc_name.as_deref(),
+                ),
+                bytes: 0,
+                local_path: None,
+                remote_paths,
+                hpc_profile_id: calc_profile_id.or(Some(profile.id.clone())),
+                has_remote_artifacts: true,
+                can_delete: true,
+                can_lighten: false,
+            },
+        );
+    }
+
+    let workspace_cmd = format!(
+        "if [ -d {root} ]; then find {root} -mindepth 1 -maxdepth 1 \\( -type d -o -type f \\) \\( -name 'qcortado*' -o -name '.qcortado*' -o -name '_qcortado*' \\) -print; fi",
+        root = shell_single_quote_remote(&workspace_root)
+    );
+    let mut candidate_paths: HashSet<String> =
+        list_remote_paths(&profile, secret.as_deref(), &workspace_cmd)
+            .await?
+            .into_iter()
+            .collect();
+
+    for task_kind in STORAGE_REMOTE_PROJECT_TASK_KINDS {
+        let task_cmd = format!(
+            "if [ -d {root}/{kind} ]; then find {root}/{kind} -mindepth 1 -maxdepth 1 -type d -print; fi",
+            root = shell_single_quote_remote(&project_root),
+            kind = shell_single_quote_remote(task_kind),
+        );
+        for path in list_remote_paths(&profile, secret.as_deref(), &task_cmd).await? {
+            candidate_paths.insert(path);
+        }
+    }
+
+    let viewer_library_path = format!("{}/_qcortado_viewer_library", project_root);
+    let viewer_cmd = format!(
+        "if [ -e {path} ]; then printf '%s\\n' {path}; fi",
+        path = shell_single_quote_remote(&viewer_library_path)
+    );
+    for path in list_remote_paths(&profile, secret.as_deref(), &viewer_cmd).await? {
+        candidate_paths.insert(path);
+    }
+
+    for path in calculation_path_refs.keys() {
+        candidate_paths.insert(path.clone());
+    }
+
+    let mut ordered_paths: Vec<String> = candidate_paths.into_iter().collect();
+    ordered_paths.sort();
+    let total_items = ordered_paths.len();
+    let mut scanned_items = 0_usize;
+    let mut bytes_seen = 0_u64;
+    let mut remote_sizes: HashMap<String, u64> = HashMap::new();
+    for path in &ordered_paths {
+        let bytes = remote_path_size_bytes(&profile, secret.as_deref(), path)
+            .await
+            .unwrap_or(0);
+        remote_sizes.insert(path.clone(), bytes);
+        scanned_items += 1;
+        bytes_seen = bytes_seen.saturating_add(bytes);
+        emit_storage_inventory_progress(
+            app,
+            progress_event_id,
+            "scanning-remote",
+            scanned_items,
+            total_items,
+            bytes_seen,
+            0,
+        );
+    }
+
+    let mut other: Vec<StoragePathEntry> = Vec::new();
+    let mut orphans: Vec<StoragePathEntry> = Vec::new();
+    for (calc_id, calc) in calculations_by_id.iter_mut() {
+        let mut total_bytes = 0_u64;
+        for path in &calc.remote_paths {
+            total_bytes = total_bytes.saturating_add(*remote_sizes.get(path).unwrap_or(&0));
+        }
+        calc.bytes = total_bytes;
+        if calc.bytes == 0 && calc.remote_paths.is_empty() {
+            calc.can_delete = false;
+        }
+        let _ = calc_id;
+    }
+
+    let referenced_paths: HashSet<String> = calculation_path_refs.keys().cloned().collect();
+    for path in ordered_paths {
+        if referenced_paths.contains(&path) {
+            continue;
+        }
+        let bytes = *remote_sizes.get(&path).unwrap_or(&0);
+        let entry = StoragePathEntry {
+            id: storage_path_entry_id(
+                if path == viewer_library_path {
+                    StorageEntryKind::Other
+                } else {
+                    StorageEntryKind::Orphan
+                },
+                &path,
+            ),
+            kind: if path == viewer_library_path {
+                StorageEntryKind::Other
+            } else {
+                StorageEntryKind::Orphan
+            },
+            label: path
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Remote Storage")
+                .to_string(),
+            description: Some(path.clone()),
+            bytes,
+            path: path.clone(),
+            delete_supported: true,
+        };
+        if entry.kind == StorageEntryKind::Other {
+            other.push(entry);
+        } else {
+            orphans.push(entry);
+        }
+    }
+
+    let mut calculations: Vec<StorageCalculationEntry> = calculations_by_id.into_values().collect();
+    calculations.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    orphans.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+    other.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.label.cmp(&b.label)));
+
+    let calculation_bytes = calculations.iter().map(|entry| entry.bytes).sum::<u64>();
+    let orphan_bytes = orphans.iter().map(|entry| entry.bytes).sum::<u64>();
+    let other_bytes = other.iter().map(|entry| entry.bytes).sum::<u64>();
+    let total_bytes = calculation_bytes
+        .saturating_add(orphan_bytes)
+        .saturating_add(other_bytes);
+
+    emit_storage_inventory_progress(
+        app,
+        progress_event_id,
+        "done",
+        total_items,
+        total_items,
+        total_bytes,
+        total_bytes,
+    );
+
+    Ok(StorageInventoryResult {
+        mode: StorageInventoryMode::Hpc,
+        scanned_at: now_iso(),
+        total_bytes,
+        project_bytes: 0,
+        calculation_bytes,
+        temp_bytes: 0,
+        orphan_bytes,
+        other_bytes,
+        profile_id: Some(profile.id),
+        profile_name: Some(profile.name),
+        warnings: Vec::new(),
+        projects: Vec::new(),
+        calculations,
+        temp: Vec::new(),
+        orphans,
+        other,
+    })
+}
+
+fn delete_single_local_storage_entry(path: &Path) -> Result<u64, String> {
+    let bytes = calculate_path_size(path)?;
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed to delete {}: {}", path.display(), e))?;
+    } else {
+        fs::remove_file(path).map_err(|e| format!("Failed to delete {}: {}", path.display(), e))?;
+    }
+    Ok(bytes)
+}
+
+fn validate_local_storage_entry_target(path: &Path, kind: StorageEntryKind) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if !is_qcortado_owned_name(&name) {
+        return Err(format!(
+            "Refusing to delete non-QCortado path {}",
+            path.display()
+        ));
+    }
+
+    let allowed_roots = storage_temp_roots();
+    if !allowed_roots.iter().any(|root| path.starts_with(root)) {
+        return Err(format!(
+            "Refusing to delete path outside temp roots: {}",
+            path.display()
+        ));
+    }
+
+    if !matches!(
+        kind,
+        StorageEntryKind::Temp | StorageEntryKind::Orphan | StorageEntryKind::Other
+    ) {
+        return Err("Only temp/orphan storage entries can be deleted directly.".to_string());
+    }
+    Ok(())
+}
+
+async fn delete_single_remote_storage_entry(
+    profile: &crate::hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    path: &str,
+) -> Result<u64, String> {
+    let normalized = normalize_remote_cleanup_path(path)?;
+    let bytes = remote_path_size_bytes(profile, secret, &normalized)
+        .await
+        .unwrap_or(0);
+    let remove_cmd = format!(
+        "if [ -e {target} ]; then rm -rf -- {target}; fi",
+        target = shell_single_quote_remote(&normalized)
+    );
+    crate::hpc::ssh::run_ssh_command(profile, secret, &remove_cmd).await?;
+    Ok(bytes)
+}
+
+async fn delete_storage_entries_impl(
+    state: &crate::AppState,
+    request: DeleteStorageEntriesRequest,
+    progress_callback: &mut (dyn FnMut(usize, usize, u64) + Send),
+) -> Result<StorageMutationResult, String> {
+    let total_items = request.entries.len();
+    let mut processed_items = 0_usize;
+    let mut result = StorageMutationResult {
+        bytes_freed: 0,
+        succeeded: Vec::new(),
+        failed: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    match request.mode {
+        StorageInventoryMode::Local => {
+            for entry in request.entries {
+                let path = PathBuf::from(&entry.path);
+                match validate_local_storage_entry_target(&path, entry.kind)
+                    .and_then(|_| delete_single_local_storage_entry(&path))
+                {
+                    Ok(bytes) => {
+                        result.bytes_freed = result.bytes_freed.saturating_add(bytes);
+                        result.succeeded.push(entry.id);
+                    }
+                    Err(err) => {
+                        result.failed.push(entry.id.clone());
+                        result.failures.push(StorageMutationFailure {
+                            id: entry.id,
+                            message: err,
+                        });
+                    }
+                }
+                processed_items += 1;
+                progress_callback(processed_items, total_items, result.bytes_freed);
+            }
+        }
+        StorageInventoryMode::Hpc => {
+            let profile = resolve_hpc_profile_for_cleanup(state, request.profile_id)?;
+            let secret = crate::hpc::credentials::resolve_secret(
+                &profile.id,
+                &profile.username,
+                &profile.host,
+                profile.credential_persisted,
+            )?;
+            let workspace_root = resolve_remote_storage_path(
+                &profile,
+                secret.as_deref(),
+                profile.remote_workspace_root.trim_end_matches('/'),
+            )
+            .await?
+            .trim_end_matches('/')
+            .to_string();
+            let project_root = resolve_remote_storage_path(
+                &profile,
+                secret.as_deref(),
+                profile.remote_project_root.trim_end_matches('/'),
+            )
+            .await?
+            .trim_end_matches('/')
+            .to_string();
+
+            for entry in request.entries {
+                let normalized = normalize_remote_cleanup_path(&entry.path)?;
+                let is_under_allowed_root = normalized == workspace_root
+                    || normalized == project_root
+                    || normalized.starts_with(&format!("{}/", workspace_root))
+                    || normalized.starts_with(&format!("{}/", project_root));
+                if !is_under_allowed_root {
+                    result.failed.push(entry.id.clone());
+                    result.failures.push(StorageMutationFailure {
+                        id: entry.id,
+                        message: format!(
+                            "Refusing to delete remote path outside QCortado roots: {}",
+                            normalized
+                        ),
+                    });
+                    processed_items += 1;
+                    progress_callback(processed_items, total_items, result.bytes_freed);
+                    continue;
+                }
+                if !matches!(
+                    entry.kind,
+                    StorageEntryKind::Orphan | StorageEntryKind::Other | StorageEntryKind::Temp
+                ) {
+                    result.failed.push(entry.id.clone());
+                    result.failures.push(StorageMutationFailure {
+                        id: entry.id,
+                        message:
+                            "Only orphan/other remote storage entries can be deleted directly."
+                                .to_string(),
+                    });
+                    processed_items += 1;
+                    progress_callback(processed_items, total_items, result.bytes_freed);
+                    continue;
+                }
+
+                match delete_single_remote_storage_entry(&profile, secret.as_deref(), &normalized)
+                    .await
+                {
+                    Ok(bytes) => {
+                        result.bytes_freed = result.bytes_freed.saturating_add(bytes);
+                        result.succeeded.push(entry.id);
+                    }
+                    Err(err) => {
+                        result.failed.push(entry.id.clone());
+                        result.failures.push(StorageMutationFailure {
+                            id: entry.id,
+                            message: err,
+                        });
+                    }
+                }
+                processed_items += 1;
+                progress_callback(processed_items, total_items, result.bytes_freed);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+async fn delete_calculation_impl(
+    app: &AppHandle,
+    state: &crate::AppState,
+    project_id: &str,
+    cif_id: &str,
+    calc_id: &str,
+) -> Result<u64, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calc_index = variant
+        .calculations
+        .iter()
+        .position(|calc| calc.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+    let calculation = variant
+        .calculations
+        .get(calc_index)
+        .cloned()
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    let local_bytes = calculate_path_size(&project_dir.join("calculations").join(calc_id))?;
+    let remote_bytes = calculation
+        .parameters
+        .as_object()
+        .and_then(|params| params.get("remote_storage_bytes"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+
+    cleanup_remote_hpc_artifacts_for_calculation(state, &calculation).await?;
+    variant.calculations.remove(calc_index);
+    write_project_json_summary(&project_json_path, &project)?;
+
+    let calc_dir = project_dir.join("calculations").join(calc_id);
+    if calc_dir.exists() {
+        fs::remove_dir_all(&calc_dir)
+            .map_err(|e| format!("Failed to delete calculation files: {}", e))?;
+    }
+
+    queue_viewer_library_publish(app);
+    Ok(local_bytes.saturating_add(remote_bytes))
 }
 
 /// Lists all project folders.
@@ -2330,6 +4106,80 @@ pub fn get_project_calculation(
         .ok_or_else(|| format!("Calculation not found: {}", calc_id))
 }
 
+/// Loads full text logs and run inputs saved under a calculation directory.
+#[tauri::command]
+pub fn get_project_calculation_logs(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+) -> Result<Vec<CalculationLogFile>, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json = project_dir.join("project.json");
+    let project = read_project_json(&project_json)?;
+    let exists = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .any(|calc| calc.id == calc_id);
+    if !exists {
+        return Err(format!("Calculation not found: {}", calc_id));
+    }
+
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    let mut logs = Vec::new();
+    collect_calculation_text_files(
+        &calc_dir,
+        &calc_dir,
+        &CalculationTextFileKind::Logs,
+        &mut logs,
+    )?;
+    logs.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(logs)
+}
+
+/// Loads saved input files under a calculation directory.
+#[tauri::command]
+pub fn get_project_calculation_inputs(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+) -> Result<Vec<CalculationLogFile>, String> {
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json = project_dir.join("project.json");
+    let project = read_project_json(&project_json)?;
+    let exists = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .any(|calc| calc.id == calc_id);
+    if !exists {
+        return Err(format!("Calculation not found: {}", calc_id));
+    }
+
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    let mut logs = Vec::new();
+    collect_calculation_text_files(
+        &calc_dir,
+        &calc_dir,
+        &CalculationTextFileKind::Inputs,
+        &mut logs,
+    )?;
+    logs.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(logs)
+}
+
 /// Refreshes local storage size for a saved calculation and persists artifact sync metadata.
 pub fn refresh_calculation_artifact_metadata(
     app: &AppHandle,
@@ -2433,6 +4283,118 @@ pub fn update_project_metadata(
 
     queue_viewer_library_publish(&app);
     Ok(project)
+}
+
+/// Updates the optional display name for a saved calculation entry.
+#[tauri::command]
+pub fn update_calculation_name(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    calc_id: String,
+    name: Option<String>,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    let normalized_name = normalize_calculation_name(name)?;
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calculation = variant
+        .calculations
+        .iter_mut()
+        .find(|calculation| calculation.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    calculation.name = normalized_name;
+    let updated_calculation = calculation.clone();
+
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated_calculation)?;
+
+    queue_viewer_library_publish(&app);
+    Ok(updated_calculation)
+}
+
+#[tauri::command]
+pub fn update_calculation_band_viewer_metadata(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    calc_id: String,
+    selected_valence_band_index: Option<u32>,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calculation = variant
+        .calculations
+        .iter_mut()
+        .find(|calculation| calculation.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+
+    if !calculation.parameters.is_object() {
+        calculation.parameters = serde_json::json!({});
+    }
+
+    let parameters = calculation
+        .parameters
+        .as_object_mut()
+        .ok_or_else(|| "Calculation parameters are not editable metadata.".to_string())?;
+    let band_viewer_metadata = parameters
+        .entry("band_viewer_metadata".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !band_viewer_metadata.is_object() {
+        *band_viewer_metadata = serde_json::json!({});
+    }
+    let metadata = band_viewer_metadata
+        .as_object_mut()
+        .ok_or_else(|| "Band viewer metadata is not an object.".to_string())?;
+
+    match selected_valence_band_index {
+        Some(index) => {
+            metadata.insert(
+                "selected_valence_band_index".to_string(),
+                serde_json::json!(index),
+            );
+        }
+        None => {
+            metadata.remove("selected_valence_band_index");
+        }
+    }
+
+    if metadata.is_empty() {
+        parameters.remove("band_viewer_metadata");
+    }
+
+    let updated_calculation = calculation.clone();
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated_calculation)?;
+
+    queue_viewer_library_publish(&app);
+    Ok(updated_calculation)
 }
 
 /// Adds a CIF file to a project
@@ -2629,6 +4591,7 @@ pub fn save_calculation(
     // Create calculation run record
     let calc_run = CalculationRun {
         id: calc_id,
+        name: None,
         calc_type: calc_data.calc_type,
         parameters: calculation_parameters,
         result: Some(calc_data.result),
@@ -2666,11 +4629,16 @@ fn is_wavefunction_archive_file(path: &Path) -> bool {
     };
 
     let lower = file_name.to_ascii_lowercase();
-    if !lower.starts_with("wfc") {
+    let looks_like_wfc = lower.starts_with("wfc") || lower.contains(".wfc");
+    let looks_like_igk = lower.starts_with("igk") || lower.contains(".igk");
+    if !looks_like_wfc && !looks_like_igk {
         return false;
     }
 
-    lower.ends_with(".dat") || lower.ends_with(".hdf5") || !lower.contains('.')
+    lower.ends_with(".dat")
+        || lower.ends_with(".hdf5")
+        || lower.ends_with(".xml")
+        || lower.matches('.').count() == 1
 }
 
 fn copy_dir_recursive_compact(src: &PathBuf, dst: &PathBuf) -> Result<(), String> {
@@ -4044,51 +6012,7 @@ pub async fn delete_calculation(
     calc_id: String,
 ) -> Result<(), String> {
     ensure_research_mode()?;
-    let projects_dir = ensure_projects_dir(&app)?;
-    let project_dir = projects_dir.join(&project_id);
-
-    if !project_dir.exists() {
-        return Err(format!("Project not found: {}", project_id));
-    }
-
-    // Load existing project
-    let project_json_path = project_dir.join("project.json");
-    let mut project = read_project_json(&project_json_path)?;
-
-    // Find the CIF variant and remove the calculation
-    let variant = project
-        .cif_variants
-        .iter_mut()
-        .find(|v| v.id == cif_id)
-        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
-
-    let calc_index = variant
-        .calculations
-        .iter()
-        .position(|c| c.id == calc_id)
-        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
-
-    let calculation = variant
-        .calculations
-        .get(calc_index)
-        .cloned()
-        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
-
-    cleanup_remote_hpc_artifacts_for_calculation(&state, &calculation).await?;
-
-    variant.calculations.remove(calc_index);
-
-    // Save updated project
-    write_project_json_summary(&project_json_path, &project)?;
-
-    // Delete calculation directory
-    let calc_dir = project_dir.join("calculations").join(&calc_id);
-    if calc_dir.exists() {
-        fs::remove_dir_all(&calc_dir)
-            .map_err(|e| format!("Failed to delete calculation files: {}", e))?;
-    }
-
-    crate::queue_auto_viewer_publish(&app, state.inner());
+    delete_calculation_impl(&app, state.inner(), &project_id, &cif_id, &calc_id).await?;
     Ok(())
 }
 
@@ -4364,8 +6288,9 @@ pub fn get_saved_phonon_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
-        repair_phonon_calculation_with_workdir, CalculationRun,
+        calculation_can_lighten, is_wavefunction_archive_file, looks_like_completed_phonon_run,
+        parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
+        remove_wavefunction_archives, repair_phonon_calculation_with_workdir, CalculationRun,
     };
     use crate::qe::QEResult;
     use std::fs;
@@ -4459,6 +6384,7 @@ mod tests {
 
         let mut calculation = CalculationRun {
             id: "test_calc".to_string(),
+            name: None,
             calc_type: "phonon".to_string(),
             parameters: serde_json::json!({
                 "recovered_from_tmp": true
@@ -4520,5 +6446,70 @@ mod tests {
         assert_eq!(markers[2].get("label"), Some(&serde_json::json!("Q3")));
 
         let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn calculation_can_lighten_only_supported_types() {
+        assert!(calculation_can_lighten("optimization"));
+        assert!(calculation_can_lighten("bands"));
+        assert!(calculation_can_lighten("dos"));
+        assert!(calculation_can_lighten("fermi_surface"));
+        assert!(!calculation_can_lighten("scf"));
+        assert!(!calculation_can_lighten("wannier"));
+        assert!(!calculation_can_lighten("phonon"));
+        assert!(!calculation_can_lighten("transport"));
+    }
+
+    #[test]
+    fn remove_wavefunction_archives_strips_only_wfc_files() {
+        let dir = make_temp_test_dir("lighten_calc");
+        let tmp_dir = dir.join("tmp").join("qcortado_scf.save");
+        fs::create_dir_all(&tmp_dir).expect("failed to create tmp dir");
+        let wfc_file = tmp_dir.join("wfc1.dat");
+        let keep_file = tmp_dir.join("charge-density.dat");
+        fs::write(&wfc_file, "wavefunction").expect("failed to write wfc file");
+        fs::write(&keep_file, "density").expect("failed to write keep file");
+
+        assert!(path_contains_wavefunction_archives(&dir).expect("should inspect wavefunctions"));
+        let freed = remove_wavefunction_archives(&dir).expect("should remove wavefunction files");
+        assert!(freed > 0);
+        assert!(!wfc_file.exists(), "wfc file should be removed");
+        assert!(keep_file.exists(), "non-wavefunction file should remain");
+        assert!(!path_contains_wavefunction_archives(&dir).expect("should recheck wavefunctions"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wavefunction_archive_detection_handles_prefixed_qe_scratch_files() {
+        let dir = make_temp_test_dir("lighten_patterns");
+        let save_dir = dir.join("tmp").join("qcortado_scf.save");
+        fs::create_dir_all(&save_dir).expect("failed to create save dir");
+
+        let prefixed_wfc = save_dir.join("qcortado_scf.wfc1");
+        let prefixed_igk = save_dir.join("qcortado_scf.igk1");
+        let schema = save_dir.join("data-file-schema.xml");
+        fs::write(&prefixed_wfc, "wfc").expect("failed to write prefixed wfc");
+        fs::write(&prefixed_igk, "igk").expect("failed to write prefixed igk");
+        fs::write(&schema, "schema").expect("failed to write schema");
+
+        assert!(is_wavefunction_archive_file(&prefixed_wfc));
+        assert!(is_wavefunction_archive_file(&prefixed_igk));
+        assert!(!is_wavefunction_archive_file(&schema));
+
+        let freed =
+            remove_wavefunction_archives(&dir).expect("should remove prefixed scratch files");
+        assert!(freed > 0);
+        assert!(
+            !prefixed_wfc.exists(),
+            "prefixed wfc shard should be removed"
+        );
+        assert!(
+            !prefixed_igk.exists(),
+            "prefixed igk shard should be removed"
+        );
+        assert!(schema.exists(), "schema metadata should remain");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

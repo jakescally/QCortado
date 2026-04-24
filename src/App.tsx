@@ -22,6 +22,7 @@ import { ProjectBrowser } from "./components/ProjectBrowser";
 import {
   ProjectDashboard,
   CalculationRun,
+  SavedBandsCalculationContext,
   WannierBandOverlayOption,
 } from "./components/ProjectDashboard";
 import { ProcessIndicator } from "./components/ProcessIndicator";
@@ -29,10 +30,11 @@ import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
+import { StorageManagerPage } from "./components/StorageManagerPage";
 import { BandsMultiview } from "./components/BandsMultiview";
 import { InfoTooltip } from "./components/InfoTooltip";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
-import { TaskProvider } from "./lib/TaskContext";
+import { TaskProvider, useTaskContext } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
@@ -58,6 +60,8 @@ import {
   exportHpcPresetBundle,
   getActiveHpcProfileId,
   importHpcPresetBundle,
+  attachHeadlessHpcJob,
+  listHeadlessHpcJobs,
   listHpcProfiles,
   loadExecutionMode,
   migrateHpcRemoteRoots,
@@ -67,6 +71,7 @@ import {
   setActiveHpcProfile,
   updateHpcProfileDefaults,
 } from "./lib/hpcConfig";
+import type { HpcHeadlessJobCandidate } from "./lib/hpcConfig";
 import type { TransportResult } from "./lib/transport";
 
 interface TempCleanupResult {
@@ -127,7 +132,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -379,6 +384,7 @@ function getPhononFocusRanges(phononBandData: BandData): {
 
 function AppInner() {
   const { theme, setTheme } = useTheme();
+  const taskContext = useTaskContext();
   const windowSize = useWindowSize();
   const plotHeight = Math.max(400, windowSize.height - 160);
 
@@ -419,6 +425,12 @@ function AppInner() {
   const [isImportingHpcPresetBundle, setIsImportingHpcPresetBundle] = useState(false);
   const [isCleaningHpcRemote, setIsCleaningHpcRemote] = useState(false);
   const [isMigratingHpcRoots, setIsMigratingHpcRoots] = useState(false);
+  const [showHeadlessRecoveryDialog, setShowHeadlessRecoveryDialog] = useState(false);
+  const [headlessCandidates, setHeadlessCandidates] = useState<HpcHeadlessJobCandidate[]>([]);
+  const [isLoadingHeadlessCandidates, setIsLoadingHeadlessCandidates] = useState(false);
+  const [isAttachingHeadlessJob, setIsAttachingHeadlessJob] = useState(false);
+  const [selectedHeadlessJobId, setSelectedHeadlessJobId] = useState<string | null>(null);
+  const [headlessRecoveryStatus, setHeadlessRecoveryStatus] = useState<string | null>(null);
   const [hpcDefaultCpuDraft, setHpcDefaultCpuDraft] = useState<SlurmResourceRequest>(
     defaultCpuResources(),
   );
@@ -427,7 +439,8 @@ function AppInner() {
   );
   const [hpcResourceModeDraft, setHpcResourceModeDraft] = useState<HpcResourceMode>("both");
   const [hpcLauncherDraft, setHpcLauncherDraft] = useState<HpcLauncher>("srun");
-  const [hpcLauncherExtraArgsDraft, setHpcLauncherExtraArgsDraft] = useState("");
+  const [hpcLauncherCpuExtraArgsDraft, setHpcLauncherCpuExtraArgsDraft] = useState("");
+  const [hpcLauncherGpuExtraArgsDraft, setHpcLauncherGpuExtraArgsDraft] = useState("");
   const [isSavingHpcDefaults, setIsSavingHpcDefaults] = useState(false);
   const [hpcDefaultsSaved, setHpcDefaultsSaved] = useState(false);
   const [hpcDefaultsStatus, setHpcDefaultsStatus] = useState<string | null>(null);
@@ -472,7 +485,12 @@ function AppInner() {
   const [bandsContext, setBandsContext] = useState<BandsContext | null>(null);
 
   // Context for viewing saved band data
-  const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
+  const [viewBandsData, setViewBandsData] = useState<{
+    bandData: any;
+    fermiEnergy: number | null;
+    calculationParameters?: Record<string, unknown> | null;
+    calculationContext?: SavedBandsCalculationContext | null;
+  } | null>(null);
 
   // Context for running Electronic DOS from a project
   const [dosContext, setDosContext] = useState<DosContext | null>(null);
@@ -526,7 +544,8 @@ function AppInner() {
       setHpcDefaultGpuDraft(defaultGpuResources());
       setHpcResourceModeDraft("both");
       setHpcLauncherDraft("srun");
-      setHpcLauncherExtraArgsDraft("");
+      setHpcLauncherCpuExtraArgsDraft("");
+      setHpcLauncherGpuExtraArgsDraft("");
       clearHpcDefaultsSaveFeedback();
       return;
     }
@@ -534,7 +553,16 @@ function AppInner() {
     setHpcDefaultGpuDraft(cloneResourceDefaults("gpu", activeHpcProfile.default_gpu_resources));
     setHpcResourceModeDraft(activeHpcProfile.resource_mode ?? "both");
     setHpcLauncherDraft(activeHpcProfile.launcher ?? "srun");
-    setHpcLauncherExtraArgsDraft(activeHpcProfile.launcher_extra_args || "");
+    setHpcLauncherCpuExtraArgsDraft(
+      activeHpcProfile.launcher_cpu_extra_args
+        ?? activeHpcProfile.launcher_extra_args
+        ?? "",
+    );
+    setHpcLauncherGpuExtraArgsDraft(
+      activeHpcProfile.launcher_gpu_extra_args
+        ?? activeHpcProfile.launcher_extra_args
+        ?? "",
+    );
     clearHpcDefaultsSaveFeedback();
   }, [activeHpcProfile?.id, activeHpcProfile?.updated_at]);
 
@@ -1058,6 +1086,59 @@ function AppInner() {
     }
   }
 
+  async function openHeadlessRecoveryDialog() {
+    if (!activeHpcProfile) {
+      setHpcStatus("Select an active HPC profile first.");
+      return;
+    }
+    setShowQueueMenu(false);
+    setShowHeadlessRecoveryDialog(true);
+    setHeadlessRecoveryStatus(null);
+    setIsLoadingHeadlessCandidates(true);
+    try {
+      const candidates = await listHeadlessHpcJobs(activeHpcProfile.id, 50);
+      setHeadlessCandidates(candidates);
+      setSelectedHeadlessJobId(candidates[0]?.remote_job_id ?? null);
+      setHeadlessRecoveryStatus(
+        candidates.length > 0
+          ? `Found ${candidates.length} recoverable QCortado job(s).`
+          : "No recoverable QCortado jobs were found for the active profile.",
+      );
+    } catch (e) {
+      console.error("Failed to list headless HPC jobs:", e);
+      setHeadlessCandidates([]);
+      setSelectedHeadlessJobId(null);
+      setHeadlessRecoveryStatus(`Failed to query headless jobs: ${e}`);
+    } finally {
+      setIsLoadingHeadlessCandidates(false);
+    }
+  }
+
+  async function handleAttachHeadlessJob() {
+    const candidate = headlessCandidates.find((item) => item.remote_job_id === selectedHeadlessJobId);
+    if (!candidate) {
+      setHeadlessRecoveryStatus("Select a job to recover.");
+      return;
+    }
+    setIsAttachingHeadlessJob(true);
+    setHeadlessRecoveryStatus(null);
+    try {
+      const result = await attachHeadlessHpcJob(
+        candidate.remote_job_id,
+        candidate.remote_workdir ?? null,
+        candidate.profile_id,
+      );
+      await taskContext.reconnectToTask(result.task_id);
+      setShowHeadlessRecoveryDialog(false);
+      setCurrentView("task-queue");
+    } catch (e) {
+      console.error("Failed to attach headless HPC job:", e);
+      setHeadlessRecoveryStatus(`Failed to attach job: ${e}`);
+    } finally {
+      setIsAttachingHeadlessJob(false);
+    }
+  }
+
   async function saveHpcDefaultRunSettings() {
     if (!activeHpcProfile) {
       setHpcDefaultsStatus("Select an active profile first.");
@@ -1073,14 +1154,16 @@ function AppInner() {
         cloneResourceDefaults("gpu", hpcDefaultGpuDraft),
         hpcResourceModeDraft,
         hpcLauncherDraft,
-        hpcLauncherExtraArgsDraft.trim() || null,
+        hpcLauncherCpuExtraArgsDraft.trim() || null,
+        hpcLauncherGpuExtraArgsDraft.trim() || null,
       );
       setHpcProfiles((prev) => prev.map((profile) => (profile.id === saved.id ? saved : profile)));
       setHpcDefaultCpuDraft(cloneResourceDefaults("cpu", saved.default_cpu_resources));
       setHpcDefaultGpuDraft(cloneResourceDefaults("gpu", saved.default_gpu_resources));
       setHpcResourceModeDraft(saved.resource_mode ?? "both");
       setHpcLauncherDraft(saved.launcher ?? "srun");
-      setHpcLauncherExtraArgsDraft(saved.launcher_extra_args || "");
+      setHpcLauncherCpuExtraArgsDraft(saved.launcher_cpu_extra_args || "");
+      setHpcLauncherGpuExtraArgsDraft(saved.launcher_gpu_extra_args || "");
       setHpcDefaultsSaved(true);
       setHpcDefaultsStatus(null);
     } catch (e) {
@@ -1495,9 +1578,17 @@ function AppInner() {
     }
   }
 
+  function navigateToStorageManager() {
+    setShowQueueMenu(false);
+    if (currentView !== "storage-manager") {
+      setLastNonUtilityView(currentView);
+      setCurrentView("storage-manager");
+    }
+  }
+
   function returnFromUtilityView() {
     const fallback: AppView = selectedProjectId ? "project-dashboard" : "project-browser";
-    const destination = (lastNonUtilityView === "task-queue" || lastNonUtilityView === "node-activity")
+    const destination = (lastNonUtilityView === "task-queue" || lastNonUtilityView === "node-activity" || lastNonUtilityView === "storage-manager")
       ? fallback
       : lastNonUtilityView;
     setCurrentView(destination);
@@ -1572,8 +1663,12 @@ function AppInner() {
       {showQueueMenu && (
         <div className="floating-queue-menu">
           <button onClick={navigateToQueue}>{executionMode === "hpc" ? "View Task Manager" : "View Queue"}</button>
+          <button onClick={navigateToStorageManager}>Open Storage Manager</button>
           {executionMode === "hpc" && (
-            <button onClick={navigateToNodeActivity}>View Node Activity</button>
+            <>
+              <button onClick={navigateToNodeActivity}>View Node Activity</button>
+              <button onClick={() => void openHeadlessRecoveryDialog()}>Recover Headless Job</button>
+            </>
           )}
         </div>
       )}
@@ -1823,16 +1918,33 @@ function AppInner() {
                       </label>
                       <label>
                         <span className="settings-field-label">
-                          Launcher Extra Args
-                          <InfoTooltip text="Optional flags appended to srun/mpirun before the QE executable command." />
+                          CPU Launcher Extra Args
+                          <InfoTooltip text="Optional CPU-run flags appended to srun/mpirun before the QE executable command." />
                         </span>
                         <input
-                          value={hpcLauncherExtraArgsDraft}
+                          value={hpcLauncherCpuExtraArgsDraft}
                           onChange={(event) => {
-                            setHpcLauncherExtraArgsDraft(normalizeCliDashText(event.target.value));
+                            setHpcLauncherCpuExtraArgsDraft(normalizeCliDashText(event.target.value));
                             clearHpcDefaultsSaveFeedback();
                           }}
                           placeholder="e.g. --bind-to none"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
+                        />
+                      </label>
+                      <label>
+                        <span className="settings-field-label">
+                          GPU Launcher Extra Args
+                          <InfoTooltip text="Optional GPU-run flags appended to srun/mpirun before the QE executable command." />
+                        </span>
+                        <input
+                          value={hpcLauncherGpuExtraArgsDraft}
+                          onChange={(event) => {
+                            setHpcLauncherGpuExtraArgsDraft(normalizeCliDashText(event.target.value));
+                            clearHpcDefaultsSaveFeedback();
+                          }}
+                          placeholder="e.g. --gpu-bind=closest"
                           autoCorrect="off"
                           autoCapitalize="off"
                           spellCheck={false}
@@ -2690,6 +2802,87 @@ function AppInner() {
     </div>
   ) : null;
 
+  const headlessRecoveryModal = showHeadlessRecoveryDialog ? (
+    <div
+      className="remote-recovery-overlay"
+      onClick={() => !isAttachingHeadlessJob && setShowHeadlessRecoveryDialog(false)}
+    >
+      <div className="remote-recovery-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="dialog-header">
+          <h2>Recover Headless Job</h2>
+          <button
+            className="dialog-close"
+            onClick={() => setShowHeadlessRecoveryDialog(false)}
+            disabled={isAttachingHeadlessJob}
+          >
+            &times;
+          </button>
+        </div>
+
+        <div className="remote-recovery-body">
+          {isLoadingHeadlessCandidates ? (
+            <div className="remote-recovery-state">Querying cluster jobs...</div>
+          ) : headlessCandidates.length === 0 ? (
+            <div className="remote-recovery-state">
+              {headlessRecoveryStatus || "No recoverable QCortado jobs found."}
+            </div>
+          ) : (
+            <div className="remote-recovery-list" role="radiogroup" aria-label="Recoverable headless HPC jobs">
+              {headlessCandidates.map((candidate) => {
+                const isSelected = selectedHeadlessJobId === candidate.remote_job_id;
+                return (
+                  <label
+                    key={`${candidate.remote_job_id}-${candidate.remote_workdir || ""}`}
+                    className={`radio-option remote-recovery-option ${isSelected ? "selected" : ""}`.trim()}
+                  >
+                    <input
+                      type="radio"
+                      name="headless-hpc-recovery-choice"
+                      checked={isSelected}
+                      onChange={() => setSelectedHeadlessJobId(candidate.remote_job_id)}
+                      disabled={isAttachingHeadlessJob}
+                    />
+                    <div className="remote-recovery-option-details">
+                      <strong>
+                        Job {candidate.remote_job_id} · {candidate.task_kind.toUpperCase()}
+                      </strong>
+                      <div className="remote-recovery-option-meta">
+                        <span>{candidate.scheduler_state}</span>
+                        <span>{candidate.remote_node || "No node yet"}</span>
+                        <span>{candidate.auto_save_available ? "Auto-save ready" : "Limited legacy recovery"}</span>
+                      </div>
+                      <code className="remote-recovery-option-path">{candidate.remote_workdir || "Remote workdir unavailable"}</code>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          {headlessRecoveryStatus && headlessCandidates.length > 0 && (
+            <div className="remote-recovery-state">{headlessRecoveryStatus}</div>
+          )}
+        </div>
+
+        <div className="remote-recovery-footer">
+          <button
+            className="remote-recovery-btn remote-recovery-btn-cancel"
+            onClick={() => setShowHeadlessRecoveryDialog(false)}
+            disabled={isAttachingHeadlessJob}
+          >
+            Cancel
+          </button>
+          <button
+            className="remote-recovery-btn remote-recovery-btn-primary"
+            onClick={() => void handleAttachHeadlessJob()}
+            disabled={isLoadingHeadlessCandidates || isAttachingHeadlessJob || !selectedHeadlessJobId}
+          >
+            {isAttachingHeadlessJob ? "Attaching..." : "Attach Job"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   const deleteProjectModal = showDeleteProjectDialog && deleteProjectSnapshot ? (
     <div className="dialog-overlay" onClick={() => !isDeletingProject && setShowDeleteProjectDialog(false)}>
       <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
@@ -2877,6 +3070,7 @@ function AppInner() {
   const activeDialogModal =
     closeConfirmModal
     || remotePhononSelectionModal
+    || headlessRecoveryModal
     || deleteProjectModal
     || cleanRemoteConfirmModal
     || migrateHpcRootsModal;
@@ -2939,6 +3133,19 @@ function AppInner() {
     );
   }
 
+  if (currentView === "storage-manager") {
+    return (
+      <>
+        <StorageManagerPage
+          onBack={returnFromUtilityView}
+          executionMode={executionMode}
+          activeHpcProfile={activeHpcProfile}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
   if (currentView === "bands-wizard" && (qePath || executionMode === "hpc") && (bandsContext || reconnectTaskId)) {
     return (
       <>
@@ -2948,8 +3155,13 @@ function AppInner() {
           executionMode={executionMode}
           onExecutionModeChange={handleExecutionModeChange}
           activeHpcProfile={activeHpcProfile}
-          onViewBands={(bandData, fermiEnergy) => {
-            setViewBandsData({ bandData, fermiEnergy });
+          onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
+            setViewBandsData({
+              bandData,
+              fermiEnergy,
+              calculationParameters,
+              calculationContext,
+            });
             setCurrentView("bands-viewer");
             setReconnectTaskId(null);
           }}
@@ -2989,6 +3201,28 @@ function AppInner() {
             <BandPlot
               data={viewBandsData.bandData}
               scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
+              calculationParameters={viewBandsData.calculationParameters ?? null}
+              onPersistSelectedValenceBandIndex={
+                viewBandsData.calculationContext
+                  ? async (bandIndex) => {
+                    const updatedCalculation = await invoke<CalculationRun>(
+                      "update_calculation_band_viewer_metadata",
+                      {
+                        projectId: viewBandsData.calculationContext?.projectId,
+                        cifId: viewBandsData.calculationContext?.cifId,
+                        calcId: viewBandsData.calculationContext?.calcId,
+                        selectedValenceBandIndex: bandIndex,
+                      },
+                    );
+                    setViewBandsData((prev) => prev
+                      ? {
+                        ...prev,
+                        calculationParameters: (updatedCalculation.parameters ?? null) as Record<string, unknown> | null,
+                      }
+                      : prev);
+                  }
+                  : undefined
+              }
               viewerType="electronic"
             />
           </div>
@@ -3549,8 +3783,13 @@ function AppInner() {
             });
             setCurrentView("bands-wizard");
           }}
-          onViewBands={(bandData, fermiEnergy) => {
-            setViewBandsData({ bandData, fermiEnergy });
+          onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
+            setViewBandsData({
+              bandData,
+              fermiEnergy,
+              calculationParameters,
+              calculationContext,
+            });
             setCurrentView("bands-viewer");
           }}
           onRunDos={(cifId, crystalData, scfCalculations) => {

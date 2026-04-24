@@ -511,14 +511,14 @@ export function PhononWizard({
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
       `QE_BIN="${qeBinDir}"`,
-      buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out"),
-      buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out", undefined, hpcResources.resource_type),
+      buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out", undefined, hpcResources.resource_type),
     ];
     if (calculateDos) {
-      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_dos.in", "matdyn_dos.out"));
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_dos.in", "matdyn_dos.out", undefined, hpcResources.resource_type));
     }
     if (calculateDispersion) {
-      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_bands.in", "matdyn_bands.out"));
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "matdyn.x", "matdyn_bands.in", "matdyn_bands.out", undefined, hpcResources.resource_type));
     }
     return lines;
   }, [activeHpcProfile, calculateDos, calculateDispersion, hpcResources.resource_type]);
@@ -934,7 +934,18 @@ export function PhononWizard({
     setStep("run");
 
     try {
-      const taskId = await taskContext.startTask("phonon", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId: _cifId,
+          workingDir: PHONON_WORK_DIR,
+          calcType: "phonon" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("phonon", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);

@@ -48,6 +48,7 @@ import {
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
 } from "../lib/hpcConfig";
+import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import {
   formatWannierConvergenceFlag,
@@ -1275,6 +1276,13 @@ export function WannierWizard({
     () => (numBandsMode === "auto" ? (recommendedNumBands != null ? String(recommendedNumBands) : "") : numBandsInput),
     [numBandsInput, numBandsMode, recommendedNumBands],
   );
+  const manualNumBandsForHpc = useMemo(() => {
+    if (numBandsMode !== "manual") {
+      return null;
+    }
+    const parsed = Number(effectiveNumBandsInput);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }, [effectiveNumBandsInput, numBandsMode]);
   const numBandsHelpText = useMemo(() => {
     if (!selectedScf || recommendedNumBands == null) {
       return "Select a source SCF to derive num_bands.";
@@ -1364,6 +1372,12 @@ export function WannierWizard({
       if (numBands < resolvedNumWann) {
         return "num_bands must be greater than or equal to num_wann.";
       }
+      if (isHpcMode && numBandsMode === "manual") {
+        const taskLimitError = validateHpcTasksWithinBandCount(hpcResources, numBands, "num_bands");
+        if (taskLimitError) {
+          return taskLimitError;
+        }
+      }
 
       if (numBands > resolvedNumWann) {
         const disWinMin = parseOptionalNumber(disWinMinInput, "dis_win_min");
@@ -1397,6 +1411,9 @@ export function WannierWizard({
     kGridInput,
     kPath,
     effectiveNumBandsInput,
+    hpcResources,
+    isHpcMode,
+    numBandsMode,
     projectionDrafts.length,
     resolvedNumWann,
     selectedIssues,
@@ -1412,11 +1429,11 @@ export function WannierWizard({
     const seedname = sanitizeSeedname(seednameInput);
     return [
       `"${remoteWannier}" -pp ${seedname} > wannier90_pre.out 2>&1`,
-      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out"),
-      buildHpcQeInputCommandLine(activeHpcProfile, "pw2wannier90.x", "pw2wan.in", "pw2wan.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw2wannier90.x", "pw2wan.in", "pw2wan.out", undefined, hpcResources.resource_type),
       `"${remoteWannier}" ${seedname} > wannier90.out 2>&1`,
     ];
-  }, [activeHpcProfile, seednameInput]);
+  }, [activeHpcProfile, hpcResources.resource_type, seednameInput]);
 
   const resultQualityIssues = useMemo(
     () => getWannierQualityIssues(result, output, selectedScf?.result?.fermi_energy ?? null),
@@ -1497,6 +1514,12 @@ export function WannierWizard({
     }
     if (numBands < resolvedNumWann) {
       throw new Error("num_bands must be greater than or equal to num_wann.");
+    }
+    if (isHpcMode && numBandsMode === "manual") {
+      const taskLimitError = validateHpcTasksWithinBandCount(hpcResources, numBands, "num_bands");
+      if (taskLimitError) {
+        throw new Error(taskLimitError);
+      }
     }
 
     const params = selectedScf.parameters || {};
@@ -1857,7 +1880,18 @@ export function WannierWizard({
 
     try {
       const plan = await buildTaskPlan();
-      const taskId = await taskContext.startTask("wannier", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId,
+          workingDir: WANNIER_WORK_DIR,
+          calcType: "wannier" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("wannier", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
       const finalTask = await taskContext.waitForTaskCompletion(taskId);
       if (finalTask.status !== "completed" || !finalTask.result) {
@@ -2443,6 +2477,7 @@ export function WannierWizard({
                 resourceMode={activeHpcProfile?.resource_mode ?? "both"}
                 defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
                 defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+                maxTasks={manualNumBandsForHpc != null ? { value: manualNumBandsForHpc, reason: "manual num_bands is active" } : null}
                 disabled={isRunning}
               />
             ) : (

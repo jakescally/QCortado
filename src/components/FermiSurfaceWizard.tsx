@@ -31,6 +31,7 @@ import {
   resolveProfileRemoteQeBinDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
@@ -318,6 +319,7 @@ export function FermiSurfaceWizard({
         "fermi_velocity.in",
         "fermi_velocity.out",
         "-npool 1",
+        hpcResources.resource_type,
       ),
     ],
     [activeHpcProfile, hpcResources.resource_type],
@@ -563,6 +565,12 @@ export function FermiSurfaceWizard({
     const parsedNbnd = fermiNbnd === "auto"
       ? null
       : parseOptionalPositiveInt(String(fermiNbnd), "number of bands");
+    if (isHpcMode) {
+      const taskLimitError = validateHpcTasksWithinBandCount(hpcResources, parsedNbnd, "bands");
+      if (taskLimitError) {
+        throw new Error(taskLimitError);
+      }
+    }
 
     const scfParams = selectedScf.parameters || {};
     const sourceStructure = resolveSavedScfStructure(scfParams);
@@ -834,7 +842,18 @@ export function FermiSurfaceWizard({
 
     try {
       const plan = await buildTaskPlan();
-      const taskId = await taskContext.startTask("fermi_surface", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId,
+          workingDir: FERMI_WORK_DIR,
+          calcType: "fermi_surface" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("fermi_surface", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);
@@ -1058,7 +1077,11 @@ export function FermiSurfaceWizard({
     const isConvThrValid = parsedConvThr !== null;
     const isMixingBetaValid = parsedMixingBeta !== null && parsedMixingBeta <= 1.0;
     const isDegaussValid = !degaussRequired || parsedDegauss !== null;
-    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid;
+    const manualBandCount = fermiNbnd === "auto" ? null : fermiNbnd;
+    const hpcTaskBandLimitError = isHpcMode
+      ? validateHpcTasksWithinBandCount(hpcResources, manualBandCount, "bands")
+      : null;
+    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid && !hpcTaskBandLimitError;
 
     return (
       <div className="wizard-step parameters-step">
@@ -1339,6 +1362,7 @@ export function FermiSurfaceWizard({
             resourceMode={activeHpcProfile?.resource_mode ?? "both"}
             defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
             defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+            maxTasks={manualBandCount != null ? { value: manualBandCount, reason: "the manual band count is active" } : null}
             onResourcesChange={setHpcResources}
             disabled={isRunning}
           />
@@ -1387,6 +1411,7 @@ export function FermiSurfaceWizard({
         )}
 
         {error && <div className="error-message">{error}</div>}
+        {hpcTaskBandLimitError && <div className="error-message">{hpcTaskBandLimitError}</div>}
 
         <div className="step-actions">
           <button className="secondary-button" onClick={() => setStep("source")}>

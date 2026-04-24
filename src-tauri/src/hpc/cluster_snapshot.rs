@@ -664,6 +664,8 @@ mod tests {
             remote_project_root: "~/qcortado/projects".to_string(),
             resource_mode: HpcResourceMode::Both,
             launcher: HpcLauncher::Srun,
+            launcher_cpu_extra_args: None,
+            launcher_gpu_extra_args: None,
             launcher_extra_args: None,
             default_cpu_resources: default_cpu_resources(),
             default_gpu_resources: default_gpu_resources(),

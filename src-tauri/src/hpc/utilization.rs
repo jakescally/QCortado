@@ -269,7 +269,10 @@ pub fn parse_utilization_output(raw: &str, resource_type: ResourceType) -> Parse
         let gpu_lines = section_lines(raw, GPU_BEGIN, GPU_END);
         collect_section_errors("gpu", &gpu_lines, &mut warnings);
         let parsed = parse_gpu_section(&gpu_lines);
-        if parsed.as_ref().is_some_and(|value| !value.devices.is_empty()) {
+        if parsed
+            .as_ref()
+            .is_some_and(|value| !value.devices.is_empty())
+        {
             sources.push("srun/nvidia-smi".to_string());
         }
         parsed
@@ -451,7 +454,8 @@ fn parse_gpu_section(lines: &[String]) -> Option<HpcGpuTelemetry> {
         Some(util_values.iter().sum::<f64>() / util_values.len() as f64)
     };
     let memory_used_bytes = sum_optional_u64(devices.iter().map(|device| device.memory_used_bytes));
-    let memory_total_bytes = sum_optional_u64(devices.iter().map(|device| device.memory_total_bytes));
+    let memory_total_bytes =
+        sum_optional_u64(devices.iter().map(|device| device.memory_total_bytes));
     let memory_used_percent = match (memory_used_bytes, memory_total_bytes) {
         (Some(used), Some(total)) if total > 0 => Some((used as f64 / total as f64) * 100.0),
         _ => None,
@@ -537,10 +541,7 @@ pub fn parse_slurm_memory_to_bytes(value: &str) -> Option<u64> {
         return None;
     }
     trimmed = trimmed.trim_end_matches(['n', 'N', 'c', 'C']);
-    let unit = trimmed
-        .chars()
-        .last()
-        .filter(|ch| ch.is_ascii_alphabetic());
+    let unit = trimmed.chars().last().filter(|ch| ch.is_ascii_alphabetic());
     let numeric = if unit.is_some() {
         &trimmed[..trimmed.len().saturating_sub(1)]
     } else {

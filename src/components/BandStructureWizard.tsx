@@ -52,6 +52,7 @@ import {
   resolveProfileRemoteQeBinDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
@@ -181,8 +182,15 @@ const BANDS_WIZARD_SETTINGS_STORAGE_KEY = "qcortado-bands-wizard-settings-v1";
 interface StoredBandWizardSettings {
   nbnd: number | "auto";
   nscfConvThrInput: string;
+  nscfElectronMaxstepInput: string;
+  nscfMixingMode: "plain" | "TF" | "local-TF";
   nscfMixingBetaInput: string;
-  nscfOccupations: "fixed" | "smearing" | "from_input" | "tetrahedra";
+  nscfMixingNdimInput: string;
+  nscfDiagonalization: "david" | "cg" | "ppcg" | "paro" | "rmm-davidson";
+  nscfStartingpot: "atomic" | "file";
+  nscfStartingwfc: "atomic" | "atomic+random" | "random" | "file";
+  nscfDiagoFullAcc: boolean;
+  nscfOccupations: "fixed" | "smearing" | "from_input" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt";
   nscfSmearing: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   nscfDegaussInput: string;
   nscfVerbosity: "low" | "high" | "debug";
@@ -257,11 +265,13 @@ function sanitizeOutputFilename(raw: string, fallback: string): string {
   return sanitized.length > 0 ? sanitized : fallback;
 }
 
-function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input" | "tetrahedra" {
+function normalizeOccupations(raw: unknown): "fixed" | "smearing" | "from_input" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt" {
   const lowered = String(raw || "smearing").toLowerCase();
   if (lowered === "fixed") return "fixed";
   if (lowered === "from_input") return "from_input";
   if (lowered === "tetrahedra") return "tetrahedra";
+  if (lowered === "tetrahedra_lin") return "tetrahedra_lin";
+  if (lowered === "tetrahedra_opt") return "tetrahedra_opt";
   return "smearing";
 }
 
@@ -275,6 +285,36 @@ function normalizeSmearing(
   if (lowered === "fermi-dirac") return "fermi-dirac";
   if (lowered === "gaussian") return "gaussian";
   return fallback;
+}
+
+function normalizeDiagonalization(
+  raw: unknown,
+): "david" | "cg" | "ppcg" | "paro" | "rmm-davidson" {
+  const lowered = String(raw || "david").toLowerCase();
+  if (lowered === "cg") return "cg";
+  if (lowered === "ppcg") return "ppcg";
+  if (lowered === "paro") return "paro";
+  if (lowered === "rmm-davidson") return "rmm-davidson";
+  return "david";
+}
+
+function normalizeMixingMode(raw: unknown): "plain" | "TF" | "local-TF" {
+  const value = String(raw || "plain");
+  if (value === "TF") return "TF";
+  if (value === "local-TF") return "local-TF";
+  return "plain";
+}
+
+function normalizeStartingPotential(raw: unknown): "atomic" | "file" {
+  return String(raw || "atomic").toLowerCase() === "file" ? "file" : "atomic";
+}
+
+function normalizeStartingWavefunction(raw: unknown): "atomic" | "atomic+random" | "random" | "file" {
+  const lowered = String(raw || "atomic").toLowerCase();
+  if (lowered === "file") return "file";
+  if (lowered === "random") return "random";
+  if (lowered === "atomic+random") return "atomic+random";
+  return "atomic";
 }
 
 const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
@@ -364,7 +404,12 @@ function applyTotalKPoints(path: KPathPoint[], totalKPoints: number): KPathPoint
 interface BandStructureWizardProps {
   onBack: () => void;
   onExecutionModeChange?: (mode: ExecutionMode) => Promise<void> | void;
-  onViewBands: (bandData: BandData, scfFermiEnergy: number | null) => void;
+  onViewBands: (
+    bandData: BandData,
+    scfFermiEnergy: number | null,
+    calculationParameters?: Record<string, unknown> | null,
+    calculationContext?: { projectId: string; cifId: string; calcId: string } | null,
+  ) => void;
   qePath: string;
   defaultSmearing?: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
   executionMode?: ExecutionMode;
@@ -446,10 +491,31 @@ export function BandStructureWizard({
   const [nscfConvThrInput, setNscfConvThrInput] = useState(
     () => storedBandWizardSettings?.nscfConvThrInput ?? "1e-8",
   );
+  const [nscfElectronMaxstepInput, setNscfElectronMaxstepInput] = useState(
+    () => storedBandWizardSettings?.nscfElectronMaxstepInput ?? "1000",
+  );
+  const [nscfMixingMode, setNscfMixingMode] = useState<"plain" | "TF" | "local-TF">(
+    () => normalizeMixingMode(storedBandWizardSettings?.nscfMixingMode),
+  );
   const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState(
     () => storedBandWizardSettings?.nscfMixingBetaInput ?? "0.7",
   );
-  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">(
+  const [nscfMixingNdimInput, setNscfMixingNdimInput] = useState(
+    () => storedBandWizardSettings?.nscfMixingNdimInput ?? "8",
+  );
+  const [nscfDiagonalization, setNscfDiagonalization] = useState<"david" | "cg" | "ppcg" | "paro" | "rmm-davidson">(
+    () => normalizeDiagonalization(storedBandWizardSettings?.nscfDiagonalization),
+  );
+  const [nscfStartingpot, setNscfStartingpot] = useState<"atomic" | "file">(
+    () => normalizeStartingPotential(storedBandWizardSettings?.nscfStartingpot),
+  );
+  const [nscfStartingwfc, setNscfStartingwfc] = useState<"atomic" | "atomic+random" | "random" | "file">(
+    () => normalizeStartingWavefunction(storedBandWizardSettings?.nscfStartingwfc),
+  );
+  const [nscfDiagoFullAcc, setNscfDiagoFullAcc] = useState(
+    () => storedBandWizardSettings?.nscfDiagoFullAcc ?? false,
+  );
+  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt">(
     () => normalizeOccupations(storedBandWizardSettings?.nscfOccupations),
   );
   const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(
@@ -561,7 +627,14 @@ export function BandStructureWizard({
     writeStoredBandWizardSettings({
       nbnd,
       nscfConvThrInput,
+      nscfElectronMaxstepInput,
+      nscfMixingMode,
       nscfMixingBetaInput,
+      nscfMixingNdimInput,
+      nscfDiagonalization,
+      nscfStartingpot,
+      nscfStartingwfc,
+      nscfDiagoFullAcc,
       nscfOccupations,
       nscfSmearing,
       nscfDegaussInput,
@@ -580,7 +653,14 @@ export function BandStructureWizard({
   }, [
     nbnd,
     nscfConvThrInput,
+    nscfElectronMaxstepInput,
+    nscfMixingMode,
     nscfMixingBetaInput,
+    nscfMixingNdimInput,
+    nscfDiagonalization,
+    nscfStartingpot,
+    nscfStartingwfc,
+    nscfDiagoFullAcc,
     nscfOccupations,
     nscfSmearing,
     nscfDegaussInput,
@@ -619,11 +699,21 @@ export function BandStructureWizard({
       setNscfConvThrInput(String(convThr));
     }
 
+    const electronMaxstep = Number(params.electron_maxstep);
+    setNscfElectronMaxstepInput(Number.isInteger(electronMaxstep) && electronMaxstep > 0 ? String(electronMaxstep) : "1000");
+    setNscfMixingMode(normalizeMixingMode(params.mixing_mode));
+
     const mixingBeta = Number(params.mixing_beta);
     if (Number.isFinite(mixingBeta) && mixingBeta > 0) {
       setNscfMixingBetaInput(String(mixingBeta));
     }
 
+    const mixingNdim = Number(params.mixing_ndim);
+    setNscfMixingNdimInput(Number.isInteger(mixingNdim) && mixingNdim > 0 ? String(mixingNdim) : "8");
+    setNscfDiagonalization(normalizeDiagonalization(params.diagonalization));
+    setNscfStartingpot(normalizeStartingPotential(params.startingpot));
+    setNscfStartingwfc(normalizeStartingWavefunction(params.startingwfc));
+    setNscfDiagoFullAcc(Boolean(params.diago_full_acc));
     setNscfOccupations(normalizeOccupations(params.occupations));
     setNscfSmearing(normalizeSmearing(params.smearing, resolvedDefaultSmearing));
 
@@ -862,11 +952,11 @@ export function BandStructureWizard({
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
       `QE_BIN="${qeBinDir}"`,
-      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out"),
-      buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out", undefined, hpcResources.resource_type),
+      buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out", undefined, hpcResources.resource_type),
     ];
     if (enableProjections) {
-      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "projwfc.x", "projwfc.in", "projwfc.out"));
+      lines.push(buildHpcQeInputCommandLine(activeHpcProfile, "projwfc.x", "projwfc.in", "projwfc.out", undefined, hpcResources.resource_type));
     }
     return lines;
   }, [activeHpcProfile, enableProjections, hpcResources.resource_type]);
@@ -901,12 +991,22 @@ export function BandStructureWizard({
       throw new Error("Please enter a valid positive NSCF convergence threshold.");
     }
 
+    const parsedElectronMaxstep = parseOptionalPositiveInt(nscfElectronMaxstepInput, "NSCF electron_maxstep");
+    if (parsedElectronMaxstep == null) {
+      throw new Error("Please enter a valid positive NSCF electron_maxstep.");
+    }
+
     const parsedMixingBeta = parseOptionalPositiveNumber(nscfMixingBetaInput, "NSCF mixing beta");
     if (parsedMixingBeta == null) {
       throw new Error("Please enter a valid positive NSCF mixing beta.");
     }
     if (parsedMixingBeta > 1.0) {
       throw new Error("NSCF mixing beta should typically be in the range (0, 1].");
+    }
+
+    const parsedMixingNdim = parseOptionalPositiveInt(nscfMixingNdimInput, "NSCF mixing_ndim");
+    if (parsedMixingNdim == null) {
+      throw new Error("Please enter a valid positive NSCF mixing_ndim.");
     }
 
     const parsedDegauss = nscfOccupations === "smearing"
@@ -919,6 +1019,12 @@ export function BandStructureWizard({
     const manualNbnd = nbnd === "auto"
       ? null
       : parseOptionalPositiveInt(String(nbnd), "number of bands");
+    if (isHpcMode) {
+      const taskLimitError = validateHpcTasksWithinBandCount(hpcResources, manualNbnd, "bands");
+      if (taskLimitError) {
+        throw new Error(taskLimitError);
+      }
+    }
 
     const bandsFilband = sanitizeOutputFilename(bandsFilbandInput, "bands.dat");
     const projectionFilproj = sanitizeOutputFilename(projectionFilprojInput, "bands.projwfc.dat");
@@ -1064,7 +1170,14 @@ export function BandStructureWizard({
         },
         kpoints: { type: "gamma" },
         conv_thr: parsedConvThr,
+        electron_maxstep: parsedElectronMaxstep,
+        mixing_mode: nscfMixingMode,
         mixing_beta: parsedMixingBeta,
+        mixing_ndim: parsedMixingNdim,
+        diagonalization: nscfDiagonalization,
+        startingpot: nscfStartingpot,
+        startingwfc: nscfStartingwfc,
+        diago_full_acc: nscfDiagoFullAcc,
         tprnfor: false,
         tstress: false,
         forc_conv_thr: null,
@@ -1111,7 +1224,14 @@ export function BandStructureWizard({
         },
         kpoints: { type: "gamma" },
         conv_thr: parsedConvThr,
+        electron_maxstep: parsedElectronMaxstep,
+        mixing_mode: nscfMixingMode,
         mixing_beta: parsedMixingBeta,
+        mixing_ndim: parsedMixingNdim,
+        diagonalization: nscfDiagonalization,
+        startingpot: nscfStartingpot,
+        startingwfc: nscfStartingwfc,
+        diago_full_acc: nscfDiagoFullAcc,
         tprnfor: false,
         tstress: false,
         forc_conv_thr: null,
@@ -1152,7 +1272,14 @@ export function BandStructureWizard({
         },
         kpoints: { type: "gamma" },
         conv_thr: parsedConvThr,
+        electron_maxstep: parsedElectronMaxstep,
+        mixing_mode: nscfMixingMode,
         mixing_beta: parsedMixingBeta,
+        mixing_ndim: parsedMixingNdim,
+        diagonalization: nscfDiagonalization,
+        startingpot: nscfStartingpot,
+        startingwfc: nscfStartingwfc,
+        diago_full_acc: nscfDiagoFullAcc,
         tprnfor: false,
         tstress: false,
         forc_conv_thr: null,
@@ -1214,7 +1341,14 @@ export function BandStructureWizard({
       n_bands: manualNbnd,
       n_bands_requested: manualNbnd,
       nscf_conv_thr: parsedConvThr,
+      nscf_electron_maxstep: parsedElectronMaxstep,
+      nscf_mixing_mode: nscfMixingMode,
       nscf_mixing_beta: parsedMixingBeta,
+      nscf_mixing_ndim: parsedMixingNdim,
+      nscf_diagonalization: nscfDiagonalization,
+      nscf_startingpot: nscfStartingpot,
+      nscf_startingwfc: nscfStartingwfc,
+      nscf_diago_full_acc: nscfDiagoFullAcc,
       nscf_occupations: nscfOccupations,
       nscf_smearing: nscfSmearing,
       nscf_degauss: parsedDegauss,
@@ -1290,7 +1424,18 @@ export function BandStructureWizard({
     try {
       const plan = await buildBandTaskPlan();
 
-      const taskId = await taskContext.startTask("bands", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId: _cifId,
+          workingDir: BANDS_WORK_DIR,
+          calcType: "bands" as const,
+          parameters: plan.saveParameters,
+          tags: plan.saveTags,
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("bands", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);
@@ -1673,18 +1818,40 @@ export function BandStructureWizard({
       if (!Number.isFinite(parsed) || parsed <= 0) return null;
       return parsed;
     };
+    const safeParsePositiveInt = (value: string): number | null => {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      if (!Number.isInteger(parsed) || parsed <= 0) return null;
+      return parsed;
+    };
     const parsedConvThr = safeParsePositive(nscfConvThrInput);
+    const parsedElectronMaxstep = safeParsePositiveInt(nscfElectronMaxstepInput);
     const parsedMixingBeta = safeParsePositive(nscfMixingBetaInput);
+    const parsedMixingNdim = safeParsePositiveInt(nscfMixingNdimInput);
     const parsedDegauss = safeParsePositive(nscfDegaussInput);
     const degaussRequired = nscfOccupations === "smearing";
     const isNbndValid = nbnd === "auto" || (Number.isInteger(nbnd) && nbnd > 0);
     const isConvThrValid = parsedConvThr !== null;
+    const isElectronMaxstepValid = parsedElectronMaxstep !== null;
     const isMixingBetaValid = parsedMixingBeta !== null && parsedMixingBeta <= 1.0;
+    const isMixingNdimValid = parsedMixingNdim !== null;
     const isDegaussValid = !degaussRequired || parsedDegauss !== null;
     const hasValidLogPath = !autoSaveLogEnabled || autoSaveLogPath.trim().length > 0;
+    const manualBandCount = nbnd === "auto" ? null : nbnd;
+    const hpcTaskBandLimitError = isHpcMode
+      ? validateHpcTasksWithinBandCount(hpcResources, manualBandCount, "bands")
+      : null;
     const bandsFilband = sanitizeOutputFilename(bandsFilbandInput, "bands.dat");
     const projectionFilproj = sanitizeOutputFilename(projectionFilprojInput, "bands.projwfc.dat");
-    const canRun = isNbndValid && isConvThrValid && isMixingBetaValid && isDegaussValid && hasValidLogPath;
+    const canRun = isNbndValid
+      && isConvThrValid
+      && isElectronMaxstepValid
+      && isMixingBetaValid
+      && isMixingNdimValid
+      && isDegaussValid
+      && hasValidLogPath
+      && !hpcTaskBandLimitError;
 
     return (
       <div className="wizard-step parameters-step">
@@ -1761,6 +1928,38 @@ export function BandStructureWizard({
 
                 <div className="phonon-field">
                   <label>
+                    Max SCF iterations
+                    <InfoTooltip text="QE variable: `electron_maxstep` in `&ELECTRONS`. Maximum electronic iterations allowed for the band-path run." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nscfElectronMaxstepInput}
+                    onChange={(e) => setNscfElectronMaxstepInput(e.target.value)}
+                    placeholder="1000"
+                    spellCheck={false}
+                  />
+                  {!isElectronMaxstepValid && (
+                    <span className="param-hint input-error">Use a positive integer.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Mixing mode
+                    <InfoTooltip text="QE variable: `mixing_mode` in `&ELECTRONS`. `plain` is the default; `TF` and `local-TF` can help metallic convergence." />
+                  </label>
+                  <select
+                    value={nscfMixingMode}
+                    onChange={(e) => setNscfMixingMode(e.target.value as "plain" | "TF" | "local-TF")}
+                  >
+                    <option value="plain">plain</option>
+                    <option value="TF">TF</option>
+                    <option value="local-TF">local-TF</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
                     Mixing beta
                     <InfoTooltip text="QE variable: `mixing_beta` in `&ELECTRONS`. Typical stable range is 0.2-0.8; values above 1 are generally unstable." />
                   </label>
@@ -1778,16 +1977,82 @@ export function BandStructureWizard({
 
                 <div className="phonon-field">
                   <label>
+                    Mixing dimensions
+                    <InfoTooltip text="QE variable: `mixing_ndim` in `&ELECTRONS`. Number of prior iterations retained in Broyden mixing." />
+                  </label>
+                  <input
+                    type="text"
+                    value={nscfMixingNdimInput}
+                    onChange={(e) => setNscfMixingNdimInput(e.target.value)}
+                    placeholder="8"
+                    spellCheck={false}
+                  />
+                  {!isMixingNdimValid && (
+                    <span className="param-hint input-error">Use a positive integer.</span>
+                  )}
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Diagonalization
+                    <InfoTooltip text="QE variable: `diagonalization` in `&ELECTRONS`. Controls the eigensolver used by the band-path `pw.x` run." />
+                  </label>
+                  <select
+                    value={nscfDiagonalization}
+                    onChange={(e) => setNscfDiagonalization(e.target.value as "david" | "cg" | "ppcg" | "paro" | "rmm-davidson")}
+                  >
+                    <option value="david">Davidson</option>
+                    <option value="cg">Conjugate Gradient</option>
+                    <option value="ppcg">PPCG</option>
+                    <option value="paro">ParO</option>
+                    <option value="rmm-davidson">RMM-Davidson</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Starting potential
+                    <InfoTooltip text="QE variable: `startingpot` in `&ELECTRONS`. `file` reuses the potential from the source calculation when the saved data is available." />
+                  </label>
+                  <select
+                    value={nscfStartingpot}
+                    onChange={(e) => setNscfStartingpot(e.target.value as "atomic" | "file")}
+                  >
+                    <option value="atomic">atomic</option>
+                    <option value="file">file</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
+                    Starting wavefunctions
+                    <InfoTooltip text="QE variable: `startingwfc` in `&ELECTRONS`. Controls the initial wavefunction guess for the NSCF band-path run." />
+                  </label>
+                  <select
+                    value={nscfStartingwfc}
+                    onChange={(e) => setNscfStartingwfc(e.target.value as "atomic" | "atomic+random" | "random" | "file")}
+                  >
+                    <option value="atomic">atomic</option>
+                    <option value="atomic+random">atomic+random</option>
+                    <option value="random">random</option>
+                    <option value="file">file</option>
+                  </select>
+                </div>
+
+                <div className="phonon-field">
+                  <label>
                     Occupations
                     <InfoTooltip text="QE variable: `occupations` in `&SYSTEM`. Use smearing for metals and challenging Fermi-level crossings." />
                   </label>
                   <select
                     value={nscfOccupations}
-                    onChange={(e) => setNscfOccupations(e.target.value as "fixed" | "smearing" | "from_input" | "tetrahedra")}
+                    onChange={(e) => setNscfOccupations(e.target.value as "fixed" | "smearing" | "from_input" | "tetrahedra" | "tetrahedra_lin" | "tetrahedra_opt")}
                   >
                     <option value="smearing">smearing</option>
                     <option value="fixed">fixed</option>
                     <option value="tetrahedra">tetrahedra</option>
+                    <option value="tetrahedra_lin">tetrahedra_lin</option>
+                    <option value="tetrahedra_opt">tetrahedra_opt</option>
                     <option value="from_input">from_input</option>
                   </select>
                 </div>
@@ -1804,7 +2069,7 @@ export function BandStructureWizard({
                   >
                     <option value="gaussian">gaussian</option>
                     <option value="methfessel-paxton">methfessel-paxton</option>
-                    <option value="marzari-vanderbilt">marzari-vanderbilt</option>
+                    <option value="marzari-vanderbilt">marzari-vanderbilt (cold)</option>
                     <option value="fermi-dirac">fermi-dirac</option>
                   </select>
                 </div>
@@ -1842,6 +2107,19 @@ export function BandStructureWizard({
                   </select>
                 </div>
               </div>
+
+              <label className="option-checkbox">
+                <input
+                  type="checkbox"
+                  checked={nscfDiagoFullAcc}
+                  onChange={(e) => setNscfDiagoFullAcc(e.target.checked)}
+                />
+                <span>
+                  Full subspace diagonalization
+                  <span className="band-control-tech-name">diago_full_acc</span>
+                  <InfoTooltip text="QE variable: `diago_full_acc` in `&ELECTRONS`. Uses full subspace diagonalization, which can help some difficult cases at higher cost." />
+                </span>
+              </label>
             </div>
           )}
         </div>
@@ -2046,6 +2324,7 @@ export function BandStructureWizard({
             resourceMode={activeHpcProfile?.resource_mode ?? "both"}
             defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
             defaultGpuResources={activeHpcProfile?.default_gpu_resources ?? null}
+            maxTasks={manualBandCount != null ? { value: manualBandCount, reason: "the manual band count is active" } : null}
             onResourcesChange={setHpcResources}
             disabled={isRunning}
           />
@@ -2150,6 +2429,7 @@ export function BandStructureWizard({
         )}
 
         {error && <div className="error-message">{error}</div>}
+        {hpcTaskBandLimitError && <div className="error-message">{hpcTaskBandLimitError}</div>}
 
         <div className="step-actions">
           <button className="secondary-button" onClick={() => setStep("kpath")}>
@@ -2317,7 +2597,7 @@ export function BandStructureWizard({
           </button>
           <button
             className="primary-button"
-            onClick={() => onViewBands(bandData, scfFermiEnergy)}
+            onClick={() => onViewBands(bandData, scfFermiEnergy, null)}
           >
             View Bands
           </button>

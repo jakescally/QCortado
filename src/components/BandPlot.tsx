@@ -71,6 +71,8 @@ interface BandPlotProps {
   onWindowOverlayChange?: (update: BandPlotWindowOverlayUpdate) => void;
   windowOverlayHint?: string;
   showBandGapOverlayOverride?: boolean;
+  calculationParameters?: Record<string, unknown> | null;
+  onPersistSelectedValenceBandIndex?: (bandIndex: number | null) => Promise<void> | void;
 }
 
 interface HoveredPoint {
@@ -98,9 +100,11 @@ type ProjectionMode = "atom" | "orbital";
 type ProjectionNormalizeMode = "global" | "band";
 type FatColorMode = "accent" | "band";
 export type FermiReferenceMode = "scf" | "bands";
+export type ZeroEnergyReferenceMode = "calculated-fermi" | "vbm";
 
 export interface BandPlotSharedSettings {
   fermiReferenceMode: FermiReferenceMode;
+  zeroEnergyReferenceMode: ZeroEnergyReferenceMode;
   lineWidth: number;
   lineOpacity: number;
   plotTextScale: number;
@@ -184,6 +188,32 @@ function clampToRange(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function distanceSquaredToSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lengthSquared = dx * dx + dy * dy;
+
+  if (lengthSquared <= 1e-12) {
+    const pointDx = px - x1;
+    const pointDy = py - y1;
+    return pointDx * pointDx + pointDy * pointDy;
+  }
+
+  const t = clampToRange(((px - x1) * dx + (py - y1) * dy) / lengthSquared, 0, 1);
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  const distX = px - projX;
+  const distY = py - projY;
+  return distX * distX + distY * distY;
+}
+
 const MIN_WINDOW_SPAN_EV = 1e-4;
 
 function rgbString(r: number, g: number, b: number): string {
@@ -236,11 +266,13 @@ function getYAxisTickStep(range: number): number {
   return 0.5;
 }
 
-function getYAxisTicks(eMin: number, eMax: number): number[] {
+function getYAxisTicks(eMin: number, eMax: number, customStep?: number | null): number[] {
   if (!Number.isFinite(eMin) || !Number.isFinite(eMax) || eMax < eMin) {
     return [0];
   }
-  const step = getYAxisTickStep(eMax - eMin);
+  const step = customStep != null && Number.isFinite(customStep) && customStep > 0
+    ? customStep
+    : getYAxisTickStep(eMax - eMin);
   const ticks: number[] = [];
   let tick = Math.ceil(eMin / step) * step;
   while (tick <= eMax + 1e-9) {
@@ -255,9 +287,24 @@ function formatAxisInputValue(value: number): string {
   return Number.parseFloat(value.toFixed(6)).toString();
 }
 
-function isElectronicEFLabel(label: string): boolean {
+function getTickDecimals(step: number | null): number {
+  if (step == null || !Number.isFinite(step) || step <= 0) {
+    return 1;
+  }
+  const normalized = formatAxisInputValue(step);
+  const decimalPart = normalized.split(".")[1] ?? "";
+  return Math.min(6, decimalPart.length);
+}
+
+function getElectronicReferenceLabelSubscript(label: string): string | null {
   const normalized = label.replace(/\s+/g, "").replace(/−/g, "-").toLowerCase();
-  return normalized === "e-e_f(ev)";
+  if (normalized === "e-e_f(ev)") {
+    return "F";
+  }
+  if (normalized === "e-e_vbm(ev)") {
+    return "VBM";
+  }
+  return null;
 }
 
 function normalizeSymmetryLabel(label: string): string {
@@ -374,10 +421,18 @@ export function getDefaultBandPlotEnergyRange(
   data: BandData,
   scfFermiEnergy?: number | null,
   requestedMode: FermiReferenceMode = "bands",
+  zeroEnergyReferenceMode: ZeroEnergyReferenceMode = "calculated-fermi",
+  selectedValenceBandMaximum?: number | null,
 ): [number, number] {
-  const { fermiEnergy } = resolveBandPlotFermiContext(data, scfFermiEnergy, requestedMode);
-  let eMin = data.energy_range[0] - fermiEnergy;
-  let eMax = data.energy_range[1] - fermiEnergy;
+  const { zeroEnergy } = resolveBandPlotEnergyReference(
+    data,
+    scfFermiEnergy,
+    requestedMode,
+    zeroEnergyReferenceMode,
+    selectedValenceBandMaximum,
+  );
+  let eMin = data.energy_range[0] - zeroEnergy;
+  let eMax = data.energy_range[1] - zeroEnergy;
   const span = Math.max(eMax - eMin, 1e-6);
   const padding = span * 0.1;
   eMin -= padding;
@@ -392,7 +447,126 @@ export function getDefaultBandPlotEnergyRange(
   return [eMin, eMax];
 }
 
-function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): BandGap | null {
+function extractSelectedValenceBandIndex(
+  parameters?: Record<string, unknown> | null,
+  bandCount?: number,
+): number | null {
+  const rawMetadata = parameters?.band_viewer_metadata;
+  if (!rawMetadata || typeof rawMetadata !== "object") {
+    return null;
+  }
+
+  const rawIndex = (rawMetadata as { selected_valence_band_index?: unknown })
+    .selected_valence_band_index;
+  const index = Number(rawIndex);
+  if (!Number.isInteger(index) || index < 0) {
+    return null;
+  }
+  if (bandCount != null && index >= bandCount) {
+    return null;
+  }
+  return index;
+}
+
+function findSelectedValenceBandMaximum(
+  energies: number[][],
+  kPoints: number[],
+  selectedBandIndex: number | null,
+): { bandIndex: number; vbmEnergy: number; vbmK: number } | null {
+  if (selectedBandIndex == null || selectedBandIndex < 0 || selectedBandIndex >= energies.length) {
+    return null;
+  }
+
+  const band = energies[selectedBandIndex];
+  const pointCount = Math.min(band.length, kPoints.length);
+  if (pointCount === 0) {
+    return null;
+  }
+
+  let vbmEnergy = Number.NEGATIVE_INFINITY;
+  let vbmK = 0;
+  for (let index = 0; index < pointCount; index += 1) {
+    const energy = band[index];
+    if (!Number.isFinite(energy)) {
+      continue;
+    }
+    if (energy > vbmEnergy) {
+      vbmEnergy = energy;
+      vbmK = kPoints[index];
+    }
+  }
+
+  if (!Number.isFinite(vbmEnergy)) {
+    return null;
+  }
+
+  return {
+    bandIndex: selectedBandIndex,
+    vbmEnergy,
+    vbmK,
+  };
+}
+
+export function calculateDisplayedBandGapFromSelectedValenceBand(
+  energies: number[][],
+  kPoints: number[],
+  selectedBandIndex: number | null,
+  zeroEnergy = 0,
+): BandGap | null {
+  const selectedValenceBand = findSelectedValenceBandMaximum(energies, kPoints, selectedBandIndex);
+  if (!selectedValenceBand) {
+    return null;
+  }
+
+  let cbmEnergy = Number.POSITIVE_INFINITY;
+  let cbmK = 0;
+
+  for (const band of energies) {
+    const pointCount = Math.min(band.length, kPoints.length);
+    for (let index = 0; index < pointCount; index += 1) {
+      const energy = band[index];
+      if (!Number.isFinite(energy) || energy <= selectedValenceBand.vbmEnergy + BAND_GAP_TOLERANCE_EV) {
+        continue;
+      }
+      if (energy < cbmEnergy) {
+        cbmEnergy = energy;
+        cbmK = kPoints[index];
+      }
+    }
+  }
+
+  if (!Number.isFinite(cbmEnergy)) {
+    return null;
+  }
+
+  const gapValue = cbmEnergy - selectedValenceBand.vbmEnergy;
+  if (!(gapValue > BAND_GAP_TOLERANCE_EV)) {
+    return null;
+  }
+
+  return {
+    value: gapValue,
+    is_direct: Math.abs(selectedValenceBand.vbmK - cbmK) < DIRECT_GAP_K_TOLERANCE,
+    vbm_k: selectedValenceBand.vbmK,
+    cbm_k: cbmK,
+    vbm_energy: selectedValenceBand.vbmEnergy - zeroEnergy,
+    cbm_energy: cbmEnergy - zeroEnergy,
+  };
+}
+
+interface BandEdgeSummary {
+  vbmEnergy: number;
+  vbmK: number;
+  cbmEnergy: number;
+  cbmK: number;
+  hasCrossingBand: boolean;
+}
+
+function findBandEdges(
+  energies: number[][],
+  kPoints: number[],
+  referenceEnergy: number,
+): BandEdgeSummary | null {
   if (energies.length === 0 || kPoints.length === 0) {
     return null;
   }
@@ -401,6 +575,7 @@ function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): Ban
   let vbmK = 0;
   let cbmEnergy = Number.POSITIVE_INFINITY;
   let cbmK = 0;
+  let hasCrossingBand = false;
 
   for (const band of energies) {
     const pointCount = Math.min(band.length, kPoints.length);
@@ -416,12 +591,12 @@ function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): Ban
       if (energy < bandMin) bandMin = energy;
       if (energy > bandMax) bandMax = energy;
 
-      if (energy <= BAND_GAP_TOLERANCE_EV && energy > vbmEnergy) {
+      if (energy <= referenceEnergy + BAND_GAP_TOLERANCE_EV && energy > vbmEnergy) {
         vbmEnergy = energy;
         vbmK = kPoints[index];
       }
 
-      if (energy >= -BAND_GAP_TOLERANCE_EV && energy < cbmEnergy) {
+      if (energy >= referenceEnergy - BAND_GAP_TOLERANCE_EV && energy < cbmEnergy) {
         cbmEnergy = energy;
         cbmK = kPoints[index];
       }
@@ -430,10 +605,10 @@ function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): Ban
     if (
       Number.isFinite(bandMin) &&
       Number.isFinite(bandMax) &&
-      bandMin < -BAND_GAP_TOLERANCE_EV &&
-      bandMax > BAND_GAP_TOLERANCE_EV
+      bandMin < referenceEnergy - BAND_GAP_TOLERANCE_EV &&
+      bandMax > referenceEnergy + BAND_GAP_TOLERANCE_EV
     ) {
-      return null;
+      hasCrossingBand = true;
     }
   }
 
@@ -441,18 +616,81 @@ function calculateDisplayedBandGap(energies: number[][], kPoints: number[]): Ban
     return null;
   }
 
-  const gapValue = cbmEnergy - vbmEnergy;
+  return {
+    vbmEnergy,
+    vbmK,
+    cbmEnergy,
+    cbmK,
+    hasCrossingBand,
+  };
+}
+
+export function resolveBandPlotEnergyReference(
+  data: BandData,
+  scfFermiEnergy?: number | null,
+  requestedFermiMode: FermiReferenceMode = "bands",
+  requestedZeroMode: ZeroEnergyReferenceMode = "calculated-fermi",
+  selectedValenceBandMaximum?: number | null,
+): {
+  fermiEnergy: number;
+  fermiMode: FermiReferenceMode;
+  hasScfFermi: boolean;
+  hasBandsFermi: boolean;
+  zeroEnergy: number;
+  zeroEnergyReferenceMode: ZeroEnergyReferenceMode;
+  valenceBandMaximum: number | null;
+} {
+  const {
+    fermiEnergy,
+    mode: fermiMode,
+    hasScfFermi,
+    hasBandsFermi,
+  } = resolveBandPlotFermiContext(data, scfFermiEnergy, requestedFermiMode);
+  const explicitValenceBandMaximum = Number.isFinite(selectedValenceBandMaximum)
+    ? (selectedValenceBandMaximum as number)
+    : null;
+  const resolvedValenceBandMaximum = explicitValenceBandMaximum;
+  const zeroEnergyReferenceMode = requestedZeroMode === "vbm" && resolvedValenceBandMaximum != null
+    ? "vbm"
+    : "calculated-fermi";
+  const zeroEnergy = zeroEnergyReferenceMode === "vbm"
+    ? resolvedValenceBandMaximum!
+    : fermiEnergy;
+
+  return {
+    fermiEnergy,
+    fermiMode,
+    hasScfFermi,
+    hasBandsFermi,
+    zeroEnergy,
+    zeroEnergyReferenceMode,
+    valenceBandMaximum: resolvedValenceBandMaximum,
+  };
+}
+
+export function calculateDisplayedBandGap(
+  energies: number[][],
+  kPoints: number[],
+  referenceEnergy: number,
+  zeroEnergy: number = referenceEnergy,
+): BandGap | null {
+  const bandEdges = findBandEdges(energies, kPoints, referenceEnergy);
+  if (!bandEdges || bandEdges.hasCrossingBand) {
+    return null;
+  }
+
+  const gapValue = bandEdges.cbmEnergy - bandEdges.vbmEnergy;
   if (!(gapValue > BAND_GAP_TOLERANCE_EV)) {
     return null;
   }
 
   return {
     value: gapValue,
-    is_direct: Math.abs(vbmK - cbmK) < DIRECT_GAP_K_TOLERANCE,
-    vbm_k: vbmK,
-    cbm_k: cbmK,
-    vbm_energy: vbmEnergy,
-    cbm_energy: cbmEnergy,
+    is_direct: Math.abs(bandEdges.vbmK - bandEdges.cbmK) < DIRECT_GAP_K_TOLERANCE,
+    vbm_k: bandEdges.vbmK,
+    cbm_k: bandEdges.cbmK,
+    vbm_energy: bandEdges.vbmEnergy - zeroEnergy,
+    cbm_energy: bandEdges.cbmEnergy - zeroEnergy,
   };
 }
 
@@ -763,6 +1001,8 @@ export function BandPlot({
   onWindowOverlayChange,
   windowOverlayHint = "Drag window edges or side sliders to tune selected ranges.",
   showBandGapOverlayOverride,
+  calculationParameters = null,
+  onPersistSelectedValenceBandIndex,
 }: BandPlotProps) {
   const { isDark } = useTheme();
   const colors = useMemo(() => isDark
@@ -808,6 +1048,7 @@ export function BandPlot({
   const [yMax, setYMax] = useState<number | null>(null);
   const [manualYMinInput, setManualYMinInput] = useState("");
   const [manualYMaxInput, setManualYMaxInput] = useState("");
+  const [manualYTickStepInput, setManualYTickStepInput] = useState("");
   const [manualRangeError, setManualRangeError] = useState<string | null>(null);
 
   // Appearance controls
@@ -845,12 +1086,29 @@ export function BandPlot({
   const [overlayDragState, setOverlayDragState] = useState<OverlayDragState | null>(null);
 
   const requestedFermiReferenceMode = sharedSettings?.fermiReferenceMode ?? null;
+  const requestedZeroEnergyReferenceMode = sharedSettings?.zeroEnergyReferenceMode ?? null;
   const fallbackFermiReferenceMode = (
     scfFermiEnergy != null && Number.isFinite(scfFermiEnergy)
   ) ? "scf" : "bands";
   const [fermiReferenceMode, setFermiReferenceMode] = useState<FermiReferenceMode>(
     requestedFermiReferenceMode ?? fallbackFermiReferenceMode,
   );
+  const [zeroEnergyReferenceMode, setZeroEnergyReferenceMode] = useState<ZeroEnergyReferenceMode>(
+    requestedZeroEnergyReferenceMode ?? "calculated-fermi",
+  );
+  const persistedSelectedValenceBandIndex = useMemo(
+    () => extractSelectedValenceBandIndex(calculationParameters, data.energies.length),
+    [calculationParameters, data.energies.length],
+  );
+  const [selectedValenceBandIndex, setSelectedValenceBandIndex] = useState<number | null>(
+    persistedSelectedValenceBandIndex,
+  );
+  const [isSelectingValenceBand, setIsSelectingValenceBand] = useState(false);
+  const [valenceBandSelectionStatus, setValenceBandSelectionStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedValenceBandIndex(persistedSelectedValenceBandIndex);
+  }, [persistedSelectedValenceBandIndex]);
 
   useEffect(() => {
     if (sharedSettings) {
@@ -867,19 +1125,62 @@ export function BandPlot({
     }
   }, [data.fermi_energy, fermiReferenceMode, scfFermiEnergy, sharedSettings]);
 
+  useEffect(() => {
+    const requestedZeroMode = requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode;
+    if (viewerType !== "electronic" || requestedZeroMode !== "vbm") {
+      setIsSelectingValenceBand(false);
+      setValenceBandSelectionStatus(null);
+      return;
+    }
+    if (selectedValenceBandIndex == null) {
+      setIsSelectingValenceBand(true);
+      if (!valenceBandSelectionStatus) {
+        setValenceBandSelectionStatus("Click the valence band on the plot.");
+      }
+    }
+  }, [
+    requestedZeroEnergyReferenceMode,
+    selectedValenceBandIndex,
+    valenceBandSelectionStatus,
+    viewerType,
+    zeroEnergyReferenceMode,
+  ]);
+
   const {
     fermiEnergy,
-    mode: resolvedFermiReferenceMode,
+    fermiMode: resolvedFermiReferenceMode,
     hasScfFermi,
     hasBandsFermi,
-  } = useMemo(
-    () =>
-      resolveBandPlotFermiContext(
-        data,
-        scfFermiEnergy,
-        requestedFermiReferenceMode ?? fermiReferenceMode,
-      ),
-    [data, fermiReferenceMode, requestedFermiReferenceMode, scfFermiEnergy],
+    zeroEnergy,
+    zeroEnergyReferenceMode: resolvedZeroEnergyReferenceMode,
+    valenceBandMaximum,
+  } = useMemo(() => {
+    const selectedValenceBand = findSelectedValenceBandMaximum(
+      data.energies,
+      data.k_points,
+      selectedValenceBandIndex,
+    );
+    return resolveBandPlotEnergyReference(
+      data,
+      scfFermiEnergy,
+      requestedFermiReferenceMode ?? fermiReferenceMode,
+      requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode,
+      selectedValenceBand?.vbmEnergy ?? null,
+    );
+  },
+    [
+      data,
+      fermiReferenceMode,
+      requestedFermiReferenceMode,
+      requestedZeroEnergyReferenceMode,
+      scfFermiEnergy,
+      selectedValenceBandIndex,
+      zeroEnergyReferenceMode,
+    ],
+  );
+  const selectedValenceBand = useMemo(
+    () => findSelectedValenceBandMaximum(data.energies, data.k_points, selectedValenceBandIndex),
+    [data.energies, data.k_points, selectedValenceBandIndex],
   );
 
   const effectiveLineWidth = sharedSettings?.lineWidth ?? lineWidth;
@@ -895,6 +1196,20 @@ export function BandPlot({
 
   const activeFermiSourceLabel = resolvedFermiReferenceMode === "scf" ? "SCF" : "Bands run";
   const activeFermiDisplay = Number.isFinite(fermiEnergy) ? `${fermiEnergy.toFixed(3)} eV` : "N/A";
+  const selectedValenceBandLabel = selectedValenceBandIndex != null
+    ? `Band ${selectedValenceBandIndex + 1}`
+    : "Not selected";
+  const activeZeroReferenceLabel = resolvedZeroEnergyReferenceMode === "vbm" ? "VBM" : "Calculated E_F";
+  const activeZeroReferenceDisplay = resolvedZeroEnergyReferenceMode === "vbm" && valenceBandMaximum != null
+    ? `${valenceBandMaximum.toFixed(3)} eV`
+    : activeFermiDisplay;
+  const zeroLineLabel = resolvedZeroEnergyReferenceMode === "vbm" ? "VBM" : "E_F";
+  const resolvedYAxisLabel = viewerType === "electronic" && yAxisLabel === "E − E_F (eV)"
+    ? (resolvedZeroEnergyReferenceMode === "vbm" ? "E − E_VBM (eV)" : yAxisLabel)
+    : yAxisLabel;
+  const resolvedValueLabel = viewerType === "electronic" && valueLabel === "E − E_F"
+    ? (resolvedZeroEnergyReferenceMode === "vbm" ? "E − E_VBM" : valueLabel)
+    : valueLabel;
   const availableComparisonOptions = comparisonOptions ?? [];
   const hasComparisonControls = comparisonOptions !== undefined;
   const editableWindowOverlays = useMemo(
@@ -941,10 +1256,10 @@ export function BandPlot({
     }
   }, [overlayDragState, windowOverlayById]);
 
-  // Shift all energies relative to Fermi level (E - E_F)
+  // Shift all energies relative to the selected zero-energy reference.
   const shiftedEnergies = useMemo(() => {
-    return data.energies.map((band) => band.map((e) => e - fermiEnergy));
-  }, [data.energies, fermiEnergy]);
+    return data.energies.map((band) => band.map((e) => e - zeroEnergy));
+  }, [data.energies, zeroEnergy]);
 
   const selectedComparison = useMemo(
     () => availableComparisonOptions.find((option) => option.id === selectedComparisonId) ?? null,
@@ -955,8 +1270,8 @@ export function BandPlot({
     if (!selectedComparison) {
       return [];
     }
-    return selectedComparison.data.energies.map((band) => band.map((e) => e - fermiEnergy));
-  }, [fermiEnergy, selectedComparison]);
+    return selectedComparison.data.energies.map((band) => band.map((e) => e - zeroEnergy));
+  }, [selectedComparison, zeroEnergy]);
 
   const comparisonKPointsForPlot = useMemo(() => {
     if (!selectedComparison) {
@@ -967,8 +1282,24 @@ export function BandPlot({
 
   const displayedBandGap = useMemo(() => {
     if (viewerType !== "electronic") return null;
-    return calculateDisplayedBandGap(shiftedEnergies, data.k_points);
-  }, [data.k_points, shiftedEnergies, viewerType]);
+    if (resolvedZeroEnergyReferenceMode === "vbm") {
+      return calculateDisplayedBandGapFromSelectedValenceBand(
+        data.energies,
+        data.k_points,
+        selectedValenceBandIndex,
+        zeroEnergy,
+      );
+    }
+    return calculateDisplayedBandGap(data.energies, data.k_points, fermiEnergy, zeroEnergy);
+  }, [
+    data.energies,
+    data.k_points,
+    fermiEnergy,
+    resolvedZeroEnergyReferenceMode,
+    selectedValenceBandIndex,
+    viewerType,
+    zeroEnergy,
+  ]);
 
   const yDomain = useMemo((): [number, number] => {
     if (yMin !== null && yMax !== null) {
@@ -981,13 +1312,18 @@ export function BandPlot({
       data,
       scfFermiEnergy,
       requestedFermiReferenceMode ?? fermiReferenceMode,
+      requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode,
+      selectedValenceBand?.vbmEnergy ?? null,
     );
   }, [
     data,
     energyRange,
     fermiReferenceMode,
     requestedFermiReferenceMode,
+    requestedZeroEnergyReferenceMode,
     scfFermiEnergy,
+    selectedValenceBand,
+    zeroEnergyReferenceMode,
     yMax,
     yMin,
   ]);
@@ -1000,20 +1336,33 @@ export function BandPlot({
     setManualYMaxInput(formatAxisInputValue(yDomain[1]));
   }, [showSidebar, yDomain[0], yDomain[1]]);
 
+  const yTickStep = useMemo(() => {
+    const trimmed = manualYTickStepInput.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number.parseFloat(trimmed);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }, [manualYTickStepInput]);
+
   const axisTickFontSize = Math.max(8, 11 * effectivePlotTextScale);
   const axisLabelFontSize = Math.max(10, 14 * effectivePlotTextScale);
   const symmetryLabelFontSize = axisLabelFontSize;
   const symmetryLabelYOffset = Math.max(20, symmetryLabelFontSize * 1.35);
   const yTickLabelYOffset = axisTickFontSize * 0.35;
-  const yTicks = useMemo(() => getYAxisTicks(yDomain[0], yDomain[1]), [yDomain]);
+  const yTicks = useMemo(
+    () => getYAxisTicks(yDomain[0], yDomain[1], yTickStep),
+    [yDomain, yTickStep],
+  );
+  const yTickDecimals = useMemo(() => getTickDecimals(yTickStep), [yTickStep]);
   const maxYTickLabelChars = useMemo(() => {
     if (yTicks.length === 0) return 3;
     let maxChars = 0;
     for (const tick of yTicks) {
-      maxChars = Math.max(maxChars, tick.toFixed(1).length);
+      maxChars = Math.max(maxChars, tick.toFixed(yTickDecimals).length);
     }
     return maxChars;
-  }, [yTicks]);
+  }, [yTickDecimals, yTicks]);
   const estimatedYTickLabelWidth = Math.max(
     axisTickFontSize * 3,
     maxYTickLabelChars * axisTickFontSize * 0.62,
@@ -1569,6 +1918,7 @@ export function BandPlot({
 
     const points: {
       key: string;
+      bandIdx: number;
       cx: number;
       cy: number;
       r: number;
@@ -1595,6 +1945,7 @@ export function BandPlot({
 
         points.push({
           key: `fat-${bandIdx}-${kIdx}`,
+          bandIdx,
           cx: scales.xScale(data.k_points[kIdx]),
           cy: scales.yScale(energy),
           r: radius,
@@ -1789,6 +2140,112 @@ export function BandPlot({
     setExportNote("Export UI stub added. Wire export logic when ready.");
   }, []);
 
+  const startValenceBandSelection = useCallback(() => {
+    setIsSelectingValenceBand(true);
+    setValenceBandSelectionStatus("Click the valence band on the plot.");
+  }, []);
+
+  const handleValenceBandSelection = useCallback(
+    async (bandIndex: number) => {
+      setSelectedValenceBandIndex(bandIndex);
+      setIsSelectingValenceBand(false);
+      setValenceBandSelectionStatus(`Valence band set to band ${bandIndex + 1}.`);
+
+      if (!onPersistSelectedValenceBandIndex) {
+        return;
+      }
+
+      try {
+        await onPersistSelectedValenceBandIndex(bandIndex);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setValenceBandSelectionStatus(
+          `Valence band set locally, but saving failed: ${message}`,
+        );
+      }
+    },
+    [onPersistSelectedValenceBandIndex],
+  );
+
+  const handlePlotClick = useCallback(
+    (event: React.MouseEvent<SVGSVGElement>) => {
+      if (!isSelectingValenceBand || !svgRef.current) {
+        return;
+      }
+
+      const rect = svgRef.current.getBoundingClientRect();
+      const x = event.clientX - rect.left - margin.left;
+      const y = event.clientY - rect.top - margin.top;
+      if (x < 0 || x > plotWidth || y < 0 || y > plotHeight) {
+        return;
+      }
+
+      let closestBandIndex: number | null = null;
+      let minDistanceSquared = Number.POSITIVE_INFINITY;
+
+      for (let bandIdx = 0; bandIdx < shiftedEnergies.length; bandIdx += 1) {
+        const band = shiftedEnergies[bandIdx];
+        const pointCount = Math.min(band.length, data.k_points.length);
+        if (pointCount === 0) {
+          continue;
+        }
+
+        for (let pointIdx = 0; pointIdx < pointCount; pointIdx += 1) {
+          const pointX = scales.xScale(data.k_points[pointIdx]);
+          const pointY = scales.yScale(band[pointIdx]);
+
+          if (pointIdx === 0 || data.k_points[pointIdx] <= data.k_points[pointIdx - 1] + 1e-10) {
+            const pointDistX = x - pointX;
+            const pointDistY = y - pointY;
+            const pointDistanceSquared = pointDistX * pointDistX + pointDistY * pointDistY;
+            if (pointDistanceSquared < minDistanceSquared) {
+              minDistanceSquared = pointDistanceSquared;
+              closestBandIndex = bandIdx;
+            }
+            continue;
+          }
+
+          const previousX = scales.xScale(data.k_points[pointIdx - 1]);
+          const previousY = scales.yScale(band[pointIdx - 1]);
+          const segmentDistanceSquared = distanceSquaredToSegment(
+            x,
+            y,
+            previousX,
+            previousY,
+            pointX,
+            pointY,
+          );
+          if (segmentDistanceSquared < minDistanceSquared) {
+            minDistanceSquared = segmentDistanceSquared;
+            closestBandIndex = bandIdx;
+          }
+        }
+      }
+
+      const selectionThresholdPx = 20;
+      if (
+        closestBandIndex == null
+        || minDistanceSquared > selectionThresholdPx * selectionThresholdPx
+      ) {
+        setValenceBandSelectionStatus("Click closer to the target band.");
+        return;
+      }
+
+      void handleValenceBandSelection(closestBandIndex);
+    },
+    [
+      data.k_points,
+      handleValenceBandSelection,
+      isSelectingValenceBand,
+      margin.left,
+      margin.top,
+      plotHeight,
+      plotWidth,
+      scales,
+      shiftedEnergies,
+    ],
+  );
+
   // Prevent page scroll while interacting with the plot area.
   useEffect(() => {
     if (!enableHoverScrollLock) return;
@@ -1822,6 +2279,7 @@ export function BandPlot({
             width={resolvedWidth}
             height={resolvedHeight}
             onMouseEnter={() => setIsHoveringPlot(true)}
+            onClick={handlePlotClick}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => {
               setIsHoveringPlot(false);
@@ -2019,7 +2477,7 @@ export function BandPlot({
                 </g>
               ))}
 
-              {/* Fermi level at E - E_F = 0 */}
+              {/* Zero-energy reference line */}
               {showFermiLevel && (
                 <g>
                   <line
@@ -2037,7 +2495,31 @@ export function BandPlot({
                     fill="#d32f2f"
                     fontSize={fermiLabelFontSize}
                   >
-                    E_F
+                    {zeroLineLabel}
+                  </text>
+                </g>
+              )}
+
+              {viewerType === "electronic" && isSelectingValenceBand && (
+                <g pointerEvents="none">
+                  <rect
+                    x={12}
+                    y={12}
+                    width={230}
+                    height={34}
+                    rx={8}
+                    fill={effectivePlotBgWhite ? "rgba(255,255,255,0.94)" : colors.tooltip}
+                    stroke="#ef6c00"
+                    strokeOpacity={0.85}
+                  />
+                  <text
+                    x={24}
+                    y={34}
+                    fill="#ef6c00"
+                    fontSize={12}
+                    fontWeight={600}
+                  >
+                    Click the valence band to set VBM zero
                   </text>
                 </g>
               )}
@@ -2077,14 +2559,27 @@ export function BandPlot({
 
                 {drawBandLines &&
                   shiftedEnergies.map((band, bandIdx) => (
-                    <path
-                      key={bandIdx}
-                      d={bandToPath(band, data.k_points)}
-                      fill="none"
-                      stroke={primaryBandStrokeColors[bandIdx]}
-                      strokeWidth={effectiveLineWidth}
-                      opacity={effectiveLineOpacity}
-                    />
+                    <g key={bandIdx}>
+                      <path
+                        d={bandToPath(band, data.k_points)}
+                        fill="none"
+                        stroke={primaryBandStrokeColors[bandIdx]}
+                        strokeWidth={effectiveLineWidth}
+                        opacity={effectiveLineOpacity}
+                      />
+                      {viewerType === "electronic" && isSelectingValenceBand && (
+                        <path
+                          d={bandToPath(band, data.k_points)}
+                          fill="none"
+                          stroke="transparent"
+                          strokeWidth={12}
+                          style={{ cursor: "crosshair", pointerEvents: "stroke" }}
+                          onClick={() => {
+                            void handleValenceBandSelection(bandIdx);
+                          }}
+                        />
+                      )}
+                    </g>
                   ))}
 
                 {drawBandLines &&
@@ -2109,6 +2604,14 @@ export function BandPlot({
                       r={point.r}
                       fill={point.fill}
                       opacity={point.opacity}
+                      style={isSelectingValenceBand ? { cursor: "crosshair" } : undefined}
+                      onClick={
+                        viewerType === "electronic" && isSelectingValenceBand
+                          ? () => {
+                            void handleValenceBandSelection(point.bandIdx);
+                          }
+                          : undefined
+                      }
                     />
                   ))}
 
@@ -2245,7 +2748,7 @@ export function BandPlot({
                       fill={colors.text}
                       fontSize={axisTickFontSize}
                     >
-                      {tick.toFixed(1)}
+                      {tick.toFixed(yTickDecimals)}
                     </text>
                   </g>
                 ))}
@@ -2260,19 +2763,19 @@ export function BandPlot({
                   fontFamily="serif"
                   fontStyle="italic"
                 >
-                  {isElectronicEFLabel(yAxisLabel) ? (
+                  {getElectronicReferenceLabelSubscript(resolvedYAxisLabel) ? (
                     <>
                       <tspan>E − E</tspan>
                       <tspan
                         baselineShift="sub"
                         fontSize={Math.max(8, axisLabelFontSize * 0.72)}
                       >
-                        F
+                        {getElectronicReferenceLabelSubscript(resolvedYAxisLabel)}
                       </tspan>
                       <tspan baselineShift="baseline"> (eV)</tspan>
                     </>
                   ) : (
-                    yAxisLabel
+                    resolvedYAxisLabel
                   )}
                 </text>
               </g>
@@ -2307,7 +2810,7 @@ export function BandPlot({
                   {pointLabel} {hoveredPoint.band}
                 </text>
                 <text x={8} y={-8} fill="#1565c0" fontSize={11}>
-                  {valueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
+                  {resolvedValueLabel} = {hoveredPoint.energy.toFixed(valueDecimals)} {valueUnit}
                 </text>
                 {hoveredPoint.projectionWeight !== undefined &&
                   hoveredPoint.projectionWeightNormalized !== undefined && (
@@ -2335,12 +2838,24 @@ export function BandPlot({
             </span>
           )}
           {viewerType === "electronic" && (
+            <span>
+              Zero ({activeZeroReferenceLabel}) = {activeZeroReferenceDisplay}
+            </span>
+          )}
+          {viewerType === "electronic" && (requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode) === "vbm" && (
+            <span>
+              Valence band: {selectedValenceBandLabel}
+            </span>
+          )}
+          {viewerType === "electronic" && (
             <span className={displayedBandGap ? "band-gap-info" : "metal-info"}>
               {displayedBandGap
                 ? `${displayedBandGap.value.toFixed(3)} eV ${
                   displayedBandGap.is_direct ? "direct" : "indirect"
                 } gap`
-                : "No gap detected at current E_F"}
+                : (requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode) === "vbm" && selectedValenceBandIndex == null
+                  ? "Select a valence band to compute the VBM-referenced gap"
+                : `No gap detected for current ${activeFermiSourceLabel.toLowerCase()} Fermi reference`}
             </span>
           )}
           {showProjectionSummary && (
@@ -2443,6 +2958,45 @@ export function BandPlot({
                   </div>
                 )}
 
+                {viewerType === "electronic" && (
+                  <>
+                    <div className="band-control-row">
+                      <label>Zero Energy</label>
+                      <select
+                        value={zeroEnergyReferenceMode}
+                        onChange={(event) =>
+                          setZeroEnergyReferenceMode(event.target.value as ZeroEnergyReferenceMode)
+                        }
+                      >
+                        <option value="calculated-fermi">Calculated E_F</option>
+                        <option value="vbm">VBM</option>
+                      </select>
+                    </div>
+                    {(requestedZeroEnergyReferenceMode ?? zeroEnergyReferenceMode) === "vbm" && (
+                      <div className="band-control-row">
+                        <label>Valence Band</label>
+                        <div className="band-control-stack">
+                          <button
+                            type="button"
+                            className="band-control-apply"
+                            onClick={startValenceBandSelection}
+                          >
+                            Change Valence Band
+                          </button>
+                          <div className="band-control-note">
+                            Selected: {selectedValenceBandLabel}
+                          </div>
+                          {valenceBandSelectionStatus && (
+                            <div className="band-control-vbm-status">
+                              {valenceBandSelectionStatus}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
                 <div className="band-control-row">
                   <label>Y Range ({valueUnit})</label>
                   <div className="band-control-range-inputs">
@@ -2480,6 +3034,22 @@ export function BandPlot({
                   {manualRangeError && (
                     <span className="band-control-range-error">{manualRangeError}</span>
                   )}
+                </div>
+
+                <div className="band-control-row">
+                  <label>Y Tick Step ({valueUnit})</label>
+                  <input
+                    type="number"
+                    step="any"
+                    min={0}
+                    value={manualYTickStepInput}
+                    onChange={(event) => setManualYTickStepInput(event.target.value)}
+                    placeholder="Auto"
+                    aria-label="Y tick step"
+                  />
+                  <div className="band-control-note">
+                    Leave blank to use automatic tick spacing.
+                  </div>
                 </div>
 
                 <div className="band-control-row">
@@ -2605,13 +3175,12 @@ export function BandPlot({
                         <strong>{displayedBandGap.is_direct ? "Direct" : "Indirect"}</strong>
                       </div>
                       <div className="band-control-note">
-                        Referenced to the current {activeFermiSourceLabel.toLowerCase()} Fermi
-                        level.
+                        Referenced to the current {activeZeroReferenceLabel} zero.
                       </div>
                     </>
                   ) : (
                     <div className="band-control-warning">
-                      No band gap was detected for the current Fermi reference.
+                      No band gap was detected for the current {activeFermiSourceLabel.toLowerCase()} Fermi reference.
                     </div>
                   )}
                 </div>

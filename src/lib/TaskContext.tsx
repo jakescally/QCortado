@@ -40,6 +40,8 @@ interface TaskSummary {
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
   local_sync_dir?: string | null;
+  recovery_save?: HpcRecoverySaveSpec | null;
+  headless_attached?: boolean;
 }
 
 interface TaskInfo {
@@ -59,6 +61,8 @@ interface TaskInfo {
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
   local_sync_dir?: string | null;
+  recovery_save?: HpcRecoverySaveSpec | null;
+  headless_attached?: boolean;
 }
 
 interface QueueSaveSpec {
@@ -69,6 +73,15 @@ interface QueueSaveSpec {
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
+}
+
+interface HpcRecoverySaveSpec {
+  project_id: string;
+  cif_id: string;
+  calc_type: string;
+  parameters: Record<string, any>;
+  tags?: string[];
+  input_content?: string;
 }
 
 export interface QueueItem {
@@ -171,6 +184,34 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     remote_project_path: info.remote_project_path ?? null,
     remote_storage_bytes: info.remote_storage_bytes ?? null,
     local_sync_dir: info.local_sync_dir ?? null,
+    recovery_save: info.recovery_save ?? null,
+    headless_attached: Boolean(info.headless_attached),
+  };
+}
+
+function withHpcRecoverySave(
+  params: Record<string, any>,
+  saveSpec?: QueueSaveSpec | null,
+): Record<string, any> {
+  if (!saveSpec || !isHpcStartParams(params)) {
+    return params;
+  }
+  return {
+    ...params,
+    executionTarget: {
+      ...(params.executionTarget || {}),
+      hpc: {
+        ...(params.executionTarget?.hpc || {}),
+        recovery_save: {
+          project_id: saveSpec.projectId,
+          cif_id: saveSpec.cifId,
+          calc_type: saveSpec.calcType,
+          parameters: saveSpec.parameters || {},
+          tags: saveSpec.tags || [],
+          input_content: saveSpec.inputContent || "",
+        },
+      },
+    },
   };
 }
 
@@ -254,8 +295,30 @@ function appendVisibleTaskOutput(task: TaskState, taskType: TaskType, line: stri
   };
 }
 
-function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: string, parameters: Record<string, any>) {
+function buildQueuedResult(
+  taskType: TaskType,
+  taskResult: any,
+  outputText: string,
+  parameters: Record<string, any>,
+  taskStatus: TaskStatus = "completed",
+  taskError: string | null = null,
+) {
+  const failed = taskStatus === "failed";
+  const failureOutput = failed && taskError && !outputText.includes(taskError)
+    ? `${outputText}${outputText.endsWith("\n") || outputText.length === 0 ? "" : "\n"}Error: ${taskError}`
+    : outputText;
+
   if (taskType === "scf") {
+    if (failed) {
+      return {
+        converged: false,
+        total_energy: null,
+        fermi_energy: null,
+        n_scf_steps: null,
+        wall_time_seconds: null,
+        raw_output: failureOutput,
+      };
+    }
     if (taskResult && typeof taskResult === "object") {
       return taskResult;
     }
@@ -274,8 +337,8 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       fermi_energy: fermiEnergy,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
-      band_data: taskResult,
+      raw_output: failureOutput,
+      band_data: failed ? null : taskResult,
     };
   }
 
@@ -293,8 +356,8 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       fermi_energy: fermiEnergy,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
-      dos_data: taskResult,
+      raw_output: failureOutput,
+      dos_data: failed ? null : taskResult,
     };
   }
 
@@ -312,7 +375,7 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       fermi_energy: fermiEnergy,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
+      raw_output: failureOutput,
     };
   }
 
@@ -330,9 +393,9 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       fermi_energy: fermiEnergy,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
+      raw_output: failureOutput,
       band_data: taskResult?.band_data ?? null,
-      wannier_data: taskResult,
+      wannier_data: failed ? null : taskResult,
     };
   }
 
@@ -350,34 +413,34 @@ function buildQueuedResult(taskType: TaskType, taskResult: any, outputText: stri
       fermi_energy: fermiEnergy,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
-      transport_data: taskResult,
+      raw_output: failureOutput,
+      transport_data: failed ? null : taskResult,
     };
   }
 
   if (taskType === "epw") {
     return {
-      converged: Boolean(taskResult?.result_summary?.completed),
+      converged: failed ? false : Boolean(taskResult?.result_summary?.completed),
       total_energy: null,
       fermi_energy: null,
       n_scf_steps: null,
       wall_time_seconds: null,
-      raw_output: outputText,
-      epw_data: taskResult,
+      raw_output: failureOutput,
+      epw_data: failed ? null : taskResult,
     };
   }
 
-  const converged = taskResult?.converged ?? true;
+  const converged = failed ? false : taskResult?.converged ?? true;
   return {
     converged,
     total_energy: null,
     fermi_energy: null,
     n_scf_steps: null,
     wall_time_seconds: null,
-    raw_output: taskResult?.raw_output ?? outputText,
+    raw_output: failed ? failureOutput : taskResult?.raw_output ?? outputText,
     phonon_data: {
-      dos_data: taskResult?.dos_data ?? null,
-      dispersion_data: taskResult?.dispersion_data ?? null,
+      dos_data: failed ? null : taskResult?.dos_data ?? null,
+      dispersion_data: failed ? null : taskResult?.dispersion_data ?? null,
     },
   };
 }
@@ -513,6 +576,50 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
   return next;
 }
 
+async function saveRecoveredTaskResult(task: TaskState, recoverySave: HpcRecoverySaveSpec): Promise<void> {
+  const outputLines = await invoke<string[]>("get_task_output", { taskId: task.taskId })
+    .catch(() => task.output);
+  const outputText = outputLines.join("\n");
+  const failed = task.status === "failed";
+  const parameters = augmentQueuedParameters(task.taskType, recoverySave.parameters || {}, task.result);
+  if (failed) {
+    parameters.run_status = "failed";
+    parameters.failure_reason = task.error ?? "Task failed";
+    parameters.failed_at = new Date().toISOString();
+  }
+  if (task.hpc.backend === "hpc") {
+    parameters.execution_backend = "hpc";
+    parameters.hpc_resource_type = task.hpc.hpc_resource_type ?? null;
+    parameters.remote_job_id = task.hpc.remote_job_id ?? null;
+    parameters.scheduler_state = task.hpc.scheduler_state ?? null;
+    parameters.remote_node = task.hpc.remote_node ?? null;
+    parameters.remote_workdir = task.hpc.remote_workdir ?? null;
+    parameters.remote_project_path = task.hpc.remote_project_path ?? null;
+    parameters.remote_storage_bytes = task.hpc.remote_storage_bytes ?? null;
+    parameters.local_sync_dir = task.hpc.local_sync_dir ?? null;
+  }
+  const resultPayload = buildQueuedResult(task.taskType, task.result, outputText, parameters, task.status, task.error);
+  const tags = [...(recoverySave.tags || [])];
+  if (failed && !tags.includes("failed")) {
+    tags.push("failed");
+  }
+  await invoke("save_calculation", {
+    projectId: recoverySave.project_id,
+    cifId: recoverySave.cif_id,
+    calcData: {
+      calc_type: recoverySave.calc_type,
+      parameters,
+      result: resultPayload,
+      started_at: task.startedAt || new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      input_content: recoverySave.input_content || "",
+      output_content: outputText,
+      tags,
+    },
+    workingDir: task.hpc.local_sync_dir ?? null,
+  });
+}
+
 export function useTaskContext(): TaskContextValue {
   const ctx = useContext(TaskContext);
   if (!ctx) {
@@ -528,6 +635,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
   const queueProcessingRef = useRef(false);
   const tasksRef = useRef(tasks);
   const queueRef = useRef(queueItems);
+  const autoSavedRecoveryTasksRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -536,6 +644,28 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     queueRef.current = queueItems;
   }, [queueItems]);
+
+  const maybeAutoSaveRecoveredTask = useCallback(async (task: TaskState) => {
+    const recoverySave = task.hpc.recovery_save;
+    const shouldSaveCompletedRecovery = task.hpc.headless_attached && task.status === "completed";
+    const shouldSaveFailedArtifacts =
+      task.status === "failed"
+      && task.hpc.backend === "hpc"
+      && Boolean(task.hpc.local_sync_dir);
+    if (
+      !recoverySave
+      || (!shouldSaveCompletedRecovery && !shouldSaveFailedArtifacts)
+      || autoSavedRecoveryTasksRef.current.has(task.taskId)
+    ) {
+      return;
+    }
+    autoSavedRecoveryTasksRef.current.add(task.taskId);
+    try {
+      await saveRecoveredTaskResult(task, recoverySave);
+    } catch (e) {
+      console.error("Failed to auto-save recovered HPC task:", e);
+    }
+  }, []);
 
   // Sync with backend on mount (handles app reload)
   useEffect(() => {
@@ -553,19 +683,20 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
 
   const subscribeToTask = useCallback((taskId: string, taskType: TaskType) => {
     const fns: UnlistenFn[] = [];
-    const refreshTaskSnapshot = async () => {
+    const refreshTaskSnapshot = async (): Promise<TaskState | null> => {
       try {
         const [info, output] = await Promise.all([
           invoke<TaskInfo>("get_task_info", { taskId }).catch(() => null),
           invoke<string[]>("get_task_output", { taskId }).catch(() => null),
         ]);
-        if (!output) return;
+        if (!output) return null;
 
+        let refreshedTask: TaskState | null = null;
         setTasks((prev) => {
           const task = prev.get(taskId);
           if (!task) return prev;
           const next = new Map(prev);
-          next.set(taskId, buildTaskState(
+          refreshedTask = buildTaskState(
             taskId,
             task.taskType,
             task.label,
@@ -575,11 +706,14 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             info?.result ?? task.result,
             info?.error ?? task.error,
             info ? taskInfoToHpcMeta(info) : task.hpc,
-          ));
+          );
+          next.set(taskId, refreshedTask);
           return next;
         });
+        return refreshedTask;
       } catch (e) {
         console.error("Failed to refresh task snapshot:", e);
+        return null;
       }
     };
 
@@ -596,11 +730,12 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     listen<string>(`task-complete:${taskId}`, async () => {
       try {
         const info = await invoke<TaskInfo>("get_task_info", { taskId });
+        let completedTask: TaskState | null = null;
         setTasks((prev) => {
           const task = prev.get(taskId);
           if (!task) return prev;
           const next = new Map(prev);
-          next.set(taskId, {
+          completedTask = {
             ...task,
             status: "completed",
             result: info.result,
@@ -610,16 +745,20 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               percent: 100,
               phase: "Complete",
             },
-          });
+          };
+          next.set(taskId, completedTask);
           return next;
         });
+        if (completedTask) {
+          void maybeAutoSaveRecoveredTask(completedTask);
+        }
         void refreshTaskSnapshot();
       } catch (e) {
         console.error("Failed to get task info on completion:", e);
       }
     }).then((fn) => fns.push(fn));
 
-    listen<string>(`task-status:${taskId}`, (event) => {
+    listen<string>(`task-status:${taskId}`, async (event) => {
       const payload = event.payload;
       if (payload.startsWith("failed:")) {
         const errorMsg = payload.slice(7);
@@ -639,21 +778,26 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           });
           return next;
         });
-        void refreshTaskSnapshot();
+        const refreshedTask = await refreshTaskSnapshot();
+        if (refreshedTask) {
+          void maybeAutoSaveRecoveredTask(refreshedTask);
+        }
       }
     }).then((fn) => fns.push(fn));
 
     unlistenRefs.current.set(taskId, fns);
-  }, []);
+  }, [maybeAutoSaveRecoveredTask]);
 
   const startTaskInternal = useCallback(
     async (
       type: TaskType,
       params: Record<string, any>,
       label: string,
+      saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
+      const effectiveParams = withHpcRecoverySave(params, saveSpec);
       const taskId = await invoke<string>(COMMAND_MAP[type], {
-        ...params,
+        ...effectiveParams,
         label,
       });
 
@@ -669,7 +813,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         outputLineCount: 0,
         result: null,
         error: null,
-        hpc: {},
+        hpc: taskInfoToHpcMeta({ recovery_save: effectiveParams.executionTarget?.hpc?.recovery_save ?? null }),
       };
 
       setTasks((prev) => {
@@ -800,21 +944,23 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
 
       if (shouldLoadFullOutput) {
         const output = await invoke<string[]>("get_task_output", { taskId });
+        const loadedTask = buildTaskState(
+          taskId,
+          taskType,
+          info.label,
+          info.started_at,
+          info.status,
+          output,
+          info.result,
+          info.error,
+          taskInfoToHpcMeta(info),
+        );
         setTasks((prev) => {
           const next = new Map(prev);
-          next.set(taskId, buildTaskState(
-            taskId,
-            taskType,
-            info.label,
-            info.started_at,
-            info.status,
-            output,
-            info.result,
-            info.error,
-            taskInfoToHpcMeta(info),
-          ));
+          next.set(taskId, loadedTask);
           return next;
         });
+        void maybeAutoSaveRecoveredTask(loadedTask);
       } else {
         setTasks((prev) => {
           const current = prev.get(taskId);
@@ -839,7 +985,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       console.error("Failed to reconnect to task:", e);
     }
-  }, [subscribeToTask]);
+  }, [maybeAutoSaveRecoveredTask, subscribeToTask]);
 
   async function syncWithBackend() {
     try {
@@ -944,9 +1090,11 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             ));
             return next;
           });
+          void maybeAutoSaveRecoveredTask(fullTask);
           return fullTask;
         } catch (e) {
           console.error("Failed to hydrate completed task output:", e);
+          void maybeAutoSaveRecoveredTask(local);
           return local;
         }
       }
@@ -985,6 +1133,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             return next;
           });
 
+          void maybeAutoSaveRecoveredTask(reconstructed);
           return reconstructed;
         }
       } catch (e) {
@@ -993,7 +1142,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
 
       await sleep(500);
     }
-  }, []);
+  }, [maybeAutoSaveRecoveredTask]);
 
   const saveQueuedTaskResult = useCallback(async (item: QueueItem, task: TaskState) => {
     const spec = item.saveSpec;
@@ -1239,7 +1388,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
       if (isHpcStartParams(params)) {
-        return startTaskInternal(type, params, label);
+        return startTaskInternal(type, params, label, saveSpec ?? null);
       }
       const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);
       window.setTimeout(() => {

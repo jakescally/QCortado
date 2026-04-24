@@ -266,8 +266,8 @@ export function ElectronicDOSWizard({
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
       `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
-      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out"),
-      buildHpcQeInputCommandLine(activeHpcProfile, "dos.x", "dos.in", "dos.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
+      buildHpcQeInputCommandLine(activeHpcProfile, "dos.x", "dos.in", "dos.out", undefined, hpcResources.resource_type),
     ],
     [activeHpcProfile, hpcResources.resource_type],
   );
@@ -712,7 +712,18 @@ export function ElectronicDOSWizard({
 
     try {
       const plan = await buildDosTaskPlan();
-      const taskId = await taskContext.startTask("dos", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId,
+          workingDir: DOS_WORK_DIR,
+          calcType: "dos" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("dos", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);

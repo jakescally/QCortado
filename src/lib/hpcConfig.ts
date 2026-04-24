@@ -161,6 +161,30 @@ export interface HpcArtifactSyncReport {
   skipped_bytes: number;
 }
 
+export interface HpcHeadlessJobCandidate {
+  profile_id: string;
+  remote_job_id: string;
+  job_name: string;
+  task_kind: string;
+  label: string;
+  scheduler_state: string;
+  remote_node?: string | null;
+  remote_workdir?: string | null;
+  submitted_at?: string | null;
+  metadata_status: string;
+  auto_save_available: boolean;
+  project_id?: string | null;
+  cif_id?: string | null;
+}
+
+export interface HpcAttachedJobResult {
+  task_id: string;
+  task_kind: string;
+  remote_job_id: string;
+  remote_workdir: string;
+  auto_save_available: boolean;
+}
+
 export interface HpcRemoteOrphanCleanupResult {
   profile_id: string;
   scanned_paths: number;
@@ -275,11 +299,29 @@ export function resolveProfileRemoteQeBinDir(
   return normalizeRemoteQeBinDir(profile.remote_qe_cpu_bin_dir) || fallback;
 }
 
-export function buildHpcLauncherCommand(profile: HpcProfile | null | undefined): string {
+function resolveProfileLauncherExtraArgs(
+  profile: HpcProfile | null | undefined,
+  resourceType?: HpcResourceType | null,
+): string {
+  if (!profile) {
+    return "";
+  }
+  const requestedType = resourceType
+    || (profile.resource_mode === "gpu_only" ? "gpu" : "cpu");
+  const resourceSpecificArgs = requestedType === "gpu"
+    ? profile.launcher_gpu_extra_args
+    : profile.launcher_cpu_extra_args;
+  return (resourceSpecificArgs ?? profile.launcher_extra_args ?? "").trim();
+}
+
+export function buildHpcLauncherCommand(
+  profile: HpcProfile | null | undefined,
+  resourceType?: HpcResourceType | null,
+): string {
   const launcherBase = profile?.launcher === "mpirun"
     ? "mpirun -np \"${SLURM_NTASKS:-1}\""
     : "srun";
-  const extraArgs = (profile?.launcher_extra_args || "").trim();
+  const extraArgs = resolveProfileLauncherExtraArgs(profile, resourceType);
   if (!extraArgs) {
     return launcherBase;
   }
@@ -328,8 +370,9 @@ export function buildHpcQeInputCommandLine(
   inputFile: string,
   outputFile: string,
   extraArgs?: string,
+  resourceType?: HpcResourceType | null,
 ): string {
-  const launcher = buildHpcLauncherCommand(profile);
+  const launcher = buildHpcLauncherCommand(profile, resourceType);
   const args = (extraArgs || "").trim();
   const argSegment = args.length > 0 ? ` ${args}` : "";
   const hasPencilDecomposition = commandArgsIncludePencilDecomposition(args);
@@ -345,6 +388,25 @@ export async function loadExecutionMode(): Promise<ExecutionMode> {
   } catch {
     return "local";
   }
+}
+
+export async function listHeadlessHpcJobs(profileId?: string | null, limit?: number): Promise<HpcHeadlessJobCandidate[]> {
+  return invoke<HpcHeadlessJobCandidate[]>("hpc_list_headless_jobs", {
+    profileId: profileId ?? null,
+    limit: limit ?? null,
+  });
+}
+
+export async function attachHeadlessHpcJob(
+  remoteJobId: string,
+  remoteWorkdir?: string | null,
+  profileId?: string | null,
+): Promise<HpcAttachedJobResult> {
+  return invoke<HpcAttachedJobResult>("hpc_attach_headless_job", {
+    profileId: profileId ?? null,
+    remoteJobId,
+    remoteWorkdir: remoteWorkdir ?? null,
+  });
 }
 
 export async function saveExecutionMode(mode: ExecutionMode): Promise<void> {
@@ -381,13 +443,15 @@ export async function updateHpcProfileDefaults(
   defaultGpuResources: SlurmResourceRequest,
   resourceMode?: HpcResourceMode,
   launcher?: HpcLauncher,
-  launcherExtraArgs?: string | null,
+  launcherCpuExtraArgs?: string | null,
+  launcherGpuExtraArgs?: string | null,
 ): Promise<HpcProfile> {
   return invoke<HpcProfile>("hpc_update_profile_defaults", {
     profileId,
     resourceMode: resourceMode ?? null,
     launcher: launcher ?? null,
-    launcherExtraArgs: launcherExtraArgs ?? null,
+    launcherCpuExtraArgs: launcherCpuExtraArgs ?? null,
+    launcherGpuExtraArgs: launcherGpuExtraArgs ?? null,
     defaultCpuResources,
     defaultGpuResources,
   });

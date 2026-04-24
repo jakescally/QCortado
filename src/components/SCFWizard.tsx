@@ -41,6 +41,7 @@ import {
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
   loadRemoteSsspData,
+  listRemotePseudopotentials,
   listRemotePseudopotentialMetadata,
   resolveProfileRemoteQeBinDir,
 } from "../lib/hpcConfig";
@@ -50,6 +51,13 @@ import {
   getDefaultHubbardManifold,
   getOutermostOccupiedOrbitalManifold,
 } from "../lib/electronConfigurations";
+import {
+  CutoffDerivation,
+  CutoffProvenance,
+  CutoffStatus,
+  SSSPElementData,
+  summarizeSelectedPseudoCutoffs,
+} from "../lib/pseudopotentialCutoffs";
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;
@@ -178,23 +186,7 @@ function normalizeHubbardManifold(raw: string): string {
   return raw.trim().replace(/\s+/g, "");
 }
 
-type CutoffStatusKind = "parsed" | "inferred" | "missing";
-type CutoffStatus = "idle" | CutoffStatusKind;
-type CutoffProvenance = "sssp" | "djrepo" | "upf" | "upf_info" | "upf_fallback" | "unknown" | "missing";
-type CutoffDerivation = "direct" | "from_wfc" | "from_rho" | "missing";
-
-interface ResolvedPseudoCutoffs {
-  wfc: number | null;
-  rho: number | null;
-  wfcStatus: CutoffStatusKind;
-  rhoStatus: CutoffStatusKind;
-  wfcProvenance: CutoffProvenance;
-  rhoProvenance: CutoffProvenance;
-  wfcDerivation: CutoffDerivation;
-  rhoDerivation: CutoffDerivation;
-  wfcRatio: number | null;
-  rhoRatio: number | null;
-}
+type PseudopotentialPreset = "sssp" | "paw" | "uspp" | "ncpp";
 
 export function SCFWizard({
   onBack,
@@ -255,6 +247,14 @@ export function SCFWizard({
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
+  const resolvedPseudoDir = useMemo(
+    () => (
+      isHpcMode
+        ? (activeHpcProfile?.remote_pseudo_dir || "")
+        : (qePath ? qePath.replace(/\/bin\/?$/, "/pseudo") : "")
+    ),
+    [activeHpcProfile?.remote_pseudo_dir, isHpcMode, qePath],
+  );
 
   const activeQueueItem = useMemo(
     () => (activeTaskId ? taskContext.queueItems.find((item) => item.taskId === activeTaskId) ?? null : null),
@@ -334,7 +334,6 @@ export function SCFWizard({
       ? null
       : optimizedStructures.find((option) => option.calcId === structureSource) || null;
   const phononPresetDisabled = structureSource === "cif";
-  const phononPresetDisabledMessage = "Select an optimized structure (or run a structure optimization) to start a phonon-ready calculation.";
 
   const applyPreset = useCallback((preset: SCFPreset) => {
     if (preset === "phonon" && phononPresetDisabled) {
@@ -516,8 +515,6 @@ export function SCFWizard({
   const isOptimizationWizard = lockedPreset === "relax";
   const wizardTitle = isOptimizationWizard ? "Structure Optimization Wizard" : "SCF Calculation Wizard";
   const showPresetRow = !lockedPreset || lockedPreset === "relax" || lockedPreset === "soc";
-  const showStandardPreset = !lockedPreset || lockedPreset === "standard";
-  const showPhononPreset = !lockedPreset || lockedPreset === "phonon";
   const showRelaxPreset = lockedPreset === "relax";
   const showSocPreset = !lockedPreset || lockedPreset === "soc";
   const socPresetSelected = selectedPreset === "soc";
@@ -586,24 +583,28 @@ export function SCFWizard({
   const [outputLineCount, setOutputLineCount] = useState(0);
   const [result, setResult] = useState<any>(null);
   const [pseudoDir, setPseudoDir] = useState<string>("");
+  const [pseudoFilenames, setPseudoFilenames] = useState<string[]>([]);
   const [pseudoError, setPseudoError] = useState<string | null>(null);
-  const [isPseudoLoading, setIsPseudoLoading] = useState(false);
+  const [pseudoPresetWarnings, setPseudoPresetWarnings] = useState<Record<string, string>>({});
+  const [selectedPseudoPreset, setSelectedPseudoPreset] = useState<PseudopotentialPreset>("sssp");
+  const [isPseudoListLoading, setIsPseudoListLoading] = useState(false);
+  const [isPseudoMetadataLoading, setIsPseudoMetadataLoading] = useState(false);
+  const [isSsspLoading, setIsSsspLoading] = useState(false);
+  const [pseudoListLoaded, setPseudoListLoaded] = useState(false);
+  const [pseudoMetadataLoaded, setPseudoMetadataLoaded] = useState(false);
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
     phase: "SCF iterations",
   });
 
-  // SSSP data for recommended cutoffs and pseudopotentials
-  interface SSSPElementData {
-    filename: string;
-    md5?: string;
-    pseudopotential?: string;
-    cutoff_wfc: number;
-    cutoff_rho: number;
-  }
   const [ssspData, setSsspData] = useState<Record<string, SSSPElementData> | null>(null);
   const [ssspMissing, setSsspMissing] = useState(false);
+  const isPseudoLoading = isPseudoListLoading || isPseudoMetadataLoading || isSsspLoading;
+  const pseudoMetadataByFilename = useMemo(
+    () => Object.fromEntries(pseudopotentials.map((pseudo) => [pseudo.filename, pseudo])),
+    [pseudopotentials],
+  );
   const hasPseudoCutoffMetadata = useMemo(
     () => pseudopotentials.some((pseudo) => pseudo.cutoff_wfc != null || pseudo.cutoff_rho != null)
       || Boolean(ssspData && Object.keys(ssspData).length > 0),
@@ -636,80 +637,139 @@ export function SCFWizard({
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
       `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
-      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "pw.in", "pw.out"),
+      buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "pw.in", "pw.out", undefined, hpcResources.resource_type),
     ],
     [activeHpcProfile, hpcResources.resource_type],
   );
 
-  // Load available pseudopotentials and SSSP data
   useEffect(() => {
-    let cancelled = false;
-    async function loadPseudos() {
-      if (!cancelled) {
-        setIsPseudoLoading(true);
-      }
-      const fallbackPseudoDir = qePath ? qePath.replace(/\/bin\/?$/, "/pseudo") : "";
-      const configuredPseudoDir = isHpcMode
-        ? (activeHpcProfile?.remote_pseudo_dir || "")
-        : fallbackPseudoDir;
-      setPseudoDir(configuredPseudoDir);
+    setPseudoDir(resolvedPseudoDir);
+    setPseudoFilenames([]);
+    setPseudopotentials([]);
+    setSsspData(null);
+    setPseudoListLoaded(false);
+    setPseudoMetadataLoaded(false);
+    setSsspMissing(false);
+    setPseudoPresetWarnings({});
+    setIsPseudoListLoading(false);
+    setIsPseudoMetadataLoading(false);
+    setIsSsspLoading(false);
 
-      if (!isHpcMode && !qePath) {
-        setPseudopotentials([]);
-        setSsspData(null);
-        setSsspMissing(true);
-        setPseudoError("Local pseudopotential directory is not configured.");
-        return;
-      }
-
-      try {
-        if (isHpcMode && !configuredPseudoDir.trim()) {
-          setPseudopotentials([]);
-          setSsspData(null);
-          setSsspMissing(true);
-          setPseudoError("Remote pseudopotential directory is not configured in the active HPC profile.");
-          return;
-        }
-
-        const pseudos = isHpcMode
-          ? await listRemotePseudopotentialMetadata(configuredPseudoDir, activeHpcProfile?.id ?? null)
-          : await invoke<PseudopotentialMetadata[]>("list_pseudopotential_metadata", { pseudoDir: fallbackPseudoDir });
-        setPseudopotentials(pseudos);
-        setPseudoError(null);
-
-        // Try to load SSSP data
-        try {
-          const sssp = isHpcMode
-            ? await loadRemoteSsspData<Record<string, SSSPElementData>>(
-              configuredPseudoDir,
-              activeHpcProfile?.id ?? null,
-            )
-            : await invoke<Record<string, SSSPElementData>>("load_sssp_data", {
-              pseudoDir: fallbackPseudoDir,
-            });
-          setSsspData(sssp);
-          setSsspMissing(false);
-        } catch {
-          setSsspData(null);
-          setSsspMissing(true);
-        }
-      } catch (e) {
-        console.error("Failed to load pseudopotentials:", e);
-        setPseudoError(String(e));
-        setPseudopotentials([]);
-        setSsspData(null);
-        setSsspMissing(true);
-      } finally {
-        if (!cancelled) {
-          setIsPseudoLoading(false);
-        }
-      }
+    if (!resolvedPseudoDir.trim()) {
+      setPseudoError(
+        isHpcMode
+          ? "Remote pseudopotential directory is not configured in the active HPC profile."
+          : "Local pseudopotential directory is not configured.",
+      );
+      return;
     }
-    loadPseudos();
-    return () => {
-      cancelled = true;
-    };
-  }, [qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
+
+    setPseudoError(null);
+  }, [isHpcMode, resolvedPseudoDir]);
+
+  const ensurePseudoFilenamesLoaded = useCallback(async (): Promise<string[]> => {
+    if (!resolvedPseudoDir.trim()) {
+      const message = isHpcMode
+        ? "Remote pseudopotential directory is not configured in the active HPC profile."
+        : "Local pseudopotential directory is not configured.";
+      setPseudoError(message);
+      throw new Error(message);
+    }
+    if (pseudoListLoaded) {
+      return pseudoFilenames;
+    }
+
+    setIsPseudoListLoading(true);
+    try {
+      const filenames = isHpcMode
+        ? await listRemotePseudopotentials(resolvedPseudoDir, activeHpcProfile?.id ?? null)
+        : await invoke<string[]>("list_pseudopotentials", { pseudoDir: resolvedPseudoDir });
+      setPseudoFilenames(filenames);
+      setPseudoListLoaded(true);
+      setPseudoError(null);
+      return filenames;
+    } catch (e) {
+      console.error("Failed to list pseudopotentials:", e);
+      const message = String(e);
+      setPseudoError(message);
+      setPseudoFilenames([]);
+      throw new Error(message);
+    } finally {
+      setIsPseudoListLoading(false);
+    }
+  }, [activeHpcProfile?.id, isHpcMode, pseudoFilenames, pseudoListLoaded, resolvedPseudoDir]);
+
+  const ensurePseudoMetadataLoaded = useCallback(async (): Promise<PseudopotentialMetadata[]> => {
+    if (!resolvedPseudoDir.trim()) {
+      const message = isHpcMode
+        ? "Remote pseudopotential directory is not configured in the active HPC profile."
+        : "Local pseudopotential directory is not configured.";
+      setPseudoError(message);
+      throw new Error(message);
+    }
+    if (pseudoMetadataLoaded) {
+      return pseudopotentials;
+    }
+
+    setIsPseudoMetadataLoading(true);
+    try {
+      const pseudos = isHpcMode
+        ? await listRemotePseudopotentialMetadata(resolvedPseudoDir, activeHpcProfile?.id ?? null)
+        : await invoke<PseudopotentialMetadata[]>("list_pseudopotential_metadata", { pseudoDir: resolvedPseudoDir });
+      setPseudopotentials(pseudos);
+      setPseudoMetadataLoaded(true);
+      setPseudoListLoaded(true);
+      setPseudoFilenames(pseudos.map((pseudo) => pseudo.filename));
+      setPseudoError(null);
+      return pseudos;
+    } catch (e) {
+      console.error("Failed to load pseudopotential metadata:", e);
+      const message = String(e);
+      setPseudoError(message);
+      setPseudopotentials([]);
+      throw new Error(message);
+    } finally {
+      setIsPseudoMetadataLoading(false);
+    }
+  }, [activeHpcProfile?.id, isHpcMode, pseudoMetadataLoaded, pseudopotentials, resolvedPseudoDir]);
+
+  const ensureSsspDataLoaded = useCallback(async (): Promise<Record<string, SSSPElementData> | null> => {
+    if (!resolvedPseudoDir.trim()) {
+      const message = isHpcMode
+        ? "Remote pseudopotential directory is not configured in the active HPC profile."
+        : "Local pseudopotential directory is not configured.";
+      setPseudoError(message);
+      throw new Error(message);
+    }
+    if (ssspData) {
+      return ssspData;
+    }
+    if (ssspMissing) {
+      return null;
+    }
+
+    setIsSsspLoading(true);
+    try {
+      const sssp = isHpcMode
+        ? await loadRemoteSsspData<Record<string, SSSPElementData>>(
+          resolvedPseudoDir,
+          activeHpcProfile?.id ?? null,
+        )
+        : await invoke<Record<string, SSSPElementData>>("load_sssp_data", {
+          pseudoDir: resolvedPseudoDir,
+        });
+      setSsspData(sssp);
+      setSsspMissing(false);
+      return sssp;
+    } catch (e) {
+      console.error("Failed to load SSSP data:", e);
+      setSsspData(null);
+      setSsspMissing(true);
+      return null;
+    } finally {
+      setIsSsspLoading(false);
+    }
+  }, [activeHpcProfile?.id, isHpcMode, resolvedPseudoDir, ssspData, ssspMissing]);
 
   // Load CPU count and check MPI availability
   useEffect(() => {
@@ -748,133 +808,71 @@ export function SCFWizard({
     );
   }
 
-  function isSocCapablePseudo(pseudo: PseudopotentialMetadata): boolean {
-    return pseudo.supports_soc;
-  }
-
-  function getPseudoCutoffRatio(pseudo: PseudopotentialMetadata | undefined): number {
+  function matchesPseudoPresetType(
+    pseudo: PseudopotentialMetadata | undefined,
+    preset: Exclude<PseudopotentialPreset, "sssp">,
+  ): boolean {
     const pseudoType = (pseudo?.pseudo_type || "").toUpperCase();
-    if (pseudoType.includes("US")) {
-      return 8;
+    switch (preset) {
+      case "paw":
+        return pseudoType.includes("PAW");
+      case "uspp":
+        return pseudoType.includes("US");
+      case "ncpp":
+        return pseudoType.includes("NC");
+      default:
+        return false;
     }
-    return 4;
   }
 
-  function inferChargeDensityCutoff(
-    pseudo: PseudopotentialMetadata | undefined,
-    wavefunctionCutoff: number | null,
-  ): number | null {
-    if (!pseudo || wavefunctionCutoff == null || !Number.isFinite(wavefunctionCutoff) || wavefunctionCutoff <= 0) {
+  function getPseudoPresetDisplayName(preset: PseudopotentialPreset): string {
+    switch (preset) {
+      case "paw":
+        return "PAW";
+      case "uspp":
+        return "USPP";
+      case "ncpp":
+        return "NCPP";
+      default:
+        return "SSSP";
+    }
+  }
+
+  function choosePreferredPseudoFilename(
+    element: string,
+    candidates: string[],
+    availableSsspData?: Record<string, SSSPElementData> | null,
+  ): string | null {
+    if (candidates.length === 0) {
       return null;
     }
-
-    return wavefunctionCutoff * getPseudoCutoffRatio(pseudo);
+    const ssspFilename = availableSsspData?.[element]?.filename?.toLowerCase();
+    if (ssspFilename) {
+      const ssspMatch = candidates.find((filename) => filename.toLowerCase() === ssspFilename);
+      if (ssspMatch) {
+        return ssspMatch;
+      }
+    }
+    const pbeMatch = candidates.find((filename) => filename.toLowerCase().includes("pbe"));
+    return pbeMatch || candidates[0];
   }
 
-  function inferWavefunctionCutoff(
-    pseudo: PseudopotentialMetadata | undefined,
-    chargeDensityCutoff: number | null,
-  ): number | null {
-    if (!pseudo || chargeDensityCutoff == null || !Number.isFinite(chargeDensityCutoff) || chargeDensityCutoff <= 0) {
+  function findFilenameCaseInsensitive(candidates: string[], target: string | null | undefined): string | null {
+    if (!target) {
       return null;
     }
-
-    return chargeDensityCutoff / getPseudoCutoffRatio(pseudo);
+    return candidates.find((candidate) => candidate.toLowerCase() === target.toLowerCase()) || null;
   }
 
-  function normalizeCutoff(value: number | null | undefined): number | null {
-    return Number.isFinite(value) && (value ?? 0) > 0 ? value as number : null;
-  }
-
-  function normalizeCutoffProvenance(value: string | null | undefined): CutoffProvenance {
-    switch (value) {
-      case "djrepo":
-      case "upf":
-      case "upf_info":
-      case "upf_fallback":
-        return value;
-      default:
-        return value ? "unknown" : "missing";
-    }
-  }
-
-  function classifyPreferredCutoffStatus(provenance: CutoffProvenance): CutoffStatusKind {
-    return provenance === "upf_fallback" ? "inferred" : "parsed";
-  }
-
-  function resolvePseudoCutoffs(
-    pseudo: PseudopotentialMetadata | undefined,
-    ssspEntry?: SSSPElementData | null,
-  ): ResolvedPseudoCutoffs {
-    const ssspMatchesPseudo = Boolean(
-      pseudo
-      && ssspEntry
-      && pseudo.filename.toLowerCase() === ssspEntry.filename.toLowerCase(),
-    );
-    const preferredWfc = normalizeCutoff((ssspMatchesPseudo ? ssspEntry?.cutoff_wfc : null) ?? pseudo?.cutoff_wfc ?? null);
-    const preferredRho = normalizeCutoff((ssspMatchesPseudo ? ssspEntry?.cutoff_rho : null) ?? pseudo?.cutoff_rho ?? null);
-    const preferredWfcProvenance = ssspMatchesPseudo && normalizeCutoff(ssspEntry?.cutoff_wfc) != null
-      ? "sssp"
-      : normalizeCutoffProvenance(pseudo?.cutoff_wfc_source);
-    const preferredRhoProvenance = ssspMatchesPseudo && normalizeCutoff(ssspEntry?.cutoff_rho) != null
-      ? "sssp"
-      : normalizeCutoffProvenance(pseudo?.cutoff_rho_source);
-    const wfc = preferredWfc ?? inferWavefunctionCutoff(pseudo, preferredRho);
-    const rho = preferredRho ?? inferChargeDensityCutoff(pseudo, preferredWfc);
-    return {
-      wfc,
-      rho,
-      wfcStatus: preferredWfc != null
-        ? classifyPreferredCutoffStatus(preferredWfcProvenance)
-        : wfc != null ? "inferred" : "missing",
-      rhoStatus: preferredRho != null
-        ? classifyPreferredCutoffStatus(preferredRhoProvenance)
-        : rho != null ? "inferred" : "missing",
-      wfcProvenance: preferredWfc != null
-        ? preferredWfcProvenance
-        : wfc != null ? preferredRhoProvenance : "missing",
-      rhoProvenance: preferredRho != null
-        ? preferredRhoProvenance
-        : rho != null ? preferredWfcProvenance : "missing",
-      wfcDerivation: preferredWfc != null
-        ? "direct"
-        : wfc != null ? "from_rho" : "missing",
-      rhoDerivation: preferredRho != null
-        ? "direct"
-        : rho != null ? "from_wfc" : "missing",
-      wfcRatio: preferredWfc != null || wfc == null ? null : getPseudoCutoffRatio(pseudo),
-      rhoRatio: preferredRho != null || rho == null ? null : getPseudoCutoffRatio(pseudo),
-    };
-  }
-
-  function cutoffStatusRank(status: CutoffStatusKind): number {
-    switch (status) {
-      case "parsed":
-        return 2;
-      case "inferred":
-        return 1;
-      default:
-        return 0;
-    }
-  }
-
-  function cutoffProvenanceRank(provenance: CutoffProvenance): number {
-    switch (provenance) {
-      case "sssp":
-        return 6;
-      case "djrepo":
-        return 5;
-      case "upf_info":
-        return 4;
-      case "upf":
-        return 3;
-      case "upf_fallback":
-        return 2;
-      case "unknown":
-        return 1;
-      default:
-        return 0;
-    }
+  function clearPseudoPresetWarning(element: string) {
+    setPseudoPresetWarnings((prev) => {
+      if (!prev[element]) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[element];
+      return next;
+    });
   }
 
   function cutoffProvenanceLabel(provenance: CutoffProvenance): string {
@@ -929,7 +927,7 @@ export function SCFWizard({
   }
 
   const selectedPseudoCutoffSummary = useMemo(() => {
-    if (pseudopotentials.length === 0) {
+    if (pseudopotentials.length === 0 && !ssspData) {
       return {
         maxWfc: 0,
         maxRho: 0,
@@ -964,146 +962,132 @@ export function SCFWizard({
       };
     }
 
-    let selectedCount = 0;
-    let maxWfc = 0;
-    let maxRho = 0;
-    let maxWfcStatus: CutoffStatusKind = "missing";
-    let maxRhoStatus: CutoffStatusKind = "missing";
-    let maxWfcProvenance: CutoffProvenance = "missing";
-    let maxRhoProvenance: CutoffProvenance = "missing";
-    let maxWfcDerivation: CutoffDerivation = "missing";
-    let maxRhoDerivation: CutoffDerivation = "missing";
-    let maxWfcRatio: number | null = null;
-    let maxRhoRatio: number | null = null;
-    let hasInferredCutoff = false;
-    let hasMissingCutoff = false;
+    return summarizeSelectedPseudoCutoffs(
+      elements,
+      selectedPseudos,
+      pseudoMetadataByFilename,
+      ssspData,
+    );
+  }, [crystalData, optimizedStructures, pseudoMetadataByFilename, selectedPseudos, ssspData, structureSource]);
 
-    for (const element of elements) {
-      const selectedFilename = selectedPseudos[element];
-      if (!selectedFilename) {
-        continue;
-      }
-
-      const selectedPseudo = pseudopotentials.find((pseudo) => pseudo.filename === selectedFilename);
-      if (!selectedPseudo) {
-        continue;
-      }
-
-      selectedCount += 1;
-      const {
-        wfc,
-        rho,
-        wfcStatus,
-        rhoStatus,
-        wfcProvenance,
-        rhoProvenance,
-        wfcDerivation,
-        rhoDerivation,
-        wfcRatio,
-        rhoRatio,
-      } = resolvePseudoCutoffs(selectedPseudo, ssspData?.[element] ?? null);
-      if (wfc != null) {
-        if (
-          wfc > maxWfc
-          || (
-            wfc === maxWfc
-            && (
-              cutoffStatusRank(wfcStatus) > cutoffStatusRank(maxWfcStatus)
-              || (
-                cutoffStatusRank(wfcStatus) === cutoffStatusRank(maxWfcStatus)
-                && cutoffProvenanceRank(wfcProvenance) > cutoffProvenanceRank(maxWfcProvenance)
-              )
-            )
-          )
-        ) {
-          maxWfc = wfc;
-          maxWfcStatus = wfcStatus;
-          maxWfcProvenance = wfcProvenance;
-          maxWfcDerivation = wfcDerivation;
-          maxWfcRatio = wfcRatio;
-        }
-      }
-      if (rho != null) {
-        if (
-          rho > maxRho
-          || (
-            rho === maxRho
-            && (
-              cutoffStatusRank(rhoStatus) > cutoffStatusRank(maxRhoStatus)
-              || (
-                cutoffStatusRank(rhoStatus) === cutoffStatusRank(maxRhoStatus)
-                && cutoffProvenanceRank(rhoProvenance) > cutoffProvenanceRank(maxRhoProvenance)
-              )
-            )
-          )
-        ) {
-          maxRho = rho;
-          maxRhoStatus = rhoStatus;
-          maxRhoProvenance = rhoProvenance;
-          maxRhoDerivation = rhoDerivation;
-          maxRhoRatio = rhoRatio;
-        }
-      }
-
-      if (wfcStatus === "inferred" || rhoStatus === "inferred") {
-        hasInferredCutoff = true;
-      }
-      if (wfcStatus === "missing" || rhoStatus === "missing") {
-        hasMissingCutoff = true;
-      }
-    }
-
-    return {
-      maxWfc,
-      maxRho,
-      wfcStatus: selectedCount === 0 ? "idle" as const : maxWfc > 0 ? maxWfcStatus : "missing" as const,
-      rhoStatus: selectedCount === 0 ? "idle" as const : maxRho > 0 ? maxRhoStatus : "missing" as const,
-      wfcProvenance: maxWfc > 0 ? maxWfcProvenance : "missing" as const,
-      rhoProvenance: maxRho > 0 ? maxRhoProvenance : "missing" as const,
-      wfcDerivation: maxWfc > 0 ? maxWfcDerivation : "missing" as const,
-      rhoDerivation: maxRho > 0 ? maxRhoDerivation : "missing" as const,
-      wfcRatio: maxWfc > 0 ? maxWfcRatio : null,
-      rhoRatio: maxRho > 0 ? maxRhoRatio : null,
-      hasInferredCutoff,
-      hasMissingCutoff,
-    };
-  }, [crystalData, optimizedStructures, pseudopotentials, selectedPseudos, ssspData, structureSource]);
-
-  // Auto-select pseudopotentials when structure source, preset, or metadata changes.
-  useEffect(() => {
-    if (pseudopotentials.length === 0) return;
-
+  const applyPseudopotentialPresetSelection = useCallback(async (preset: PseudopotentialPreset) => {
     const elements = getUniqueElements();
-    if (elements.length === 0) return;
+    setPseudoPresetWarnings({});
+    if (elements.length === 0) {
+      setSelectedPseudos({});
+      return;
+    }
 
-    const selected: Record<string, string> = {};
+    const filenames = await ensurePseudoFilenamesLoaded();
+    const nextSelected: Record<string, string> = {};
+
+    if (preset === "sssp") {
+      const nextSsspData = await ensureSsspDataLoaded();
+      const metadata = socPresetSelected ? await ensurePseudoMetadataLoaded() : null;
+      const metadataByFilename = metadata
+        ? Object.fromEntries(metadata.map((pseudo) => [pseudo.filename, pseudo]))
+        : null;
+      let hasCompleteSsspCoverage = Boolean(nextSsspData);
+      if (nextSsspData) {
+        for (const element of elements) {
+          const ssspFilename = nextSsspData[element]?.filename;
+          const matchedSsspFilename = findFilenameCaseInsensitive(filenames, ssspFilename);
+          const ssspExists = Boolean(matchedSsspFilename);
+          const ssspSupportsSoc = !socPresetSelected || (
+            Boolean(matchedSsspFilename)
+            && Boolean(metadataByFilename?.[matchedSsspFilename!]?.supports_soc)
+          );
+          if (!ssspExists || !ssspSupportsSoc) {
+            hasCompleteSsspCoverage = false;
+            break;
+          }
+        }
+      }
+
+      if (!hasCompleteSsspCoverage) {
+        setPseudoError("SSSP pseudos not found");
+        for (const element of elements) {
+          const candidates = filenames.filter((filename) => pseudoMatchesElement(filename, element));
+          const compatibleCandidates = socPresetSelected
+            ? candidates.filter((filename) => metadataByFilename?.[filename]?.supports_soc)
+            : candidates;
+          const fallback = choosePreferredPseudoFilename(element, compatibleCandidates, nextSsspData);
+          if (fallback) {
+            nextSelected[element] = fallback;
+          }
+        }
+        setSelectedPseudos(nextSelected);
+        return;
+      }
+
+      for (const element of elements) {
+        const ssspFilename = nextSsspData?.[element]?.filename;
+        const matchedSsspFilename = findFilenameCaseInsensitive(filenames, ssspFilename);
+        if (matchedSsspFilename) {
+          nextSelected[element] = matchedSsspFilename;
+        }
+      }
+      setPseudoError(null);
+      setSelectedPseudos(nextSelected);
+      return;
+    }
+
+    const metadata = await ensurePseudoMetadataLoaded();
+    const metadataByFilename = Object.fromEntries(metadata.map((pseudo) => [pseudo.filename, pseudo]));
+    const nextWarnings: Record<string, string> = {};
 
     for (const element of elements) {
-      const elementPseudos = pseudopotentials.filter((pseudo) => pseudoMatchesElement(pseudo.filename, element));
-      const filteredPseudos = socPresetSelected
-        ? elementPseudos.filter(isSocCapablePseudo)
-        : elementPseudos;
-      if (filteredPseudos.length === 0) {
+      const matchingFilenames = filenames.filter((filename) => pseudoMatchesElement(filename, element));
+      const socCompatibleFilenames = socPresetSelected
+        ? matchingFilenames.filter((filename) => metadataByFilename[filename]?.supports_soc)
+        : matchingFilenames;
+
+      const typedMatches = socCompatibleFilenames.filter((filename) =>
+        matchesPseudoPresetType(metadataByFilename[filename], preset),
+      );
+      const chosenTypedMatch = choosePreferredPseudoFilename(element, typedMatches, ssspData);
+      if (chosenTypedMatch) {
+        nextSelected[element] = chosenTypedMatch;
         continue;
       }
 
-      const ssspEntry = ssspData?.[element] ?? null;
-      const preferredFilename = ssspEntry ? ssspEntry.filename.toLowerCase() : null;
-      const ssspMatch = preferredFilename
-        ? filteredPseudos.find((pseudo) => pseudo.filename.toLowerCase() === preferredFilename)
-        : undefined;
-      const pbeMatch = filteredPseudos.find((pseudo) => pseudo.filename.toLowerCase().includes("pbe"));
-      const chosenPseudo = ssspMatch || pbeMatch || filteredPseudos[0];
-
-      selected[element] = chosenPseudo.filename;
+      const fallback = choosePreferredPseudoFilename(element, socCompatibleFilenames, ssspData);
+      if (fallback) {
+        nextSelected[element] = fallback;
+        nextWarnings[element] = `No ${getPseudoPresetDisplayName(preset)} pseudo found. The calculation may still work.`;
+      }
     }
 
-    setSelectedPseudos(selected);
-  }, [crystalData, pseudopotentials, ssspData, structureSource, optimizedStructures, selectedPreset]);
+    setPseudoError(null);
+    setPseudoPresetWarnings(nextWarnings);
+    setSelectedPseudos(nextSelected);
+  }, [
+    ensurePseudoFilenamesLoaded,
+    ensurePseudoMetadataLoaded,
+    ensureSsspDataLoaded,
+    socPresetSelected,
+    ssspData,
+  ]);
+
+  const handlePseudopotentialPresetClick = useCallback((preset: PseudopotentialPreset) => {
+    setSelectedPseudoPreset(preset);
+    void applyPseudopotentialPresetSelection(preset).catch((e) => {
+      console.error("Failed to apply pseudopotential preset:", e);
+    });
+  }, [applyPseudopotentialPresetSelection]);
+
+  useEffect(() => {
+    if (!resolvedPseudoDir.trim()) {
+      return;
+    }
+    void applyPseudopotentialPresetSelection(selectedPseudoPreset).catch((e) => {
+      console.error("Failed to apply pseudopotential preset:", e);
+    });
+  }, [applyPseudopotentialPresetSelection, resolvedPseudoDir, structureSource, crystalData, selectedOptimizedStructure?.calcId, socPresetSelected]);
 
   // Keep cutoffs aligned with the currently selected pseudopotentials, including manual changes.
   useEffect(() => {
-    if (pseudopotentials.length === 0) return;
+    if (pseudopotentials.length === 0 && !ssspData) return;
 
     setConfig((prev) => {
       let nextEcutwfc = prev.ecutwfc;
@@ -1392,9 +1376,7 @@ export function SCFWizard({
     }
 
     // Build the calculation configuration with all options
-    const pseudoDir = isHpcMode
-      ? (activeHpcProfile?.remote_pseudo_dir || "")
-      : qePath.replace("/bin", "/pseudo");
+    const pseudoDir = resolvedPseudoDir;
     if (!pseudoDir.trim()) {
       throw new Error(
         isHpcMode
@@ -1498,7 +1480,7 @@ export function SCFWizard({
         sourceDescriptor,
       );
       const queueCalcType: "scf" | "optimization" = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
-      const runSaveSpec = projectContext && !isHpcMode
+      const runSaveSpec = projectContext
         ? {
             projectId: projectContext.projectId,
             cifId: projectContext.cifId,
@@ -1533,7 +1515,7 @@ export function SCFWizard({
       setResult(calcResult);
       setOutput((prev) => prev + "\n=== Calculation Complete ===\n");
       setStep("results");
-      if (runSaveSpec) {
+      if (runSaveSpec && !isHpcMode && finalTask.hpc.backend !== "hpc") {
         setIsSaving(true);
         setProgress((prev) => ({
           ...prev,
@@ -2180,14 +2162,14 @@ export function SCFWizard({
                   </h3>
                   {socPresetSelected && (
                     <p className="pseudo-hint">
-                      SOC preset filters this list to fully relativistic pseudopotentials only. Files without
+                      SOC-compatible mode filters this list to fully relativistic pseudopotentials only. Files without
                       `has_so = true` or `relativistic = "full"` in the UPF header are hidden.
                     </p>
                   )}
                   <p className="pseudo-dir-info">
                     Directory: <code>{pseudoDir}</code>
-                    {pseudopotentials.length > 0 && (
-                      <span className="pseudo-count"> ({pseudopotentials.length} files)</span>
+                    {pseudoFilenames.length > 0 && (
+                      <span className="pseudo-count"> ({pseudoFilenames.length} files)</span>
                     )}
                   </p>
                   {isPseudoLoading && (
@@ -2201,44 +2183,55 @@ export function SCFWizard({
                   )}
                   <div className="pseudo-list">
                     {getUniqueElements().map((el) => {
-                      const matchingPseudos = pseudopotentials.filter((pseudo) =>
-                        pseudoMatchesElement(pseudo.filename, el)
+                      const matchingPseudoFiles = pseudoFilenames.filter((filename) =>
+                        pseudoMatchesElement(filename, el)
                       );
-                      const availablePseudos = socPresetSelected
-                        ? matchingPseudos.filter(isSocCapablePseudo)
-                        : matchingPseudos;
+                      const availablePseudoFiles = socPresetSelected
+                        ? matchingPseudoFiles.filter((filename) => pseudoMetadataByFilename[filename]?.supports_soc)
+                        : matchingPseudoFiles;
                       const selectedValue = selectedPseudos[el] || "";
-                      const selectedPseudo = selectedValue
-                        ? pseudopotentials.find((pseudo) => pseudo.filename === selectedValue)
-                        : undefined;
                       const dropdownOptions = !socPresetSelected
-                        && selectedPseudo
-                        && !availablePseudos.some((pseudo) => pseudo.filename === selectedValue)
-                        ? [selectedPseudo, ...availablePseudos]
-                        : availablePseudos;
+                        && selectedValue
+                        && !availablePseudoFiles.includes(selectedValue)
+                        ? [selectedValue, ...availablePseudoFiles]
+                        : availablePseudoFiles;
+                      const warningText = pseudoPresetWarnings[el];
                       return (
                         <div key={el} className="pseudo-row">
-                          <label>{el}</label>
+                          <label className="pseudo-row-label">
+                            <span>{el}</span>
+                            {warningText && (
+                              <InfoTooltip text={warningText}>
+                                <span className="pseudo-warning-icon" aria-label={warningText}>!</span>
+                              </InfoTooltip>
+                            )}
+                          </label>
                           <select
                             value={selectedValue}
-                            disabled={isPseudoLoading}
+                            disabled={isPseudoLoading || (socPresetSelected && !pseudoMetadataLoaded)}
                             onChange={(e) =>
-                              setSelectedPseudos((prev) => ({
-                                ...prev,
-                                [el]: e.target.value,
-                              }))
+                              {
+                                const nextValue = e.target.value;
+                                clearPseudoPresetWarning(el);
+                                setSelectedPseudos((prev) => ({
+                                  ...prev,
+                                  [el]: nextValue,
+                                }));
+                              }
                             }
                           >
                             <option value="">
                               {dropdownOptions.length === 0
                                 ? socPresetSelected
-                                  ? `No SOC-capable ${el} pseudopotentials found`
+                                  ? `No SOC-compatible ${el} pseudopotentials found`
                                   : `No ${el} pseudopotentials found`
-                                : "Select..."}
+                                : socPresetSelected && !pseudoMetadataLoaded
+                                  ? "Loading SOC-compatible pseudos..."
+                                  : "Select..."}
                             </option>
-                            {dropdownOptions.map((pseudo) => (
-                              <option key={pseudo.filename} value={pseudo.filename}>
-                                {pseudo.filename}
+                            {dropdownOptions.map((filename) => (
+                              <option key={filename} value={filename}>
+                                {filename}
                               </option>
                             ))}
                           </select>
@@ -2246,9 +2239,11 @@ export function SCFWizard({
                       );
                     })}
                   </div>
-                  {getUniqueElements().some((el) => {
-                    const matches = pseudopotentials.filter((pseudo) => pseudoMatchesElement(pseudo.filename, el));
-                    return socPresetSelected ? !matches.some(isSocCapablePseudo) : matches.length === 0;
+                  {(!socPresetSelected || pseudoMetadataLoaded) && getUniqueElements().some((el) => {
+                    const matches = pseudoFilenames.filter((filename) => pseudoMatchesElement(filename, el));
+                    return socPresetSelected
+                      ? !matches.some((filename) => pseudoMetadataByFilename[filename]?.supports_soc)
+                      : matches.length === 0;
                   }) && (
                     <p className="pseudo-hint">
                       Missing pseudopotentials? Download them from the{" "}
@@ -2259,7 +2254,7 @@ export function SCFWizard({
                       >
                         SSSP Precision Library
                       </a>{" "}
-                      and place them in your QE pseudo directory. SOC runs require fully relativistic files.
+                      and place them in your QE pseudo directory. SOC-compatible runs require fully relativistic files.
                     </p>
                   )}
                 </section>
@@ -2275,46 +2270,8 @@ export function SCFWizard({
                     <div className="param-grid">
                       {showPresetRow && (
                         <div className="param-row full-width">
-                          <label>Presets</label>
+                          <label>Calculation Presets</label>
                           <div className="preset-buttons">
-                            {showStandardPreset && (
-                              <InfoTooltip text="Standard SCF calculation">
-                                <button
-                                  type="button"
-                                  className={`preset-btn ${selectedPreset === "standard" ? "active" : ""}`}
-                                  onClick={() => applyPreset("standard")}
-                                  aria-label="Standard SCF calculation"
-                                >
-                                  Standard
-                                </button>
-                              </InfoTooltip>
-                            )}
-                            {showPhononPreset && (
-                              (phononPresetDisabled ? (
-                                <InfoTooltip
-                                  text={phononPresetDisabledMessage || "Phonon-ready preset is unavailable."}
-                                  className="preset-disabled-tooltip"
-                                >
-                                  <button
-                                    type="button"
-                                    className={`preset-btn preset-phonon ${selectedPreset === "phonon" && !phononPresetDisabled ? "active" : ""} ${phononPresetDisabled ? "preset-disabled" : ""}`}
-                                    onClick={() => applyPreset("phonon")}
-                                    aria-disabled={phononPresetDisabled}
-                                  >
-                                    Phonon-Ready
-                                  </button>
-                                </InfoTooltip>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className={`preset-btn preset-phonon ${selectedPreset === "phonon" && !phononPresetDisabled ? "active" : ""} ${phononPresetDisabled ? "preset-disabled" : ""}`}
-                                  onClick={() => applyPreset("phonon")}
-                                  aria-disabled={phononPresetDisabled}
-                                >
-                                  Phonon-Ready
-                                </button>
-                              ))
-                            )}
                             {showRelaxPreset && (
                               <InfoTooltip text="Variable-cell relaxation for structure optimization">
                                 <button
@@ -2328,20 +2285,69 @@ export function SCFWizard({
                               </InfoTooltip>
                             )}
                             {showSocPreset && (
-                              <InfoTooltip text="SOC-enabled SCF calculation">
+                              <InfoTooltip text="Enable the current SOC-compatible setup: noncollinear spin, `nspin = 4`, and spin-orbit coupling.">
                                 <button
                                   type="button"
                                   className={`preset-btn ${selectedPreset === "soc" ? "active" : ""}`}
                                   onClick={() => applyPreset("soc")}
-                                  aria-label="SOC-enabled SCF calculation"
+                                  aria-label="SOC-compatible SCF calculation"
                                 >
-                                  SOC
+                                  SOC-Compatible
                                 </button>
                               </InfoTooltip>
                             )}
                           </div>
                         </div>
                       )}
+
+                      <div className="param-row full-width">
+                        <label>
+                          Pseudopotential Presets
+                          <InfoTooltip text="Auto-select pseudopotentials by library or pseudopotential type. SSSP is the default. PAW, USPP, and NCPP try to match that type for each element and fall back to another pseudo with a warning when needed." />
+                        </label>
+                        <div className="preset-buttons">
+                          <InfoTooltip text="Prefer the SSSP-recommended pseudopotentials for each element.">
+                            <button
+                              type="button"
+                              className={`preset-btn ${selectedPseudoPreset === "sssp" ? "active" : ""}`}
+                              onClick={() => handlePseudopotentialPresetClick("sssp")}
+                              aria-label="SSSP pseudopotential preset"
+                            >
+                              SSSP
+                            </button>
+                          </InfoTooltip>
+                          <InfoTooltip text="Prefer PAW pseudopotentials when available.">
+                            <button
+                              type="button"
+                              className={`preset-btn ${selectedPseudoPreset === "paw" ? "active" : ""}`}
+                              onClick={() => handlePseudopotentialPresetClick("paw")}
+                              aria-label="PAW pseudopotential preset"
+                            >
+                              PAW
+                            </button>
+                          </InfoTooltip>
+                          <InfoTooltip text="Prefer ultrasoft pseudopotentials when available.">
+                            <button
+                              type="button"
+                              className={`preset-btn ${selectedPseudoPreset === "uspp" ? "active" : ""}`}
+                              onClick={() => handlePseudopotentialPresetClick("uspp")}
+                              aria-label="USPP pseudopotential preset"
+                            >
+                              USPP
+                            </button>
+                          </InfoTooltip>
+                          <InfoTooltip text="Prefer norm-conserving pseudopotentials when available.">
+                            <button
+                              type="button"
+                              className={`preset-btn ${selectedPseudoPreset === "ncpp" ? "active" : ""}`}
+                              onClick={() => handlePseudopotentialPresetClick("ncpp")}
+                              aria-label="NCPP pseudopotential preset"
+                            >
+                              NCPP
+                            </button>
+                          </InfoTooltip>
+                        </div>
+                      </div>
 
                       {!isOptimizationWizard && (
                         <div className="param-row">

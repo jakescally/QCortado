@@ -104,6 +104,7 @@ async fn run_with_optional_askpass(
     program: &str,
     args: &[String],
     secret: Option<&str>,
+    timeout_secs: u64,
 ) -> Result<std::process::Output, String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -121,9 +122,10 @@ async fn run_with_optional_askpass(
         None
     };
 
-    let output_result = tokio::time::timeout(Duration::from_secs(120), cmd.output())
-        .await
-        .map_err(|_| format!("{} command timed out", program))?;
+    let output_result =
+        tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), cmd.output())
+            .await
+            .map_err(|_| format!("{} command timed out", program))?;
     let output = output_result.map_err(|e| format!("Failed to execute {}: {}", program, e));
 
     if let Some(path) = askpass_path {
@@ -138,6 +140,15 @@ pub async fn run_ssh_command(
     secret: Option<&str>,
     remote_command: &str,
 ) -> Result<String, String> {
+    run_ssh_command_with_timeout(profile, secret, remote_command, 120).await
+}
+
+pub async fn run_ssh_command_with_timeout(
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_command: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
     let use_password = matches!(profile.auth_method, HpcAuthMethod::Password);
     let mut args = ssh_options(profile, !use_password);
     if use_password {
@@ -149,7 +160,7 @@ pub async fn run_ssh_command(
     args.push(destination(profile));
     args.push(remote_command.to_string());
 
-    let output = run_with_optional_askpass("ssh", &args, secret).await?;
+    let output = run_with_optional_askpass("ssh", &args, secret, timeout_secs).await?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -176,7 +187,7 @@ pub async fn upload_directory(
     args.push("-r".to_string());
     args.push(local_dir.display().to_string());
     args.push(format!("{}:{}", destination(profile), remote_parent));
-    let output = run_with_optional_askpass("scp", &args, secret).await?;
+    let output = run_with_optional_askpass("scp", &args, secret, 120).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -202,7 +213,7 @@ pub async fn upload_file(
     let mut args = scp_options(profile, !use_password);
     args.push(local_file.display().to_string());
     args.push(format!("{}:{}", destination(profile), remote_file));
-    let output = run_with_optional_askpass("scp", &args, secret).await?;
+    let output = run_with_optional_askpass("scp", &args, secret, 120).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -223,7 +234,7 @@ pub async fn download_file(
     let mut args = scp_options(profile, !use_password);
     args.push(format!("{}:{}", destination(profile), remote_file));
     args.push(local_file.display().to_string());
-    let output = run_with_optional_askpass("scp", &args, secret).await?;
+    let output = run_with_optional_askpass("scp", &args, secret, 120).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -255,7 +266,7 @@ pub async fn download_directory_contents(
         remote_dir.trim_end_matches('/')
     ));
     args.push(local_dir.display().to_string());
-    let output = run_with_optional_askpass("scp", &args, secret).await?;
+    let output = run_with_optional_askpass("scp", &args, secret, 120).await?;
     if output.status.success() {
         Ok(())
     } else {

@@ -321,9 +321,9 @@ export function TransportWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `${buildHpcLauncherCommand(activeHpcProfile)} ${deriveRemotePostw90Path(activeHpcProfile)} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
+      `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${deriveRemotePostw90Path(activeHpcProfile)} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
     ],
-    [activeHpcProfile, seedname],
+    [activeHpcProfile, hpcResources.resource_type, seedname],
   );
 
   function selectSourceWannier(calc: CalculationRun) {
@@ -507,7 +507,18 @@ export function TransportWizard({
 
     try {
       const plan = await buildTaskPlan();
-      const taskId = await taskContext.startTask("transport", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId,
+          workingDir: TRANSPORT_WORK_DIR,
+          calcType: "transport" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("transport", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);

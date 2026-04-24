@@ -293,4 +293,5 @@ mod tests {
         assert!(result1.converged);
         assert!(!result2.converged);
     }
+
 }

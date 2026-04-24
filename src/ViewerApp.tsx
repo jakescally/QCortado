@@ -11,6 +11,7 @@ import { ProjectBrowser } from "./components/ProjectBrowser";
 import {
   CalculationRun,
   ProjectDashboard,
+  SavedBandsCalculationContext,
   WannierBandOverlayOption,
 } from "./components/ProjectDashboard";
 import { TransportPlot } from "./components/TransportPlot";
@@ -92,7 +93,12 @@ function ViewerAppInner() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
-  const [viewBandsData, setViewBandsData] = useState<{ bandData: any; fermiEnergy: number | null } | null>(null);
+  const [viewBandsData, setViewBandsData] = useState<{
+    bandData: any;
+    fermiEnergy: number | null;
+    calculationParameters?: Record<string, unknown> | null;
+    calculationContext?: SavedBandsCalculationContext | null;
+  } | null>(null);
   const [viewDosData, setViewDosData] = useState<{ dosData: ElectronicDOSData; fermiEnergy: number | null } | null>(null);
   const [viewWannierData, setViewWannierData] = useState<{
     result: any;
@@ -264,8 +270,13 @@ function ViewerAppInner() {
           }}
           onRunSCF={viewOnlyNoopScf}
           onRunBands={viewOnlyNoopCalc}
-          onViewBands={(bandData, fermiEnergy) => {
-            setViewBandsData({ bandData, fermiEnergy });
+          onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
+            setViewBandsData({
+              bandData,
+              fermiEnergy,
+              calculationParameters,
+              calculationContext,
+            });
             setCurrentView("bands-viewer");
           }}
           onRunDos={viewOnlyNoopCalc}
@@ -323,6 +334,7 @@ function ViewerAppInner() {
             <BandPlot
               data={viewBandsData.bandData}
               scfFermiEnergy={viewBandsData.fermiEnergy ?? undefined}
+              calculationParameters={viewBandsData.calculationParameters ?? null}
               viewerType="electronic"
             />
           </div>

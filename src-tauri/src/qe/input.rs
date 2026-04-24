@@ -681,6 +681,77 @@ mod tests {
     }
 
     #[test]
+    fn test_bands_input_writes_electronic_controls() {
+        let calc = QECalculation {
+            calculation: CalculationType::Bands,
+            prefix: "bands".to_string(),
+            outdir: "./tmp".to_string(),
+            pseudo_dir: "./pseudo".to_string(),
+            system: QESystem {
+                ibrav: BravaisLattice::Free,
+                celldm: None,
+                cell_parameters: Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                cell_units: Some(PositionUnits::Angstrom),
+                species: vec![AtomicSpecies {
+                    symbol: "Si".to_string(),
+                    mass: 28.086,
+                    pseudopotential: "Si.pbe.UPF".to_string(),
+                    starting_magnetization: None,
+                }],
+                atoms: vec![Atom {
+                    symbol: "Si".to_string(),
+                    position: [0.0, 0.0, 0.0],
+                    if_pos: [true, true, true],
+                }],
+                position_units: PositionUnits::Crystal,
+                ecutwfc: 40.0,
+                ecutrho: Some(320.0),
+                nbnd: None,
+                tot_charge: None,
+                input_dft: None,
+                nspin: 1,
+                noncolin: false,
+                lspinorb: false,
+                tot_magnetization: None,
+                constrained_magnetization: None,
+                occupations: Occupations::Fixed,
+                smearing: SmearingType::default(),
+                degauss: None,
+                nosym: false,
+                noinv: false,
+                hubbard: None,
+            },
+            kpoints: KPoints::Gamma,
+            conv_thr: 1.0e-8,
+            electron_maxstep: Some(120),
+            mixing_mode: Some(MixingMode::LocalTf),
+            mixing_beta: 0.7,
+            mixing_ndim: Some(10),
+            diagonalization: Some(DiagonalizationMethod::Cg),
+            startingpot: Some(StartingPotential::File),
+            startingwfc: Some(StartingWavefunction::AtomicRandom),
+            diago_full_acc: true,
+            tprnfor: false,
+            tstress: false,
+            forc_conv_thr: None,
+            etot_conv_thr: None,
+            press: None,
+            verbosity: None,
+            disk_io: None,
+        };
+
+        let input = generate_pw_input(&calc);
+
+        assert!(input.contains("electron_maxstep = 120"));
+        assert!(input.contains("mixing_mode = 'local-TF'"));
+        assert!(input.contains("mixing_ndim = 10"));
+        assert!(input.contains("diagonalization = 'cg'"));
+        assert!(input.contains("startingpot = 'file'"));
+        assert!(input.contains("startingwfc = 'atomic+random'"));
+        assert!(input.contains("diago_full_acc = .true."));
+    }
+
+    #[test]
     fn test_soc_input_writes_noncolin_and_lspinorb() {
         let calc = QECalculation {
             calculation: CalculationType::Scf,

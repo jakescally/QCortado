@@ -30,6 +30,22 @@ pub struct HpcBatchRequest {
     pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HpcAttachRequest {
+    pub task_id: String,
+    pub task_kind: String,
+    pub task_label: String,
+    pub profile: HpcProfile,
+    pub secret: Option<String>,
+    pub remote_job_id: String,
+    pub remote_workdir: String,
+    pub remote_project_path: Option<String>,
+    pub slurm_script: Option<String>,
+    pub sbatch_preview: Option<String>,
+    pub local_sync_dir: PathBuf,
+    pub cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HpcBatchResult {
     pub backend: String,
@@ -104,6 +120,123 @@ fn emit_task_event_line(app: &AppHandle, task_id: &str, line: &str) {
 async fn emit_task_line(app: &AppHandle, pm: &ProcessManager, task_id: &str, line: String) {
     emit_task_event_line(app, task_id, &line);
     pm.append_output(task_id, line).await;
+}
+
+fn push_unique_remote_path(targets: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(path) = candidate.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if targets.iter().any(|existing| existing == path) {
+        return;
+    }
+    targets.push(path.to_string());
+}
+
+async fn remove_remote_paths_best_effort(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    targets: &[String],
+    failure_label: &str,
+) {
+    for target in targets {
+        let remove_cmd = format!(
+            "if [ -e {target} ]; then rm -rf -- {target}; fi",
+            target = shell_single_quote(target)
+        );
+        if let Err(err) = run_ssh_command(profile, secret, &remove_cmd).await {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!("HPC_WARNING|Failed to remove remote {failure_label} at {target}: {err}"),
+            )
+            .await;
+        }
+    }
+}
+
+async fn archive_remote_run_copy(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    remote_project_path: &str,
+) -> Result<(), String> {
+    emit_task_line(
+        app,
+        pm,
+        task_id,
+        format!("HPC_STAGE|Archiving|{}", remote_project_path),
+    )
+    .await;
+    emit_task_line(
+        app,
+        pm,
+        task_id,
+        format!(
+            "[QCortado] Remote archive copy started at {}.",
+            chrono::Utc::now().to_rfc3339()
+        ),
+    )
+    .await;
+    let archive_started = Instant::now();
+
+    let archive_cmd = format!(
+        "mkdir -p {dest} && if [ -d {src} ]; then cp -a {src}/. {dest}/; fi",
+        src = shell_single_quote(remote_workdir),
+        dest = shell_single_quote(remote_project_path)
+    );
+    let archive_result = run_ssh_command(profile, secret, &archive_cmd).await;
+    match archive_result {
+        Ok(_) => {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!("HPC_STAGE|Archived|{}", remote_project_path),
+            )
+            .await;
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!(
+                    "[QCortado] Remote archive copy finished in {:.1}s.",
+                    archive_started.elapsed().as_secs_f64()
+                ),
+            )
+            .await;
+            Ok(())
+        }
+        Err(err) => {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!(
+                    "HPC_WARNING|Failed to archive run under remote project root ({}): {}",
+                    remote_project_path, err
+                ),
+            )
+            .await;
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!(
+                    "[QCortado] Remote archive copy failed after {:.1}s.",
+                    archive_started.elapsed().as_secs_f64()
+                ),
+            )
+            .await;
+            Err(err)
+        }
+    }
 }
 
 fn normalize_rel_path(raw: &str) -> Option<String> {
@@ -1000,6 +1133,17 @@ pub async fn run_batch_task(
             submit_output.trim()
         )
     })?;
+    let job_id_record_cmd = format!(
+        "cd {} && printf %s {} > .qcortado_job_id",
+        shell_single_quote(&remote_workdir),
+        shell_single_quote(&job_id)
+    );
+    let _ = run_ssh_command(
+        &request.profile,
+        request.secret.as_deref(),
+        &job_id_record_cmd,
+    )
+    .await;
 
     pm.set_remote_job_id(task_id(&request), Some(job_id.clone()))
         .await;
@@ -1090,87 +1234,6 @@ pub async fn run_batch_task(
     };
     let terminal_state = normalize_scheduler_state(&terminal_snapshot.state);
 
-    if let Some(remote_project_path) = planned_remote_project_path.as_ref() {
-        emit_task_line(
-            &app,
-            &pm,
-            task_id(&request),
-            format!("HPC_STAGE|Archiving|{}", remote_project_path),
-        )
-        .await;
-        emit_task_line(
-            &app,
-            &pm,
-            task_id(&request),
-            format!(
-                "[QCortado] Remote archive copy started at {}.",
-                chrono::Utc::now().to_rfc3339()
-            ),
-        )
-        .await;
-        let archive_started = Instant::now();
-
-        let archive_cmd = format!(
-            "mkdir -p {dest} && if [ -d {src} ]; then cp -a {src}/. {dest}/; fi",
-            src = shell_single_quote(&remote_workdir),
-            dest = shell_single_quote(remote_project_path)
-        );
-        match run_ssh_command(&request.profile, request.secret.as_deref(), &archive_cmd).await {
-            Ok(_) => {
-                archived_remote_project_path = Some(remote_project_path.clone());
-                pm.set_remote_project_path(task_id(&request), Some(remote_project_path.clone()))
-                    .await;
-                emit_task_line(
-                    &app,
-                    &pm,
-                    task_id(&request),
-                    format!("HPC_STAGE|Archived|{}", remote_project_path),
-                )
-                .await;
-                emit_task_line(
-                    &app,
-                    &pm,
-                    task_id(&request),
-                    format!(
-                        "[QCortado] Remote archive copy finished in {:.1}s.",
-                        archive_started.elapsed().as_secs_f64()
-                    ),
-                )
-                .await;
-            }
-            Err(err) => {
-                emit_task_line(
-                    &app,
-                    &pm,
-                    task_id(&request),
-                    format!(
-                        "HPC_WARNING|Failed to archive run under remote project root ({}): {}",
-                        remote_project_path, err
-                    ),
-                )
-                .await;
-                emit_task_line(
-                    &app,
-                    &pm,
-                    task_id(&request),
-                    format!(
-                        "[QCortado] Remote archive copy failed after {:.1}s.",
-                        archive_started.elapsed().as_secs_f64()
-                    ),
-                )
-                .await;
-            }
-        }
-    } else {
-        emit_task_line(
-            &app,
-            &pm,
-            task_id(&request),
-            "HPC_WARNING|Remote project root unavailable; skipping remote archive copy".to_string(),
-        )
-        .await;
-    }
-
     if terminal_state == "COMPLETED" {
         let completion_sync_mode = if request.task_kind == "epw" {
             ArtifactSyncMode::EpwReady
@@ -1251,6 +1314,47 @@ pub async fn run_batch_task(
             },
         )
         .await;
+        if let Some(remote_project_path) = planned_remote_project_path.as_ref() {
+            if archive_remote_run_copy(
+                &app,
+                &pm,
+                task_id(&request),
+                &request.profile,
+                request.secret.as_deref(),
+                &remote_workdir,
+                remote_project_path,
+            )
+            .await
+            .is_ok()
+            {
+                archived_remote_project_path = Some(remote_project_path.clone());
+                pm.set_remote_project_path(task_id(&request), Some(remote_project_path.clone()))
+                    .await;
+                if remote_project_path != &remote_workdir {
+                    remove_remote_paths_best_effort(
+                        &app,
+                        &pm,
+                        task_id(&request),
+                        &request.profile,
+                        request.secret.as_deref(),
+                        std::slice::from_ref(&remote_workdir),
+                        "workspace bundle",
+                    )
+                    .await;
+                }
+                pm.set_remote_workdir(task_id(&request), Some(remote_project_path.clone()))
+                    .await;
+            }
+        } else {
+            emit_task_line(
+                &app,
+                &pm,
+                task_id(&request),
+                "HPC_WARNING|Remote project root unavailable; skipping remote archive copy"
+                    .to_string(),
+            )
+            .await;
+        }
     } else {
         emit_task_line(
             &app,
@@ -1308,6 +1412,26 @@ pub async fn run_batch_task(
             },
         )
         .await;
+        let mut cleanup_targets: Vec<String> = Vec::new();
+        push_unique_remote_path(&mut cleanup_targets, Some(&remote_workdir));
+        push_unique_remote_path(
+            &mut cleanup_targets,
+            archived_remote_project_path.as_deref(),
+        );
+        remove_remote_paths_best_effort(
+            &app,
+            &pm,
+            task_id(&request),
+            &request.profile,
+            request.secret.as_deref(),
+            &cleanup_targets,
+            "failure artifacts",
+        )
+        .await;
+        pm.set_remote_project_path(task_id(&request), None).await;
+        pm.set_remote_workdir(task_id(&request), None).await;
+        pm.set_remote_storage_bytes(task_id(&request), Some(0))
+            .await;
 
         return Err(format!(
             "Remote job ended with state {}. Check slurm.err/slurm.out in task output.",
@@ -1320,12 +1444,317 @@ pub async fn run_batch_task(
         task_kind: request.task_kind,
         task_label: request.task_label,
         remote_job_id: job_id,
-        remote_workdir,
+        remote_workdir: archived_remote_project_path
+            .clone()
+            .unwrap_or_else(|| remote_workdir.clone()),
         remote_project_path: archived_remote_project_path,
         remote_node: terminal_snapshot.node,
         terminal_state,
         sbatch_preview: request.sbatch_preview,
         slurm_script: request.slurm_script,
+    })
+}
+
+pub async fn run_attached_batch_task(
+    app: AppHandle,
+    pm: ProcessManager,
+    request: HpcAttachRequest,
+) -> Result<HpcBatchResult, String> {
+    let task_id = request.task_id.as_str();
+    let remote_workdir = request.remote_workdir.trim_end_matches('/').to_string();
+    let job_id = request.remote_job_id.trim().to_string();
+    if job_id.is_empty() {
+        return Err("Remote job id is required for reattach.".to_string());
+    }
+    if remote_workdir.is_empty() {
+        return Err("Remote working directory is required for reattach.".to_string());
+    }
+
+    emit_task_line(
+        &app,
+        &pm,
+        task_id,
+        format!("HPC_STAGE|Reattached|{} ({})", job_id, remote_workdir),
+    )
+    .await;
+    if let Some(preview) = request
+        .sbatch_preview
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        emit_task_line(&app, &pm, task_id, format!("HPC_CMD|{}", preview)).await;
+    }
+    if let Some(script) = request
+        .slurm_script
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        emit_task_line(&app, &pm, task_id, "HPC_SCRIPT_BEGIN".to_string()).await;
+        for line in script.lines() {
+            emit_task_line(&app, &pm, task_id, format!("HPC_SCRIPT|{}", line)).await;
+        }
+        emit_task_line(&app, &pm, task_id, "HPC_SCRIPT_END".to_string()).await;
+    }
+
+    let live_output_files = request
+        .slurm_script
+        .as_deref()
+        .map(collect_live_output_files)
+        .filter(|files| !files.is_empty())
+        .unwrap_or_else(|| vec!["slurm.out".to_string(), "slurm.err".to_string()]);
+    let mut live_line_counts: HashMap<String, usize> = HashMap::new();
+    let mut announced_live_files: HashSet<String> = HashSet::new();
+    let mut last_scheduler_state: Option<String> = None;
+
+    let terminal_snapshot = loop {
+        if request.cancel_flag.load(Ordering::SeqCst) {
+            let cancel_cmd = format!("scancel {}", shell_single_quote(&job_id));
+            let _ = run_ssh_command(&request.profile, request.secret.as_deref(), &cancel_cmd).await;
+            return Err("Cancelled by user".to_string());
+        }
+
+        for file_name in &live_output_files {
+            let previous_line_count = live_line_counts.entry(file_name.clone()).or_insert(0);
+            let announced = announced_live_files.contains(file_name);
+            let updated_announced = stream_remote_file_incremental(
+                &app,
+                &pm,
+                task_id,
+                &request.profile,
+                request.secret.as_deref(),
+                &remote_workdir,
+                file_name,
+                previous_line_count,
+                announced,
+            )
+            .await;
+            if updated_announced {
+                announced_live_files.insert(file_name.clone());
+            }
+        }
+
+        let squeue_cmd = format!("squeue -h -j {} -o \"%T|%N\"", shell_single_quote(&job_id));
+        let scheduler_snapshot =
+            run_ssh_command(&request.profile, request.secret.as_deref(), &squeue_cmd)
+                .await
+                .ok()
+                .and_then(|output| parse_squeue_snapshot(&output));
+
+        let resolved_snapshot = if let Some(snapshot) = scheduler_snapshot {
+            Some(SchedulerSnapshot {
+                state: normalize_scheduler_state(&snapshot.state),
+                node: snapshot.node.clone(),
+                source: snapshot.source,
+            })
+        } else {
+            let sacct_cmd = format!(
+                "sacct -j {} --format=State,NodeList --parsable2 --noheader",
+                shell_single_quote(&job_id)
+            );
+            run_ssh_command(&request.profile, request.secret.as_deref(), &sacct_cmd)
+                .await
+                .ok()
+                .and_then(|output| parse_sacct_snapshot(&output))
+                .map(|snapshot| SchedulerSnapshot {
+                    state: normalize_scheduler_state(&snapshot.state),
+                    node: snapshot.node.clone(),
+                    source: snapshot.source,
+                })
+        };
+
+        if let Some(snapshot) = resolved_snapshot {
+            let changed = last_scheduler_state
+                .as_ref()
+                .map(|state| state != &snapshot.state)
+                .unwrap_or(true);
+            if changed {
+                update_scheduler_snapshot(&app, &pm, task_id, &snapshot).await;
+                last_scheduler_state = Some(snapshot.state.clone());
+            }
+            if is_terminal_state(&snapshot.state) {
+                break snapshot;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    };
+
+    let terminal_state = normalize_scheduler_state(&terminal_snapshot.state);
+    let planned_remote_project_path = if let Some(path) = request.remote_project_path.as_ref() {
+        Some(path.clone())
+    } else {
+        resolve_remote_path(
+            &request.profile,
+            request.secret.as_deref(),
+            request.profile.remote_project_root.trim_end_matches('/'),
+        )
+        .await
+        .ok()
+        .map(|root| root.trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .map(|root| {
+            format!(
+                "{}/{}/{}",
+                root.trim_end_matches('/'),
+                request.task_kind,
+                request.task_id
+            )
+        })
+    };
+    let mut archived_remote_project_path = request.remote_project_path.clone();
+    if let Some(remote_project_path) = archived_remote_project_path.as_ref() {
+        pm.set_remote_project_path(task_id, Some(remote_project_path.clone()))
+            .await;
+    }
+
+    if terminal_state == "COMPLETED" {
+        let completion_sync_mode = if request.task_kind == "epw" {
+            ArtifactSyncMode::EpwReady
+        } else {
+            ArtifactSyncMode::Minimal
+        };
+        emit_task_line(
+            &app,
+            &pm,
+            task_id,
+            format!(
+                "HPC_STAGE|Collecting|{} ({})",
+                remote_workdir,
+                completion_sync_mode.label()
+            ),
+        )
+        .await;
+        let sync_report = sync_remote_artifacts(
+            &app,
+            &pm,
+            HpcArtifactSyncRequest {
+                task_id: request.task_id.clone(),
+                task_kind: request.task_kind.clone(),
+                profile: request.profile.clone(),
+                secret: request.secret.clone(),
+                remote_workdir: remote_workdir.clone(),
+                local_sync_dir: request.local_sync_dir.clone(),
+                mode: completion_sync_mode,
+            },
+        )
+        .await?;
+        let remote_storage_bytes = sync_report
+            .downloaded_bytes
+            .saturating_add(sync_report.skipped_bytes);
+        pm.set_remote_storage_bytes(task_id, Some(remote_storage_bytes))
+            .await;
+        emit_task_line(
+            &app,
+            &pm,
+            task_id,
+            format!(
+                "HPC_STAGE|Saved|{} sync complete ({} files, {:.2} MB downloaded, {} skipped, remote {:.2} MB)",
+                sync_report.mode,
+                sync_report.downloaded_files,
+                sync_report.downloaded_bytes as f64 / (1024.0 * 1024.0),
+                sync_report.skipped_files,
+                remote_storage_bytes as f64 / (1024.0 * 1024.0),
+            ),
+        )
+        .await;
+        if let Some(remote_project_path) = planned_remote_project_path.as_ref() {
+            if archive_remote_run_copy(
+                &app,
+                &pm,
+                task_id,
+                &request.profile,
+                request.secret.as_deref(),
+                &remote_workdir,
+                remote_project_path,
+            )
+            .await
+            .is_ok()
+            {
+                archived_remote_project_path = Some(remote_project_path.clone());
+                pm.set_remote_project_path(task_id, Some(remote_project_path.clone()))
+                    .await;
+                if remote_project_path != &remote_workdir {
+                    remove_remote_paths_best_effort(
+                        &app,
+                        &pm,
+                        task_id,
+                        &request.profile,
+                        request.secret.as_deref(),
+                        std::slice::from_ref(&remote_workdir),
+                        "workspace bundle",
+                    )
+                    .await;
+                }
+                pm.set_remote_workdir(task_id, Some(remote_project_path.clone()))
+                    .await;
+            }
+        } else {
+            emit_task_line(
+                &app,
+                &pm,
+                task_id,
+                "HPC_WARNING|Remote project root unavailable; skipping remote archive copy"
+                    .to_string(),
+            )
+            .await;
+        }
+    } else {
+        emit_task_line(
+            &app,
+            &pm,
+            task_id,
+            format!("HPC_WARNING|Remote job ended with state {}", terminal_state),
+        )
+        .await;
+        let _ = sync_remote_artifacts(
+            &app,
+            &pm,
+            HpcArtifactSyncRequest {
+                task_id: request.task_id.clone(),
+                task_kind: request.task_kind.clone(),
+                profile: request.profile.clone(),
+                secret: request.secret.clone(),
+                remote_workdir: remote_workdir.clone(),
+                local_sync_dir: request.local_sync_dir.clone(),
+                mode: ArtifactSyncMode::Minimal,
+            },
+        )
+        .await;
+        let mut cleanup_targets: Vec<String> = Vec::new();
+        push_unique_remote_path(&mut cleanup_targets, Some(&remote_workdir));
+        push_unique_remote_path(
+            &mut cleanup_targets,
+            archived_remote_project_path.as_deref(),
+        );
+        remove_remote_paths_best_effort(
+            &app,
+            &pm,
+            task_id,
+            &request.profile,
+            request.secret.as_deref(),
+            &cleanup_targets,
+            "failure artifacts",
+        )
+        .await;
+        pm.set_remote_project_path(task_id, None).await;
+        pm.set_remote_workdir(task_id, None).await;
+        pm.set_remote_storage_bytes(task_id, Some(0)).await;
+        return Err(format!("Remote job ended with state {}.", terminal_state));
+    }
+
+    Ok(HpcBatchResult {
+        backend: "hpc".to_string(),
+        task_kind: request.task_kind,
+        task_label: request.task_label,
+        remote_job_id: job_id,
+        remote_workdir: archived_remote_project_path
+            .clone()
+            .unwrap_or_else(|| remote_workdir.clone()),
+        remote_project_path: archived_remote_project_path.take(),
+        remote_node: terminal_snapshot.node,
+        terminal_state,
+        sbatch_preview: request.sbatch_preview.unwrap_or_default(),
+        slurm_script: request.slurm_script.unwrap_or_default(),
     })
 }
 
@@ -1336,8 +1765,8 @@ fn task_id(request: &HpcBatchRequest) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_incremental_read_output, should_download_minimal, RemoteFileEntry,
-        LIVE_LINECOUNT_MARKER,
+        parse_incremental_read_output, push_unique_remote_path, should_download_minimal,
+        RemoteFileEntry, LIVE_LINECOUNT_MARKER,
     };
 
     #[test]
@@ -1377,5 +1806,19 @@ mod tests {
             size_bytes: 1_024,
         };
         assert!(!should_download_minimal("fermi_surface", &entry));
+    }
+
+    #[test]
+    fn cleanup_targets_are_unique_and_ignore_empty_paths() {
+        let mut targets = Vec::new();
+        push_unique_remote_path(&mut targets, Some("/remote/workdir"));
+        push_unique_remote_path(&mut targets, Some("/remote/workdir"));
+        push_unique_remote_path(&mut targets, Some("  "));
+        push_unique_remote_path(&mut targets, None);
+        push_unique_remote_path(&mut targets, Some("/remote/archive"));
+        assert_eq!(
+            targets,
+            vec!["/remote/workdir".to_string(), "/remote/archive".to_string()]
+        );
     }
 }

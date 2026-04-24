@@ -375,7 +375,7 @@ export function EpwWizard({
       return [
         "cd \"$SLURM_SUBMIT_DIR\"",
         `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
-        `${buildHpcLauncherCommand(activeHpcProfile)} ${epwExecutable} -in epw.in > epw.out 2> epw.err`,
+        `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${epwExecutable} -in epw.in > epw.out 2> epw.err`,
       ];
     },
     [activeHpcProfile, hpcResources.resource_type],
@@ -681,7 +681,18 @@ export function EpwWizard({
         throw new Error("EPW prerequisite validation failed. Resolve the reported issues before running.");
       }
 
-      const taskId = await taskContext.startTask("epw", plan.taskParams, plan.taskLabel);
+      const hpcSaveSpec = isHpcMode
+        ? {
+          projectId,
+          cifId,
+          workingDir: EPW_WORK_DIR,
+          calcType: "epw" as const,
+          parameters: plan.saveParameters,
+          tags: [],
+          inputContent: "",
+        }
+        : null;
+      const taskId = await taskContext.startTask("epw", plan.taskParams, plan.taskLabel, hpcSaveSpec);
       setActiveTaskId(taskId);
 
       const finalTask = await taskContext.waitForTaskCompletion(taskId);

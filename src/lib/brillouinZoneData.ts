@@ -142,6 +142,13 @@ export function findHighSymmetryPoint(
   data: BrillouinZoneData,
   label: string,
 ): HighSymmetryPoint | null {
+  const exactNeedle = label.trim();
+  for (const point of data.points) {
+    if (point.label === exactNeedle || point.id === exactNeedle) {
+      return point;
+    }
+  }
+
   const needle = normalizeHighSymmetryLabel(label);
 
   // Pass 1: canonical labels and explicit ids.
@@ -344,7 +351,7 @@ export function getTetragonalPrimitiveBZ(_c_over_a: number): BrillouinZoneData {
 export function getTetragonalBodyCenteredBZ(c_over_a: number): BrillouinZoneData {
   if (c_over_a < 1) {
     // tI1 (c < a)
-    const eta = (1 + c_over_a * c_over_a) / (4 * c_over_a * c_over_a);
+    const eta = (1 + c_over_a * c_over_a) / 4;
     return {
       latticeType: "tI1",
       name: "Tetragonal I (c < a)",
@@ -355,34 +362,35 @@ export function getTetragonalBodyCenteredBZ(c_over_a: number): BrillouinZoneData
         { label: "P", coords: [0.25, 0.25, 0.25], description: "Edge midpoint" },
         { label: "X", coords: [0, 0, 0.5], description: "Face center" },
         { label: "Z", coords: [eta, eta, -eta], description: "On Σ line" },
-        { label: "Z₁", coords: [-eta, 1 - eta, eta], description: "On Σ₁ line" },
+        { label: "Z₀", aliases: ["Z_0"], coords: [-eta, 1 - eta, eta], description: "On Σ₁ line" },
       ],
       recommendedPath: [
-        ["Γ", "X"], ["X", "M"], ["M", "Γ"], ["Γ", "Z"], ["Z", "P"], ["P", "N"], ["N", "Z₁"], ["Z₁", "M"], ["X", "P"]
+        ["Γ", "X"], ["X", "M"], ["M", "Γ"], ["Γ", "Z"], ["Z₀", "M"], ["X", "P"], ["P", "N"], ["N", "Γ"]
       ],
       vertices: [], // Complex shape
       edges: [],
     };
   } else {
     // tI2 (c > a)
-    const eta = (1 + c_over_a * c_over_a) / (4 * c_over_a * c_over_a);
-    const zeta = c_over_a * c_over_a / (2 + 2 * c_over_a * c_over_a);
+    const inverseAspectSquared = 1 / (c_over_a * c_over_a);
+    const eta = (1 + inverseAspectSquared) / 4;
+    const zeta = inverseAspectSquared / 2;
     return {
       latticeType: "tI2",
       name: "Tetragonal I (c > a)",
       points: [
         { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
-        { label: "N", coords: [0, 0.5, 0], description: "Face center" },
-        { label: "P", coords: [0.25, 0.25, 0.25], description: "Vertex" },
-        { label: "S", coords: [-eta, eta, eta], description: "On Σ line" },
-        { label: "S₁", coords: [eta, 1 - eta, -eta], description: "On Σ₁ line" },
+        { label: "M", coords: [0.5, 0.5, -0.5], description: "Corner" },
         { label: "X", coords: [0, 0, 0.5], description: "Face center" },
-        { label: "Y", coords: [-zeta, zeta, 0.5], description: "Edge point" },
-        { label: "Y₁", coords: [0.5, 0.5, -zeta], description: "Edge point" },
-        { label: "Z", coords: [0.5, 0.5, -0.5], description: "Corner" },
+        { label: "P", coords: [0.25, 0.25, 0.25], description: "Vertex" },
+        { label: "N", coords: [0, 0.5, 0], description: "Face center" },
+        { label: "S₀", aliases: ["S_0"], coords: [-eta, eta, eta], description: "On Σ₀ line" },
+        { label: "S", coords: [eta, 1 - eta, -eta], description: "On Σ line" },
+        { label: "R", coords: [-zeta, zeta, 0.5], description: "Edge point" },
+        { id: "G_BCT2", label: "G", coords: [0.5, 0.5, -zeta], description: "Edge point" },
       ],
       recommendedPath: [
-        ["Γ", "X"], ["X", "Y"], ["Y", "S"], ["S", "Γ"], ["Γ", "Z"], ["Z", "S₁"], ["S₁", "N"], ["N", "P"], ["P", "Y₁"], ["Y₁", "Z"], ["X", "P"]
+        ["Γ", "X"], ["X", "P"], ["P", "N"], ["N", "Γ"], ["Γ", "M"], ["M", "S"], ["S₀", "Γ"], ["X", "R"], ["G", "M"]
       ],
       vertices: [],
       edges: [],

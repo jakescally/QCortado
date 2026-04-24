@@ -131,7 +131,11 @@ pub struct HpcProfile {
     pub resource_mode: HpcResourceMode,
     #[serde(default)]
     pub launcher: HpcLauncher,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher_cpu_extra_args: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher_gpu_extra_args: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_extra_args: Option<String>,
     #[serde(default = "default_cpu_resources")]
     pub default_cpu_resources: SlurmResourceRequest,
@@ -173,6 +177,17 @@ impl HpcProfile {
                 .unwrap_or(fallback),
         }
     }
+
+    pub fn launcher_extra_args_for_resource(&self, resource_type: ResourceType) -> Option<&str> {
+        let specific = match resource_type {
+            ResourceType::Cpu => self.launcher_cpu_extra_args.as_deref(),
+            ResourceType::Gpu => self.launcher_gpu_extra_args.as_deref(),
+        };
+        specific
+            .or(self.launcher_extra_args.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -183,6 +198,8 @@ pub struct HpcExecutionTarget {
     pub resources: Option<SlurmResourceRequest>,
     #[serde(default)]
     pub interactive_debug: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_save: Option<HpcRecoverySaveSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -191,6 +208,19 @@ pub struct ExecutionTarget {
     pub mode: ExecutionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hpc: Option<HpcExecutionTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HpcRecoverySaveSpec {
+    pub project_id: String,
+    pub cif_id: String,
+    pub calc_type: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub input_content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

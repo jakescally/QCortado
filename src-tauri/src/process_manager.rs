@@ -39,6 +39,10 @@ pub struct TaskInfo {
     pub remote_storage_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_sync_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_save: Option<serde_json::Value>,
+    #[serde(default)]
+    pub headless_attached: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -66,6 +70,10 @@ pub struct TaskSummary {
     pub remote_storage_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_sync_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_save: Option<serde_json::Value>,
+    #[serde(default)]
+    pub headless_attached: bool,
 }
 
 pub struct RunningTask {
@@ -89,6 +97,8 @@ pub struct RunningTask {
     pub remote_storage_bytes: Option<u64>,
     pub hpc_profile_id: Option<String>,
     pub local_sync_dir: Option<String>,
+    pub recovery_save: Option<serde_json::Value>,
+    pub headless_attached: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +108,7 @@ pub struct HpcTransferContext {
     pub status: TaskStatus,
     pub backend: Option<String>,
     pub remote_workdir: Option<String>,
+    pub remote_project_path: Option<String>,
     pub hpc_profile_id: Option<String>,
     pub local_sync_dir: Option<String>,
 }
@@ -152,6 +163,8 @@ impl ProcessManager {
             remote_storage_bytes: None,
             hpc_profile_id: None,
             local_sync_dir: None,
+            recovery_save: None,
+            headless_attached: false,
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
@@ -222,6 +235,8 @@ impl ProcessManager {
             remote_project_path: t.remote_project_path.clone(),
             remote_storage_bytes: t.remote_storage_bytes,
             local_sync_dir: t.local_sync_dir.clone(),
+            recovery_save: t.recovery_save.clone(),
+            headless_attached: t.headless_attached,
         })
     }
 
@@ -244,6 +259,8 @@ impl ProcessManager {
                 remote_project_path: t.remote_project_path.clone(),
                 remote_storage_bytes: t.remote_storage_bytes,
                 local_sync_dir: t.local_sync_dir.clone(),
+                recovery_save: t.recovery_save.clone(),
+                headless_attached: t.headless_attached,
             })
             .collect()
     }
@@ -374,6 +391,67 @@ impl ProcessManager {
         }
     }
 
+    pub async fn set_recovery_save(&self, task_id: &str, recovery_save: Option<serde_json::Value>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.recovery_save = recovery_save;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn attach_hpc_task(
+        &self,
+        task_id: String,
+        task_type: String,
+        label: String,
+        started_at: Option<String>,
+        hpc_profile_id: Option<String>,
+        hpc_resource_type: Option<String>,
+        remote_job_id: Option<String>,
+        scheduler_state: Option<String>,
+        remote_node: Option<String>,
+        remote_workdir: Option<String>,
+        remote_project_path: Option<String>,
+        local_sync_dir: Option<String>,
+        recovery_save: Option<serde_json::Value>,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut tasks = self.tasks.lock().await;
+        let was_running = tasks
+            .get(&task_id)
+            .map(|task| task.status == TaskStatus::Running)
+            .unwrap_or(false);
+        let task = RunningTask {
+            task_id: task_id.clone(),
+            task_type,
+            label,
+            started_at: started_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            output_buffer: Vec::new(),
+            status: TaskStatus::Running,
+            result: None,
+            error: None,
+            child_id: None,
+            cancel_flag: cancel_flag.clone(),
+            backend: Some("hpc".to_string()),
+            hpc_resource_type,
+            remote_job_id,
+            scheduler_state,
+            remote_node,
+            remote_workdir,
+            remote_project_path,
+            remote_storage_bytes: None,
+            hpc_profile_id,
+            local_sync_dir,
+            recovery_save,
+            headless_attached: true,
+        };
+        tasks.insert(task_id, task);
+        if !was_running {
+            self.running_count.fetch_add(1, Ordering::SeqCst);
+        }
+        cancel_flag
+    }
+
     pub async fn get_hpc_transfer_context(&self, task_id: &str) -> Option<HpcTransferContext> {
         let tasks = self.tasks.lock().await;
         tasks.get(task_id).map(|task| HpcTransferContext {
@@ -382,6 +460,7 @@ impl ProcessManager {
             status: task.status.clone(),
             backend: task.backend.clone(),
             remote_workdir: task.remote_workdir.clone(),
+            remote_project_path: task.remote_project_path.clone(),
             hpc_profile_id: task.hpc_profile_id.clone(),
             local_sync_dir: task.local_sync_dir.clone(),
         })

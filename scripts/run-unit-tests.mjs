@@ -5,12 +5,16 @@ import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const testEntries = [
+  "tests/bandPlot/bandEnergyReference.test.ts",
   "tests/cifSubstitution/cifSubstitution.test.ts",
   "tests/epw/epwUtils.test.ts",
   "tests/transport/transportUtils.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
+  "tests/brillouinZoneData/tetragonalBodyCentered.test.ts",
+  "tests/hpcBandLimits/hpcBandLimits.test.ts",
   "tests/hpcUtilization/hpcUtilization.test.ts",
+  "tests/pseudopotentialCutoffs/ssspPresetCutoffs.test.ts",
 ];
 
 const tempDir = mkdtempSync(join(tmpdir(), "qcortado-unit-tests-"));

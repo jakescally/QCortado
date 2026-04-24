@@ -75,6 +75,8 @@ function makeDefaultProfile(): HpcProfile {
     remote_project_root: "~/qcortado/projects",
     resource_mode: "both",
     launcher: "srun",
+    launcher_cpu_extra_args: null,
+    launcher_gpu_extra_args: null,
     launcher_extra_args: null,
     default_cpu_resources: defaultCpuResources(),
     default_gpu_resources: defaultGpuResources(),
@@ -97,12 +99,20 @@ function normalizeQeProfilePaths(profile: HpcProfile): HpcProfile {
       : fallback;
   const normalizedCpu = cpu.length > 0 ? cpu : primary;
   const normalizedGpu = gpu.length > 0 ? gpu : primary;
+  const legacyLauncherExtraArgs = (profile.launcher_extra_args || "").trim();
+  const launcherCpuExtraArgs = profile.launcher_cpu_extra_args
+    ?? (legacyLauncherExtraArgs.length > 0 ? legacyLauncherExtraArgs : null);
+  const launcherGpuExtraArgs = profile.launcher_gpu_extra_args
+    ?? (legacyLauncherExtraArgs.length > 0 ? legacyLauncherExtraArgs : null);
 
   return {
     ...profile,
     remote_qe_bin_dir: primary,
     remote_qe_cpu_bin_dir: normalizedCpu,
     remote_qe_gpu_bin_dir: normalizedGpu,
+    launcher_cpu_extra_args: launcherCpuExtraArgs,
+    launcher_gpu_extra_args: launcherGpuExtraArgs,
+    launcher_extra_args: null,
   };
 }
 
@@ -496,14 +506,15 @@ export function HpcSetupWizard({
                 <option value="srun">srun</option>
                 <option value="mpirun">mpirun</option>
               </select>
-              <label className="settings-menu-label">Launcher Extra Args</label>
+              <label className="settings-menu-label">CPU Launcher Extra Args</label>
               <input
                 className="settings-menu-input"
-                value={profile.launcher_extra_args || ""}
+                value={profile.launcher_cpu_extra_args ?? profile.launcher_extra_args ?? ""}
                 onChange={(event) =>
                   setProfile((prev) => ({
                     ...prev,
-                    launcher_extra_args: normalizeCliDashText(event.target.value) || null,
+                    launcher_cpu_extra_args: normalizeCliDashText(event.target.value) || null,
+                    launcher_extra_args: null,
                   }))
                 }
                 placeholder="e.g. --bind-to none"
@@ -511,8 +522,24 @@ export function HpcSetupWizard({
                 autoCapitalize="off"
                 spellCheck={false}
               />
+              <label className="settings-menu-label">GPU Launcher Extra Args</label>
+              <input
+                className="settings-menu-input"
+                value={profile.launcher_gpu_extra_args ?? profile.launcher_extra_args ?? ""}
+                onChange={(event) =>
+                  setProfile((prev) => ({
+                    ...prev,
+                    launcher_gpu_extra_args: normalizeCliDashText(event.target.value) || null,
+                    launcher_extra_args: null,
+                  }))
+                }
+                placeholder="e.g. --gpu-bind=closest"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+              />
               <p className="settings-menu-hint">
-                Appended to launcher command before QE executable.
+                Appended to launcher command before QE executable for the selected resource type.
               </p>
               <label className="settings-menu-label">Default CPU Partition</label>
               <input

@@ -90,11 +90,94 @@ export interface PseudopotentialMetadata {
 }
 
 export type ExecutionMode = "local" | "hpc";
+export type StorageInventoryMode = "local" | "hpc";
 export type QeSmearingType = "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
 export type HpcAuthMethod = "ssh_key" | "password";
 export type HpcResourceType = "cpu" | "gpu";
 export type HpcResourceMode = "cpu_only" | "gpu_only" | "both";
 export type HpcLauncher = "srun" | "mpirun";
+
+export type StorageEntryKind = "project" | "temp" | "orphan" | "other";
+
+export interface StorageInventoryProgress {
+  progress_event_id: string;
+  phase: string;
+  scanned_items: number;
+  total_items: number;
+  bytes_seen: number;
+  total_bytes_estimate: number;
+}
+
+export interface StoragePathEntry {
+  id: string;
+  kind: StorageEntryKind;
+  label: string;
+  description?: string | null;
+  bytes: number;
+  path: string;
+  delete_supported: boolean;
+}
+
+export interface StorageCalculationEntry {
+  id: string;
+  project_id: string;
+  project_name: string;
+  cif_id: string;
+  cif_label: string;
+  calc_id: string;
+  calc_type: string;
+  label: string;
+  bytes: number;
+  local_path?: string | null;
+  remote_paths: string[];
+  hpc_profile_id?: string | null;
+  has_remote_artifacts: boolean;
+  can_delete: boolean;
+  can_lighten: boolean;
+}
+
+export interface StorageInventoryResult {
+  mode: StorageInventoryMode;
+  scanned_at: string;
+  total_bytes: number;
+  project_bytes: number;
+  calculation_bytes: number;
+  temp_bytes: number;
+  orphan_bytes: number;
+  other_bytes: number;
+  profile_id?: string | null;
+  profile_name?: string | null;
+  warnings: string[];
+  projects: StoragePathEntry[];
+  calculations: StorageCalculationEntry[];
+  temp: StoragePathEntry[];
+  orphans: StoragePathEntry[];
+  other: StoragePathEntry[];
+}
+
+export interface StorageDeleteEntryTarget {
+  id: string;
+  kind: StorageEntryKind;
+  path: string;
+}
+
+export interface StorageCalculationTarget {
+  project_id: string;
+  cif_id: string;
+  calc_id: string;
+}
+
+export interface StorageMutationFailure {
+  id: string;
+  message: string;
+}
+
+export interface StorageMutationResult {
+  bytes_freed: number;
+  succeeded: string[];
+  failed: string[];
+  failures: StorageMutationFailure[];
+}
 
 export interface SlurmResourceRequest {
   resource_type: HpcResourceType;
@@ -132,6 +215,8 @@ export interface HpcProfile {
   remote_project_root: string;
   resource_mode: HpcResourceMode;
   launcher: HpcLauncher;
+  launcher_cpu_extra_args?: string | null;
+  launcher_gpu_extra_args?: string | null;
   launcher_extra_args?: string | null;
   default_cpu_resources: SlurmResourceRequest;
   default_gpu_resources: SlurmResourceRequest;
@@ -145,6 +230,7 @@ export interface HpcExecutionTarget {
   profile_id?: string | null;
   resources?: SlurmResourceRequest | null;
   interactive_debug?: boolean;
+  recovery_save?: HpcRecoverySaveSpec | null;
 }
 
 export interface ExecutionTarget {
@@ -166,6 +252,17 @@ export interface HpcTaskMeta {
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
   local_sync_dir?: string | null;
+  recovery_save?: HpcRecoverySaveSpec | null;
+  headless_attached?: boolean;
+}
+
+export interface HpcRecoverySaveSpec {
+  project_id: string;
+  cif_id: string;
+  calc_type: string;
+  parameters: Record<string, any>;
+  tags?: string[];
+  input_content?: string;
 }
 
 export type QePositionUnit = "alat" | "bohr" | "angstrom" | "crystal";

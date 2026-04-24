@@ -40,6 +40,7 @@ interface QEResult {
 
 export interface CalculationRun {
   id: string;
+  name?: string | null;
   calc_type: string;
   parameters: any;
   result: QEResult | null;
@@ -49,11 +50,23 @@ export interface CalculationRun {
   storage_bytes?: number | null;
 }
 
+interface CalculationLogFile {
+  path: string;
+  contents: string;
+  size_bytes: number;
+}
+
 export interface WannierBandOverlayOption {
   id: string;
   label: string;
   data: any;
   fermiEnergy: number | null;
+}
+
+export interface SavedBandsCalculationContext {
+  projectId: string;
+  cifId: string;
+  calcId: string;
 }
 
 interface CifVariant {
@@ -89,7 +102,12 @@ interface ProjectDashboardProps {
     optimizedStructures?: OptimizedStructureOption[],
   ) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onViewBands: (bandData: any, scfFermiEnergy: number | null) => void;
+  onViewBands: (
+    bandData: any,
+    scfFermiEnergy: number | null,
+    calculationParameters?: Record<string, unknown> | null,
+    calculationContext?: SavedBandsCalculationContext | null,
+  ) => void;
   onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
   onRunWannier: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
@@ -150,8 +168,10 @@ interface DisplayCellMetrics {
 type CellMatrix = [[number, number, number], [number, number, number], [number, number, number]];
 
 const DELETE_CONFIRM_TEXT = "DELETE";
+const MAX_CALCULATION_NAME_CHARS = 80;
 const SOC_PRIORITY_BOOST = 250;
 const PINNED_TAG = "pinned";
+const FILE_VIEWER_COPY_LIMIT_BYTES = 5 * 1024 * 1024;
 const RECIPROCAL_AXIS_OPTIONS = [
   { value: 0, label: "a*" },
   { value: 1, label: "b*" },
@@ -275,6 +295,27 @@ function BravaisLatticeIcon({ info }: { info: DashboardBravaisInfo }) {
   );
 }
 
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M13.5 6.5l4 4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function findSliceAxis(primaryAxis: number, secondaryAxis: number): number | null {
   const selected = new Set([primaryAxis, secondaryAxis]);
   const remaining = RECIPROCAL_AXIS_OPTIONS.find((option) => !selected.has(option.value));
@@ -346,7 +387,8 @@ function getCalcTagClass(tag: { label: string; type: string }): string {
   const normalizedLabel = tag.label.trim().toUpperCase();
   const isHpcTag = normalizedLabel === "HPC";
   const isDownloadedTag = normalizedLabel === "DOWNLOADED";
-  return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}${isDownloadedTag ? " calc-tag-downloaded" : ""}`;
+  const isFailedTag = normalizedLabel === "FAILED";
+  return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}${isDownloadedTag ? " calc-tag-downloaded" : ""}${isFailedTag ? " calc-tag-failed" : ""}`;
 }
 
 function asNonNegativeInteger(value: unknown): number | null {
@@ -377,6 +419,20 @@ function isHpcArtifactsDownloaded(calc: CalculationRun): boolean {
   if (params.artifacts_downloaded_full === true) return true;
   const syncMode = String(params.artifact_sync_mode || "").trim().toLowerCase();
   return syncMode === "full";
+}
+
+function isFailedCalculation(calc: CalculationRun): boolean {
+  if (Array.isArray(calc.tags) && calc.tags.some((tag) => String(tag).trim().toLowerCase() === "failed")) {
+    return true;
+  }
+  const params = calc.parameters || {};
+  const status = String(params.run_status ?? params.status ?? "").trim().toLowerCase();
+  return status === "failed";
+}
+
+function getFailureReason(calc: CalculationRun): string | null {
+  const reason = String(calc.parameters?.failure_reason ?? calc.parameters?.error ?? "").trim();
+  return reason || null;
 }
 
 function isWannierReadyScf(calc: CalculationRun): boolean {
@@ -410,6 +466,10 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
       tags.push({ label, type });
     }
   };
+
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
 
   // Special tags from stored tags array (phonon-ready, structure-optimized).
   if (calc.tags) {
@@ -495,6 +555,9 @@ function getOptimizationMode(calc: CalculationRun): "relax" | "vcrelax" {
 function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
+  if (isFailedCalculation(calc)) {
+    tags.push({ label: "Failed", type: "feature" });
+  }
   tags.push({ label: "Geometry", type: "geometry" });
   tags.push({ label: getOptimizationMode(calc) === "vcrelax" ? "VC-Relax" : "Relax", type: "info" });
 
@@ -529,6 +592,10 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
       tags.push({ label, type });
     }
   };
+
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
 
   // K-points info
   if (params.total_k_points) {
@@ -577,6 +644,10 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
     }
   };
 
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
+
   if (params.dos_k_grid) {
     const [k1, k2, k3] = params.dos_k_grid;
     pushTag(`${k1}×${k2}×${k3} K`, "info");
@@ -620,6 +691,10 @@ function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "
     }
   };
 
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
+
   if (params.k_grid) {
     const [k1, k2, k3] = params.k_grid;
     pushTag(`${k1}×${k2}×${k3} K`, "info");
@@ -657,6 +732,10 @@ function getTransportTags(calc: CalculationRun): { label: string; type: "info" |
     }
   };
 
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
+
   if (params.boltz_kmesh) {
     const [k1, k2, k3] = params.boltz_kmesh;
     pushTag(`${k1}×${k2}×${k3} K`, "info");
@@ -691,6 +770,10 @@ function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info
       tags.push({ label, type });
     }
   };
+
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
 
   if (params.fermi_k_grid) {
     const [k1, k2, k3] = params.fermi_k_grid;
@@ -728,6 +811,10 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
 
+  if (isFailedCalculation(calc)) {
+    tags.push({ label: "Failed", type: "feature" });
+  }
+
   if (params.q_grid) {
     const [q1, q2, q3] = params.q_grid;
     tags.push({ label: `${q1}×${q2}×${q3} Q`, type: "info" });
@@ -760,6 +847,10 @@ function getEpwTags(calc: CalculationRun): { label: string; type: "info" | "feat
       tags.push({ label, type });
     }
   };
+
+  if (isFailedCalculation(calc)) {
+    pushTag("Failed", "feature");
+  }
 
   const fineKMesh = Array.isArray(params.fine_k_grid) ? params.fine_k_grid : params.k_mesh;
   const coarseQMesh = Array.isArray(params.coarse_q_grid) ? params.coarse_q_grid : params.q_mesh;
@@ -1223,6 +1314,9 @@ export function ProjectDashboard({
   const [showDeleteCalcDialog, setShowDeleteCalcDialog] = useState(false);
   const [calcToDelete, setCalcToDelete] = useState<{ calcId: string; calcType: string } | null>(null);
   const [isDeletingCalc, setIsDeletingCalc] = useState(false);
+  const [calculationNameEditor, setCalculationNameEditor] = useState<{ calcId: string; calcType: string } | null>(null);
+  const [calculationNameDraft, setCalculationNameDraft] = useState("");
+  const [isSavingCalculationName, setIsSavingCalculationName] = useState(false);
   const [showLudwigExportDialog, setShowLudwigExportDialog] = useState(false);
   const [calcToExportLudwig, setCalcToExportLudwig] = useState<CalculationRun | null>(null);
   const [isExportingLudwig, setIsExportingLudwig] = useState(false);
@@ -1244,6 +1338,20 @@ export function ProjectDashboard({
   const [downloadingCalcId, setDownloadingCalcId] = useState<string | null>(null);
   const [downloadProgressByCalcId, setDownloadProgressByCalcId] = useState<Record<string, HpcDownloadProgress>>({});
   const [calculationDetailsById, setCalculationDetailsById] = useState<Record<string, CalculationRun>>({});
+  const [fileViewer, setFileViewer] = useState<{
+    calcId: string;
+    calcType: string;
+    kind: "logs" | "inputs";
+    files: CalculationLogFile[];
+    activePath: string | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+  const [fileViewerCopyState, setFileViewerCopyState] = useState<{
+    path: string;
+    status: "copied" | "error";
+    message: string;
+  } | null>(null);
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -1256,6 +1364,10 @@ export function ProjectDashboard({
   useEffect(() => {
     setCalculationDetailsById({});
   }, [projectId]);
+
+  useEffect(() => {
+    setFileViewerCopyState(null);
+  }, [fileViewer?.calcId, fileViewer?.kind, fileViewer?.activePath]);
 
   function formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -1373,6 +1485,153 @@ export function ProjectDashboard({
         }
     ));
     return detail;
+  }
+
+  async function openCalculationFileViewer(calc: CalculationRun, kind: "logs" | "inputs") {
+    setError(null);
+    setInfoMessage(null);
+    setFileViewer({
+      calcId: calc.id,
+      calcType: calc.calc_type,
+      kind,
+      files: [],
+      activePath: null,
+      loading: true,
+      error: null,
+    });
+
+    try {
+      const command = kind === "logs" ? "get_project_calculation_logs" : "get_project_calculation_inputs";
+      const files = await invoke<CalculationLogFile[]>(command, {
+        projectId,
+        calcId: calc.id,
+      });
+      setFileViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        kind,
+        files,
+        activePath: files[0]?.path ?? null,
+        loading: false,
+        error: null,
+      });
+    } catch (e) {
+      console.error(`Failed to load calculation ${kind}:`, e);
+      setFileViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        kind,
+        files: [],
+        activePath: null,
+        loading: false,
+        error: String(e),
+      });
+    }
+  }
+
+  async function handleViewLogs(calc: CalculationRun) {
+    await openCalculationFileViewer(calc, "logs");
+  }
+
+  async function handleViewInput(calc: CalculationRun) {
+    await openCalculationFileViewer(calc, "inputs");
+  }
+
+  function closeFileViewer() {
+    setFileViewer(null);
+    setFileViewerCopyState(null);
+  }
+
+  function getActiveFileViewerFile(): CalculationLogFile | null {
+    if (!fileViewer || fileViewer.loading || fileViewer.error) return null;
+    return fileViewer.files.find((file) => file.path === fileViewer.activePath) ?? null;
+  }
+
+  async function handleCopyFileViewerContents() {
+    const activeFile = getActiveFileViewerFile();
+    if (!activeFile) return;
+    if (activeFile.size_bytes > FILE_VIEWER_COPY_LIMIT_BYTES) {
+      setFileViewerCopyState({
+        path: activeFile.path,
+        status: "error",
+        message: `Copy disabled above ${formatBytes(FILE_VIEWER_COPY_LIMIT_BYTES)}.`,
+      });
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard access is unavailable in this context.");
+      }
+      await navigator.clipboard.writeText(activeFile.contents);
+      setFileViewerCopyState({
+        path: activeFile.path,
+        status: "copied",
+        message: "Copied",
+      });
+      window.setTimeout(() => {
+        setFileViewerCopyState((current) => (
+          current?.path === activeFile.path && current.status === "copied" ? null : current
+        ));
+      }, 2000);
+    } catch (e) {
+      console.error("Failed to copy file contents:", e);
+      setFileViewerCopyState({
+        path: activeFile.path,
+        status: "error",
+        message: "Copy failed",
+      });
+    }
+  }
+
+  function renderCalculationFailure(calc: CalculationRun) {
+    const failureReason = getFailureReason(calc);
+    if (!isFailedCalculation(calc) && !failureReason) {
+      return null;
+    }
+
+    return (
+      <div className="warning-banner calculation-failure-banner">
+        <strong>Run failed.</strong> {failureReason || "Saved logs are available for debugging."}
+      </div>
+    );
+  }
+
+  function renderViewLogsButton(calc: CalculationRun) {
+    return (
+      <button
+        className="view-logs-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleViewLogs(calc);
+        }}
+      >
+        View Logs
+      </button>
+    );
+  }
+
+  function renderViewInputButton(calc: CalculationRun) {
+    return (
+      <button
+        className="view-logs-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleViewInput(calc);
+        }}
+      >
+        View Input
+      </button>
+    );
+  }
+
+  function renderSavedFileButtons(calc: CalculationRun) {
+    return (
+      <>
+        {renderViewInputButton(calc)}
+        {renderViewLogsButton(calc)}
+      </>
+    );
   }
 
   function updateCalculationRecords(
@@ -1497,6 +1756,88 @@ export function ProjectDashboard({
     });
     setInfoMessage(`Updated "${updatedProject.name}".`);
     setError(null);
+  }
+
+  function getCalculationEntryName(calc: CalculationRun): string | null {
+    const name = calc.name?.trim();
+    return name ? name : null;
+  }
+
+  function renderCalculationEntryName(calc: CalculationRun) {
+    const name = getCalculationEntryName(calc);
+    if (!name) return null;
+    return (
+      <span className="calc-entry-name" title={name}>
+        {name}
+      </span>
+    );
+  }
+
+  function openCalculationNameEditor(calc: CalculationRun) {
+    if (readOnly) return;
+    setCalculationNameEditor({ calcId: calc.id, calcType: calc.calc_type });
+    setCalculationNameDraft(getCalculationEntryName(calc) ?? "");
+    setError(null);
+    setInfoMessage(null);
+  }
+
+  function closeCalculationNameEditor() {
+    if (isSavingCalculationName) return;
+    setCalculationNameEditor(null);
+    setCalculationNameDraft("");
+  }
+
+  async function handleSaveCalculationName() {
+    if (readOnly || !selectedCifId || !calculationNameEditor) return;
+
+    const trimmedName = calculationNameDraft.trim();
+    if (trimmedName.length > MAX_CALCULATION_NAME_CHARS) {
+      setError(`Calculation names must be ${MAX_CALCULATION_NAME_CHARS} characters or fewer.`);
+      return;
+    }
+
+    setIsSavingCalculationName(true);
+    try {
+      const updatedCalculation = await invoke<CalculationRun>("update_calculation_name", {
+        projectId,
+        cifId: selectedCifId,
+        calcId: calculationNameEditor.calcId,
+        name: trimmedName || null,
+      });
+      const nextName = updatedCalculation.name ?? null;
+      updateCalculationRecords(calculationNameEditor.calcId, (calc) => ({
+        ...calc,
+        name: nextName,
+      }));
+      setCalculationNameEditor(null);
+      setCalculationNameDraft("");
+      setInfoMessage(nextName ? `Named calculation "${nextName}".` : "Cleared calculation name.");
+      setError(null);
+    } catch (e) {
+      console.error("Failed to update calculation name:", e);
+      setError(`Failed to update calculation name: ${e}`);
+    } finally {
+      setIsSavingCalculationName(false);
+    }
+  }
+
+  function renderRenameCalculationButton(calc: CalculationRun) {
+    if (readOnly) return null;
+    const hasName = Boolean(getCalculationEntryName(calc));
+    return (
+      <button
+        type="button"
+        className="rename-calc-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          openCalculationNameEditor(calc);
+        }}
+        title={hasName ? "Rename calculation" : "Name calculation"}
+        aria-label={hasName ? "Rename calculation" : "Name calculation"}
+      >
+        <PencilIcon />
+      </button>
+    );
   }
 
   async function handleConfirmDelete() {
@@ -1768,13 +2109,26 @@ export function ProjectDashboard({
 
   async function handleViewBands(calc: CalculationRun) {
     try {
+      if (!selectedCifId) {
+        setError("No active CIF variant is selected.");
+        return;
+      }
       const detail = await ensureCalculationDetails(calc);
       const bandData = detail.result?.band_data ?? calc.result?.band_data ?? null;
       if (!bandData) {
         setError("Saved band data is unavailable for this calculation.");
         return;
       }
-      onViewBands(bandData, detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null);
+      onViewBands(
+        bandData,
+        detail.result?.fermi_energy ?? calc.result?.fermi_energy ?? null,
+        (detail.parameters ?? calc.parameters ?? null) as Record<string, unknown> | null,
+        {
+          projectId,
+          cifId: selectedCifId,
+          calcId: calc.id,
+        },
+      );
     } catch (e) {
       console.error("Failed to load band data:", e);
       setError(`Failed to load band data: ${e}`);
@@ -2552,22 +2906,7 @@ function normalizeSavedKPath(value: unknown): string {
                     onClick={openEditProjectDialog}
                     aria-label="Edit project"
                   >
-                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <path
-                        d="M13.5 6.5l4 4"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
+                    <PencilIcon />
                   </button>
                 </InfoTooltip>
               )}
@@ -2664,22 +3003,7 @@ function normalizeSavedKPath(value: unknown): string {
                   onClick={openEditProjectDialog}
                   aria-label="Edit project"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                      d="M4 20h4l10-10a2.12 2.12 0 0 0-3-3L5 17v3z"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M13.5 6.5l4 4"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
+                  <PencilIcon />
                 </button>
               </InfoTooltip>
             )}
@@ -2957,6 +3281,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">SCF</span>
                         {calc.result && (
                           <span
@@ -2996,6 +3321,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3017,6 +3343,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && calc.result && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           {calc.result.total_energy && (
                             <div className="detail-item">
@@ -3050,6 +3377,7 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
+                          {renderSavedFileButtons(calc)}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (
                             <button
@@ -3090,6 +3418,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">BANDS</span>
                         {calc.parameters?.k_path && (
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
@@ -3118,6 +3447,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3139,6 +3469,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>K-Path</label>
@@ -3172,12 +3503,13 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {calc.result && (
+                          {renderSavedFileButtons(calc)}
+                          {!isFailedCalculation(calc) && (
                             <button
                               className="view-bands-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewBands(calc);
+                                void handleViewBands(calcData);
                               }}
                             >
                               View Bands
@@ -3225,6 +3557,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">DOS</span>
                         <div className="calc-tags">
                           {getDosTags(calc).map((tag, i) => (
@@ -3250,6 +3583,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3271,6 +3605,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>DOS K-Grid</label>
@@ -3316,12 +3651,13 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {calc.result && (
+                          {renderSavedFileButtons(calc)}
+                          {!isFailedCalculation(calc) && (
                             <button
                               className="view-dos-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewDos(calc);
+                                void handleViewDos(calcData);
                               }}
                             >
                               View DOS
@@ -3374,6 +3710,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">WANNIER</span>
                         {calc.parameters?.k_path && (
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
@@ -3402,6 +3739,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3423,6 +3761,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         {wannierIssues.length > 0 && (
                           <div className="warning-banner">
                             {wannierIssues.map((issue) => issue.message).join(" ")}
@@ -3498,12 +3837,13 @@ function normalizeSavedKPath(value: unknown): string {
                         ) : null}
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {calc.result && (
+                          {renderSavedFileButtons(calc)}
+                          {!isFailedCalculation(calc) && (
                             <button
                               className="view-bands-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewWannier(calc);
+                                void handleViewWannier(calcData);
                               }}
                             >
                               View Wannier
@@ -3563,6 +3903,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">BOLTZWANN</span>
                         <div className="calc-tags">
                           {getTransportTags(calc).map((tag, i) => (
@@ -3588,6 +3929,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3609,6 +3951,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>Source Wannier</label>
@@ -3658,12 +4001,13 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {(transportData || calc.result) && (
+                          {renderSavedFileButtons(calc)}
+                          {!isFailedCalculation(calc) && (
                             <button
                               className="view-dos-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewTransport(calc);
+                                void handleViewTransport(calcData);
                               }}
                             >
                               View Transport
@@ -3692,7 +4036,7 @@ function normalizeSavedKPath(value: unknown): string {
         )}
 
         {/* Fermi Surface Calculations */}
-        {!readOnly && fermiSurfaceCalculations.length > 0 && (
+        {fermiSurfaceCalculations.length > 0 && (
           <section className="history-section fermi-surface-section">
             <h3>Fermi Surface</h3>
             <div className="calculations-list">
@@ -3724,6 +4068,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">FERMI</span>
                         <div className="calc-tags">
                           {getFermiSurfaceTags(calc).map((tag, i) => (
@@ -3749,6 +4094,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3770,6 +4116,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>Dense K-Grid</label>
@@ -3821,11 +4168,12 @@ function normalizeSavedKPath(value: unknown): string {
                         )}
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
+                          {renderSavedFileButtons(calc)}
                           <button
                             className="view-fermi-btn"
                             onClick={(e) => {
                               e.stopPropagation();
-                              void handleViewFermiSurface(calc, primaryFile);
+                              void handleViewFermiSurface(calcData, primaryFile);
                             }}
                             disabled={launchingFermiCalcId === calc.id || (!primaryFile && surfaceFiles.length === 0)}
                           >
@@ -3885,6 +4233,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">PHONON</span>
                         {calc.parameters?.q_path && (
                           <span className="calc-kpath">{calc.parameters.q_path}</span>
@@ -3913,6 +4262,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -3934,6 +4284,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>Q-Grid</label>
@@ -3973,12 +4324,13 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
+                          {renderSavedFileButtons(calc)}
                           {hasDispersion && (
                             <button
                               className="view-phonon-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewPhonon(calc, "bands", fallbackPhononData);
+                                void handleViewPhonon(calcData, "bands", fallbackPhononData);
                               }}
                             >
                               View Bands
@@ -3989,7 +4341,7 @@ function normalizeSavedKPath(value: unknown): string {
                               className="view-phonon-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewPhonon(calc, "dos", fallbackPhononData);
+                                void handleViewPhonon(calcData, "dos", fallbackPhononData);
                               }}
                             >
                               View DOS
@@ -4063,6 +4415,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">EPW</span>
                         <div className="calc-tags">
                           {getEpwTags(calc).map((tag, i) => (
@@ -4088,6 +4441,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -4109,6 +4463,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>Fine K-Mesh</label>
@@ -4156,12 +4511,13 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
-                          {(epwData || calc.result) && (
+                          {renderSavedFileButtons(calc)}
+                          {!isFailedCalculation(calc) && (
                             <button
                               className="view-dos-btn"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                void handleViewEPW(calc);
+                                void handleViewEPW(calcData);
                               }}
                             >
                               View EPW Results
@@ -4289,6 +4645,7 @@ function normalizeSavedKPath(value: unknown): string {
                       }}
                     >
                       <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
                         <span className="calc-type">OPT</span>
                         {calc.result && (
                           <span
@@ -4328,6 +4685,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
                             ? formatDate(calc.completed_at)
@@ -4349,6 +4707,7 @@ function normalizeSavedKPath(value: unknown): string {
 
                     {expandedCalc === calc.id && (
                       <div className="calculation-details">
+                        {renderCalculationFailure(calc)}
                         <div className="details-grid">
                           <div className="detail-item">
                             <label>Mode</label>
@@ -4420,6 +4779,7 @@ function normalizeSavedKPath(value: unknown): string {
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
+                          {renderSavedFileButtons(calc)}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (
                             <button
@@ -4460,6 +4820,69 @@ function normalizeSavedKPath(value: unknown): string {
             onClose={() => setShowCifSubstitutionDialog(false)}
             onSaved={handleCifSubstitutionSaved}
           />
+
+          {calculationNameEditor && (
+            <div className="dialog-overlay" onClick={closeCalculationNameEditor}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Name Calculation</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={closeCalculationNameEditor}
+                    disabled={isSavingCalculationName}
+                  >
+                    &times;
+                  </button>
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleSaveCalculationName();
+                  }}
+                >
+                  <div className="dialog-body">
+                    <div className="save-form">
+                      <div className="form-group">
+                        <label>{calculationNameEditor.calcType.toUpperCase()} entry name</label>
+                        <input
+                          type="text"
+                          value={calculationNameDraft}
+                          onChange={(e) => setCalculationNameDraft(e.target.value)}
+                          maxLength={MAX_CALCULATION_NAME_CHARS}
+                          placeholder="Optional name"
+                          disabled={isSavingCalculationName}
+                          autoFocus
+                        />
+                        <span className="form-hint">
+                          Leave blank to use the default entry label.
+                        </span>
+                        <span className="form-hint">
+                          {calculationNameDraft.length}/{MAX_CALCULATION_NAME_CHARS}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="dialog-footer">
+                    <button
+                      type="button"
+                      className="dialog-btn cancel"
+                      onClick={closeCalculationNameEditor}
+                      disabled={isSavingCalculationName}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="dialog-btn save"
+                      disabled={isSavingCalculationName}
+                    >
+                      {isSavingCalculationName ? "Saving..." : "Save Name"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
 
           {showLudwigExportDialog && calcToExportLudwig && (
             <div className="dialog-overlay" onClick={closeLudwigExportDialog}>
@@ -4673,6 +5096,83 @@ function normalizeSavedKPath(value: unknown): string {
             </div>
           )}
         </>
+      )}
+      {fileViewer && (
+        <div className="dialog-overlay" onClick={closeFileViewer}>
+          <div className="dialog-content dialog-large calculation-logs-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>{fileViewer.calcType.toUpperCase()} {fileViewer.kind === "logs" ? "Logs" : "Input Files"}</h2>
+              <div className="calculation-viewer-header-actions">
+                <button
+                  type="button"
+                  className="view-logs-btn"
+                  onClick={() => {
+                    void handleCopyFileViewerContents();
+                  }}
+                  disabled={
+                    !getActiveFileViewerFile()
+                    || getActiveFileViewerFile()!.size_bytes > FILE_VIEWER_COPY_LIMIT_BYTES
+                  }
+                  title={(() => {
+                    const activeFile = getActiveFileViewerFile();
+                    if (!activeFile) return "No file selected";
+                    if (activeFile.size_bytes > FILE_VIEWER_COPY_LIMIT_BYTES) {
+                      return `Copy disabled for files larger than ${formatBytes(FILE_VIEWER_COPY_LIMIT_BYTES)}.`;
+                    }
+                    return `Copy ${activeFile.path}`;
+                  })()}
+                >
+                  {(() => {
+                    const activeFile = getActiveFileViewerFile();
+                    if (!activeFile) return "Copy";
+                    if (activeFile.size_bytes > FILE_VIEWER_COPY_LIMIT_BYTES) {
+                      return "Too Large to Copy";
+                    }
+                    if (fileViewerCopyState?.path === activeFile.path) {
+                      return fileViewerCopyState.message;
+                    }
+                    return "Copy";
+                  })()}
+                </button>
+                <button className="dialog-close" onClick={closeFileViewer}>
+                  &times;
+                </button>
+              </div>
+            </div>
+            <div className="dialog-body calculation-logs-body">
+              {fileViewer.loading ? (
+                <p>Loading {fileViewer.kind === "logs" ? "logs" : "input files"}...</p>
+              ) : fileViewer.error ? (
+                <div className="error-banner">{fileViewer.error}</div>
+              ) : fileViewer.files.length === 0 ? (
+                <p>No saved {fileViewer.kind === "logs" ? "logs" : "input files"} were found for this calculation.</p>
+              ) : (
+                <>
+                  <div className="calculation-log-list">
+                    {fileViewer.files.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        className={`calculation-log-tab ${fileViewer.activePath === file.path ? "active" : ""}`}
+                        onClick={() => {
+                          setFileViewer((current) => current ? { ...current, activePath: file.path } : current);
+                        }}
+                      >
+                        <span>{file.path}</span>
+                        <small>{formatBytes(file.size_bytes)}</small>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="calculation-log-content">
+                    <pre>
+                      {fileViewer.files.find((file) => file.path === fileViewer.activePath)?.contents || ""}
+                    </pre>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
