@@ -942,6 +942,11 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   margin-top: 0;
 }
 
+.paste-copied-run-btn.is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* SCF configure actions should live in the fixed bottom action lane */
 .wizard-container.wizard-step-configure .run-btn-group {
   position: fixed;
@@ -4916,12 +4921,39 @@ html[data-theme="dark"] .node-activity-empty-cell {
   transition: color 0.15s ease, background 0.15s ease;
 }
 
+.copy-calc-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: -0.65rem;
+  margin-right: -0.35rem;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #718096;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
 .calculation-header:hover .rename-calc-btn,
 .rename-calc-btn:focus-visible {
   display: flex;
 }
 
+.calculation-header:hover .copy-calc-btn,
+.copy-calc-btn:focus-visible {
+  display: flex;
+}
+
 .rename-calc-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.copy-calc-btn svg {
   width: 14px;
   height: 14px;
 }
@@ -4932,11 +4964,18 @@ html[data-theme="dark"] .node-activity-empty-cell {
   background: #edf2f7;
 }
 
+.copy-calc-btn:hover,
+.copy-calc-btn:focus-visible {
+  color: #2d3748;
+  background: #edf2f7;
+}
+
 @media (hover: none) {
   .pin-calc-btn {
     opacity: 1;
   }
 
+  .copy-calc-btn,
   .rename-calc-btn {
     display: flex;
   }
@@ -5149,8 +5188,18 @@ html[data-theme="dark"] {
     color: #a0aec0;
   }
 
+  .copy-calc-btn {
+    color: #a0aec0;
+  }
+
   .rename-calc-btn:hover,
   .rename-calc-btn:focus-visible {
+    color: #f7fafc;
+    background: #4a5568;
+  }
+
+  .copy-calc-btn:hover,
+  .copy-calc-btn:focus-visible {
     color: #f7fafc;
     background: #4a5568;
   }
@@ -9531,6 +9580,11 @@ html[data-theme="dark"] .run-step-status-pill.error {
 html[data-theme="dark"] .run-status-rail {
   background: #1e1e2e;
   border-color: #313244;
+}
+
+html[data-theme="dark"] .paste-copied-run-btn.is-disabled {
+  opacity: 0.55;
+  color: #94a3b8;
 }
 
 html[data-theme="dark"] .results-panel {

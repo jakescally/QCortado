@@ -18,6 +18,10 @@ import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import {
+  rememberScfRunSettingsClipboardText,
+  serializeScfRunSettings,
+} from "../lib/scfRunSettingsClipboard";
 import { CifSubstitutionDialog } from "./CifSubstitutionDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
@@ -307,6 +311,29 @@ function PencilIcon() {
       />
       <path
         d="M13.5 6.5l4 4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect
+        x="9"
+        y="9"
+        width="11"
+        height="11"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"
@@ -1840,6 +1867,58 @@ export function ProjectDashboard({
     );
   }
 
+  async function handleCopyScfRunSettings(calc: CalculationRun) {
+    setError(null);
+    setInfoMessage(null);
+    try {
+      const detailed = await ensureCalculationDetails(calc);
+      const serializedText = serializeScfRunSettings({
+        id: detailed.id,
+        calc_type: detailed.calc_type,
+        name: detailed.name,
+        parameters: detailed.parameters,
+      });
+      rememberScfRunSettingsClipboardText(serializedText);
+      let wroteToSystemClipboard = false;
+
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(serializedText);
+          wroteToSystemClipboard = true;
+        }
+      } catch (clipboardError) {
+        console.warn("System clipboard write unavailable; using in-app copied settings only.", clipboardError);
+      }
+
+      setInfoMessage(
+        wroteToSystemClipboard
+          ? "Copied run settings."
+          : "Copied run settings in-app. System clipboard access is unavailable in this context.",
+      );
+    } catch (e) {
+      console.error("Failed to copy SCF run settings:", e);
+      setError(`Failed to copy run settings: ${e}`);
+    }
+  }
+
+  function renderCopyScfSettingsButton(calc: CalculationRun) {
+    if (calc.calc_type !== "scf" && calc.calc_type !== "optimization") return null;
+    return (
+      <button
+        type="button"
+        className="copy-calc-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleCopyScfRunSettings(calc);
+        }}
+        title="Copy run settings"
+        aria-label="Copy run settings"
+      >
+        <CopyIcon />
+      </button>
+    );
+  }
+
   async function handleConfirmDelete() {
     if (readOnly) return;
     if (deleteConfirmText !== DELETE_CONFIRM_TEXT) return;
@@ -2064,11 +2143,20 @@ export function ProjectDashboard({
     );
   }
 
-  function handleRunOptimization() {
+  async function handleRunOptimization() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunSCF(selectedCifId, crystalData, cifContent, variant.filename, "relax", true);
+    const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
+    onRunSCF(
+      selectedCifId,
+      crystalData,
+      cifContent,
+      variant.filename,
+      "relax",
+      true,
+      optimizedStructures,
+    );
   }
 
   function handleRunBands() {
@@ -3321,6 +3409,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderCopyScfSettingsButton(calc)}
                         {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
@@ -3447,6 +3536,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
+                        {renderCopyScfSettingsButton(calc)}
                         {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at

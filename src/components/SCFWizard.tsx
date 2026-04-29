@@ -58,6 +58,14 @@ import {
   SSSPElementData,
   summarizeSelectedPseudoCutoffs,
 } from "../lib/pseudopotentialCutoffs";
+import {
+  getStoredScfRunSettingsClipboardText,
+  hasStoredScfRunSettingsClipboardText,
+  parseScfRunSettingsClipboardText,
+  rememberScfRunSettingsClipboardText,
+  SCF_RUN_SETTINGS_UPDATED_EVENT,
+  ScfRunSettingsClipboardPayload,
+} from "../lib/scfRunSettingsClipboard";
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;
@@ -186,6 +194,40 @@ function normalizeHubbardManifold(raw: string): string {
   return raw.trim().replace(/\s+/g, "");
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+function asNumberTriplet(value: unknown): [number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 3) return null;
+  const parsed = value.map((entry) => asFiniteNumber(entry));
+  if (parsed.some((entry) => entry === null)) return null;
+  return [parsed[0]!, parsed[1]!, parsed[2]!];
+}
+
+function toIntegerTriplet(value: [number, number, number]): [number, number, number] {
+  return value.map((entry) => Math.max(1, Math.round(entry))) as [number, number, number];
+}
+
+function toOffsetTriplet(value: [number, number, number]): [number, number, number] {
+  return value.map((entry) => (entry >= 0.5 ? 1 : 0)) as [number, number, number];
+}
+
 type PseudopotentialPreset = "sssp" | "paw" | "uspp" | "ncpp";
 
 export function SCFWizard({
@@ -215,6 +257,10 @@ export function SCFWizard({
   const [cifFilename, setCifFilename] = useState<string>(initialCif?.filename || "");
   const [cifContent, setCifContent] = useState<string>(initialCif?.cifContent || "");
   const [error, setError] = useState<string | null>(null);
+  const [copiedRunSettingsAvailable, setCopiedRunSettingsAvailable] = useState<boolean>(
+    hasStoredScfRunSettingsClipboardText(),
+  );
+  const [copiedRunSettingsMessage, setCopiedRunSettingsMessage] = useState<string | null>(null);
 
   // Track project context for saving
   const [projectContext, setProjectContext] = useState<{ projectId: string; cifId: string } | null>(
@@ -408,6 +454,24 @@ export function SCFWizard({
     });
   }, [activeQueueItem, projectContext]);
 
+  useEffect(() => {
+    const refresh = () => {
+      void refreshCopiedRunSettingsAvailability();
+    };
+    refresh();
+    window.addEventListener(SCF_RUN_SETTINGS_UPDATED_EVENT, refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener(SCF_RUN_SETTINGS_UPDATED_EVENT, refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (step !== "configure") return;
+    void refreshCopiedRunSettingsAvailability();
+  }, [step]);
+
   // Reconnect to a running/completed background task
   useEffect(() => {
     if (!activeTaskId) return;
@@ -514,6 +578,9 @@ export function SCFWizard({
   const lockedPreset = presetLock && initialPreset ? initialPreset : null;
   const isOptimizationWizard = lockedPreset === "relax";
   const wizardTitle = isOptimizationWizard ? "Structure Optimization Wizard" : "SCF Calculation Wizard";
+  const structureSourceTooltip = isOptimizationWizard
+    ? "For complicated runs, you may want to run a relaxation with a coarse k-grid, then use that result as a structure source and run a finer relaxation."
+    : "Choose the geometry used for this SCF. 'From CIF' uses the original imported structure; optimized structures come from saved geometry optimization runs.";
   const showPresetRow = !lockedPreset || lockedPreset === "relax" || lockedPreset === "soc";
   const showRelaxPreset = lockedPreset === "relax";
   const showSocPreset = !lockedPreset || lockedPreset === "soc";
@@ -1169,6 +1236,354 @@ export function SCFWizard({
     }
     if (!crystalData) return [];
     return [...new Set(crystalData.atom_sites.map((a) => getBaseElement(a.type_symbol)))];
+  }
+
+  function isSameMaterialAsClipboard(payload: ScfRunSettingsClipboardPayload): boolean {
+    const currentElements = new Set(getUniqueElements().map((symbol) => getBaseElement(symbol)));
+    if (currentElements.size === 0) return false;
+    const copiedElements = new Set(payload.source.element_symbols.map((symbol) => getBaseElement(symbol)));
+    if (copiedElements.size !== currentElements.size) return false;
+    for (const symbol of copiedElements) {
+      if (!currentElements.has(symbol)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function refreshCopiedRunSettingsAvailability() {
+    let available = hasStoredScfRunSettingsClipboardText();
+    if (available) {
+      setCopiedRunSettingsAvailable(true);
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.readText) {
+        const clipboardText = await navigator.clipboard.readText();
+        const parsed = parseScfRunSettingsClipboardText(clipboardText);
+        if (parsed) {
+          rememberScfRunSettingsClipboardText(clipboardText);
+          available = true;
+        }
+      }
+    } catch {
+      // Ignore clipboard-read failures; availability falls back to in-app copied state.
+    }
+    setCopiedRunSettingsAvailable(available);
+  }
+
+  function applyCopiedScfSettings(payload: ScfRunSettingsClipboardPayload): {
+    applied: boolean;
+    skippedElementSpecific: boolean;
+  } {
+    const settings = asRecord(payload.settings);
+    if (!settings) {
+      return { applied: false, skippedElementSpecific: false };
+    }
+
+    const currentElements = new Set(getUniqueElements().map((symbol) => getBaseElement(symbol)));
+    const sameMaterial = isSameMaterialAsClipboard(payload);
+    const selectedPseudosForCurrentMaterial: Record<string, string> | null = sameMaterial
+      ? (() => {
+        const selectedPseudos = asRecord(settings.selected_pseudos);
+        if (!selectedPseudos) return null;
+        const nextPseudos: Record<string, string> = {};
+        for (const [element, filename] of Object.entries(selectedPseudos)) {
+          const normalized = getBaseElement(element);
+          if (!currentElements.has(normalized)) continue;
+          const text = String(filename ?? "").trim();
+          if (!text) continue;
+          nextPseudos[normalized] = text;
+        }
+        return nextPseudos;
+      })()
+      : null;
+    const filterByCurrentElements = (value: unknown): Record<string, number> => {
+      const raw = asRecord(value);
+      if (!raw) return {};
+      const next: Record<string, number> = {};
+      for (const [element, amount] of Object.entries(raw)) {
+        const normalized = getBaseElement(element);
+        if (!currentElements.has(normalized)) continue;
+        const numeric = asFiniteNumber(amount);
+        if (numeric == null) continue;
+        next[normalized] = numeric;
+      }
+      return next;
+    };
+    const filterManifoldsByCurrentElements = (value: unknown): Record<string, string> => {
+      const raw = asRecord(value);
+      if (!raw) return {};
+      const next: Record<string, string> = {};
+      for (const [element, manifold] of Object.entries(raw)) {
+        const normalized = getBaseElement(element);
+        if (!currentElements.has(normalized)) continue;
+        const text = String(manifold ?? "").trim();
+        if (!text) continue;
+        next[normalized] = text;
+      }
+      return next;
+    };
+
+    setConfig((prev) => {
+      const next: SCFConfig = { ...prev };
+
+      const calculationMode = settings.calculation_mode;
+      if (calculationMode === "scf" || calculationMode === "relax" || calculationMode === "vcrelax") {
+        next.calculation = calculationMode;
+      }
+
+      const occupations = settings.occupations;
+      if (
+        occupations === "smearing" || occupations === "tetrahedra" || occupations === "tetrahedra_lin"
+        || occupations === "tetrahedra_opt" || occupations === "fixed" || occupations === "from_input"
+      ) {
+        next.occupations = occupations;
+      }
+
+      const smearing = settings.smearing;
+      if (
+        smearing === "gaussian" || smearing === "methfessel-paxton"
+        || smearing === "marzari-vanderbilt" || smearing === "fermi-dirac" || smearing === "cold"
+      ) {
+        next.smearing = smearing;
+      }
+
+      const simpleNumberFields: Array<[keyof SCFConfig, unknown]> = [
+        ["ecutwfc", settings.ecutwfc],
+        ["ecutrho", settings.ecutrho],
+        ["degauss", settings.degauss],
+        ["conv_thr", settings.conv_thr],
+        ["mixing_beta", settings.mixing_beta],
+        ["forc_conv_thr", settings.forc_conv_thr],
+        ["etot_conv_thr", settings.etot_conv_thr],
+        ["press", settings.press],
+        ["electron_maxstep", settings.electron_maxstep],
+        ["mixing_ndim", settings.mixing_ndim],
+        ["tot_charge", settings.tot_charge],
+      ];
+      for (const [field, value] of simpleNumberFields) {
+        const parsed = asFiniteNumber(value);
+        if (parsed != null) {
+          (next[field] as number) = parsed;
+        }
+      }
+
+      const nbndValue = settings.nbnd;
+      if (nbndValue == null || nbndValue === "") {
+        next.nbnd = null;
+      } else {
+        const parsedNbnd = asFiniteNumber(nbndValue);
+        if (parsedNbnd != null) {
+          next.nbnd = Math.max(1, Math.round(parsedNbnd));
+        }
+      }
+
+      const kgrid = asNumberTriplet(settings.kgrid);
+      if (kgrid) {
+        next.kgrid = toIntegerTriplet(kgrid);
+      }
+      const kgridOffset = asNumberTriplet(settings.kgrid_offset);
+      if (kgridOffset) {
+        next.kgrid_offset = toOffsetTriplet(kgridOffset);
+      }
+
+      const nspin = asFiniteNumber(settings.nspin);
+      if (nspin === 1 || nspin === 2 || nspin === 4) {
+        next.nspin = nspin;
+      }
+
+      const boolFields: Array<[keyof SCFConfig, unknown]> = [
+        ["noncolin", settings.noncolin],
+        ["lspinorb", settings.lspinorb],
+        ["tprnfor", settings.tprnfor],
+        ["tstress", settings.tstress],
+      ];
+      for (const [field, value] of boolFields) {
+        const parsed = asBoolean(value);
+        if (parsed != null) {
+          (next[field] as boolean) = parsed;
+        }
+      }
+
+      const totMag = settings.tot_magnetization;
+      if (totMag == null || totMag === "") {
+        next.tot_magnetization = null;
+      } else {
+        const parsedTotMag = asFiniteNumber(totMag);
+        if (parsedTotMag != null) {
+          next.tot_magnetization = parsedTotMag;
+        }
+      }
+
+      const constrainedMag = settings.constrained_magnetization;
+      if (
+        constrainedMag === "none" || constrainedMag === "total"
+        || constrainedMag === "atomic" || constrainedMag === "total direction"
+        || constrainedMag === "atomic direction"
+      ) {
+        next.constrained_magnetization = constrainedMag;
+      }
+
+      const vdw = settings.vdw_corr;
+      if (
+        vdw === "none" || vdw === "grimme-d2" || vdw === "grimme-d3"
+        || vdw === "ts-vdw" || vdw === "xdm" || vdw === "dft-d"
+      ) {
+        next.vdw_corr = vdw;
+      }
+
+      const assumeIsolated = settings.assume_isolated;
+      if (
+        assumeIsolated === "none" || assumeIsolated === "makov-payne"
+        || assumeIsolated === "martyna-tuckerman" || assumeIsolated === "esm"
+        || assumeIsolated === "2D"
+      ) {
+        next.assume_isolated = assumeIsolated;
+      }
+
+      const verbosity = settings.verbosity;
+      if (verbosity === "low" || verbosity === "high") {
+        next.verbosity = verbosity;
+      }
+
+      const diskIo = settings.disk_io;
+      if (diskIo === "low" || diskIo === "medium" || diskIo === "high" || diskIo === "nowf") {
+        next.disk_io = diskIo;
+      }
+
+      const mixingMode = settings.mixing_mode;
+      if (mixingMode === "plain" || mixingMode === "TF" || mixingMode === "local-TF") {
+        next.mixing_mode = mixingMode;
+      }
+
+      const diagonalization = settings.diagonalization;
+      if (
+        diagonalization === "david" || diagonalization === "cg" || diagonalization === "ppcg"
+        || diagonalization === "paro" || diagonalization === "rmm-davidson"
+      ) {
+        next.diagonalization = diagonalization;
+      }
+
+      const startingpot = settings.startingpot;
+      if (startingpot === "atomic" || startingpot === "file") {
+        next.startingpot = startingpot;
+      }
+
+      const startingwfc = settings.startingwfc;
+      if (
+        startingwfc === "atomic" || startingwfc === "atomic+random"
+        || startingwfc === "random" || startingwfc === "file"
+      ) {
+        next.startingwfc = startingwfc;
+      }
+
+      const inputDft = settings.input_dft;
+      if (typeof inputDft === "string") {
+        next.input_dft = inputDft;
+      }
+
+      if (sameMaterial) {
+        const startingMag = filterByCurrentElements(settings.starting_magnetization);
+        if (Object.keys(startingMag).length > 0) {
+          next.starting_magnetization = startingMag;
+        }
+
+        const ldaPlusU = asBoolean(settings.lda_plus_u);
+        if (ldaPlusU != null) {
+          next.lda_plus_u = ldaPlusU;
+        }
+
+        const hubbardProjector = settings.hubbard_projector;
+        if (
+          hubbardProjector === "atomic" || hubbardProjector === "ortho-atomic"
+          || hubbardProjector === "norm-atomic" || hubbardProjector === "wf"
+          || hubbardProjector === "pseudo"
+        ) {
+          next.hubbard_projector = hubbardProjector;
+        }
+
+        const hubbardKind = asFiniteNumber(settings.hubbard_formulation);
+        if (hubbardKind === 0 || hubbardKind === 1 || hubbardKind === 2) {
+          next.lda_plus_u_kind = hubbardKind;
+        }
+
+        const hubbardManifold = filterManifoldsByCurrentElements(settings.hubbard_manifold);
+        if (Object.keys(hubbardManifold).length > 0) {
+          next.hubbard_manifold = hubbardManifold;
+        }
+
+        const hubbardU = filterByCurrentElements(settings.hubbard_u);
+        if (Object.keys(hubbardU).length > 0) {
+          next.hubbard_u = hubbardU;
+        }
+
+        const hubbardJ = filterByCurrentElements(settings.hubbard_j);
+        if (Object.keys(hubbardJ).length > 0) {
+          next.hubbard_j = hubbardJ;
+        }
+      }
+
+      return next;
+    });
+
+    const copiedConvThr = asFiniteNumber(settings.conv_thr);
+    setConvThrInput(copiedConvThr != null ? String(copiedConvThr) : String(config.conv_thr));
+    if (selectedPseudosForCurrentMaterial) {
+      setSelectedPseudos(selectedPseudosForCurrentMaterial);
+      setPseudoPresetWarnings({});
+    }
+    setSelectedPreset(null);
+
+    return {
+      applied: true,
+      skippedElementSpecific: !sameMaterial,
+    };
+  }
+
+  async function handlePasteFromCopiedRun() {
+    setError(null);
+    setCopiedRunSettingsMessage(null);
+    let payload: ScfRunSettingsClipboardPayload | null = null;
+    let clipboardText: string | null = null;
+
+    try {
+      if (navigator.clipboard?.readText) {
+        clipboardText = await navigator.clipboard.readText();
+        payload = parseScfRunSettingsClipboardText(clipboardText);
+      }
+    } catch {
+      // Ignore clipboard-read failures and fall back to in-app stored copy.
+    }
+
+    if (!payload) {
+      const storedText = getStoredScfRunSettingsClipboardText();
+      payload = parseScfRunSettingsClipboardText(storedText);
+      clipboardText = storedText;
+    }
+
+    if (!payload) {
+      setCopiedRunSettingsAvailable(false);
+      setCopiedRunSettingsMessage("No copied run settings were found. Copy an existing run first.");
+      return;
+    }
+
+    if (clipboardText) {
+      rememberScfRunSettingsClipboardText(clipboardText);
+    }
+
+    const applyOutcome = applyCopiedScfSettings(payload);
+    if (!applyOutcome.applied) {
+      setCopiedRunSettingsMessage("Copied settings could not be parsed.");
+      return;
+    }
+    setCopiedRunSettingsAvailable(true);
+    if (applyOutcome.skippedElementSpecific) {
+      setCopiedRunSettingsMessage("Pasted settings. Element-specific options were skipped because the material differs.");
+    } else {
+      setCopiedRunSettingsMessage("Pasted settings from copied run.");
+    }
   }
 
   const hubbardDefaultElements = getUniqueElements();
@@ -2073,6 +2488,7 @@ export function SCFWizard({
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+      {copiedRunSettingsMessage && <div className="info-banner">{copiedRunSettingsMessage}</div>}
 
       <div className="wizard-content">
         {step === "import" && (
@@ -2349,25 +2765,23 @@ export function SCFWizard({
                         </div>
                       </div>
 
-                      {!isOptimizationWizard && (
-                        <div className="param-row">
-                          <label>
-                            Structure Source
-                            <InfoTooltip text="Choose the geometry used for this SCF. 'From CIF' uses the original imported structure; optimized structures come from saved geometry optimization runs." />
-                          </label>
-                          <select
-                            value={structureSource}
-                            onChange={(e) => setStructureSource(e.target.value)}
-                          >
-                            <option value="cif">From CIF (original structure)</option>
-                            {optimizedStructures.map((option) => (
-                              <option key={option.calcId} value={option.calcId}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
+                      <div className="param-row">
+                        <label>
+                          Structure Source
+                          <InfoTooltip text={structureSourceTooltip} />
+                        </label>
+                        <select
+                          value={structureSource}
+                          onChange={(e) => setStructureSource(e.target.value)}
+                        >
+                          <option value="cif">From CIF (original structure)</option>
+                          {optimizedStructures.map((option) => (
+                            <option key={option.calcId} value={option.calcId}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
 
                       <div className="param-row">
                         <label>
@@ -3079,6 +3493,15 @@ export function SCFWizard({
                 )}
 
                 <div className="run-btn-group">
+                  <button
+                    className={`secondary-button paste-copied-run-btn ${copiedRunSettingsAvailable ? "" : "is-disabled"}`}
+                    onClick={() => void handlePasteFromCopiedRun()}
+                    title={copiedRunSettingsAvailable
+                      ? "Paste settings from copied run"
+                      : "Copy an Existing Run's Settings First"}
+                  >
+                    Paste from copied run
+                  </button>
                   {projectContext && !isHpcMode && (
                     <button
                       className="secondary-button"

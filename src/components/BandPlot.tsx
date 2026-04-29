@@ -98,6 +98,7 @@ export type ColorMode = "single" | "rainbow";
 export type RainbowPalette = "jet" | "sinebow";
 type ProjectionMode = "atom" | "orbital";
 type ProjectionNormalizeMode = "global" | "band";
+type ProjectionRenderMode = "fat" | "color";
 type FatColorMode = "accent" | "band";
 export type FermiReferenceMode = "scf" | "bands";
 export type ZeroEnergyReferenceMode = "calculated-fermi" | "vbm";
@@ -239,6 +240,46 @@ function sinebowColor(t: number): string {
   const g = 255 * Math.pow(Math.sin(a + (2 * Math.PI) / 3), 2);
   const b = 255 * Math.pow(Math.sin(a + (4 * Math.PI) / 3), 2);
   return rgbString(r, g, b);
+}
+
+function projectionScaleColor(t: number): string {
+  const x = clamp01(t);
+  const blue = { r: 25, g: 70, b: 238 };
+  const red = { r: 232, g: 48, b: 38 };
+  return rgbString(
+    blue.r + (red.r - blue.r) * x,
+    blue.g + (red.g - blue.g) * x,
+    blue.b + (red.b - blue.b) * x,
+  );
+}
+
+function projectionWeightColor(value: number, min: number, max: number): string {
+  const span = max - min;
+  const t = span > 1e-12 ? (value - min) / span : 0;
+  return projectionScaleColor(t);
+}
+
+function buildProjectionLegendTicks(
+  min: number,
+  max: number,
+  tickCount: number,
+): number[] {
+  const count = Math.max(2, Math.min(12, Math.round(tickCount)));
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+    return [];
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const t = count <= 1 ? 0 : index / (count - 1);
+    return max - (max - min) * t;
+  });
+}
+
+function formatProjectionLegendLabel(label: string): string {
+  const trimmed = label.trim() || "Selected";
+  if (/projection$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed} orbital projection`;
 }
 
 function bandColorForIndex(
@@ -1013,6 +1054,7 @@ export function BandPlot({
   const svgRef = useRef<SVGSVGElement>(null);
   const plotCanvasRef = useRef<HTMLDivElement>(null);
   const clipPathId = useId();
+  const projectionGradientId = useId();
   const [hoveredPoint, setHoveredPoint] = useState<HoveredPoint | null>(null);
   const [isHoveringPlot, setIsHoveringPlot] = useState(false);
 
@@ -1061,6 +1103,7 @@ export function BandPlot({
 
   // Fat-band controls
   const [fatBandsEnabled, setFatBandsEnabled] = useState(false);
+  const [projectionRenderMode, setProjectionRenderMode] = useState<ProjectionRenderMode>("fat");
   const [projectionMode, setProjectionMode] = useState<ProjectionMode>("atom");
   const [selectedOrbitalElementKey, setSelectedOrbitalElementKey] = useState("");
   const [selectedProjectionId, setSelectedProjectionId] = useState("");
@@ -1071,6 +1114,9 @@ export function BandPlot({
   const [fatColorMode, setFatColorMode] = useState<FatColorMode>("band");
   const [fatAccentColor, setFatAccentColor] = useState("#f57c00");
   const [showLinesWithFat, setShowLinesWithFat] = useState(true);
+  const [projectionColorMin, setProjectionColorMin] = useState(0.2);
+  const [projectionColorMax, setProjectionColorMax] = useState(0.4);
+  const [projectionLegendTickCount, setProjectionLegendTickCount] = useState(9);
 
   // Plot background toggle
   const [plotBgWhite, setPlotBgWhite] = useState(true);
@@ -1369,16 +1415,30 @@ export function BandPlot({
   );
   const fermiLabelFontSize = axisTickFontSize;
   const fermiLabelYOffset = fermiLabelFontSize * 0.35;
+  const projectionLegendReservedWidth =
+    viewerType === "electronic" && fatBandsEnabled && projectionRenderMode === "color"
+      ? Math.round(Math.max(84, 92 * effectivePlotTextScale))
+      : 0;
 
   // Margins & dimensions — scale from actual axis text footprint.
   const margin = useMemo(() => ({
     top: 30,
-    right: Math.round(Math.max(30, 16 + fermiLabelFontSize * 2.2)),
+    right: Math.round(Math.max(
+      30,
+      16 + fermiLabelFontSize * 2.2,
+      projectionLegendReservedWidth,
+    )),
     bottom: Math.round(Math.max(50, 18 + symmetryLabelFontSize * 2.2)),
     left: Math.round(
       Math.max(70, 20 + estimatedYTickLabelWidth + axisLabelFontSize * 1.6),
     ),
-  }), [axisLabelFontSize, estimatedYTickLabelWidth, fermiLabelFontSize, symmetryLabelFontSize]);
+  }), [
+    axisLabelFontSize,
+    estimatedYTickLabelWidth,
+    fermiLabelFontSize,
+    projectionLegendReservedWidth,
+    symmetryLabelFontSize,
+  ]);
 
   const fallbackWidth = Math.max(240, width);
   const fallbackHeight = Math.max(220, height);
@@ -1819,6 +1879,43 @@ export function BandPlot({
     return projectionGroups.find((group) => group.id === selectedProjectionId) || null;
   }, [projectionGroups, selectedProjectionId]);
 
+  const selectedProjectionEntryValue = useMemo(() => {
+    const exactMatch = projectionSelectionEntries.find((entry) =>
+      entry.value === selectedProjectionId &&
+      entry.mode === projectionMode &&
+      (entry.mode !== "orbital" || (entry.elementKey ?? "") === selectedOrbitalElementKey)
+    );
+    if (exactMatch) {
+      return exactMatch.value;
+    }
+    return projectionSelectionEntries.some((entry) => entry.value === selectedProjectionId)
+      ? selectedProjectionId
+      : projectionSelectionEntries[0]?.value ?? "";
+  }, [
+    projectionMode,
+    projectionSelectionEntries,
+    selectedOrbitalElementKey,
+    selectedProjectionId,
+  ]);
+
+  const applyProjectionSelectionEntry = useCallback(
+    (value: string) => {
+      const selectedEntry = projectionSelectionEntries.find((entry) => entry.value === value);
+      if (!selectedEntry) {
+        return;
+      }
+      setFatBandsEnabled(true);
+      setProjectionMode(selectedEntry.mode);
+      if (selectedEntry.mode === "orbital") {
+        setSelectedOrbitalElementKey(selectedEntry.elementKey ?? "");
+      } else {
+        setSelectedOrbitalElementKey("");
+      }
+      setSelectedProjectionId(selectedEntry.value);
+    },
+    [projectionSelectionEntries],
+  );
+
   const projectionNormalizationGroups = useMemo(() => {
     if (!selectedProjectionGroup) return [];
 
@@ -1891,11 +1988,25 @@ export function BandPlot({
     );
   }, [projectionNormalizationGroups, selectedProjectionGroup, projectionNormalizeMode]);
 
-  const fatBandsActive =
+  const projectionColorRangeValid =
+    Number.isFinite(projectionColorMin) &&
+    Number.isFinite(projectionColorMax) &&
+    projectionColorMax > projectionColorMin;
+
+  const projectionActive =
     viewerType === "electronic" &&
     fatBandsEnabled &&
-    normalizedProjectionWeights !== null &&
     selectedProjectionGroup !== null;
+
+  const fatBandsActive =
+    projectionActive &&
+    projectionRenderMode === "fat" &&
+    normalizedProjectionWeights !== null;
+
+  const colorProjectionActive =
+    projectionActive &&
+    projectionRenderMode === "color" &&
+    projectionColorRangeValid;
 
   // Generate SVG path for a band
   const bandToPath = useCallback(
@@ -1968,6 +2079,81 @@ export function BandPlot({
     scales,
     shiftedEnergies,
   ]);
+
+  const colorProjectionSegments = useMemo(() => {
+    if (!colorProjectionActive || !selectedProjectionGroup) return [];
+
+    const segments: {
+      key: string;
+      bandIdx: number;
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      stroke: string;
+    }[] = [];
+
+    for (let bandIdx = 0; bandIdx < shiftedEnergies.length; bandIdx += 1) {
+      const band = shiftedEnergies[bandIdx];
+      const weights = selectedProjectionGroup.weights[bandIdx] || [];
+      const pointCount = Math.min(band.length, data.k_points.length, weights.length);
+      for (let kIdx = 1; kIdx < pointCount; kIdx += 1) {
+        if (data.k_points[kIdx] <= data.k_points[kIdx - 1] + 1e-10) {
+          continue;
+        }
+
+        const energy1 = band[kIdx - 1];
+        const energy2 = band[kIdx];
+        if (
+          (energy1 < scales.eMin - 1 && energy2 < scales.eMin - 1) ||
+          (energy1 > scales.eMax + 1 && energy2 > scales.eMax + 1)
+        ) {
+          continue;
+        }
+
+        const weight1 = Number.isFinite(weights[kIdx - 1]) ? weights[kIdx - 1] : 0;
+        const weight2 = Number.isFinite(weights[kIdx]) ? weights[kIdx] : 0;
+        const weight = (weight1 + weight2) / 2;
+
+        segments.push({
+          key: `color-projection-${bandIdx}-${kIdx}`,
+          bandIdx,
+          x1: scales.xScale(data.k_points[kIdx - 1]),
+          y1: scales.yScale(energy1),
+          x2: scales.xScale(data.k_points[kIdx]),
+          y2: scales.yScale(energy2),
+          stroke: projectionWeightColor(weight, projectionColorMin, projectionColorMax),
+        });
+      }
+    }
+
+    return segments;
+  }, [
+    colorProjectionActive,
+    data.k_points,
+    projectionColorMax,
+    projectionColorMin,
+    scales,
+    selectedProjectionGroup,
+    shiftedEnergies,
+  ]);
+
+  const projectionLegendTicks = useMemo(
+    () => buildProjectionLegendTicks(
+      projectionColorMin,
+      projectionColorMax,
+      projectionLegendTickCount,
+    ),
+    [projectionColorMax, projectionColorMin, projectionLegendTickCount],
+  );
+
+  const projectionLegendDecimals = useMemo(() => {
+    const span = projectionColorMax - projectionColorMin;
+    const tickStep = projectionLegendTicks.length > 1
+      ? Math.abs(projectionLegendTicks[0] - projectionLegendTicks[1])
+      : span;
+    return Math.max(2, getTickDecimals(tickStep));
+  }, [projectionColorMax, projectionColorMin, projectionLegendTicks]);
 
   // Handle mouse move for hover
   const handleMouseMove = useCallback(
@@ -2264,9 +2450,13 @@ export function BandPlot({
     };
   }, [enableHoverScrollLock, isHoveringPlot]);
 
-  const drawBandLines = !fatBandsActive || showLinesWithFat;
+  const drawBandLines = !colorProjectionActive && (!fatBandsActive || showLinesWithFat);
   const projectionLabel = selectedProjectionGroup?.label || "None";
-  const showProjectionSummary = fatBandsActive && selectedProjectionGroup !== null;
+  const projectionDisplayLabel =
+    projectionSelectionEntries.find((entry) => entry.value === selectedProjectionEntryValue)
+      ?.label ?? projectionLabel;
+  const projectionLegendLabel = formatProjectionLegendLabel(projectionDisplayLabel);
+  const showProjectionSummary = projectionActive && selectedProjectionGroup !== null;
 
   const svgBgFill = effectivePlotBgWhite ? "#ffffff" : colors.bg;
 
@@ -2292,6 +2482,10 @@ export function BandPlot({
               <clipPath id={clipPathId}>
                 <rect x={0} y={0} width={plotWidth} height={plotHeight} />
               </clipPath>
+              <linearGradient id={projectionGradientId} x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0%" stopColor={projectionScaleColor(0)} />
+                <stop offset="100%" stopColor={projectionScaleColor(1)} />
+              </linearGradient>
             </defs>
 
             {/* Background */}
@@ -2582,6 +2776,29 @@ export function BandPlot({
                     </g>
                   ))}
 
+                {colorProjectionActive &&
+                  colorProjectionSegments.map((segment) => (
+                    <line
+                      key={segment.key}
+                      x1={segment.x1}
+                      y1={segment.y1}
+                      x2={segment.x2}
+                      y2={segment.y2}
+                      stroke={segment.stroke}
+                      strokeWidth={effectiveLineWidth}
+                      strokeLinecap="round"
+                      opacity={effectiveLineOpacity}
+                      style={isSelectingValenceBand ? { cursor: "crosshair" } : undefined}
+                      onClick={
+                        viewerType === "electronic" && isSelectingValenceBand
+                          ? () => {
+                            void handleValenceBandSelection(segment.bandIdx);
+                          }
+                          : undefined
+                      }
+                    />
+                  ))}
+
                 {drawBandLines &&
                   selectedComparison &&
                   comparisonShiftedEnergies.map((band, bandIdx) => (
@@ -2782,6 +2999,67 @@ export function BandPlot({
 
               {/* X-axis line */}
               <line x1={0} y1={plotHeight} x2={plotWidth} y2={plotHeight} stroke={colors.axis} />
+
+              {colorProjectionActive && (
+                <g className="projection-color-key" pointerEvents="none">
+                  {(() => {
+                    const legendX = plotWidth + Math.max(28, axisTickFontSize * 2.2);
+                    const legendWidth = Math.max(10, axisTickFontSize * 0.95);
+                    const tickLength = Math.max(4, axisTickFontSize * 0.45);
+                    const labelX = legendX + legendWidth + Math.max(36, axisTickFontSize * 3.2);
+                    return (
+                      <>
+                        <rect
+                          x={legendX}
+                          y={0}
+                          width={legendWidth}
+                          height={plotHeight}
+                          fill={`url(#${projectionGradientId})`}
+                          stroke={colors.axis}
+                          strokeWidth={0.5}
+                        />
+                        {projectionLegendTicks.map((tick) => {
+                          const tickY = plotHeight
+                            - ((tick - projectionColorMin) /
+                              (projectionColorMax - projectionColorMin)) * plotHeight;
+                          return (
+                            <g key={tick}>
+                              <line
+                                x1={legendX + legendWidth}
+                                x2={legendX + legendWidth + tickLength}
+                                y1={tickY}
+                                y2={tickY}
+                                stroke={colors.axis}
+                                strokeWidth={0.75}
+                              />
+                              <text
+                                x={legendX + legendWidth + tickLength + 3}
+                                y={tickY + yTickLabelYOffset}
+                                fill={colors.text}
+                                fontSize={Math.max(7, axisTickFontSize * 0.78)}
+                              >
+                                {tick.toFixed(projectionLegendDecimals)}
+                              </text>
+                            </g>
+                          );
+                        })}
+                        <text
+                          x={labelX}
+                          y={plotHeight / 2}
+                          transform={`rotate(-90 ${labelX} ${plotHeight / 2})`}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          fill={colors.text}
+                          fontSize={Math.max(8, axisTickFontSize * 0.95)}
+                          fontWeight={600}
+                        >
+                          {projectionLegendLabel}
+                        </text>
+                      </>
+                    );
+                  })()}
+                </g>
+              )}
             </g>
 
             {/* Tooltip */}
@@ -2860,7 +3138,7 @@ export function BandPlot({
           )}
           {showProjectionSummary && (
             <span className="band-plot-projection-pill">
-              Fat bands: {projectionLabel}
+              {projectionRenderMode === "color" ? "Color projection" : "Fat bands"}: {projectionDisplayLabel}
             </span>
           )}
           {selectedComparison && (
@@ -3202,7 +3480,7 @@ export function BandPlot({
                 <div className="band-control-grid">
                   <div className="band-control-row">
                     <label>
-                      Enable Fat Bands
+                      Enable Projection
                       <span className="band-control-tech-name">projwfc.x</span>
                     </label>
                     <input
@@ -3222,130 +3500,108 @@ export function BandPlot({
                   {hasProjectionData && (
                     <>
                       <div className="band-control-row">
-                        <label>Projection Group Type</label>
+                        <label>Projection Style</label>
                         <select
-                          value={projectionMode}
+                          value={projectionRenderMode}
                           onChange={(event) =>
-                            setProjectionMode(event.target.value as ProjectionMode)
+                            setProjectionRenderMode(event.target.value as ProjectionRenderMode)
                           }
                         >
-                          <option value="atom">By element</option>
-                          <option value="orbital">By orbital</option>
+                          <option value="fat">Fat bands</option>
+                          <option value="color">Red-blue color bands</option>
                         </select>
                       </div>
 
-                      {projectionMode === "orbital" && hasElementResolvedOrbitals && (
-                        <div className="band-control-row">
-                          <label>Element for Orbital</label>
-                          <select
-                            value={selectedOrbitalElementKey}
-                            onChange={(event) => setSelectedOrbitalElementKey(event.target.value)}
-                          >
-                            {orbitalElementOptions.map((option) => (
-                              <option key={option.key} value={option.key}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      )}
-
-                      {projectionMode === "orbital" && !hasElementResolvedOrbitals && (
-                        <div className="band-control-warning">
-                          Element-resolved orbital channels are unavailable for this saved result.
-                          Showing global orbital totals.
-                        </div>
-                      )}
-
                       <div className="band-control-row">
-                        <label>
-                          {projectionMode === "orbital"
-                            ? "Orbital Channel"
-                            : "Contribution"}
-                        </label>
+                        <label>Projection</label>
                         <select
-                          value={selectedProjectionId}
-                          onChange={(event) => setSelectedProjectionId(event.target.value)}
+                          value={selectedProjectionEntryValue}
+                          onChange={(event) => applyProjectionSelectionEntry(event.target.value)}
+                          disabled={projectionSelectionEntries.length === 0}
                         >
-                          {projectionGroups.map((group) => (
-                            <option key={group.id} value={group.id}>
-                              {group.label}
+                          {projectionSelectionEntries.map((entry) => (
+                            <option key={entry.value} value={entry.value}>
+                              {entry.label}
                             </option>
                           ))}
                         </select>
                       </div>
 
-                      <div className="band-control-row">
-                        <label>Weight Normalization</label>
-                        <select
-                          value={projectionNormalizeMode}
-                          onChange={(event) =>
-                            setProjectionNormalizeMode(
-                              event.target.value as ProjectionNormalizeMode,
-                            )
-                          }
-                        >
-                          <option value="global">
-                            {projectionMode === "atom"
-                              ? "Global (all elements)"
-                              : hasElementResolvedOrbitals
-                                ? selectedProjectionId.startsWith("element-orbital-total-")
-                                  ? "Global (all element totals)"
-                                  : "Global (all element orbitals)"
-                                : "Global (all orbitals)"}
-                          </option>
-                          <option value="band">
-                            {projectionMode === "atom"
-                              ? "Per band (all elements)"
-                              : hasElementResolvedOrbitals
-                                ? selectedProjectionId.startsWith("element-orbital-total-")
-                                  ? "Per band (all element totals)"
-                                  : "Per band (all element orbitals)"
-                                : "Per band (all orbitals)"}
-                          </option>
-                        </select>
-                      </div>
+                      {projectionRenderMode === "fat" && (
+                        <>
+                          <div className="band-control-row">
+                            <label>Weight Normalization</label>
+                            <select
+                              value={projectionNormalizeMode}
+                              onChange={(event) =>
+                                setProjectionNormalizeMode(
+                                  event.target.value as ProjectionNormalizeMode,
+                                )
+                              }
+                            >
+                              <option value="global">
+                                {projectionMode === "atom"
+                                  ? "Global (all elements)"
+                                  : hasElementResolvedOrbitals
+                                    ? selectedProjectionId.startsWith("element-orbital-total-")
+                                      ? "Global (all element totals)"
+                                      : "Global (all element orbitals)"
+                                    : "Global (all orbitals)"}
+                              </option>
+                              <option value="band">
+                                {projectionMode === "atom"
+                                  ? "Per band (all elements)"
+                                  : hasElementResolvedOrbitals
+                                    ? selectedProjectionId.startsWith("element-orbital-total-")
+                                      ? "Per band (all element totals)"
+                                      : "Per band (all element orbitals)"
+                                    : "Per band (all orbitals)"}
+                              </option>
+                            </select>
+                          </div>
 
-                      <div className="band-control-row">
-                        <label>Fat-Band Scale</label>
-                        <input
-                          type="range"
-                          min={2}
-                          max={20}
-                          step={0.5}
-                          value={fatScale}
-                          onChange={(event) => setFatScale(Number.parseFloat(event.target.value))}
-                        />
-                        <span className="band-control-value">{fatScale.toFixed(1)}</span>
-                      </div>
+                          <div className="band-control-row">
+                            <label>Fat-Band Scale</label>
+                            <input
+                              type="range"
+                              min={2}
+                              max={20}
+                              step={0.5}
+                              value={fatScale}
+                              onChange={(event) => setFatScale(Number.parseFloat(event.target.value))}
+                            />
+                            <span className="band-control-value">{fatScale.toFixed(1)}</span>
+                          </div>
 
-                      <div className="band-control-row">
-                        <label>Fat-Band Opacity</label>
-                        <input
-                          type="range"
-                          min={0.05}
-                          max={1}
-                          step={0.05}
-                          value={fatOpacity}
-                          onChange={(event) =>
-                            setFatOpacity(Number.parseFloat(event.target.value))
-                          }
-                        />
-                        <span className="band-control-value">{fatOpacity.toFixed(2)}</span>
-                      </div>
+                          <div className="band-control-row">
+                            <label>Fat-Band Opacity</label>
+                            <input
+                              type="range"
+                              min={0.05}
+                              max={1}
+                              step={0.05}
+                              value={fatOpacity}
+                              onChange={(event) =>
+                                setFatOpacity(Number.parseFloat(event.target.value))
+                              }
+                            />
+                            <span className="band-control-value">{fatOpacity.toFixed(2)}</span>
+                          </div>
 
-                      <div className="band-control-row">
-                        <label>Fat-Band Color Mode</label>
-                        <select
-                          value={fatColorMode}
-                          onChange={(event) => setFatColorMode(event.target.value as FatColorMode)}
-                        >
-                          <option value="band">Match band color</option>
-                          <option value="accent">Single accent color</option>
-                        </select>
-                      </div>
+                          <div className="band-control-row">
+                            <label>Fat-Band Color Mode</label>
+                            <select
+                              value={fatColorMode}
+                              onChange={(event) => setFatColorMode(event.target.value as FatColorMode)}
+                            >
+                              <option value="band">Match band color</option>
+                              <option value="accent">Single accent color</option>
+                            </select>
+                          </div>
+                        </>
+                      )}
 
-                      {fatColorMode === "accent" && (
+                      {projectionRenderMode === "fat" && fatColorMode === "accent" && (
                         <div className="band-control-row">
                           <label>Accent Color</label>
                           <input
@@ -3356,14 +3612,82 @@ export function BandPlot({
                         </div>
                       )}
 
-                      <div className="band-control-row">
-                        <label>Keep Band Lines Visible</label>
-                        <input
-                          type="checkbox"
-                          checked={showLinesWithFat}
-                          onChange={(event) => setShowLinesWithFat(event.target.checked)}
-                        />
-                      </div>
+                      {projectionRenderMode === "fat" && (
+                        <div className="band-control-row">
+                          <label>Keep Band Lines Visible</label>
+                          <input
+                            type="checkbox"
+                            checked={showLinesWithFat}
+                            onChange={(event) => setShowLinesWithFat(event.target.checked)}
+                          />
+                        </div>
+                      )}
+
+                      {projectionRenderMode === "color" && (
+                        <>
+                          <div className="band-control-row">
+                            <label>Color Range</label>
+                            <div className="band-control-range-inputs">
+                              <input
+                                type="number"
+                                step="any"
+                                value={projectionColorMin}
+                                onChange={(event) => {
+                                  const parsed = Number.parseFloat(event.target.value);
+                                  if (Number.isFinite(parsed)) {
+                                    setProjectionColorMin(parsed);
+                                  }
+                                }}
+                                aria-label="Projection blue minimum"
+                              />
+                              <span className="band-control-range-separator">to</span>
+                              <input
+                                type="number"
+                                step="any"
+                                value={projectionColorMax}
+                                onChange={(event) => {
+                                  const parsed = Number.parseFloat(event.target.value);
+                                  if (Number.isFinite(parsed)) {
+                                    setProjectionColorMax(parsed);
+                                  }
+                                }}
+                                aria-label="Projection red maximum"
+                              />
+                            </div>
+                            <div className="band-control-note">
+                              Raw projection weights: blue at the lower value, red at the upper value.
+                            </div>
+                            {!projectionColorRangeValid && (
+                              <span className="band-control-range-error">
+                                Upper projection value must be greater than lower value.
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="band-control-row">
+                            <label>Key Tick Count</label>
+                            <input
+                              type="number"
+                              min={2}
+                              max={12}
+                              step={1}
+                              value={projectionLegendTickCount}
+                              onChange={(event) => {
+                                const parsed = Number.parseInt(event.target.value, 10);
+                                if (Number.isFinite(parsed)) {
+                                  setProjectionLegendTickCount(
+                                    Math.max(2, Math.min(12, parsed)),
+                                  );
+                                }
+                              }}
+                              aria-label="Projection key tick count"
+                            />
+                            <div className="band-control-note">
+                              Includes the minimum and maximum labels.
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </>
                   )}
                 </div>
