@@ -14,6 +14,7 @@ const testEntries = [
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
   "tests/brillouinZoneData/tetragonalBodyCentered.test.ts",
   "tests/hpcBandLimits/hpcBandLimits.test.ts",
+  "tests/hpcProfileAdapter/hpcProfileAdapter.test.ts",
   "tests/hpcUtilization/hpcUtilization.test.ts",
   "tests/hubbard/hubbard.test.ts",
   "tests/magnetism/magnetism.test.ts",

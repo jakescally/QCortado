@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::engines::EngineId;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionMode {
@@ -210,6 +212,128 @@ impl HpcProfile {
             .map(str::trim)
             .filter(|value| !value.is_empty())
     }
+
+    pub fn qe_runtime_profile(&self) -> QeHpcRuntimeProfile {
+        self.qe_runtime_profile_for_resource(self.preferred_resource_type())
+    }
+
+    pub fn qe_runtime_profile_for_resource(
+        &self,
+        resource_type: ResourceType,
+    ) -> QeHpcRuntimeProfile {
+        QeHpcRuntimeProfile {
+            engine_id: EngineId::Qe,
+            supported: true,
+            profile_id: self.id.clone(),
+            profile_name: self.name.clone(),
+            cluster: self.cluster.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            resource_mode: self.resource_mode,
+            resource_type,
+            supports_resource_type: self.supports_resource_type(resource_type),
+            launcher: self.launcher,
+            launcher_extra_args: self
+                .launcher_extra_args_for_resource(resource_type)
+                .map(str::to_string),
+            remote_workspace_root: self.remote_workspace_root.clone(),
+            remote_project_root: self.remote_project_root.clone(),
+            paths: QeHpcRuntimePaths {
+                remote_bin_dir: self.remote_qe_bin_dir_for_resource(resource_type).to_string(),
+                remote_pseudo_dir: self.remote_pseudo_dir_for_resource(resource_type).to_string(),
+                remote_epw_path: normalize_optional_runtime_text(&self.remote_epw_path),
+                remote_wannier90_path: normalize_optional_runtime_text(
+                    &self.remote_wannier90_path,
+                ),
+                remote_postw90_path: normalize_optional_runtime_text(&self.remote_postw90_path),
+                uses_pseudopotentials: true,
+            },
+        }
+    }
+
+    pub fn runtime_profile_for_engine(
+        &self,
+        engine_id: EngineId,
+        resource_type: ResourceType,
+    ) -> EngineHpcRuntimeProfile {
+        match engine_id {
+            EngineId::Qe => {
+                EngineHpcRuntimeProfile::Qe(self.qe_runtime_profile_for_resource(resource_type))
+            }
+            EngineId::Wien2k => {
+                EngineHpcRuntimeProfile::Unsupported(UnsupportedEngineHpcRuntimeProfile {
+                    engine_id,
+                    supported: false,
+                    profile_id: self.id.clone(),
+                    profile_name: self.name.clone(),
+                    reason: "This engine does not have an HPC runtime profile adapter yet."
+                        .to_string(),
+                })
+            }
+        }
+    }
+}
+
+fn normalize_optional_runtime_text(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QeHpcRuntimePaths {
+    pub remote_bin_dir: String,
+    pub remote_pseudo_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_epw_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_wannier90_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_postw90_path: Option<String>,
+    pub uses_pseudopotentials: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QeHpcRuntimeProfile {
+    pub engine_id: EngineId,
+    pub supported: bool,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub cluster: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub resource_mode: HpcResourceMode,
+    pub resource_type: ResourceType,
+    pub supports_resource_type: bool,
+    pub launcher: HpcLauncher,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launcher_extra_args: Option<String>,
+    pub remote_workspace_root: String,
+    pub remote_project_root: String,
+    pub paths: QeHpcRuntimePaths,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedEngineHpcRuntimeProfile {
+    pub engine_id: EngineId,
+    pub supported: bool,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineHpcRuntimeProfile {
+    Qe(QeHpcRuntimeProfile),
+    Unsupported(UnsupportedEngineHpcRuntimeProfile),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
