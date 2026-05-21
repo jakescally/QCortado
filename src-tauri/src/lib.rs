@@ -21,6 +21,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub mod config;
+pub mod engines;
 pub mod hpc;
 pub mod process_manager;
 pub mod projects;
