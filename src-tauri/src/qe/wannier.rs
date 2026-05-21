@@ -2822,6 +2822,8 @@ mod tests {
                     mass: 28.0855,
                     pseudopotential: "Si.upf".to_string(),
                     starting_magnetization: None,
+                    theta: None,
+                    phi: None,
                 }],
                 atoms: vec![
                     Atom {

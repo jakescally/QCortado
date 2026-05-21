@@ -323,6 +323,14 @@ impl QERunner {
             .await?;
         Ok(output)
     }
+
+    /// Runs hp.x for Hubbard linear-response calculation.
+    pub async fn run_hp(&self, input: &str, working_dir: &PathBuf) -> Result<String, RunnerError> {
+        let (output, _) = self
+            .run_executable("hp.x", input, working_dir, None)
+            .await?;
+        Ok(output)
+    }
 }
 
 /// Represents a running QE calculation that can be monitored/cancelled.

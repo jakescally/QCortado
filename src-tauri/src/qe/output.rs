@@ -31,6 +31,9 @@ pub fn parse_pw_output(output: &str) -> QEResult {
     // Parse total magnetization
     result.total_magnetization = parse_magnetization(output);
 
+    // Parse per-atom magnetic moments
+    result.atomic_magnetic_moments = parse_atomic_magnetic_moments(output);
+
     // Parse forces
     result.forces = parse_forces(output);
 
@@ -78,6 +81,89 @@ fn parse_magnetization(output: &str) -> Option<f64> {
         .last()
         .and_then(|cap| cap.get(1))
         .and_then(|m| m.as_str().parse::<f64>().ok())
+}
+
+/// Extracts per-site magnetic moments.
+///
+/// QE prints collinear moments as a signed scalar (`magn=` or `magn:`). Non-collinear
+/// output may include vector records such as `m = (mx my mz)`. We preserve the
+/// final value seen for each atom because intermediate SCF iterations can print
+/// earlier site moments too.
+fn parse_atomic_magnetic_moments(output: &str) -> Option<Vec<[f64; 3]>> {
+    let number = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)";
+    let vector_re = Regex::new(&format!(
+        r"(?i)\batom\s*:?\s*(\d+).*?\bm(?:agn(?:etization)?)?\s*=\s*\(?\s*{}\s+{}\s+{}\s*\)?",
+        number, number, number,
+    ))
+    .ok()?;
+    let atom_number_re = Regex::new(r"(?i)^\s*atom\s+number\s+(\d+)").ok()?;
+    let magnetization_re = Regex::new(&format!(
+        r"(?i)^\s*magnetization\s*:\s*{}\s+{}\s+{}(?:\s|$)",
+        number, number, number,
+    ))
+    .ok()?;
+    let collinear_re = Regex::new(&format!(
+        r"(?i)\batom\s*:?\s*(\d+).*?\bmagn\s*[:=]\s*{}",
+        number,
+    ))
+    .ok()?;
+
+    let mut moments: Vec<Option<[f64; 3]>> = Vec::new();
+    let mut pending_atom_number: Option<usize> = None;
+    for line in output.lines() {
+        if let Some(cap) = vector_re.captures(line) {
+            let index = cap.get(1)?.as_str().parse::<usize>().ok()?;
+            if index == 0 {
+                continue;
+            }
+            let moment = [
+                cap.get(2)?.as_str().parse::<f64>().ok()?,
+                cap.get(3)?.as_str().parse::<f64>().ok()?,
+                cap.get(4)?.as_str().parse::<f64>().ok()?,
+            ];
+            if moments.len() < index {
+                moments.resize(index, None);
+            }
+            moments[index - 1] = Some(moment);
+            continue;
+        }
+
+        if let Some(cap) = atom_number_re.captures(line) {
+            let index = cap.get(1)?.as_str().parse::<usize>().ok()?;
+            pending_atom_number = if index > 0 { Some(index) } else { None };
+            continue;
+        }
+
+        if let Some(cap) = magnetization_re.captures(line) {
+            if let Some(index) = pending_atom_number.take() {
+                let moment = [
+                    cap.get(1)?.as_str().parse::<f64>().ok()?,
+                    cap.get(2)?.as_str().parse::<f64>().ok()?,
+                    cap.get(3)?.as_str().parse::<f64>().ok()?,
+                ];
+                if moments.len() < index {
+                    moments.resize(index, None);
+                }
+                moments[index - 1] = Some(moment);
+            }
+            continue;
+        }
+
+        if let Some(cap) = collinear_re.captures(line) {
+            let index = cap.get(1)?.as_str().parse::<usize>().ok()?;
+            if index == 0 {
+                continue;
+            }
+            let moment = cap.get(2)?.as_str().parse::<f64>().ok()?;
+            if moments.len() < index {
+                moments.resize(index, None);
+            }
+            moments[index - 1] = Some([0.0, 0.0, moment]);
+        }
+    }
+
+    let parsed: Option<Vec<[f64; 3]>> = moments.into_iter().collect();
+    parsed.filter(|values| !values.is_empty())
 }
 
 /// Extracts forces on atoms.
@@ -294,4 +380,54 @@ mod tests {
         assert!(!result2.converged);
     }
 
+    #[test]
+    fn test_parse_collinear_atomic_magnetic_moments() {
+        let output = r#"
+     Magnetic moment per site:
+     atom    1 (R=0.108)  charge= 14.8805  magn=  2.1250
+     atom:   2            charge: 12.1000  magn: -1.8750
+"#;
+
+        let moments = parse_pw_output(output).atomic_magnetic_moments.unwrap();
+        assert_eq!(moments, vec![[0.0, 0.0, 2.125], [0.0, 0.0, -1.875]]);
+    }
+
+    #[test]
+    fn test_parse_noncollinear_atomic_magnetic_moments_keeps_final_values() {
+        let output = r#"
+     atom   1   type  1   m = ( 0.1000  0.2000  0.3000 )
+     atom   2   type  1   m = ( -0.4000  0.0000  0.5000 )
+     atom   1   type  1   m = ( 0.6000  0.7000  0.8000 )
+     atom   2   type  1   m = ( -0.9000  0.0000  1.1000 )
+"#;
+
+        let moments = parse_pw_output(output).atomic_magnetic_moments.unwrap();
+        assert_eq!(moments, vec![[0.6, 0.7, 0.8], [-0.9, 0.0, 1.1]]);
+    }
+
+    #[test]
+    fn test_parse_noncollinear_atom_number_magnetization_block() {
+        let output = r#"
+ ==============================================================================
+     atom number    1 relative position :    0.0000   0.0000   0.0000
+     charge :    18.324832  (integrated on a sphere of radius 0.206)
+     magnetization :          2.840143    0.099180    2.841836
+     magnetization/charge:    0.154989    0.005412    0.155081
+
+ ==============================================================================
+     atom number    2 relative position :   -0.5000   0.5000   0.5000
+     charge :     4.043035  (integrated on a sphere of radius 0.206)
+     magnetization :         -0.019422   -0.000678   -0.019434
+     magnetization/charge:   -0.004804   -0.000168   -0.004807
+"#;
+
+        let moments = parse_pw_output(output).atomic_magnetic_moments.unwrap();
+        assert_eq!(
+            moments,
+            vec![
+                [2.840143, 0.09918, 2.841836],
+                [-0.019422, -0.000678, -0.019434]
+            ]
+        );
+    }
 }

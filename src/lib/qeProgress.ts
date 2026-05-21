@@ -400,6 +400,7 @@ type ProgressKind =
   | "bands"
   | "dos"
   | "fermi_surface"
+  | "hubbard_lrt"
   | "phonon"
   | "epw"
   | "wannier"
@@ -424,6 +425,17 @@ export function progressReducer(
       return updateDosProgress(line, state);
     case "fermi_surface":
       return updateFermiSurfaceProgress(line, state);
+    case "hubbard_lrt":
+      if (line.includes("=== Hubbard LRT Complete ===")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("Running hp.x")) {
+        return { ...state, status: "running", percent: 20, phase: "hp.x" };
+      }
+      if (line.includes("Parsing Hubbard parameters")) {
+        return { ...state, status: "running", percent: 90, phase: "Parsing results" };
+      }
+      return { ...state, status: "running", phase: state.phase || "Hubbard LRT" };
     case "phonon":
       return updatePhononProgress(line, state);
     case "epw":

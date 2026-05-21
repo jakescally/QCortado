@@ -71,6 +71,8 @@ function makeDefaultProfile(): HpcProfile {
     remote_epw_path: null,
     remote_wannier90_path: deriveRemoteWannier90PathFromQeBinDir(defaultCpuBin),
     remote_pseudo_dir: "~/qe/pseudo",
+    remote_cpu_pseudo_dir: "~/qe/pseudo",
+    remote_gpu_pseudo_dir: "~/qe-gpu/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
     resource_mode: "both",
@@ -99,6 +101,17 @@ function normalizeQeProfilePaths(profile: HpcProfile): HpcProfile {
       : fallback;
   const normalizedCpu = cpu.length > 0 ? cpu : primary;
   const normalizedGpu = gpu.length > 0 ? gpu : primary;
+  const legacyPseudo = (profile.remote_pseudo_dir || "").trim();
+  const pseudoFallback = legacyPseudo.length > 0 ? legacyPseudo : "~/qe/pseudo";
+  const cpuPseudo = (profile.remote_cpu_pseudo_dir || "").trim();
+  const gpuPseudo = (profile.remote_gpu_pseudo_dir || "").trim();
+  const primaryPseudo = cpuPseudo.length > 0
+    ? cpuPseudo
+    : gpuPseudo.length > 0
+      ? gpuPseudo
+      : pseudoFallback;
+  const normalizedCpuPseudo = cpuPseudo.length > 0 ? cpuPseudo : primaryPseudo;
+  const normalizedGpuPseudo = gpuPseudo.length > 0 ? gpuPseudo : primaryPseudo;
   const legacyLauncherExtraArgs = (profile.launcher_extra_args || "").trim();
   const launcherCpuExtraArgs = profile.launcher_cpu_extra_args
     ?? (legacyLauncherExtraArgs.length > 0 ? legacyLauncherExtraArgs : null);
@@ -110,6 +123,9 @@ function normalizeQeProfilePaths(profile: HpcProfile): HpcProfile {
     remote_qe_bin_dir: primary,
     remote_qe_cpu_bin_dir: normalizedCpu,
     remote_qe_gpu_bin_dir: normalizedGpu,
+    remote_pseudo_dir: primaryPseudo,
+    remote_cpu_pseudo_dir: normalizedCpuPseudo,
+    remote_gpu_pseudo_dir: normalizedGpuPseudo,
     launcher_cpu_extra_args: launcherCpuExtraArgs,
     launcher_gpu_extra_args: launcherGpuExtraArgs,
     launcher_extra_args: null,
@@ -166,10 +182,18 @@ export function HpcSetupWizard({
       const resolvedGpuPath = gpuPath.length > 0 ? gpuPath : legacyPath;
       const hasCpuPath = profile.resource_mode !== "gpu_only" ? resolvedCpuPath.length > 0 : true;
       const hasGpuPath = profile.resource_mode !== "cpu_only" ? resolvedGpuPath.length > 0 : true;
+      const legacyPseudoPath = (profile.remote_pseudo_dir || "").trim();
+      const cpuPseudoPath = (profile.remote_cpu_pseudo_dir || "").trim();
+      const gpuPseudoPath = (profile.remote_gpu_pseudo_dir || "").trim();
+      const resolvedCpuPseudoPath = cpuPseudoPath.length > 0 ? cpuPseudoPath : legacyPseudoPath;
+      const resolvedGpuPseudoPath = gpuPseudoPath.length > 0 ? gpuPseudoPath : legacyPseudoPath;
+      const hasCpuPseudoPath = profile.resource_mode !== "gpu_only" ? resolvedCpuPseudoPath.length > 0 : true;
+      const hasGpuPseudoPath = profile.resource_mode !== "cpu_only" ? resolvedGpuPseudoPath.length > 0 : true;
       return (
         hasCpuPath
         && hasGpuPath
-        && profile.remote_pseudo_dir.trim().length > 0
+        && hasCpuPseudoPath
+        && hasGpuPseudoPath
         && profile.remote_workspace_root.trim().length > 0
         && profile.remote_project_root.trim().length > 0
       );
@@ -454,11 +478,21 @@ export function HpcSetupWizard({
               <p className="settings-menu-hint">
                 QCortado derives this automatically by replacing the executable name in the Wannier90 path with <code>postw90.x</code>.
               </p>
-              <label className="settings-menu-label">Remote Pseudopotential Directory</label>
+              <label className="settings-menu-label">Remote CPU Pseudopotential Directory</label>
               <input
                 className="settings-menu-input"
-                value={profile.remote_pseudo_dir}
-                onChange={(event) => setProfile((prev) => ({ ...prev, remote_pseudo_dir: event.target.value }))}
+                value={profile.remote_cpu_pseudo_dir || profile.remote_pseudo_dir || ""}
+                onChange={(event) => setProfile((prev) => ({
+                  ...prev,
+                  remote_pseudo_dir: event.target.value,
+                  remote_cpu_pseudo_dir: event.target.value || null,
+                }))}
+              />
+              <label className="settings-menu-label">Remote GPU Pseudopotential Directory</label>
+              <input
+                className="settings-menu-input"
+                value={profile.remote_gpu_pseudo_dir || ""}
+                onChange={(event) => setProfile((prev) => ({ ...prev, remote_gpu_pseudo_dir: event.target.value || null }))}
               />
               <label className="settings-menu-label">Remote Workspace Root</label>
               <input

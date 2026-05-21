@@ -9,6 +9,7 @@ import {
   PseudopotentialMetadata,
   SlurmResourceRequest,
 } from "./types";
+import type { PseudopotentialInventoryEntry } from "./pseudopotentialMetadataCache";
 
 export interface HpcConnectionTestResult {
   success: boolean;
@@ -299,6 +300,30 @@ export function resolveProfileRemoteQeBinDir(
   return normalizeRemoteQeBinDir(profile.remote_qe_cpu_bin_dir) || fallback;
 }
 
+function normalizeRemotePseudoDir(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function resolveProfileRemotePseudoDir(
+  profile: HpcProfile | null | undefined,
+  resourceType?: HpcResourceType | null,
+): string {
+  const fallback = normalizeRemotePseudoDir(profile?.remote_pseudo_dir) || "";
+  if (!profile) {
+    return fallback;
+  }
+  const requestedType = resourceType
+    || (profile.resource_mode === "gpu_only" ? "gpu" : "cpu");
+  if (requestedType === "gpu") {
+    return normalizeRemotePseudoDir(profile.remote_gpu_pseudo_dir) || fallback;
+  }
+  return normalizeRemotePseudoDir(profile.remote_cpu_pseudo_dir) || fallback;
+}
+
 function resolveProfileLauncherExtraArgs(
   profile: HpcProfile | null | undefined,
   resourceType?: HpcResourceType | null,
@@ -334,6 +359,7 @@ const QE_PENCIL_DECOMPOSITION_EXECUTABLES = new Set([
   "projwfc.x",
   "dos.x",
   "fermi_velocity.x",
+  "hp.x",
   "ph.x",
   "q2r.x",
   "matdyn.x",
@@ -364,6 +390,14 @@ function qeExecutableUsesPencilDecomposition(executable: string): boolean {
   return QE_PENCIL_DECOMPOSITION_EXECUTABLES.has(executableName);
 }
 
+function qeExecutableDefaultExtraArgs(executable: string): string {
+  const executableName = executable.trim().split(/[\\/]/).pop()?.toLowerCase() || "";
+  if (executableName === "hp.x") {
+    return "-ndiag 1";
+  }
+  return "";
+}
+
 export function buildHpcQeInputCommandLine(
   profile: HpcProfile | null | undefined,
   executable: string,
@@ -375,11 +409,13 @@ export function buildHpcQeInputCommandLine(
   const launcher = buildHpcLauncherCommand(profile, resourceType);
   const args = (extraArgs || "").trim();
   const argSegment = args.length > 0 ? ` ${args}` : "";
+  const defaultArgs = qeExecutableDefaultExtraArgs(executable);
+  const defaultArgSegment = defaultArgs.length > 0 ? ` ${defaultArgs}` : "";
   const hasPencilDecomposition = commandArgsIncludePencilDecomposition(args);
   const pdSegment = qeExecutableUsesPencilDecomposition(executable) && !hasPencilDecomposition
     ? " -pd .true."
     : "";
-  return `${launcher} "$QE_BIN/${executable}"${argSegment}${pdSegment} -in ${inputFile} > ${outputFile} 2>&1`;
+  return `${launcher} "$QE_BIN/${executable}"${argSegment}${defaultArgSegment}${pdSegment} -in ${inputFile} > ${outputFile} 2>&1`;
 }
 
 export async function loadExecutionMode(): Promise<ExecutionMode> {
@@ -509,6 +545,16 @@ export async function listRemotePseudopotentials(
   });
 }
 
+export async function listRemotePseudopotentialInventory(
+  pseudoDir?: string | null,
+  profileId?: string | null,
+): Promise<PseudopotentialInventoryEntry[]> {
+  return invoke<PseudopotentialInventoryEntry[]>("hpc_list_remote_pseudopotential_inventory", {
+    profileId: profileId ?? null,
+    pseudoDir: pseudoDir ?? null,
+  });
+}
+
 export async function listRemotePseudopotentialMetadata(
   pseudoDir?: string | null,
   profileId?: string | null,
@@ -516,6 +562,18 @@ export async function listRemotePseudopotentialMetadata(
   return invoke<PseudopotentialMetadata[]>("hpc_list_remote_pseudopotential_metadata", {
     profileId: profileId ?? null,
     pseudoDir: pseudoDir ?? null,
+  });
+}
+
+export async function getRemotePseudopotentialMetadata(
+  filename: string,
+  pseudoDir?: string | null,
+  profileId?: string | null,
+): Promise<PseudopotentialMetadata> {
+  return invoke<PseudopotentialMetadata>("hpc_get_remote_pseudopotential_metadata", {
+    profileId: profileId ?? null,
+    pseudoDir: pseudoDir ?? null,
+    filename,
   });
 }
 

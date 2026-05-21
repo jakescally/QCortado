@@ -156,6 +156,12 @@ pub struct AtomicSpecies {
     /// Initial spin polarization for this atomic type.
     #[serde(default)]
     pub starting_magnetization: Option<f64>,
+    /// Initial non-collinear magnetization polar angle for this atomic type.
+    #[serde(default, alias = "angle1")]
+    pub theta: Option<f64>,
+    /// Initial non-collinear magnetization azimuthal angle for this atomic type.
+    #[serde(default, alias = "angle2")]
+    pub phi: Option<f64>,
 }
 
 /// Hubbard projector basis for the QE 7.3.1+ HUBBARD card.
@@ -515,6 +521,9 @@ pub struct QEResult {
     pub fermi_energy: Option<f64>,
     /// Total magnetization (if spin-polarized)
     pub total_magnetization: Option<f64>,
+    /// Per-atom magnetic moments in crystal-axis components [a, b, c].
+    #[serde(default)]
+    pub atomic_magnetic_moments: Option<Vec<[f64; 3]>>,
     /// Forces on atoms [nat][3] in Ry/Bohr
     pub forces: Option<Vec<[f64; 3]>>,
     /// Stress tensor [3][3] in kbar
@@ -545,6 +554,9 @@ pub struct QEResult {
     /// Full EPW data payload (for `epw.x` calculations)
     #[serde(default)]
     pub epw_data: Option<serde_json::Value>,
+    /// Full Hubbard linear-response data (for `hp.x` calculations)
+    #[serde(default)]
+    pub hubbard_lrt_data: Option<serde_json::Value>,
 }
 
 impl Default for QEResult {
@@ -554,6 +566,7 @@ impl Default for QEResult {
             total_energy: None,
             fermi_energy: None,
             total_magnetization: None,
+            atomic_magnetic_moments: None,
             forces: None,
             stress: None,
             n_scf_steps: None,
@@ -566,8 +579,93 @@ impl Default for QEResult {
             wannier_data: None,
             transport_data: None,
             epw_data: None,
+            hubbard_lrt_data: None,
         }
     }
+}
+
+// ============================================================================
+// Hubbard linear-response Calculation Types
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HpCalculation {
+    pub prefix: String,
+    pub outdir: String,
+    pub nq: [u32; 3],
+    #[serde(default)]
+    pub find_atpert: Option<u32>,
+    #[serde(default)]
+    pub conv_thr_chi: Option<f64>,
+    #[serde(default)]
+    pub niter_max: Option<u32>,
+    #[serde(default)]
+    pub iverbosity: Option<u32>,
+    #[serde(default)]
+    pub no_metq0: bool,
+    #[serde(default)]
+    pub skip_equivalence_q: bool,
+    #[serde(default)]
+    pub docc_thr: Option<f64>,
+    #[serde(default)]
+    pub ethr_nscf: Option<f64>,
+    #[serde(default)]
+    pub thresh_init: Option<f64>,
+    #[serde(default)]
+    pub alpha_mix: Option<f64>,
+    #[serde(default)]
+    pub nmix: Option<u32>,
+    #[serde(default)]
+    pub max_seconds: Option<f64>,
+}
+
+impl Default for HpCalculation {
+    fn default() -> Self {
+        Self {
+            prefix: "qcortado_scf".to_string(),
+            outdir: "./tmp".to_string(),
+            nq: [1, 1, 1],
+            find_atpert: Some(1),
+            conv_thr_chi: Some(1.0e-5),
+            niter_max: Some(100),
+            iverbosity: Some(1),
+            no_metq0: false,
+            skip_equivalence_q: false,
+            docc_thr: Some(1.0e-5),
+            ethr_nscf: Some(1.0e-11),
+            thresh_init: Some(1.0e-14),
+            alpha_mix: Some(0.3),
+            nmix: Some(4),
+            max_seconds: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubbardLrtConfig {
+    pub hp: HpCalculation,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub scf_calc_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HubbardLrtValue {
+    pub element: String,
+    pub manifold: String,
+    pub target: String,
+    pub value_ev: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubbardLrtResult {
+    pub converged: bool,
+    pub q_mesh: [u32; 3],
+    pub u_values: Vec<HubbardLrtValue>,
+    pub raw_output: String,
+    pub parameters_output: Option<String>,
+    pub artifacts: Vec<String>,
 }
 
 // ============================================================================

@@ -18,6 +18,8 @@ import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
 import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { getMagnetismViewerData, isMagneticScfCalculation } from "../lib/magnetism";
+import { getScfHubbardUDisplayValues, isDudarevDftUScf, normalizeHubbardLrtUValues } from "../lib/hubbard";
 import {
   rememberScfRunSettingsClipboardText,
   serializeScfRunSettings,
@@ -25,12 +27,15 @@ import {
 import { CifSubstitutionDialog } from "./CifSubstitutionDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
+import { MagnetismViewer } from "./MagnetismViewer";
 import type { TransportResult } from "../lib/transport";
 
 interface QEResult {
   converged: boolean;
   total_energy: number | null;
   fermi_energy: number | null;
+  total_magnetization?: number | null;
+  atomic_magnetic_moments?: unknown;
   n_scf_steps: number | null;
   wall_time_seconds: number | null;
   raw_output: string;
@@ -38,6 +43,7 @@ interface QEResult {
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
   epw_data?: any;  // EPW data payload for EPW calculations
+  hubbard_lrt_data?: any;  // Hubbard hp.x linear-response data
   wannier_data?: any;  // Wannier90 data payload for Wannier calculations
   transport_data?: TransportResult;
 }
@@ -104,6 +110,7 @@ interface ProjectDashboardProps {
     preset?: SCFPreset,
     presetLock?: boolean,
     optimizedStructures?: OptimizedStructureOption[],
+    calculations?: CalculationRun[],
   ) => void;
   onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
@@ -123,6 +130,7 @@ interface ProjectDashboardProps {
   onRunTransport: (cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
   onViewTransport: (transportData: TransportResult) => void;
   onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunHubbardLrt: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onRunEPW: (cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
@@ -132,12 +140,17 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
-type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "phonon" | "epw" | "optimization";
+type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
 interface CalculationRuntimeDisplay {
   kind: CalculationRuntimeKind;
   seconds: number;
+}
+
+interface CalculationDeleteTarget {
+  calcId: string;
+  calcType: string;
 }
 
 type HpcDownloadPhase = "connecting" | "collecting" | "downloading" | "saved" | "error";
@@ -1060,6 +1073,12 @@ function getCalculationBestScore(calc: CalculationRun, category: CalculationCate
     return convergedBonus + (4 * kScore) + bandScore + socBonus;
   }
 
+  if (category === "hubbard_lrt") {
+    const qScore = Math.log2(Math.max(1, getMeshProduct(params.q_mesh)));
+    const valueScore = Math.log2(Math.max(1, Number(params.u_value_count) || 1));
+    return convergedBonus + (4 * qScore) + valueScore;
+  }
+
   if (category === "dos") {
     const kScore = Math.log2(Math.max(1, getMeshProduct(params.dos_k_grid)));
     const resolutionScore = getThresholdTightness(params.dos_delta_e, 12);
@@ -1315,6 +1334,7 @@ export function ProjectDashboard({
   onRunTransport,
   onViewTransport,
   onRunFermiSurface,
+  onRunHubbardLrt,
   onRunPhonons,
   onRunEPW,
   onViewPhonons,
@@ -1339,14 +1359,20 @@ export function ProjectDashboard({
 
   // Delete calculation confirmation dialog state
   const [showDeleteCalcDialog, setShowDeleteCalcDialog] = useState(false);
-  const [calcToDelete, setCalcToDelete] = useState<{ calcId: string; calcType: string } | null>(null);
+  const [calcToDelete, setCalcToDelete] = useState<CalculationDeleteTarget | null>(null);
   const [isDeletingCalc, setIsDeletingCalc] = useState(false);
+  const [isMultiDeleteMode, setIsMultiDeleteMode] = useState(false);
+  const [selectedCalcIds, setSelectedCalcIds] = useState<Set<string>>(() => new Set());
+  const [showBulkDeleteCalcDialog, setShowBulkDeleteCalcDialog] = useState(false);
+  const [isBulkDeletingCalc, setIsBulkDeletingCalc] = useState(false);
   const [calculationNameEditor, setCalculationNameEditor] = useState<{ calcId: string; calcType: string } | null>(null);
   const [calculationNameDraft, setCalculationNameDraft] = useState("");
   const [isSavingCalculationName, setIsSavingCalculationName] = useState(false);
   const [showLudwigExportDialog, setShowLudwigExportDialog] = useState(false);
   const [calcToExportLudwig, setCalcToExportLudwig] = useState<CalculationRun | null>(null);
   const [isExportingLudwig, setIsExportingLudwig] = useState(false);
+  const [magnetismViewerCalcId, setMagnetismViewerCalcId] = useState<string | null>(null);
+  const [openingMagnetismCalcId, setOpeningMagnetismCalcId] = useState<string | null>(null);
   const [ludwigExportMode, setLudwigExportMode] = useState<LudwigExportMode>("strict_2d");
   const [ludwigPrimaryAxis, setLudwigPrimaryAxis] = useState<number>(0);
   const [ludwigSecondaryAxis, setLudwigSecondaryAxis] = useState<number>(1);
@@ -1391,6 +1417,12 @@ export function ProjectDashboard({
   useEffect(() => {
     setCalculationDetailsById({});
   }, [projectId]);
+
+  useEffect(() => {
+    setIsMultiDeleteMode(false);
+    setSelectedCalcIds(new Set());
+    setShowBulkDeleteCalcDialog(false);
+  }, [projectId, selectedCifId]);
 
   useEffect(() => {
     setFileViewerCopyState(null);
@@ -1658,6 +1690,59 @@ export function ProjectDashboard({
         {renderViewInputButton(calc)}
         {renderViewLogsButton(calc)}
       </>
+    );
+  }
+
+  function renderMagnetismViewer(calc: CalculationRun) {
+    if (!isMagneticScfCalculation(calc)) return null;
+    const viewerData = getMagnetismViewerData(calc);
+    if (!viewerData) return null;
+
+    return (
+      <MagnetismViewer
+        structure={viewerData.structure}
+        moments={viewerData.moments}
+        totalMagnetization={calc.result?.total_magnetization ?? null}
+      />
+    );
+  }
+
+  async function handleOpenMagnetismViewer(calc: CalculationRun) {
+    if (!isMagneticScfCalculation(calc)) return;
+    setOpeningMagnetismCalcId(calc.id);
+    try {
+      const detailed = await ensureCalculationDetails(calc);
+      const viewerData = getMagnetismViewerData(detailed);
+      if (!viewerData) {
+        setError("This magnetic SCF does not include per-atom magnetic moments in the saved result or raw output.");
+        return;
+      }
+      setMagnetismViewerCalcId(detailed.id);
+      setError(null);
+    } catch (e) {
+      setError(`Failed to load magnetism viewer data: ${e}`);
+    } finally {
+      setOpeningMagnetismCalcId(null);
+    }
+  }
+
+  function renderMagnetismViewerButton(calc: CalculationRun) {
+    if (!isMagneticScfCalculation(calc)) return null;
+
+    const opening = openingMagnetismCalcId === calc.id;
+
+    return (
+      <button
+        className="view-magnetism-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleOpenMagnetismViewer(calc);
+        }}
+        disabled={opening}
+        title="Open the 3D magnetic moment viewer"
+      >
+        {opening ? "Loading Magnetism..." : "Open Magnetism Viewer"}
+      </button>
     );
   }
 
@@ -1940,6 +2025,71 @@ export function ProjectDashboard({
     setShowDeleteCalcDialog(true);
   }
 
+  function enterMultiDeleteMode() {
+    if (readOnly) return;
+    setSelectedCalcIds(new Set());
+    setIsMultiDeleteMode(true);
+    setError(null);
+    setInfoMessage(null);
+  }
+
+  function exitMultiDeleteMode() {
+    if (isBulkDeletingCalc) return;
+    setIsMultiDeleteMode(false);
+    setSelectedCalcIds(new Set());
+    setShowBulkDeleteCalcDialog(false);
+  }
+
+  function toggleSelectedCalculation(calcId: string) {
+    if (!isMultiDeleteMode || isBulkDeletingCalc) return;
+    setSelectedCalcIds((current) => {
+      const next = new Set(current);
+      if (next.has(calcId)) {
+        next.delete(calcId);
+      } else {
+        next.add(calcId);
+      }
+      return next;
+    });
+  }
+
+  function selectAllVisibleCalculations() {
+    if (!selectedVariant) return;
+    setSelectedCalcIds(new Set(selectedVariant.calculations.map((calc) => calc.id)));
+  }
+
+  function clearSelectedCalculations() {
+    setSelectedCalcIds(new Set());
+  }
+
+  function handleCalculationHeaderClick(calc: CalculationRun, expandCalculation: () => void) {
+    if (isMultiDeleteMode) {
+      toggleSelectedCalculation(calc.id);
+      return;
+    }
+    expandCalculation();
+  }
+
+  function renderCalculationSelectionControl(calc: CalculationRun) {
+    if (!isMultiDeleteMode) return null;
+    const checked = selectedCalcIds.has(calc.id);
+    return (
+      <label
+        className="calc-selection-control"
+        onClick={(e) => e.stopPropagation()}
+        title={checked ? "Deselect calculation" : "Select calculation"}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => toggleSelectedCalculation(calc.id)}
+          disabled={isBulkDeletingCalc}
+          aria-label={`${checked ? "Deselect" : "Select"} ${calc.calc_type.toUpperCase()} calculation`}
+        />
+      </label>
+    );
+  }
+
   async function handleConfirmDeleteCalc() {
     if (readOnly) return;
     if (!calcToDelete || !selectedCifId) return;
@@ -1967,6 +2117,48 @@ export function ProjectDashboard({
       setError(String(e));
     } finally {
       setIsDeletingCalc(false);
+    }
+  }
+
+  async function handleConfirmBulkDeleteCalculations() {
+    if (readOnly) return;
+    if (!selectedCifId || selectedCalcIds.size === 0) return;
+
+    const calcIdsToDelete = new Set(selectedCalcIds);
+    setIsBulkDeletingCalc(true);
+    const scrollY = window.scrollY;
+    let deletedCount = 0;
+    try {
+      for (const calcId of calcIdsToDelete) {
+        await invoke("delete_calculation", {
+          projectId,
+          cifId: selectedCifId,
+          calcId,
+        });
+        deletedCount += 1;
+      }
+      await loadProject({ showLoading: false, refreshSelectedCif: false });
+      setExpandedCalc((current) => (current && calcIdsToDelete.has(current) ? null : current));
+      setSelectedCalcIds(new Set());
+      setIsMultiDeleteMode(false);
+      setShowBulkDeleteCalcDialog(false);
+      setInfoMessage(`Deleted ${calcIdsToDelete.size} calculation${calcIdsToDelete.size !== 1 ? "s" : ""}.`);
+      setError(null);
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: scrollY, left: 0, behavior: "auto" });
+      });
+    } catch (e) {
+      console.error("Failed to delete selected calculations:", e);
+      if (deletedCount > 0) {
+        await loadProject({ showLoading: false, refreshSelectedCif: false });
+      }
+      setError(
+        deletedCount > 0
+          ? `Deleted ${deletedCount} calculation${deletedCount !== 1 ? "s" : ""}, then failed: ${e}`
+          : `Failed to delete selected calculations: ${e}`,
+      );
+    } finally {
+      setIsBulkDeletingCalc(false);
     }
   }
 
@@ -2140,6 +2332,7 @@ export function ProjectDashboard({
       undefined,
       undefined,
       optimizedStructures,
+      variant.calculations,
     );
   }
 
@@ -2156,6 +2349,7 @@ export function ProjectDashboard({
       "relax",
       true,
       optimizedStructures,
+      variant.calculations,
     );
   }
 
@@ -2567,6 +2761,13 @@ export function ProjectDashboard({
     onRunPhonons(selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunHubbardLrt() {
+    if (!selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunHubbardLrt(selectedCifId, crystalData, variant.calculations);
+  }
+
   function handleRunEPW() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -2671,6 +2872,12 @@ export function ProjectDashboard({
     );
   }
 
+  function hasEligibleHubbardLrtScf(): boolean {
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some((calc) => isDudarevDftUScf(calc));
+  }
+
   function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
     const wallSeconds = calc.result?.wall_time_seconds;
     if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
@@ -2729,6 +2936,26 @@ function formatEnergy(energy: number): string {
   return `${energy.toFixed(6)} Ry`;
 }
 
+const compactHubbardUFormatter = new Intl.NumberFormat(undefined, {
+  maximumSignificantDigits: 2,
+  minimumSignificantDigits: 2,
+});
+
+function formatCompactHubbardU(value: number): string {
+  return compactHubbardUFormatter.format(value);
+}
+
+function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
+  const values = getScfHubbardUDisplayValues(calc);
+  if (values.length === 0) return null;
+  if (values.length === 1) {
+    return formatCompactHubbardU(values[0].value_ev);
+  }
+  return values
+    .map((entry) => `${entry.target} ${formatCompactHubbardU(entry.value_ev)}`)
+    .join(", ");
+}
+
 function normalizeSavedKPath(value: unknown): string {
   return String(value || "")
     .replace(/\s*→\s*/g, "→")
@@ -2778,6 +3005,40 @@ function normalizeSavedKPath(value: unknown): string {
   }
 
   const selectedVariant = getSelectedVariant();
+  const selectedVariantCalculationIds = useMemo<string[]>(
+    () => selectedVariant?.calculations.map((calc) => calc.id) ?? [],
+    [selectedVariant],
+  );
+  const selectedCalculationsForDeletion = useMemo<CalculationRun[]>(
+    () => selectedVariant?.calculations.filter((calc) => selectedCalcIds.has(calc.id)) ?? [],
+    [selectedVariant, selectedCalcIds],
+  );
+  const selectedCalculationCount = selectedCalculationsForDeletion.length;
+  const visibleCalculationCount = selectedVariant?.calculations.length ?? 0;
+
+  useEffect(() => {
+    setSelectedCalcIds((current) => {
+      if (current.size === 0) return current;
+      const visibleIds = new Set(selectedVariantCalculationIds);
+      let changed = false;
+      const next = new Set<string>();
+      for (const calcId of current) {
+        if (visibleIds.has(calcId)) {
+          next.add(calcId);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [selectedVariantCalculationIds]);
+
+  const magnetismViewerCalc = useMemo<CalculationRun | null>(() => {
+    if (!magnetismViewerCalcId) return null;
+    const summaryCalc = selectedVariant?.calculations.find((calc) => calc.id === magnetismViewerCalcId) ?? null;
+    if (summaryCalc) return getCalculationRecord(summaryCalc);
+    return calculationDetailsById[magnetismViewerCalcId] ?? null;
+  }, [calculationDetailsById, magnetismViewerCalcId, selectedVariant]);
   const pinnedCalcIds = useMemo<Set<string>>(() => {
     if (!selectedVariant) return new Set<string>();
     return new Set(
@@ -2836,6 +3097,15 @@ function normalizeSavedKPath(value: unknown): string {
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "fermi_surface") || [],
       calculationSortMode,
       "fermi_surface",
+      pinnedCalcIds,
+    ),
+    [selectedVariant, calculationSortMode, pinnedCalcIds],
+  );
+  const hubbardLrtCalculations = useMemo<CalculationRun[]>(
+    () => sortCalculations(
+      selectedVariant?.calculations.filter((calc) => calc.calc_type === "hubbard_lrt") || [],
+      calculationSortMode,
+      "hubbard_lrt",
       pinnedCalcIds,
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
@@ -3246,16 +3516,69 @@ function normalizeSavedKPath(value: unknown): string {
         <section className="actions-section">
           <div className="actions-section-header">
             <h3>Calculations</h3>
-            <div className="history-sort-control">
-              <label htmlFor="dashboard-sort-mode">Sort Entries</label>
-              <select
-                id="dashboard-sort-mode"
-                value={calculationSortMode}
-                onChange={(e) => handleCalculationSortModeChange(e.target.value as CalculationSortMode)}
-              >
-                <option value="recent">Most Recent</option>
-                <option value="best">Best</option>
-              </select>
+            <div className="history-header-controls">
+              {!readOnly && visibleCalculationCount > 0 && (
+                <div className="multi-delete-toolbar">
+                  {isMultiDeleteMode ? (
+                    <>
+                      <span className="multi-delete-count">
+                        {selectedCalculationCount} selected
+                      </span>
+                      <button
+                        type="button"
+                        className="multi-delete-action-btn"
+                        onClick={selectAllVisibleCalculations}
+                        disabled={isBulkDeletingCalc || selectedCalculationCount === visibleCalculationCount}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        className="multi-delete-action-btn"
+                        onClick={clearSelectedCalculations}
+                        disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        className="multi-delete-danger-btn"
+                        onClick={() => setShowBulkDeleteCalcDialog(true)}
+                        disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                      >
+                        Delete Selected
+                      </button>
+                      <button
+                        type="button"
+                        className="multi-delete-action-btn"
+                        onClick={exitMultiDeleteMode}
+                        disabled={isBulkDeletingCalc}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="multi-delete-action-btn"
+                      onClick={enterMultiDeleteMode}
+                    >
+                      Select
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="history-sort-control">
+                <label htmlFor="dashboard-sort-mode">Sort Entries</label>
+                <select
+                  id="dashboard-sort-mode"
+                  value={calculationSortMode}
+                  onChange={(e) => handleCalculationSortModeChange(e.target.value as CalculationSortMode)}
+                >
+                  <option value="recent">Most Recent</option>
+                  <option value="best">Best</option>
+                </select>
+              </div>
             </div>
           </div>
           {!readOnly && (
@@ -3322,6 +3645,17 @@ function normalizeSavedKPath(value: unknown): string {
               </button>
               <button
                 className="calc-action-btn"
+                onClick={handleRunHubbardLrt}
+                disabled={!hasEligibleHubbardLrtScf()}
+              >
+                <span className="calc-action-icon">LRT</span>
+                <span className="calc-action-label">Hubbard LRT</span>
+                <span className="calc-action-hint">
+                  {hasEligibleHubbardLrtScf() ? "Calculate U with hp.x" : "Requires DFT+U SCF"}
+                </span>
+              </button>
+              <button
+                className="calc-action-btn"
                 onClick={handleRunPhonons}
                 disabled={!hasConvergedSCF()}
               >
@@ -3360,14 +3694,21 @@ function normalizeSavedKPath(value: unknown): string {
                 const isPinned = pinnedCalcIds.has(calc.id);
                 const calcData = getCalculationRecord(calc);
                 const runtime = getCalculationRuntime(calcData);
+                const hubbardUDisplay = formatScfDashboardHubbardU(calc);
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () => {
+                        if (expandedCalc !== calc.id && isMagneticScfCalculation(calc)) {
+                          void ensureCalculationDetails(calc).catch((e) => {
+                            setError(`Failed to load SCF details: ${e}`);
+                          });
+                        }
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id);
+                      })}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">SCF</span>
@@ -3383,6 +3724,11 @@ function normalizeSavedKPath(value: unknown): string {
                         {calc.result?.total_energy && (
                           <span className="calc-energy">
                             E = {formatEnergy(calc.result.total_energy)}
+                          </span>
+                        )}
+                        {hubbardUDisplay && (
+                          <span className="calc-hubbard-u">
+                            U = {hubbardUDisplay} eV
                           </span>
                         )}
                         <div className="calc-tags">
@@ -3430,26 +3776,26 @@ function normalizeSavedKPath(value: unknown): string {
                       </div>
                     </div>
 
-                    {expandedCalc === calc.id && calc.result && (
+                    {expandedCalc === calc.id && calcData.result && (
                       <div className="calculation-details">
-                        {renderCalculationFailure(calc)}
+                        {renderCalculationFailure(calcData)}
                         <div className="details-grid">
-                          {calc.result.total_energy && (
+                          {calcData.result.total_energy && (
                             <div className="detail-item">
                               <label>Total Energy</label>
-                              <span>{formatEnergy(calc.result.total_energy)}</span>
+                              <span>{formatEnergy(calcData.result.total_energy)}</span>
                             </div>
                           )}
-                          {calc.result.fermi_energy && (
+                          {calcData.result.fermi_energy && (
                             <div className="detail-item">
                               <label>Fermi Energy</label>
-                              <span>{calc.result.fermi_energy.toFixed(4)} eV</span>
+                              <span>{calcData.result.fermi_energy.toFixed(4)} eV</span>
                             </div>
                           )}
-                          {calc.result.n_scf_steps && (
+                          {calcData.result.n_scf_steps && (
                             <div className="detail-item">
                               <label>SCF Steps</label>
-                              <span>{calc.result.n_scf_steps}</span>
+                              <span>{calcData.result.n_scf_steps}</span>
                             </div>
                           )}
                           {runtime && (
@@ -3458,15 +3804,16 @@ function normalizeSavedKPath(value: unknown): string {
                               <span>{formatRuntimeDuration(runtime.seconds)}</span>
                             </div>
                           )}
-                          {renderStorageDetailItems(calc)}
+                          {renderStorageDetailItems(calcData)}
                         </div>
                         <div className="detail-item parameters">
                           <label>Parameters</label>
-                          <pre>{JSON.stringify(calc.parameters, null, 2)}</pre>
+                          <pre>{JSON.stringify(calcData.parameters, null, 2)}</pre>
                         </div>
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {renderSavedFileButtons(calc)}
+                          {renderMagnetismViewerButton(calcData)}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (
                             <button
@@ -3502,10 +3849,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">BANDS</span>
@@ -3642,10 +3990,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item dos-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">DOS</span>
@@ -3795,10 +4144,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">WANNIER</span>
@@ -3988,10 +4338,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item dos-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">BOLTZWANN</span>
@@ -4153,10 +4504,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item fermi-surface-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">FERMI</span>
@@ -4291,6 +4643,109 @@ function normalizeSavedKPath(value: unknown): string {
           </section>
         )}
 
+        {/* Hubbard LRT Calculations */}
+        {hubbardLrtCalculations.length > 0 && (
+          <section className="history-section hubbard-lrt-section">
+            <h3>Hubbard LRT</h3>
+            <div className="calculations-list">
+              {hubbardLrtCalculations.map((calc) => {
+                const isPinned = pinnedCalcIds.has(calc.id);
+                const calcData = getCalculationRecord(calc);
+                const runtime = getCalculationRuntime(calcData);
+                const lrtData = calcData.result?.hubbard_lrt_data ?? calc.result?.hubbard_lrt_data ?? calcData.result ?? calc.result ?? null;
+                const uValues = normalizeHubbardLrtUValues(lrtData?.u_values);
+                return (
+                  <div key={calc.id} className="calculation-item hubbard-lrt-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
+                    >
+                      {renderCalculationSelectionControl(calc)}
+                      <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
+                        <span className="calc-type">HUBBARD LRT</span>
+                        {Array.isArray(calc.parameters?.q_mesh) && (
+                          <span className="calc-kpath">{calc.parameters.q_mesh.join("×")}</span>
+                        )}
+                        <div className="calc-tags">
+                          {isHpcCalculation(calc) && <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>}
+                          {calc.result?.converged && <span className="calc-tag calc-tag-special">Converged</span>}
+                        </div>
+                      </div>
+                      <div className="calculation-meta">
+                        <button
+                          type="button"
+                          className={`pin-calc-btn ${isPinned ? "pinned" : ""}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void togglePinnedCalculation(calc.id, isPinned);
+                          }}
+                          disabled={readOnly}
+                          title={isPinned ? "Unpin calculation" : "Pin calculation"}
+                          aria-label={isPinned ? "Unpin calculation" : "Pin calculation"}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
+                          </svg>
+                        </button>
+                        {renderRenameCalculationButton(calc)}
+                        <span className="calc-date">{calc.completed_at ? formatDate(calc.completed_at) : "In progress..."}</span>
+                        {runtime && <span className="calc-runtime">{formatRuntimeDuration(runtime.seconds)}</span>}
+                        {calc.storage_bytes != null && <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>}
+                        <span className="expand-icon">{expandedCalc === calc.id ? "▼" : "▶"}</span>
+                      </div>
+                    </div>
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        {renderCalculationFailure(calcData)}
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Calculated U</label>
+                            <span>
+                              {uValues.length > 0
+                                ? uValues.map((entry) => `${entry.target}: ${entry.value_ev.toFixed(3)} eV`).join(", ")
+                                : "Unavailable"}
+                            </span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Source SCF</label>
+                            <span>{calc.parameters?.source_scf_id || "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Q Mesh</label>
+                            <span>{Array.isArray(calc.parameters?.q_mesh) ? calc.parameters.q_mesh.join(" × ") : "N/A"}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Converged</label>
+                            <span>{calcData.result?.converged ? "Yes" : "No"}</span>
+                          </div>
+                        </div>
+                        <div className="calc-actions">
+                          {renderSavedFileButtons(calc)}
+                          {renderHpcDownloadButton(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {/* Phonon Calculations */}
         {phononCalculations.length > 0 && (
           <section className="history-section phonon-section">
@@ -4318,10 +4773,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item phonon-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">PHONON</span>
@@ -4500,10 +4956,11 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item dos-item">
                     <div
                       className="calculation-header"
-                      onClick={() =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id)
-                      }
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">EPW</span>
@@ -4725,15 +5182,16 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item">
                     <div
                       className="calculation-header"
-                      onClick={() => {
+                      onClick={() => handleCalculationHeaderClick(calc, () => {
                         if (expandedCalc !== calc.id) {
                           void ensureCalculationDetails(calc).catch((e) => {
                             console.warn("Failed to load optimization detail:", e);
                           });
                         }
                         setExpandedCalc(expandedCalc === calc.id ? null : calc.id);
-                      }}
+                      })}
                     >
+                      {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">OPT</span>
@@ -4892,6 +5350,26 @@ function normalizeSavedKPath(value: unknown): string {
           </section>
         )}
       </div>
+
+      {magnetismViewerCalc && getMagnetismViewerData(magnetismViewerCalc) && (
+        <div className="magnetism-fullscreen-viewer">
+          <div className="magnetism-fullscreen-header">
+            <button
+              className="back-btn"
+              onClick={() => setMagnetismViewerCalcId(null)}
+            >
+              ← Back
+            </button>
+            <div>
+              <h2>Magnetism Viewer</h2>
+              <span>{getCalculationEntryName(magnetismViewerCalc) ?? `SCF ${magnetismViewerCalc.id.slice(0, 8)}`}</span>
+            </div>
+          </div>
+          <div className="magnetism-fullscreen-body">
+            {renderMagnetismViewer(magnetismViewerCalc)}
+          </div>
+        </div>
+      )}
 
       {!readOnly && (
         <>
@@ -5141,6 +5619,60 @@ function normalizeSavedKPath(value: unknown): string {
 
           {/* Delete Project Dialog */}
           {showDeleteDialog && renderDeleteDialog()}
+
+          {/* Delete Selected Calculations Dialog */}
+          {showBulkDeleteCalcDialog && (
+            <div className="dialog-overlay" onClick={() => !isBulkDeletingCalc && setShowBulkDeleteCalcDialog(false)}>
+              <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
+                <div className="dialog-header">
+                  <h2>Delete Selected Calculations</h2>
+                  <button
+                    className="dialog-close"
+                    onClick={() => setShowBulkDeleteCalcDialog(false)}
+                    disabled={isBulkDeletingCalc}
+                  >
+                    &times;
+                  </button>
+                </div>
+
+                <div className="dialog-body">
+                  <p className="exit-warning">
+                    Delete {selectedCalculationCount} selected calculation{selectedCalculationCount !== 1 ? "s" : ""}?
+                  </p>
+                  <p className="exit-hint">
+                    This will permanently remove the selected calculation results and all associated input/output files.
+                  </p>
+                  <div className="bulk-delete-summary">
+                    {selectedCalculationsForDeletion.map((calc) => (
+                      <div key={calc.id} className="bulk-delete-summary-item">
+                        <span>{calc.calc_type.toUpperCase()}</span>
+                        <span>{getCalculationEntryName(calc) ?? calc.id.slice(0, 8)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="dialog-footer">
+                  <button
+                    className="dialog-btn cancel"
+                    onClick={() => setShowBulkDeleteCalcDialog(false)}
+                    disabled={isBulkDeletingCalc}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="dialog-btn delete width-lock"
+                    onClick={() => {
+                      void handleConfirmBulkDeleteCalculations();
+                    }}
+                    disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                  >
+                    {isBulkDeletingCalc ? "Deleting..." : "Delete Selected"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Delete Calculation Dialog */}
           {showDeleteCalcDialog && (

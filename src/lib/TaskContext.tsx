@@ -7,7 +7,7 @@ import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "epw" | "wannier" | "transport";
+export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -39,6 +39,7 @@ interface TaskSummary {
   remote_workdir?: string | null;
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
+  hpc_profile_id?: string | null;
   local_sync_dir?: string | null;
   recovery_save?: HpcRecoverySaveSpec | null;
   headless_attached?: boolean;
@@ -60,6 +61,7 @@ interface TaskInfo {
   remote_workdir?: string | null;
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
+  hpc_profile_id?: string | null;
   local_sync_dir?: string | null;
   recovery_save?: HpcRecoverySaveSpec | null;
   headless_attached?: boolean;
@@ -69,7 +71,7 @@ interface QueueSaveSpec {
   projectId: string;
   cifId: string;
   workingDir?: string | null;
-  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "phonon" | "epw" | "wannier" | "transport" | "optimization";
+  calcType: "scf" | "bands" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport" | "optimization";
   parameters: Record<string, any>;
   tags?: string[];
   inputContent?: string;
@@ -139,6 +141,7 @@ const COMMAND_MAP: Record<TaskType, string> = {
   bands: "start_bands_calculation",
   dos: "start_dos_calculation",
   fermi_surface: "start_fermi_surface_calculation",
+  hubbard_lrt: "start_hubbard_lrt_calculation",
   phonon: "start_phonon_calculation",
   epw: "start_epw_calculation",
   wannier: "start_wannier_calculation",
@@ -167,7 +170,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
@@ -183,6 +186,7 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
     remote_workdir: info.remote_workdir ?? null,
     remote_project_path: info.remote_project_path ?? null,
     remote_storage_bytes: info.remote_storage_bytes ?? null,
+    hpc_profile_id: info.hpc_profile_id ?? null,
     local_sync_dir: info.local_sync_dir ?? null,
     recovery_save: info.recovery_save ?? null,
     headless_attached: Boolean(info.headless_attached),
@@ -248,6 +252,46 @@ function progressFromOutput(taskType: TaskType, output: string[], status: TaskSt
   return progress;
 }
 
+function isPslibraryAtomicOrbitalLabelError(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("offset_atom_wfc")
+    && (
+      normalized.includes("does not contain labels for atomic orbitals")
+      || normalized.includes("please add them by hand in the pseudo")
+    );
+}
+
+function taskUsesRemotePseudos(hpc: HpcTaskMeta): boolean {
+  return hpc.backend === "hpc"
+    || Boolean(hpc.hpc_profile_id)
+    || Boolean(hpc.remote_job_id)
+    || Boolean(hpc.remote_workdir)
+    || Boolean(hpc.remote_project_path);
+}
+
+function addPslibraryPseudoRepairHint(
+  error: string | null,
+  output: string[],
+  hpc: HpcTaskMeta,
+): string | null {
+  const baseError = error ?? "Calculation failed.";
+  const combinedText = `${baseError}\n${output.join("\n")}`;
+  if (!isPslibraryAtomicOrbitalLabelError(combinedText)) {
+    return error;
+  }
+  if (
+    baseError.includes("Repair Local PSLibrary Pseudos")
+    || baseError.includes("Repair Remote PSLibrary Pseudos")
+  ) {
+    return baseError;
+  }
+
+  const remote = taskUsesRemotePseudos(hpc);
+  const settingsPath = remote ? "Settings > HPC" : "Settings > General";
+  const buttonLabel = remote ? "Repair Remote PSLibrary Pseudos" : "Repair Local PSLibrary Pseudos";
+  return `${baseError}\n\nThis matches a known PSLibrary UPF defect where the tenth atomic wavefunction tag is written as PP_CHI.1 instead of PP_CHI.10. Open ${settingsPath} and run ${buttonLabel}, then rerun the calculation.`;
+}
+
 function buildTaskState(
   taskId: string,
   taskType: TaskType,
@@ -279,7 +323,7 @@ function buildTaskState(
     outputText: visibleOutput.text,
     outputLineCount: visibleOutput.totalLineCount,
     result,
-    error,
+    error: addPslibraryPseudoRepairHint(error, output, hpc),
     hpc,
   };
 }
@@ -376,6 +420,18 @@ function buildQueuedResult(
       n_scf_steps: null,
       wall_time_seconds: null,
       raw_output: failureOutput,
+    };
+  }
+
+  if (taskType === "hubbard_lrt") {
+    return {
+      converged: failed ? false : Boolean(taskResult?.converged ?? true),
+      total_energy: null,
+      fermi_energy: null,
+      n_scf_steps: null,
+      wall_time_seconds: null,
+      raw_output: failed ? failureOutput : taskResult?.raw_output ?? outputText,
+      hubbard_lrt_data: failed ? null : taskResult,
     };
   }
 
@@ -514,6 +570,13 @@ function augmentQueuedParameters(taskType: TaskType, baseParameters: Record<stri
     if (next.n_modes == null && Number.isFinite(Number(taskResult?.n_modes))) {
       next.n_modes = Number(taskResult.n_modes);
     }
+  } else if (taskType === "hubbard_lrt") {
+    if (next.u_value_count == null && Array.isArray(taskResult?.u_values)) {
+      next.u_value_count = taskResult.u_values.length;
+    }
+    if (next.q_mesh == null && Array.isArray(taskResult?.q_mesh)) {
+      next.q_mesh = taskResult.q_mesh;
+    }
   } else if (taskType === "wannier") {
     if (next.total_spread == null && Number.isFinite(Number(taskResult?.total_spread))) {
       next.total_spread = Number(taskResult.total_spread);
@@ -596,6 +659,7 @@ async function saveRecoveredTaskResult(task: TaskState, recoverySave: HpcRecover
     parameters.remote_workdir = task.hpc.remote_workdir ?? null;
     parameters.remote_project_path = task.hpc.remote_project_path ?? null;
     parameters.remote_storage_bytes = task.hpc.remote_storage_bytes ?? null;
+    parameters.hpc_profile_id = task.hpc.hpc_profile_id ?? null;
     parameters.local_sync_dir = task.hpc.local_sync_dir ?? null;
   }
   const resultPayload = buildQueuedResult(task.taskType, task.result, outputText, parameters, task.status, task.error);
@@ -769,7 +833,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           next.set(taskId, {
             ...task,
             status: "failed",
-            error: errorMsg,
+            error: addPslibraryPseudoRepairHint(errorMsg, task.output, task.hpc),
             progress: {
               status: "error",
               percent: task.progress.percent,
@@ -1163,6 +1227,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       parameters.remote_workdir = task.hpc.remote_workdir ?? null;
       parameters.remote_project_path = task.hpc.remote_project_path ?? null;
       parameters.remote_storage_bytes = task.hpc.remote_storage_bytes ?? null;
+      parameters.hpc_profile_id = task.hpc.hpc_profile_id ?? null;
     }
     const resultPayload = buildQueuedResult(item.taskType, taskResult, outputText, parameters);
 

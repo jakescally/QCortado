@@ -14,6 +14,7 @@ import { EpwViewer } from "./components/EpwViewer";
 import type { EpwViewerPayload } from "./components/EpwViewer";
 import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
 import { PhononWizard } from "./components/PhononWizard";
+import { HubbardLrtWizard } from "./components/HubbardLrtWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { TransportPlot } from "./components/TransportPlot";
 import { TransportWizard } from "./components/TransportWizard";
@@ -67,6 +68,7 @@ import {
   migrateHpcRemoteRoots,
   normalizeCliDashText,
   openHpcActivityWindow,
+  resolveProfileRemotePseudoDir,
   saveExecutionMode,
   setActiveHpcProfile,
   updateHpcProfileDefaults,
@@ -78,6 +80,16 @@ interface TempCleanupResult {
   removed_paths: string[];
   failed_paths: string[];
   bytes_freed: number;
+}
+
+interface PslibraryPseudoRepairResult {
+  pseudo_dir: string;
+  scanned: number;
+  candidates: number;
+  patched: number;
+  already_clean: number;
+  patched_files: string[];
+  clean_files: string[];
 }
 
 interface RecoveryCalculation {
@@ -132,7 +144,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -148,6 +160,7 @@ interface SCFContext {
   initialPreset?: SCFPreset;
   presetLock?: boolean;
   optimizedStructures?: OptimizedStructureOption[];
+  calculations?: CalculationRun[];
 }
 
 interface BandsContext {
@@ -197,6 +210,13 @@ interface EpwContext {
   crystalData: CrystalData;
   projectId: string;
   calculations: CalculationRun[];
+}
+
+interface HubbardLrtContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+  scfCalculations: CalculationRun[];
 }
 
 interface PhononData {
@@ -425,6 +445,9 @@ function AppInner() {
   const [isImportingHpcPresetBundle, setIsImportingHpcPresetBundle] = useState(false);
   const [isCleaningHpcRemote, setIsCleaningHpcRemote] = useState(false);
   const [isMigratingHpcRoots, setIsMigratingHpcRoots] = useState(false);
+  const [isRepairingLocalPseudos, setIsRepairingLocalPseudos] = useState(false);
+  const [isRepairingRemotePseudos, setIsRepairingRemotePseudos] = useState(false);
+  const [pseudoRepairStatus, setPseudoRepairStatus] = useState<string | null>(null);
   const [showHeadlessRecoveryDialog, setShowHeadlessRecoveryDialog] = useState(false);
   const [headlessCandidates, setHeadlessCandidates] = useState<HpcHeadlessJobCandidate[]>([]);
   const [isLoadingHeadlessCandidates, setIsLoadingHeadlessCandidates] = useState(false);
@@ -519,6 +542,9 @@ function AppInner() {
 
   // Context for running Phonons from a project
   const [phononsContext, setPhononsContext] = useState<PhononsContext | null>(null);
+
+  // Context for running Hubbard linear response from a project
+  const [hubbardLrtContext, setHubbardLrtContext] = useState<HubbardLrtContext | null>(null);
 
   // Context for running EPW from a project
   const [epwContext, setEpwContext] = useState<EpwContext | null>(null);
@@ -692,6 +718,71 @@ function AppInner() {
       setError(String(e));
     } finally {
       setIsSavingQePath(false);
+    }
+  }
+
+  function getLocalPseudoDir() {
+    const basePath = (qePath || qePathInput).trim();
+    if (!basePath) return "";
+    return basePath.replace(/\/bin\/?$/, "/pseudo");
+  }
+
+  function formatPseudoRepairResult(scope: "Local" | "Remote", result: PslibraryPseudoRepairResult) {
+    const changed = result.patched_files.slice(0, 4).join(", ");
+    const suffix = result.patched_files.length > 4
+      ? `, +${result.patched_files.length - 4} more`
+      : "";
+    const patchedDetail = result.patched > 0
+      ? ` Patched: ${changed}${suffix}.`
+      : " No changes needed.";
+    return `${scope} PSLibrary repair scanned ${result.scanned} UPFs, found ${result.candidates} affected candidates, patched ${result.patched}, already clean ${result.already_clean}.${patchedDetail}`;
+  }
+
+  async function repairLocalPslibraryPseudos() {
+    const pseudoDir = getLocalPseudoDir();
+    if (!pseudoDir) {
+      setPseudoRepairStatus("Set the local QE bin path first.");
+      return;
+    }
+
+    setIsRepairingLocalPseudos(true);
+    setPseudoRepairStatus(null);
+    try {
+      const result = await invoke<PslibraryPseudoRepairResult>("repair_local_pslibrary_pseudopotentials", {
+        pseudoDir,
+      });
+      setPseudoRepairStatus(formatPseudoRepairResult("Local", result));
+      setError(null);
+    } catch (e) {
+      const message = String(e);
+      setPseudoRepairStatus(message);
+      setError(message);
+    } finally {
+      setIsRepairingLocalPseudos(false);
+    }
+  }
+
+  async function repairRemotePslibraryPseudos() {
+    if (!activeHpcProfile) {
+      setPseudoRepairStatus("Select an active HPC profile first.");
+      return;
+    }
+
+    setIsRepairingRemotePseudos(true);
+    setPseudoRepairStatus(null);
+    try {
+      const result = await invoke<PslibraryPseudoRepairResult>("hpc_repair_remote_pslibrary_pseudopotentials", {
+        profileId: activeHpcProfile.id,
+        pseudoDir: resolveProfileRemotePseudoDir(activeHpcProfile),
+      });
+      setPseudoRepairStatus(formatPseudoRepairResult("Remote", result));
+      setError(null);
+    } catch (e) {
+      const message = String(e);
+      setPseudoRepairStatus(message);
+      setError(message);
+    } finally {
+      setIsRepairingRemotePseudos(false);
     }
   }
 
@@ -1495,6 +1586,7 @@ function AppInner() {
       setBandsContext(null);
       setDosContext(null);
       setFermiSurfaceContext(null);
+      setHubbardLrtContext(null);
       setPhononsContext(null);
       setEpwContext(null);
       setViewBandsData(null);
@@ -1521,6 +1613,7 @@ function AppInner() {
       wannier: "wannier-wizard",
       transport: "transport-wizard",
       fermi_surface: "fermi-surface-wizard",
+      hubbard_lrt: "hubbard-lrt-wizard",
       phonon: "phonon-wizard",
       epw: "epw-wizard",
     };
@@ -1840,6 +1933,17 @@ function AppInner() {
                       >
                         {isCleaningHpcRemote ? "Cleaning Remote..." : "Clean Remote Orphans"}
                       </button>
+                      <div className="settings-repair-button-wrap">
+                        <InfoTooltip text="Scans the active HPC profile's remote pseudo directory and fixes only PSLibrary UPFs where the tenth atomic wavefunction tag was written as PP_CHI.1 instead of PP_CHI.10.">
+                          <button
+                            className="settings-menu-item"
+                            onClick={() => void repairRemotePslibraryPseudos()}
+                            disabled={!activeHpcProfile || isRepairingRemotePseudos}
+                          >
+                            {isRepairingRemotePseudos ? "Repairing Remote Pseudos..." : "Repair Remote PSLibrary Pseudos"}
+                          </button>
+                        </InfoTooltip>
+                      </div>
                       <button
                         className="settings-menu-item"
                         onClick={() => void handleExportHpcPresetBundle()}
@@ -1866,6 +1970,7 @@ function AppInner() {
                   </button>
                 )}
                 {settingsPage === "hpc" && hpcStatus && <div className="settings-menu-status">{hpcStatus}</div>}
+                {settingsPage === "hpc" && pseudoRepairStatus && <div className="settings-menu-status">{pseudoRepairStatus}</div>}
               </div>
 
               {executionMode === "hpc" && settingsPage === "hpc" && activeHpcProfile && (
@@ -2483,6 +2588,19 @@ function AppInner() {
                     <p className="settings-menu-hint">
                       QCortado derives <code>postw90.x</code> from the Wannier90 executable path by using the same directory.
                     </p>
+
+                    <div className="settings-repair-button-wrap">
+                      <InfoTooltip text="Scans the pseudo directory next to the configured local QE bin path and fixes only PSLibrary UPFs where the tenth atomic wavefunction tag was written as PP_CHI.1 instead of PP_CHI.10.">
+                        <button
+                          className="settings-menu-item"
+                          onClick={() => void repairLocalPslibraryPseudos()}
+                          disabled={isRepairingLocalPseudos || getLocalPseudoDir().length === 0}
+                        >
+                          {isRepairingLocalPseudos ? "Repairing Local Pseudos..." : "Repair Local PSLibrary Pseudos"}
+                        </button>
+                      </InfoTooltip>
+                    </div>
+                    {pseudoRepairStatus && <div className="settings-menu-status">{pseudoRepairStatus}</div>}
 
                     <div className="settings-local-status-grid">
                       <div className="status-row">
@@ -3478,6 +3596,30 @@ function AppInner() {
     );
   }
 
+  if (currentView === "hubbard-lrt-wizard" && (qePath || executionMode === "hpc") && (hubbardLrtContext || reconnectTaskId)) {
+    return (
+      <>
+        <HubbardLrtWizard
+          qePath={qePath || ""}
+          executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
+          activeHpcProfile={activeHpcProfile}
+          onBack={() => {
+            setCurrentView("project-dashboard");
+            setHubbardLrtContext(null);
+            setReconnectTaskId(null);
+          }}
+          projectId={hubbardLrtContext?.projectId ?? ""}
+          cifId={hubbardLrtContext?.cifId ?? ""}
+          crystalData={hubbardLrtContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
+          scfCalculations={hubbardLrtContext?.scfCalculations ?? []}
+          reconnectTaskId={reconnectTaskId ?? undefined}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
   if (currentView === "phonon-wizard" && (qePath || executionMode === "hpc") && (phononsContext || reconnectTaskId)) {
     return (
       <>
@@ -3761,7 +3903,7 @@ function AppInner() {
             setCurrentView("project-browser");
             setSelectedProjectId(null);
           }}
-          onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures) => {
+          onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures, calculations) => {
             setScfContext({
               cifId,
               crystalData,
@@ -3771,6 +3913,7 @@ function AppInner() {
               initialPreset: preset,
               presetLock,
               optimizedStructures,
+              calculations,
             });
             setCurrentView("scf-wizard");
           }}
@@ -3848,6 +3991,15 @@ function AppInner() {
               scfCalculations,
             });
             setCurrentView("phonon-wizard");
+          }}
+          onRunHubbardLrt={(cifId, crystalData, scfCalculations) => {
+            setHubbardLrtContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            setCurrentView("hubbard-lrt-wizard");
           }}
           onRunEPW={(cifId, crystalData, calculations) => {
             setEpwContext({

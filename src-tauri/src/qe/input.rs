@@ -144,6 +144,14 @@ fn write_system_namelist(out: &mut String, calc: &QECalculation) {
             if let Some(value) = species.starting_magnetization {
                 writeln!(out, "  starting_magnetization({}) = {},", index + 1, value).unwrap();
             }
+            if noncolin {
+                if let Some(value) = species.theta {
+                    writeln!(out, "  angle1({}) = {},", index + 1, value).unwrap();
+                }
+                if let Some(value) = species.phi {
+                    writeln!(out, "  angle2({}) = {},", index + 1, value).unwrap();
+                }
+            }
         }
         if let Some(tot_magnetization) = sys.tot_magnetization {
             writeln!(out, "  tot_magnetization = {},", tot_magnetization).unwrap();
@@ -387,6 +395,60 @@ fn write_hubbard_card(out: &mut String, sys: &QESystem) {
 }
 
 // ============================================================================
+// Hubbard linear-response Input Generation
+// ============================================================================
+
+pub fn generate_hp_input(calc: &super::types::HpCalculation) -> String {
+    let mut output = String::new();
+
+    writeln!(output, "&INPUTHP").unwrap();
+    writeln!(output, "  prefix = '{}',", calc.prefix).unwrap();
+    writeln!(output, "  outdir = '{}',", calc.outdir).unwrap();
+    writeln!(output, "  nq1 = {},", calc.nq[0]).unwrap();
+    writeln!(output, "  nq2 = {},", calc.nq[1]).unwrap();
+    writeln!(output, "  nq3 = {},", calc.nq[2]).unwrap();
+    if let Some(find_atpert) = calc.find_atpert {
+        writeln!(output, "  find_atpert = {},", find_atpert).unwrap();
+    }
+    if let Some(conv_thr_chi) = calc.conv_thr_chi {
+        writeln!(output, "  conv_thr_chi = {:.2e},", conv_thr_chi).unwrap();
+    }
+    if let Some(niter_max) = calc.niter_max {
+        writeln!(output, "  niter_max = {},", niter_max).unwrap();
+    }
+    if let Some(iverbosity) = calc.iverbosity {
+        writeln!(output, "  iverbosity = {},", iverbosity).unwrap();
+    }
+    if calc.no_metq0 {
+        writeln!(output, "  no_metq0 = .true.,").unwrap();
+    }
+    if calc.skip_equivalence_q {
+        writeln!(output, "  skip_equivalence_q = .true.,").unwrap();
+    }
+    if let Some(docc_thr) = calc.docc_thr {
+        writeln!(output, "  docc_thr = {:.2e},", docc_thr).unwrap();
+    }
+    if let Some(ethr_nscf) = calc.ethr_nscf {
+        writeln!(output, "  ethr_nscf = {:.2e},", ethr_nscf).unwrap();
+    }
+    if let Some(thresh_init) = calc.thresh_init {
+        writeln!(output, "  thresh_init = {:.2e},", thresh_init).unwrap();
+    }
+    if let Some(alpha_mix) = calc.alpha_mix {
+        writeln!(output, "  alpha_mix(1) = {},", alpha_mix).unwrap();
+    }
+    if let Some(nmix) = calc.nmix {
+        writeln!(output, "  nmix = {},", nmix).unwrap();
+    }
+    if let Some(max_seconds) = calc.max_seconds {
+        writeln!(output, "  max_seconds = {},", max_seconds).unwrap();
+    }
+    writeln!(output, "/").unwrap();
+
+    output
+}
+
+// ============================================================================
 // Phonon Input Generation
 // ============================================================================
 
@@ -591,6 +653,8 @@ mod tests {
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
                     starting_magnetization: None,
+                    theta: None,
+                    phi: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -681,6 +745,34 @@ mod tests {
     }
 
     #[test]
+    fn test_hp_input_generation() {
+        let input = generate_hp_input(&HpCalculation {
+            prefix: "qcortado_scf".to_string(),
+            outdir: "./tmp".to_string(),
+            nq: [2, 2, 1],
+            find_atpert: Some(1),
+            conv_thr_chi: Some(1.0e-5),
+            niter_max: Some(120),
+            iverbosity: Some(2),
+            no_metq0: true,
+            skip_equivalence_q: false,
+            docc_thr: Some(1.0e-5),
+            ethr_nscf: Some(1.0e-11),
+            thresh_init: Some(1.0e-14),
+            alpha_mix: Some(0.3),
+            nmix: Some(4),
+            max_seconds: Some(3600.0),
+        });
+        assert!(input.contains("&INPUTHP"));
+        assert!(input.contains("prefix = 'qcortado_scf'"));
+        assert!(input.contains("nq1 = 2"));
+        assert!(input.contains("nq2 = 2"));
+        assert!(input.contains("nq3 = 1"));
+        assert!(input.contains("no_metq0 = .true."));
+        assert!(input.contains("alpha_mix(1) = 0.3"));
+    }
+
+    #[test]
     fn test_bands_input_writes_electronic_controls() {
         let calc = QECalculation {
             calculation: CalculationType::Bands,
@@ -697,6 +789,8 @@ mod tests {
                     mass: 28.086,
                     pseudopotential: "Si.pbe.UPF".to_string(),
                     starting_magnetization: None,
+                    theta: None,
+                    phi: None,
                 }],
                 atoms: vec![Atom {
                     symbol: "Si".to_string(),
@@ -767,7 +861,9 @@ mod tests {
                     symbol: "Bi".to_string(),
                     mass: 208.98,
                     pseudopotential: "Bi.rel-pbe.upf".to_string(),
-                    starting_magnetization: None,
+                    starting_magnetization: Some(0.5),
+                    theta: Some(90.0),
+                    phi: Some(45.0),
                 }],
                 atoms: vec![Atom {
                     symbol: "Bi".to_string(),
@@ -815,6 +911,9 @@ mod tests {
 
         assert!(input.contains("noncolin = .true."));
         assert!(input.contains("lspinorb = .true."));
+        assert!(input.contains("starting_magnetization(1) = 0.5"));
+        assert!(input.contains("angle1(1) = 90"));
+        assert!(input.contains("angle2(1) = 45"));
         assert!(!input.contains("nspin = 4"));
     }
 
@@ -900,6 +999,8 @@ mod tests {
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
                     starting_magnetization: None,
+                    theta: None,
+                    phi: None,
                 }],
                 atoms: vec![
                     Atom {
@@ -975,6 +1076,8 @@ mod tests {
                     mass: 28.086,
                     pseudopotential: "Si.pz-vbc.UPF".to_string(),
                     starting_magnetization: None,
+                    theta: None,
+                    phi: None,
                 }],
                 atoms: vec![
                     Atom {

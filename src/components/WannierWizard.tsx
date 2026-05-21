@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -47,6 +47,7 @@ import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
+  resolveProfileRemotePseudoDir,
 } from "../lib/hpcConfig";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -60,6 +61,9 @@ import {
   getOutermostOccupiedOrbital,
 } from "../lib/electronConfigurations";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
+import { getMagneticSpeciesFields } from "../lib/magnetism";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 
 interface CalculationRun {
   id: string;
@@ -143,6 +147,7 @@ type ProjectionOrbital = "s" | "p" | "d" | "f" | "sp" | "sp2" | "sp3" | "sp3d" |
 type WizardStep = "source" | "mesh" | "projections" | "run" | "results";
 type NumBandsMode = "auto" | "manual";
 type ReferenceEnergyMode = "relative" | "absolute";
+const WANNIER_WIZARD_SETTINGS_ID = "wannier";
 
 interface ProjectionDraft {
   id: string;
@@ -150,6 +155,25 @@ interface ProjectionDraft {
   symbol: string;
   orbital: ProjectionOrbital;
   siteIndex: number | null;
+}
+
+interface StoredWannierWizardSettings {
+  kGridInput: [string, string, string];
+  totalKPointsTarget: number;
+  totalKPointsInput: string;
+  numBandsInput: string;
+  numBandsMode: NumBandsMode;
+  seednameInput: string;
+  projectionDrafts: ProjectionDraft[];
+  numWannOverrideInput: string;
+  excludeBandsInput: string;
+  disWinMinInput: string;
+  disWinMaxInput: string;
+  disFrozMinInput: string;
+  disFrozMaxInput: string;
+  referenceEnergyMode: ReferenceEnergyMode;
+  referenceShowBandGapOverlay: boolean;
+  referenceProjectionSelection: string;
 }
 
 interface WannierWizardProps {
@@ -543,6 +567,11 @@ export function WannierWizard({
   const resolvedDefaultSmearing = normalizeSmearing(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredWannierWizardSettings>(projectId, WANNIER_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
+  const shouldPreserveStoredSettingsRef = useRef(Boolean(storedWizardSettings));
   const [step, setStep] = useState<WizardStep>(reconnectTaskId ? "run" : "source");
   const [error, setError] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
@@ -555,25 +584,25 @@ export function WannierWizard({
   const [scfSortMode, setScfSortMode] = useState<ScfSortMode>(() => getStoredSortMode());
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
-  const [kGridInput, setKGridInput] = useState<[string, string, string]>(["4", "4", "4"]);
-  const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
-  const [totalKPointsInput, setTotalKPointsInput] = useState("120");
-  const [numBandsInput, setNumBandsInput] = useState("");
-  const [numBandsMode, setNumBandsMode] = useState<NumBandsMode>("auto");
-  const [seednameInput, setSeednameInput] = useState("qcortado_wannier");
+  const [kGridInput, setKGridInput] = useState<[string, string, string]>(() => storedWizardSettings?.kGridInput ?? ["4", "4", "4"]);
+  const [totalKPointsTarget, setTotalKPointsTarget] = useState(() => storedWizardSettings?.totalKPointsTarget ?? 120);
+  const [totalKPointsInput, setTotalKPointsInput] = useState(() => storedWizardSettings?.totalKPointsInput ?? "120");
+  const [numBandsInput, setNumBandsInput] = useState(() => storedWizardSettings?.numBandsInput ?? "");
+  const [numBandsMode, setNumBandsMode] = useState<NumBandsMode>(() => storedWizardSettings?.numBandsMode ?? "auto");
+  const [seednameInput, setSeednameInput] = useState(() => storedWizardSettings?.seednameInput ?? "qcortado_wannier");
   const [kPath, setKPath] = useState<KPathPoint[]>([]);
   const [kPathRhombohedralConvention, setKPathRhombohedralConvention] = useState<RhombohedralConvention | undefined>(undefined);
-  const [projectionDrafts, setProjectionDrafts] = useState<ProjectionDraft[]>([]);
-  const [numWannOverrideInput, setNumWannOverrideInput] = useState("");
-  const [excludeBandsInput, setExcludeBandsInput] = useState("");
-  const [disWinMinInput, setDisWinMinInput] = useState("");
-  const [disWinMaxInput, setDisWinMaxInput] = useState("");
-  const [disFrozMinInput, setDisFrozMinInput] = useState("");
-  const [disFrozMaxInput, setDisFrozMaxInput] = useState("");
+  const [projectionDrafts, setProjectionDrafts] = useState<ProjectionDraft[]>(() => storedWizardSettings?.projectionDrafts ?? []);
+  const [numWannOverrideInput, setNumWannOverrideInput] = useState(() => storedWizardSettings?.numWannOverrideInput ?? "");
+  const [excludeBandsInput, setExcludeBandsInput] = useState(() => storedWizardSettings?.excludeBandsInput ?? "");
+  const [disWinMinInput, setDisWinMinInput] = useState(() => storedWizardSettings?.disWinMinInput ?? "");
+  const [disWinMaxInput, setDisWinMaxInput] = useState(() => storedWizardSettings?.disWinMaxInput ?? "");
+  const [disFrozMinInput, setDisFrozMinInput] = useState(() => storedWizardSettings?.disFrozMinInput ?? "");
+  const [disFrozMaxInput, setDisFrozMaxInput] = useState(() => storedWizardSettings?.disFrozMaxInput ?? "");
   const [referenceBandsCalcId, setReferenceBandsCalcId] = useState("");
-  const [referenceEnergyMode, setReferenceEnergyMode] = useState<ReferenceEnergyMode>("absolute");
-  const [referenceShowBandGapOverlay, setReferenceShowBandGapOverlay] = useState(true);
-  const [referenceProjectionSelection, setReferenceProjectionSelection] = useState("none");
+  const [referenceEnergyMode, setReferenceEnergyMode] = useState<ReferenceEnergyMode>(() => storedWizardSettings?.referenceEnergyMode ?? "absolute");
+  const [referenceShowBandGapOverlay, setReferenceShowBandGapOverlay] = useState(() => storedWizardSettings?.referenceShowBandGapOverlay ?? true);
+  const [referenceProjectionSelection, setReferenceProjectionSelection] = useState(() => storedWizardSettings?.referenceProjectionSelection ?? "none");
   const [detailedBandsById, setDetailedBandsById] = useState<Record<string, CalculationRun>>({});
   const [referenceBandsLoading, setReferenceBandsLoading] = useState(false);
   const [progress, setProgress] = useState<ProgressState>(defaultProgressState("Wannier90"));
@@ -646,6 +675,45 @@ export function WannierWizard({
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
   useEffect(() => {
+    writeProjectWizardSettings(projectId, WANNIER_WIZARD_SETTINGS_ID, {
+      kGridInput,
+      totalKPointsTarget,
+      totalKPointsInput,
+      numBandsInput,
+      numBandsMode,
+      seednameInput,
+      projectionDrafts,
+      numWannOverrideInput,
+      excludeBandsInput,
+      disWinMinInput,
+      disWinMaxInput,
+      disFrozMinInput,
+      disFrozMaxInput,
+      referenceEnergyMode,
+      referenceShowBandGapOverlay,
+      referenceProjectionSelection,
+    });
+  }, [
+    projectId,
+    kGridInput,
+    totalKPointsTarget,
+    totalKPointsInput,
+    numBandsInput,
+    numBandsMode,
+    seednameInput,
+    projectionDrafts,
+    numWannOverrideInput,
+    excludeBandsInput,
+    disWinMinInput,
+    disWinMaxInput,
+    disFrozMinInput,
+    disFrozMaxInput,
+    referenceEnergyMode,
+    referenceShowBandGapOverlay,
+    referenceProjectionSelection,
+  ]);
+
+  useEffect(() => {
     async function initLocalExecutionDefaults() {
       if (isHpcMode) return;
       try {
@@ -698,10 +766,12 @@ export function WannierWizard({
   useEffect(() => {
     if (!selectedScf) return;
     const params = selectedScf.parameters || {};
-    const storedGrid = Array.isArray(params.kgrid) && params.kgrid.length === 3
-      ? params.kgrid.map((value: unknown) => String(value || "4")) as [string, string, string]
-      : ["4", "4", "4"];
-    setKGridInput([storedGrid[0], storedGrid[1], storedGrid[2]]);
+    if (!shouldPreserveStoredSettingsRef.current) {
+      const storedGrid = Array.isArray(params.kgrid) && params.kgrid.length === 3
+        ? params.kgrid.map((value: unknown) => String(value || "4")) as [string, string, string]
+        : ["4", "4", "4"];
+      setKGridInput([storedGrid[0], storedGrid[1], storedGrid[2]]);
+    }
 
     if (projectionDrafts.length === 0) {
       const uniqueElements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
@@ -721,6 +791,7 @@ export function WannierWizard({
   }, [selectedScf, crystalData, projectionDrafts.length]);
 
   useEffect(() => {
+    if (shouldPreserveStoredSettingsRef.current) return;
     setNumBandsMode("auto");
     setNumBandsInput("");
   }, [selectedScf?.id]);
@@ -1533,22 +1604,12 @@ export function WannierWizard({
     const degauss = Number(params.degauss);
     const convThr = Number(params.conv_thr);
     const mixingBeta = Number(params.mixing_beta);
-    const sourceStartingMagnetization =
-      params.starting_magnetization && typeof params.starting_magnetization === "object"
-        ? params.starting_magnetization as Record<string, unknown>
-        : {};
-    const getStartingMagnetization = (element: string) => {
-      const value = Number(sourceStartingMagnetization[element]);
-      return Number.isFinite(value) ? value : undefined;
-    };
     const baseElements = [...new Set(crystalData.atom_sites.map((site) => getBaseElement(site.type_symbol)))];
     const species = baseElements.map((element) => ({
       symbol: element,
       mass: ELEMENT_MASSES[element] || 1,
       pseudopotential: sourcePseudoMap[element],
-      ...(getStartingMagnetization(element) !== undefined
-        ? { starting_magnetization: getStartingMagnetization(element) }
-        : {}),
+      ...getMagneticSpeciesFields(params, element),
     }));
     if (species.some((entry) => !entry.pseudopotential)) {
       throw new Error("Source SCF pseudopotential metadata is incomplete. Re-run the SCF before starting Wannier.");
@@ -1586,13 +1647,16 @@ export function WannierWizard({
 
     let baseCalculation;
     let transformedPath;
+    const pseudoDir = isHpcMode
+      ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
+      : qePath.replace(/\/bin\/?$/, "/pseudo");
 
     if (isOptimizedSourceScf && structureForNscf) {
       baseCalculation = {
         calculation: "scf",
         prefix: params.prefix || "qcortado_scf",
         outdir: "./tmp",
-        pseudo_dir: isHpcMode ? (activeHpcProfile?.remote_pseudo_dir || "") : qePath.replace(/\/bin\/?$/, "/pseudo"),
+        pseudo_dir: pseudoDir,
         system: {
           ibrav: "free",
           celldm: null,
@@ -1641,7 +1705,7 @@ export function WannierWizard({
         calculation: "scf",
         prefix: params.prefix || "qcortado_scf",
         outdir: "./tmp",
-        pseudo_dir: isHpcMode ? (activeHpcProfile?.remote_pseudo_dir || "") : qePath.replace(/\/bin\/?$/, "/pseudo"),
+        pseudo_dir: pseudoDir,
         system: {
           ibrav: inferredBravais?.ibrav ?? "free",
           celldm: inferredBravais?.celldm ?? null,
@@ -1688,7 +1752,7 @@ export function WannierWizard({
         calculation: "scf",
         prefix: params.prefix || "qcortado_scf",
         outdir: "./tmp",
-        pseudo_dir: isHpcMode ? (activeHpcProfile?.remote_pseudo_dir || "") : qePath.replace(/\/bin\/?$/, "/pseudo"),
+        pseudo_dir: pseudoDir,
         system: {
           ibrav: "free",
           celldm: null,
@@ -1851,6 +1915,8 @@ export function WannierWizard({
         noncolin: params.noncolin,
         lspinorb: params.lspinorb,
         starting_magnetization: params.starting_magnetization ?? null,
+        starting_magnetization_theta: params.starting_magnetization_theta ?? params.starting_magnetization_angle1 ?? params.theta ?? params.angle1 ?? null,
+        starting_magnetization_phi: params.starting_magnetization_phi ?? params.starting_magnetization_angle2 ?? params.phi ?? params.angle2 ?? null,
         lda_plus_u: params.lda_plus_u,
         vdw_corr: params.vdw_corr,
         symmetry_spacegroup: resolvedSymmetry?.spacegroupNumber ?? null,
@@ -2000,6 +2066,7 @@ export function WannierWizard({
 
         <div className="scf-list">
           {sortedReadyScfs.map((scf) => {
+            const scfName = getCalculationName(scf);
             return (
               <div
                 key={scf.id}
@@ -2018,6 +2085,11 @@ export function WannierWizard({
                       setError(null);
                     }}
                   />
+                  {scfName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(scf)}>
+                      {scfName}
+                    </span>
+                  )}
                   <span className="scf-date">
                     {new Date(scf.started_at).toLocaleDateString()}
                   </span>
@@ -2146,7 +2218,7 @@ export function WannierWizard({
           <h4>Summary</h4>
           <div className="summary-row">
             <span>Source SCF:</span>
-            <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
+            <span>{formatCalculationSourceLabel(selectedScf)}</span>
           </div>
           <div className="summary-row">
             <span>NSCF mesh:</span>
@@ -2446,7 +2518,7 @@ export function WannierWizard({
               <h4>Summary</h4>
               <div className="summary-row">
                 <span>Source SCF:</span>
-                <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
+                <span>{formatCalculationSourceLabel(selectedScf)}</span>
               </div>
               <div className="summary-row">
                 <span>NSCF mesh:</span>

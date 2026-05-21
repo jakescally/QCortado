@@ -64,6 +64,7 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
     bands: "Band Structure",
     dos: "Electronic DOS",
     fermi_surface: "Fermi Surface",
+    hubbard_lrt: "Hubbard LRT",
     phonon: "Phonon",
     epw: "EPW",
     wannier: "Wannier90",

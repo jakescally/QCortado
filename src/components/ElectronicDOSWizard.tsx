@@ -22,6 +22,9 @@ import { useTaskContext } from "../lib/TaskContext";
 import { ElectronicDOSData } from "./ElectronicDOSPlot";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
+import { getMagneticSpeciesFields } from "../lib/magnetism";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -29,6 +32,7 @@ import {
   defaultResourcesForProfile,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
+  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -94,6 +98,15 @@ interface ElectronicDOSWizardProps {
 
 type WizardStep = "source" | "parameters" | "run" | "results";
 const DOS_WORK_DIR = "/tmp/qcortado_dos";
+const DOS_WIZARD_SETTINGS_ID = "dos";
+
+interface StoredDosWizardSettings {
+  dosKGrid: [number, number, number];
+  deltaEInput: string;
+  degaussInput: string;
+  eminInput: string;
+  emaxInput: string;
+}
 
 interface DosTaskPlan {
   taskLabel: string;
@@ -206,6 +219,10 @@ export function ElectronicDOSWizard({
   const resolvedDefaultSmearing = normalizeSmearingDefault(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredDosWizardSettings>(projectId, DOS_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -225,11 +242,11 @@ export function ElectronicDOSWizard({
     setStoredSortMode(mode);
   }, []);
 
-  const [dosKGrid, setDosKGrid] = useState<[number, number, number]>([16, 16, 16]);
-  const [deltaEInput, setDeltaEInput] = useState("0.02");
-  const [degaussInput, setDegaussInput] = useState("0.02");
-  const [eminInput, setEminInput] = useState("");
-  const [emaxInput, setEmaxInput] = useState("");
+  const [dosKGrid, setDosKGrid] = useState<[number, number, number]>(() => storedWizardSettings?.dosKGrid ?? [16, 16, 16]);
+  const [deltaEInput, setDeltaEInput] = useState(() => storedWizardSettings?.deltaEInput ?? "0.02");
+  const [degaussInput, setDegaussInput] = useState(() => storedWizardSettings?.degaussInput ?? "0.02");
+  const [eminInput, setEminInput] = useState(() => storedWizardSettings?.eminInput ?? "");
+  const [emaxInput, setEmaxInput] = useState(() => storedWizardSettings?.emaxInput ?? "");
 
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState("");
@@ -276,6 +293,16 @@ export function ElectronicDOSWizard({
     if (!isHpcMode) return;
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
+
+  useEffect(() => {
+    writeProjectWizardSettings(projectId, DOS_WIZARD_SETTINGS_ID, {
+      dosKGrid,
+      deltaEInput,
+      degaussInput,
+      eminInput,
+      emaxInput,
+    });
+  }, [projectId, dosKGrid, deltaEInput, degaussInput, eminInput, emaxInput]);
 
   const selectedScfDependencyBlocked = useMemo(() => {
     if (isHpcMode || !selectedScf) return false;
@@ -354,7 +381,7 @@ export function ElectronicDOSWizard({
         setMpiProcs(defaults.nprocs);
 
         const pseudoDir = isHpcMode
-          ? (activeHpcProfile?.remote_pseudo_dir || "")
+          ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
           : qePath.replace(/\/bin\/?$/, "/pseudo");
         const pseudos = isHpcMode
           ? await listRemotePseudopotentials(pseudoDir, activeHpcProfile?.id ?? null)
@@ -372,7 +399,16 @@ export function ElectronicDOSWizard({
     }
 
     void init();
-  }, [crystalData, qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
+  }, [
+    crystalData,
+    qePath,
+    isHpcMode,
+    activeHpcProfile?.id,
+    activeHpcProfile?.remote_cpu_pseudo_dir,
+    activeHpcProfile?.remote_gpu_pseudo_dir,
+    activeHpcProfile?.remote_pseudo_dir,
+    hpcResources.resource_type,
+  ]);
 
   useEffect(() => {
     if (!activeTaskId) return;
@@ -502,7 +538,7 @@ export function ElectronicDOSWizard({
     const inheritedDegaussValue = Number(scfParams.degauss);
     const inheritedDegauss = Number.isFinite(inheritedDegaussValue) ? inheritedDegaussValue : null;
     const pseudoDir = isHpcMode
-      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
       : qePath.replace(/\/bin\/?$/, "/pseudo");
     if (!pseudoDir.trim()) {
       throw new Error(
@@ -522,25 +558,14 @@ export function ElectronicDOSWizard({
     const nspin = Number(scfParams.nspin) || 1;
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
-    const sourceStartingMagnetization =
-      scfParams.starting_magnetization && typeof scfParams.starting_magnetization === "object"
-        ? scfParams.starting_magnetization as Record<string, unknown>
-        : {};
-    const getStartingMagnetization = (element: string) => {
-      const value = Number(sourceStartingMagnetization[element]);
-      return Number.isFinite(value) ? value : undefined;
-    };
-
     const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
     const commonSystemFields = {
       species: elements.map((element) => ({
-        symbol: element,
-        mass: ELEMENT_MASSES[element] || 1.0,
-        pseudopotential: resolvedPseudos[element],
-        ...(getStartingMagnetization(element) !== undefined
-          ? { starting_magnetization: getStartingMagnetization(element) }
-          : {}),
-      })),
+      symbol: element,
+      mass: ELEMENT_MASSES[element] || 1.0,
+      pseudopotential: resolvedPseudos[element],
+      ...getMagneticSpeciesFields(scfParams, element),
+    })),
       position_units: structureForNscf?.position_units || "crystal",
       ecutwfc,
       ecutrho,
@@ -672,6 +697,8 @@ export function ElectronicDOSWizard({
       noncolin: scfParams.noncolin,
       lspinorb: scfParams.lspinorb,
       starting_magnetization: scfParams.starting_magnetization ?? null,
+      starting_magnetization_theta: scfParams.starting_magnetization_theta ?? scfParams.starting_magnetization_angle1 ?? scfParams.theta ?? scfParams.angle1 ?? null,
+      starting_magnetization_phi: scfParams.starting_magnetization_phi ?? scfParams.starting_magnetization_angle2 ?? scfParams.phi ?? scfParams.angle2 ?? null,
       lda_plus_u: scfParams.lda_plus_u,
       hubbard_projector: scfParams.hubbard_projector ?? null,
       hubbard_formulation: scfParams.hubbard_formulation ?? null,
@@ -874,48 +901,56 @@ export function ElectronicDOSWizard({
         </p>
 
         <div className="scf-list">
-          {sortedScfs.map((scf) => (
-            <div
-              key={scf.id}
-              className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
-              onClick={() => {
-                setDependencyStatus(null);
-                setSelectedScf(scf);
-                setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-              }}
-            >
-              <div className="scf-option-header">
-                <input
-                  type="radio"
-                  checked={selectedScf?.id === scf.id}
-                  onChange={() => {
-                    setDependencyStatus(null);
-                    setSelectedScf(scf);
-                    setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-                  }}
-                />
-                <span className="scf-date">
-                  {new Date(scf.started_at).toLocaleDateString()}
-                </span>
-              </div>
-              <div className="scf-details">
-                <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
-                {scf.result?.fermi_energy != null && (
-                  <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
-                )}
-              </div>
-              <div className="calc-tags">
-                {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
-                  <span
-                    key={`${tag.label}-${i}`}
-                    className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
-                  >
-                    {tag.label}
+          {sortedScfs.map((scf) => {
+            const scfName = getCalculationName(scf);
+            return (
+              <div
+                key={scf.id}
+                className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
+                onClick={() => {
+                  setDependencyStatus(null);
+                  setSelectedScf(scf);
+                  setScfFermiEnergy(scf.result?.fermi_energy ?? null);
+                }}
+              >
+                <div className="scf-option-header">
+                  <input
+                    type="radio"
+                    checked={selectedScf?.id === scf.id}
+                    onChange={() => {
+                      setDependencyStatus(null);
+                      setSelectedScf(scf);
+                      setScfFermiEnergy(scf.result?.fermi_energy ?? null);
+                    }}
+                  />
+                  {scfName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(scf)}>
+                      {scfName}
+                    </span>
+                  )}
+                  <span className="scf-date">
+                    {new Date(scf.started_at).toLocaleDateString()}
                   </span>
-                ))}
+                </div>
+                <div className="scf-details">
+                  <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
+                  {scf.result?.fermi_energy != null && (
+                    <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
+                  )}
+                </div>
+                <div className="calc-tags">
+                  {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
+                    <span
+                      key={`${tag.label}-${i}`}
+                      className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
+                    >
+                      {tag.label}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="step-actions">
@@ -1029,7 +1064,7 @@ export function ElectronicDOSWizard({
           <h4>Summary</h4>
           <div className="summary-row">
             <span>Source SCF:</span>
-            <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
+            <span>{formatCalculationSourceLabel(selectedScf)}</span>
           </div>
           <div className="summary-row">
             <span>DOS k-grid:</span>

@@ -40,6 +40,18 @@ function collectElementSymbolsFromSettings(settings: Record<string, unknown>): s
   if (startingMagnetization) {
     sourceKeys.push(...Object.keys(startingMagnetization));
   }
+  const startingMagnetizationTheta = asRecord(
+    settings.starting_magnetization_theta ?? settings.starting_magnetization_angle1 ?? settings.theta ?? settings.angle1,
+  );
+  if (startingMagnetizationTheta) {
+    sourceKeys.push(...Object.keys(startingMagnetizationTheta));
+  }
+  const startingMagnetizationPhi = asRecord(
+    settings.starting_magnetization_phi ?? settings.starting_magnetization_angle2 ?? settings.phi ?? settings.angle2,
+  );
+  if (startingMagnetizationPhi) {
+    sourceKeys.push(...Object.keys(startingMagnetizationPhi));
+  }
   const hubbardU = asRecord(settings.hubbard_u);
   if (hubbardU) {
     sourceKeys.push(...Object.keys(hubbardU));

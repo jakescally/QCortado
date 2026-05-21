@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -23,6 +23,8 @@ import {
 import { HpcRunSettings } from "./HpcRunSettings";
 import { TransportPlot } from "./TransportPlot";
 import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import type { TransportResult } from "../lib/transport";
 
 interface CalculationRun {
@@ -58,6 +60,20 @@ type WizardStep = "source" | "parameters" | "run" | "results";
 type TransportSourceSortMode = "recent" | "best";
 
 const TRANSPORT_WORK_DIR = "/tmp/qcortado_transport";
+const TRANSPORT_WIZARD_SETTINGS_ID = "transport";
+
+interface StoredTransportWizardSettings {
+  boltzKMesh: [number, number, number];
+  muOffsetMinInput: string;
+  muOffsetMaxInput: string;
+  muOffsetStepInput: string;
+  tempMinInput: string;
+  tempMaxInput: string;
+  tempStepInput: string;
+  relaxationTimeInput: string;
+  is2d: boolean;
+  boltz2dDir: string;
+}
 
 function formatNumber(value: number | null | undefined, digits = 4): string {
   if (!Number.isFinite(Number(value))) {
@@ -250,6 +266,11 @@ export function TransportWizard({
 }: TransportWizardProps) {
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredTransportWizardSettings>(projectId, TRANSPORT_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
+  const shouldPreserveStoredSettingsRef = useRef(Boolean(storedWizardSettings));
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
     (task) => task.status === "running" && task.taskId !== activeTaskId,
@@ -272,16 +293,16 @@ export function TransportWizard({
   const [transportData, setTransportData] = useState<TransportResult | null>(null);
   const [isSaved, setIsSaved] = useState(false);
 
-  const [boltzKMesh, setBoltzKMesh] = useState<[number, number, number]>([24, 24, 24]);
-  const [muOffsetMinInput, setMuOffsetMinInput] = useState("-0.5");
-  const [muOffsetMaxInput, setMuOffsetMaxInput] = useState("0.5");
-  const [muOffsetStepInput, setMuOffsetStepInput] = useState("0.05");
-  const [tempMinInput, setTempMinInput] = useState("100");
-  const [tempMaxInput, setTempMaxInput] = useState("800");
-  const [tempStepInput, setTempStepInput] = useState("50");
-  const [relaxationTimeInput, setRelaxationTimeInput] = useState("10");
-  const [is2d, setIs2d] = useState(false);
-  const [boltz2dDir, setBoltz2dDir] = useState("z");
+  const [boltzKMesh, setBoltzKMesh] = useState<[number, number, number]>(() => storedWizardSettings?.boltzKMesh ?? [24, 24, 24]);
+  const [muOffsetMinInput, setMuOffsetMinInput] = useState(() => storedWizardSettings?.muOffsetMinInput ?? "-0.5");
+  const [muOffsetMaxInput, setMuOffsetMaxInput] = useState(() => storedWizardSettings?.muOffsetMaxInput ?? "0.5");
+  const [muOffsetStepInput, setMuOffsetStepInput] = useState(() => storedWizardSettings?.muOffsetStepInput ?? "0.05");
+  const [tempMinInput, setTempMinInput] = useState(() => storedWizardSettings?.tempMinInput ?? "100");
+  const [tempMaxInput, setTempMaxInput] = useState(() => storedWizardSettings?.tempMaxInput ?? "800");
+  const [tempStepInput, setTempStepInput] = useState(() => storedWizardSettings?.tempStepInput ?? "50");
+  const [relaxationTimeInput, setRelaxationTimeInput] = useState(() => storedWizardSettings?.relaxationTimeInput ?? "10");
+  const [is2d, setIs2d] = useState(() => storedWizardSettings?.is2d ?? false);
+  const [boltz2dDir, setBoltz2dDir] = useState(() => storedWizardSettings?.boltz2dDir ?? "z");
 
   const [mpiEnabled, setMpiEnabled] = useState(false);
   const [mpiProcs, setMpiProcs] = useState(1);
@@ -328,7 +349,9 @@ export function TransportWizard({
 
   function selectSourceWannier(calc: CalculationRun) {
     setSelectedWannierCalculation(calc);
-    setBoltzKMesh(defaultBoltzKMesh(calc));
+    if (!shouldPreserveStoredSettingsRef.current) {
+      setBoltzKMesh(defaultBoltzKMesh(calc));
+    }
     setError(null);
   }
 
@@ -336,6 +359,33 @@ export function TransportWizard({
     if (!isHpcMode) return;
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [activeHpcProfile?.id, activeHpcProfile?.resource_mode, isHpcMode]);
+
+  useEffect(() => {
+    writeProjectWizardSettings(projectId, TRANSPORT_WIZARD_SETTINGS_ID, {
+      boltzKMesh,
+      muOffsetMinInput,
+      muOffsetMaxInput,
+      muOffsetStepInput,
+      tempMinInput,
+      tempMaxInput,
+      tempStepInput,
+      relaxationTimeInput,
+      is2d,
+      boltz2dDir,
+    });
+  }, [
+    projectId,
+    boltzKMesh,
+    muOffsetMinInput,
+    muOffsetMaxInput,
+    muOffsetStepInput,
+    tempMinInput,
+    tempMaxInput,
+    tempStepInput,
+    relaxationTimeInput,
+    is2d,
+    boltz2dDir,
+  ]);
 
   useEffect(() => {
     async function init() {
@@ -666,6 +716,7 @@ export function TransportWizard({
             const fermiEnergy = calc.result?.fermi_energy;
             const numWann = sourceWannierNumWann(calc);
             const numBands = sourceWannierNumBands(calc);
+            const calcName = getCalculationName(calc);
             const sourceIssues = getWannierQualityIssues(
               calc.result?.wannier_data ?? null,
               calc.result?.raw_output ?? null,
@@ -684,6 +735,11 @@ export function TransportWizard({
                     checked={selectedWannierCalculation?.id === calc.id}
                     onChange={() => selectSourceWannier(calc)}
                   />
+                  {calcName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(calc, "Wannier")}>
+                      {calcName}
+                    </span>
+                  )}
                   <span className="scf-date">
                     {new Date(calc.completed_at || calc.started_at).toLocaleDateString()}
                   </span>

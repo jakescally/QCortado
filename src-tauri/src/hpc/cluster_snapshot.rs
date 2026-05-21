@@ -660,6 +660,8 @@ mod tests {
             remote_wannier90_path: Some("wannier90.x".to_string()),
             remote_postw90_path: Some("postw90.x".to_string()),
             remote_pseudo_dir: "~/qe/pseudo".to_string(),
+            remote_cpu_pseudo_dir: Some("~/qe/pseudo".to_string()),
+            remote_gpu_pseudo_dir: Some("~/qe-gpu/pseudo".to_string()),
             remote_workspace_root: "~/qcortado/work".to_string(),
             remote_project_root: "~/qcortado/projects".to_string(),
             resource_mode: HpcResourceMode::Both,

@@ -211,6 +211,8 @@ export interface HpcProfile {
   remote_wannier90_path?: string | null;
   remote_postw90_path?: string | null;
   remote_pseudo_dir: string;
+  remote_cpu_pseudo_dir?: string | null;
+  remote_gpu_pseudo_dir?: string | null;
   remote_workspace_root: string;
   remote_project_root: string;
   resource_mode: HpcResourceMode;
@@ -251,6 +253,7 @@ export interface HpcTaskMeta {
   remote_workdir?: string | null;
   remote_project_path?: string | null;
   remote_storage_bytes?: number | null;
+  hpc_profile_id?: string | null;
   local_sync_dir?: string | null;
   recovery_save?: HpcRecoverySaveSpec | null;
   headless_attached?: boolean;

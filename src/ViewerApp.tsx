@@ -295,6 +295,7 @@ function ViewerAppInner() {
             setCurrentView("transport-viewer");
           }}
           onRunFermiSurface={viewOnlyNoopCalc}
+          onRunHubbardLrt={viewOnlyNoopCalc}
           onRunPhonons={viewOnlyNoopCalc}
           onRunEPW={viewOnlyNoopCalc}
           onViewPhonons={(phononData, viewMode) => {

@@ -399,23 +399,25 @@ const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
 const MULTIVIEW_BANDS_PROGRESS_EVENT: &str = "multiview-bands-progress";
 const STORAGE_MANAGER_PROGRESS_EVENT: &str = "storage-manager-progress";
-const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 9] = [
+const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 10] = [
     "scf",
     "bands",
     "dos",
     "wannier",
     "transport",
+    "hubbard_lrt",
     "epw",
     "phonon",
     "optimization",
     "fermi_surface",
 ];
-const STORAGE_REMOTE_PROJECT_TASK_KINDS: [&str; 9] = [
+const STORAGE_REMOTE_PROJECT_TASK_KINDS: [&str; 10] = [
     "scf",
     "bands",
     "dos",
     "wannier",
     "transport",
+    "hubbard_lrt",
     "epw",
     "phonon",
     "optimization",
@@ -1350,6 +1352,7 @@ fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
         || result.wannier_data.is_some()
         || result.transport_data.is_some()
         || result.epw_data.is_some()
+        || result.hubbard_lrt_data.is_some()
 }
 
 fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
@@ -1358,6 +1361,7 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
         total_energy: result.total_energy,
         fermi_energy: result.fermi_energy,
         total_magnetization: result.total_magnetization,
+        atomic_magnetic_moments: result.atomic_magnetic_moments.clone(),
         forces: None,
         stress: None,
         n_scf_steps: result.n_scf_steps,
@@ -1370,7 +1374,25 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
         wannier_data: None,
         transport_data: None,
         epw_data: None,
+        hubbard_lrt_data: result
+            .hubbard_lrt_data
+            .as_ref()
+            .and_then(summarize_hubbard_lrt_data_for_project),
     }
+}
+
+fn summarize_hubbard_lrt_data_for_project(data: &serde_json::Value) -> Option<serde_json::Value> {
+    let u_values = data.get("u_values")?.clone();
+    let mut summary = serde_json::Map::new();
+    summary.insert("u_values".to_string(), u_values);
+
+    for key in ["converged", "q_mesh", "artifacts"] {
+        if let Some(value) = data.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+
+    Some(serde_json::Value::Object(summary))
 }
 
 fn summarize_calculation_for_project(calc: &CalculationRun) -> CalculationRun {
@@ -1431,6 +1453,8 @@ fn merge_summary_into_full_calculation(full: &mut CalculationRun, summary: &Calc
                 full_result.total_energy = summary_result.total_energy;
                 full_result.fermi_energy = summary_result.fermi_energy;
                 full_result.total_magnetization = summary_result.total_magnetization;
+                full_result.atomic_magnetic_moments =
+                    summary_result.atomic_magnetic_moments.clone();
                 full_result.n_scf_steps = summary_result.n_scf_steps;
                 full_result.wall_time_seconds = summary_result.wall_time_seconds;
             }
@@ -2084,6 +2108,7 @@ fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
         "dos" => Some("dos"),
         "wannier" | "wannier90" => Some("wannier"),
         "transport" => Some("transport"),
+        "hubbard_lrt" | "hubbard-lrt" | "hubbard lrt" | "lrt" => Some("hubbard_lrt"),
         "epw" => Some("epw"),
         "phonon" => Some("phonon"),
         "optimization"
@@ -2580,6 +2605,7 @@ fn calculation_display_label(calc_type: &str, name: Option<&str>) -> String {
         "dos" => "DOS",
         "wannier" => "Wannier",
         "transport" => "Transport",
+        "hubbard_lrt" => "Hubbard LRT",
         "epw" => "EPW",
         "phonon" => "Phonon",
         "fermi_surface" => "Fermi Surface",
@@ -3739,6 +3765,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         let mut has_dos = false;
         let mut has_wannier = false;
         let mut has_transport = false;
+        let mut has_hubbard_lrt = false;
         let mut has_epw = false;
         let mut has_phonon = false;
         let mut has_optimization = false;
@@ -3763,6 +3790,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 Some("dos") => has_dos = true,
                 Some("wannier") => has_wannier = true,
                 Some("transport") => has_transport = true,
+                Some("hubbard_lrt") => has_hubbard_lrt = true,
                 Some("epw") => has_epw = true,
                 Some("phonon") => has_phonon = true,
                 Some("optimization") => has_optimization = true,
@@ -3779,6 +3807,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
                 "dos" => has_dos,
                 "wannier" => has_wannier,
                 "transport" => has_transport,
+                "hubbard_lrt" => has_hubbard_lrt,
                 "epw" => has_epw,
                 "phonon" => has_phonon,
                 "optimization" => has_optimization,
@@ -5249,6 +5278,7 @@ pub fn recover_phonon_calculation(
         total_energy: None,
         fermi_energy: None,
         total_magnetization: None,
+        atomic_magnetic_moments: None,
         forces: None,
         stress: None,
         n_scf_steps: None,
@@ -5264,6 +5294,7 @@ pub fn recover_phonon_calculation(
         wannier_data: None,
         transport_data: None,
         epw_data: None,
+        hubbard_lrt_data: None,
     };
 
     let input_content = fs::read_to_string(tmp_dir.join("ph.in")).unwrap_or_default();
@@ -6290,7 +6321,8 @@ mod tests {
     use super::{
         calculation_can_lighten, is_wavefunction_archive_file, looks_like_completed_phonon_run,
         parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
-        remove_wavefunction_archives, repair_phonon_calculation_with_workdir, CalculationRun,
+        remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
+        summarize_qe_result_for_project, CalculationRun,
     };
     use crate::qe::QEResult;
     use std::fs;
@@ -6310,6 +6342,44 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("failed to create temp test directory");
         dir
+    }
+
+    #[test]
+    fn project_summary_keeps_compact_hubbard_lrt_values() {
+        let result = QEResult {
+            converged: true,
+            raw_output: "large hp output should not be embedded".to_string(),
+            hubbard_lrt_data: Some(serde_json::json!({
+                "converged": true,
+                "q_mesh": [2, 2, 2],
+                "u_values": [
+                    {
+                        "element": "Ho",
+                        "manifold": "4f",
+                        "target": "Ho-4f",
+                        "value_ev": 6.99
+                    }
+                ],
+                "raw_output": "large nested hp output should not be embedded",
+                "parameters_output": "small but stored in full calc only",
+                "artifacts": ["hp.in", "hp.out", "qcortado_scf.Hubbard_parameters.dat"]
+            })),
+            ..QEResult::default()
+        };
+
+        let summary = summarize_qe_result_for_project(&result);
+        assert!(summary.raw_output.is_empty());
+
+        let lrt = summary
+            .hubbard_lrt_data
+            .expect("summary should keep compact Hubbard LRT data");
+        assert_eq!(lrt.get("q_mesh"), Some(&serde_json::json!([2, 2, 2])));
+        assert_eq!(
+            lrt.pointer("/u_values/0/target"),
+            Some(&serde_json::json!("Ho-4f"))
+        );
+        assert!(lrt.get("raw_output").is_none());
+        assert!(lrt.get("parameters_output").is_none());
     }
 
     #[test]
@@ -6394,6 +6464,7 @@ mod tests {
                 total_energy: None,
                 fermi_energy: None,
                 total_magnetization: None,
+                atomic_magnetic_moments: None,
                 forces: None,
                 stress: None,
                 n_scf_steps: None,
@@ -6416,6 +6487,7 @@ mod tests {
                 wannier_data: None,
                 transport_data: None,
                 epw_data: None,
+                hubbard_lrt_data: None,
             }),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: Some("2026-01-01T00:01:00Z".to_string()),

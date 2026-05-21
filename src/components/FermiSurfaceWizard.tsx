@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -22,6 +22,9 @@ import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
+import { getMagneticSpeciesFields } from "../lib/magnetism";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -29,6 +32,7 @@ import {
   defaultResourcesForProfile,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
+  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
@@ -94,6 +98,19 @@ interface FermiSurfaceWizardProps {
 
 type WizardStep = "source" | "parameters" | "run" | "results";
 const FERMI_WORK_DIR = "/tmp/qcortado_fermi_surface";
+const FERMI_SURFACE_WIZARD_SETTINGS_ID = "fermi-surface";
+
+interface StoredFermiSurfaceWizardSettings {
+  fermiKGrid: [number, number, number];
+  fermiKOffset: [0 | 1, 0 | 1, 0 | 1];
+  fermiNbnd: number | "auto";
+  nscfConvThrInput: string;
+  nscfMixingBetaInput: string;
+  nscfOccupations: "fixed" | "smearing" | "from_input" | "tetrahedra";
+  nscfSmearing: "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
+  nscfDegaussInput: string;
+  nscfVerbosity: "low" | "high" | "debug";
+}
 
 interface FrmsfFileData {
   file_name: string;
@@ -248,6 +265,11 @@ export function FermiSurfaceWizard({
 }: FermiSurfaceWizardProps) {
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredFermiSurfaceWizardSettings>(projectId, FERMI_SURFACE_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
+  const shouldPreserveStoredSettingsRef = useRef(Boolean(storedWizardSettings));
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -269,15 +291,15 @@ export function FermiSurfaceWizard({
     setStoredSortMode(mode);
   }, []);
 
-  const [fermiKGrid, setFermiKGrid] = useState<[number, number, number]>([24, 24, 24]);
-  const [fermiKOffset, setFermiKOffset] = useState<[0 | 1, 0 | 1, 0 | 1]>([0, 0, 0]);
-  const [fermiNbnd, setFermiNbnd] = useState<number | "auto">("auto");
-  const [nscfConvThrInput, setNscfConvThrInput] = useState("1e-8");
-  const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState("0.7");
-  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">("smearing");
-  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(resolvedDefaultSmearing);
-  const [nscfDegaussInput, setNscfDegaussInput] = useState("0.02");
-  const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">("high");
+  const [fermiKGrid, setFermiKGrid] = useState<[number, number, number]>(() => storedWizardSettings?.fermiKGrid ?? [24, 24, 24]);
+  const [fermiKOffset, setFermiKOffset] = useState<[0 | 1, 0 | 1, 0 | 1]>(() => storedWizardSettings?.fermiKOffset ?? [0, 0, 0]);
+  const [fermiNbnd, setFermiNbnd] = useState<number | "auto">(() => storedWizardSettings?.fermiNbnd ?? "auto");
+  const [nscfConvThrInput, setNscfConvThrInput] = useState(() => storedWizardSettings?.nscfConvThrInput ?? "1e-8");
+  const [nscfMixingBetaInput, setNscfMixingBetaInput] = useState(() => storedWizardSettings?.nscfMixingBetaInput ?? "0.7");
+  const [nscfOccupations, setNscfOccupations] = useState<"fixed" | "smearing" | "from_input" | "tetrahedra">(() => storedWizardSettings?.nscfOccupations ?? "smearing");
+  const [nscfSmearing, setNscfSmearing] = useState<"gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac">(() => storedWizardSettings?.nscfSmearing ?? resolvedDefaultSmearing);
+  const [nscfDegaussInput, setNscfDegaussInput] = useState(() => storedWizardSettings?.nscfDegaussInput ?? "0.02");
+  const [nscfVerbosity, setNscfVerbosity] = useState<"low" | "high" | "debug">(() => storedWizardSettings?.nscfVerbosity ?? "high");
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     mesh: true,
     nscf: true,
@@ -329,6 +351,31 @@ export function FermiSurfaceWizard({
     if (!isHpcMode) return;
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
+
+  useEffect(() => {
+    writeProjectWizardSettings(projectId, FERMI_SURFACE_WIZARD_SETTINGS_ID, {
+      fermiKGrid,
+      fermiKOffset,
+      fermiNbnd,
+      nscfConvThrInput,
+      nscfMixingBetaInput,
+      nscfOccupations,
+      nscfSmearing,
+      nscfDegaussInput,
+      nscfVerbosity,
+    });
+  }, [
+    projectId,
+    fermiKGrid,
+    fermiKOffset,
+    fermiNbnd,
+    nscfConvThrInput,
+    nscfMixingBetaInput,
+    nscfOccupations,
+    nscfSmearing,
+    nscfDegaussInput,
+    nscfVerbosity,
+  ]);
 
   useEffect(() => {
     if (visibleOutputLineCount > outputLineCount) {
@@ -396,7 +443,9 @@ export function FermiSurfaceWizard({
     setSelectedScf(scf);
     setDependencyStatus(null);
     setScfFermiEnergy(scf.result?.fermi_energy ?? null);
-    applyScfDefaults(scf);
+    if (!shouldPreserveStoredSettingsRef.current) {
+      applyScfDefaults(scf);
+    }
   }, [applyScfDefaults]);
 
   const selectedScfDependencyBlocked = useMemo(() => {
@@ -476,7 +525,7 @@ export function FermiSurfaceWizard({
         setMpiProcs(defaults.nprocs);
 
         const pseudoDir = isHpcMode
-          ? (activeHpcProfile?.remote_pseudo_dir || "")
+          ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
           : qePath.replace(/\/bin\/?$/, "/pseudo");
         const pseudos = isHpcMode
           ? await listRemotePseudopotentials(pseudoDir, activeHpcProfile?.id ?? null)
@@ -494,7 +543,16 @@ export function FermiSurfaceWizard({
     }
 
     void init();
-  }, [crystalData, qePath, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
+  }, [
+    crystalData,
+    qePath,
+    isHpcMode,
+    activeHpcProfile?.id,
+    activeHpcProfile?.remote_cpu_pseudo_dir,
+    activeHpcProfile?.remote_gpu_pseudo_dir,
+    activeHpcProfile?.remote_pseudo_dir,
+    hpcResources.resource_type,
+  ]);
 
   useEffect(() => {
     if (!activeTaskId) return;
@@ -626,7 +684,7 @@ export function FermiSurfaceWizard({
     }
 
     const pseudoDir = isHpcMode
-      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
       : qePath.replace(/\/bin\/?$/, "/pseudo");
     if (!pseudoDir.trim()) {
       throw new Error(
@@ -646,24 +704,13 @@ export function FermiSurfaceWizard({
     const nspin = Number(scfParams.nspin) || 1;
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
-    const sourceStartingMagnetization =
-      scfParams.starting_magnetization && typeof scfParams.starting_magnetization === "object"
-        ? scfParams.starting_magnetization as Record<string, unknown>
-        : {};
-    const getStartingMagnetization = (element: string) => {
-      const value = Number(sourceStartingMagnetization[element]);
-      return Number.isFinite(value) ? value : undefined;
-    };
-
     const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
     const commonSystemFields = {
       species: elements.map((element) => ({
         symbol: element,
         mass: ELEMENT_MASSES[element] || 1.0,
         pseudopotential: resolvedPseudos[element],
-        ...(getStartingMagnetization(element) !== undefined
-          ? { starting_magnetization: getStartingMagnetization(element) }
-          : {}),
+        ...getMagneticSpeciesFields(scfParams, element),
       })),
       position_units: structureForNscf?.position_units || "crystal",
       ecutwfc,
@@ -801,6 +848,8 @@ export function FermiSurfaceWizard({
       noncolin: scfParams.noncolin,
       lspinorb: scfParams.lspinorb,
       starting_magnetization: scfParams.starting_magnetization ?? null,
+      starting_magnetization_theta: scfParams.starting_magnetization_theta ?? scfParams.starting_magnetization_angle1 ?? scfParams.theta ?? scfParams.angle1 ?? null,
+      starting_magnetization_phi: scfParams.starting_magnetization_phi ?? scfParams.starting_magnetization_angle2 ?? scfParams.phi ?? scfParams.angle2 ?? null,
       lda_plus_u: scfParams.lda_plus_u,
       hubbard_projector: scfParams.hubbard_projector ?? null,
       hubbard_formulation: scfParams.hubbard_formulation ?? null,
@@ -1009,40 +1058,48 @@ export function FermiSurfaceWizard({
         </p>
 
         <div className="scf-list">
-          {sortedScfs.map((scf) => (
-            <div
-              key={scf.id}
-              className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
-              onClick={() => selectSourceScf(scf)}
-            >
-              <div className="scf-option-header">
-                <input
-                  type="radio"
-                  checked={selectedScf?.id === scf.id}
-                  onChange={() => selectSourceScf(scf)}
-                />
-                <span className="scf-date">
-                  {new Date(scf.started_at).toLocaleDateString()}
-                </span>
-              </div>
-              <div className="scf-details">
-                <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
-                {scf.result?.fermi_energy != null && (
-                  <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
-                )}
-              </div>
-              <div className="calc-tags">
-                {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
-                  <span
-                    key={`${tag.label}-${i}`}
-                    className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
-                  >
-                    {tag.label}
+          {sortedScfs.map((scf) => {
+            const scfName = getCalculationName(scf);
+            return (
+              <div
+                key={scf.id}
+                className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
+                onClick={() => selectSourceScf(scf)}
+              >
+                <div className="scf-option-header">
+                  <input
+                    type="radio"
+                    checked={selectedScf?.id === scf.id}
+                    onChange={() => selectSourceScf(scf)}
+                  />
+                  {scfName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(scf)}>
+                      {scfName}
+                    </span>
+                  )}
+                  <span className="scf-date">
+                    {new Date(scf.started_at).toLocaleDateString()}
                   </span>
-                ))}
+                </div>
+                <div className="scf-details">
+                  <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
+                  {scf.result?.fermi_energy != null && (
+                    <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
+                  )}
+                </div>
+                <div className="calc-tags">
+                  {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
+                    <span
+                      key={`${tag.label}-${i}`}
+                      className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
+                    >
+                      {tag.label}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="step-actions">
@@ -1308,7 +1365,7 @@ export function FermiSurfaceWizard({
           <h4>Summary</h4>
           <div className="summary-row">
             <span>Source SCF:</span>
-            <span>{selectedScf?.id.slice(0, 8) || "N/A"}</span>
+            <span>{formatCalculationSourceLabel(selectedScf)}</span>
           </div>
           <div className="summary-row">
             <span>K-grid:</span>

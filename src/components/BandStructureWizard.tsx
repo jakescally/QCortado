@@ -42,7 +42,11 @@ import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
+import { getScfHubbardUDisplayValues } from "../lib/hubbard";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
@@ -50,6 +54,7 @@ import {
   defaultResourcesForProfile,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
+  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
@@ -97,6 +102,14 @@ function getScfProfileId(calc: CalculationRun): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatHubbardUDisplay(calc: CalculationRun): string | null {
+  const values = getScfHubbardUDisplayValues(calc);
+  if (values.length === 0) return null;
+  return values
+    .map((entry) => `${entry.target} = ${entry.value_ev.toFixed(3)} eV`)
+    .join(", ");
 }
 
 // Helper to generate calculation feature tags from parameters
@@ -177,7 +190,7 @@ function getCalculationTags(
   return tags;
 }
 
-const BANDS_WIZARD_SETTINGS_STORAGE_KEY = "qcortado-bands-wizard-settings-v1";
+const BANDS_WIZARD_SETTINGS_ID = "bands";
 
 interface StoredBandWizardSettings {
   nbnd: number | "auto";
@@ -204,28 +217,6 @@ interface StoredBandWizardSettings {
   projectionFilprojInput: string;
   autoSaveLogEnabled: boolean;
   autoSaveLogPath: string;
-}
-
-function readStoredBandWizardSettings(): Partial<StoredBandWizardSettings> | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(BANDS_WIZARD_SETTINGS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed as Partial<StoredBandWizardSettings>;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredBandWizardSettings(settings: StoredBandWizardSettings): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(BANDS_WIZARD_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // Ignore persistence failures and keep in-memory behavior.
-  }
 }
 
 function parseOptionalNumber(input: string, label: string): number | null {
@@ -445,7 +436,9 @@ export function BandStructureWizard({
   scfCalculations,
   reconnectTaskId,
 }: BandStructureWizardProps) {
-  const storedBandWizardSettingsRef = useRef<Partial<StoredBandWizardSettings> | null>(readStoredBandWizardSettings());
+  const storedBandWizardSettingsRef = useRef<Partial<StoredBandWizardSettings> | null>(
+    readProjectWizardSettings<StoredBandWizardSettings>(projectId, BANDS_WIZARD_SETTINGS_ID),
+  );
   const shouldPreserveStoredConfigRef = useRef(Boolean(storedBandWizardSettingsRef.current));
   const storedBandWizardSettings = storedBandWizardSettingsRef.current;
   const taskContext = useTaskContext();
@@ -624,7 +617,7 @@ export function BandStructureWizard({
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
 
   useEffect(() => {
-    writeStoredBandWizardSettings({
+    writeProjectWizardSettings(projectId, BANDS_WIZARD_SETTINGS_ID, {
       nbnd,
       nscfConvThrInput,
       nscfElectronMaxstepInput,
@@ -675,6 +668,7 @@ export function BandStructureWizard({
     projectionFilprojInput,
     autoSaveLogEnabled,
     autoSaveLogPath,
+    projectId,
   ]);
 
   // Helper functions
@@ -828,7 +822,7 @@ export function BandStructureWizard({
 
         // Load pseudopotentials
         const pseudoDir = isHpcMode
-          ? (activeHpcProfile?.remote_pseudo_dir || "")
+          ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
           : qePath.replace(/\/bin\/?$/, "/pseudo");
         const pseudos = isHpcMode
           ? await listRemotePseudopotentials(pseudoDir, activeHpcProfile?.id ?? null)
@@ -850,7 +844,16 @@ export function BandStructureWizard({
       }
     }
     init();
-  }, [qePath, crystalData, isHpcMode, activeHpcProfile?.id, activeHpcProfile?.remote_pseudo_dir]);
+  }, [
+    qePath,
+    crystalData,
+    isHpcMode,
+    activeHpcProfile?.id,
+    activeHpcProfile?.remote_cpu_pseudo_dir,
+    activeHpcProfile?.remote_gpu_pseudo_dir,
+    activeHpcProfile?.remote_pseudo_dir,
+    hpcResources.resource_type,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1057,7 +1060,7 @@ export function BandStructureWizard({
     // SCFWizard uses "qcortado_scf" as the prefix
     const scfPrefix = scfParams.prefix || "qcortado_scf";
     const pseudoDir = isHpcMode
-      ? (activeHpcProfile?.remote_pseudo_dir || "")
+      ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
       : qePath.replace(/\/bin\/?$/, "/pseudo");
     if (!pseudoDir.trim()) {
       throw new Error(
@@ -1077,15 +1080,6 @@ export function BandStructureWizard({
     const nspin = Number.isFinite(sourceNspin) && sourceNspin > 0 ? sourceNspin : 1;
     const lspinorb = Boolean(scfParams.lspinorb);
     const noncolin = nspin === 4 || Boolean(scfParams.noncolin) || lspinorb;
-    const sourceStartingMagnetization =
-      scfParams.starting_magnetization && typeof scfParams.starting_magnetization === "object"
-        ? scfParams.starting_magnetization as Record<string, unknown>
-        : {};
-    const getStartingMagnetization = (element: string) => {
-      const value = Number(sourceStartingMagnetization[element]);
-      return Number.isFinite(value) ? value : undefined;
-    };
-
     let resolvedSymmetry = symmetryTransform;
     let resolvedSymmetryError = symmetryError;
     if (!resolvedSymmetry) {
@@ -1128,9 +1122,7 @@ export function BandStructureWizard({
       symbol: el,
       mass: ELEMENT_MASSES[el] || 1.0,
       pseudopotential: resolvedPseudos[el],
-      ...(getStartingMagnetization(el) !== undefined
-        ? { starting_magnetization: getStartingMagnetization(el) }
-        : {}),
+      ...getMagneticSpeciesFields(scfParams, el),
     }));
 
     const context = resolvePathTransformContext(crystalData, resolvedSymmetry);
@@ -1362,6 +1354,8 @@ export function BandStructureWizard({
       noncolin: scfParams.noncolin,
       lspinorb: scfParams.lspinorb,
       starting_magnetization: scfParams.starting_magnetization ?? null,
+      starting_magnetization_theta: scfParams.starting_magnetization_theta ?? scfParams.starting_magnetization_angle1 ?? scfParams.theta ?? scfParams.angle1 ?? null,
+      starting_magnetization_phi: scfParams.starting_magnetization_phi ?? scfParams.starting_magnetization_angle2 ?? scfParams.phi ?? scfParams.angle2 ?? null,
       lda_plus_u: scfParams.lda_plus_u,
       hubbard_projector: scfParams.hubbard_projector ?? null,
       hubbard_formulation: scfParams.hubbard_formulation ?? null,
@@ -1669,40 +1663,52 @@ export function BandStructureWizard({
         </p>
 
         <div className="scf-list">
-          {sortedScfs.map((scf) => (
-            <div
-              key={scf.id}
-              className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
-              onClick={() => selectSourceScf(scf)}
-            >
-              <div className="scf-option-header">
-                <input
-                  type="radio"
-                  checked={selectedScf?.id === scf.id}
-                  onChange={() => selectSourceScf(scf)}
-                />
-                <span className="scf-date">
-                  {new Date(scf.started_at).toLocaleDateString()}
-                </span>
-              </div>
-              <div className="scf-details">
-                <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
-                {scf.result?.fermi_energy && (
-                  <span>E_F = {scf.result.fermi_energy.toFixed(3)} eV</span>
-                )}
-              </div>
-              <div className="calc-tags">
-                {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
-                  <span
-                    key={i}
-                    className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
-                  >
-                    {tag.label}
+          {sortedScfs.map((scf) => {
+            const hubbardUDisplay = formatHubbardUDisplay(scf);
+            const scfName = getCalculationName(scf);
+            return (
+              <div
+                key={scf.id}
+                className={`scf-option ${selectedScf?.id === scf.id ? "selected" : ""}`}
+                onClick={() => selectSourceScf(scf)}
+              >
+                <div className="scf-option-header">
+                  <input
+                    type="radio"
+                    checked={selectedScf?.id === scf.id}
+                    onChange={() => selectSourceScf(scf)}
+                  />
+                  {scfName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(scf)}>
+                      {scfName}
+                    </span>
+                  )}
+                  <span className="scf-date">
+                    {new Date(scf.started_at).toLocaleDateString()}
                   </span>
-                ))}
+                </div>
+                <div className="scf-details">
+                  <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
+                  {scf.result?.fermi_energy && (
+                    <span>E_F = {scf.result.fermi_energy.toFixed(3)} eV</span>
+                  )}
+                  {hubbardUDisplay && (
+                    <span>Hubbard U: {hubbardUDisplay}</span>
+                  )}
+                </div>
+                <div className="calc-tags">
+                  {getCalculationTags(scf, downloadedDependencyScfIds).map((tag, i) => (
+                    <span
+                      key={i}
+                      className={`calc-tag calc-tag-${tag.type}${tag.label.trim().toUpperCase() === "HPC" ? " calc-tag-hpc" : ""}${tag.label.trim().toUpperCase() === "DOWNLOADED" ? " calc-tag-downloaded" : ""}`}
+                    >
+                      {tag.label}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="step-actions">

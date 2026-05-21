@@ -29,19 +29,22 @@ pub mod symmetry;
 
 use process_manager::ProcessManager;
 
+const ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING: bool = false;
+
 use qe::{
-    add_phonon_symmetry_markers, build_epw_input, build_epw_keyword_map, build_transport_win,
-    collect_epw_artifacts, epw_coarse_k_mesh, epw_coarse_q_mesh, epw_fine_k_mesh, epw_fine_q_mesh,
-    export_ludwig_bundle, generate_dos_input, generate_matdyn_bands_input,
-    generate_matdyn_dos_input, generate_ph_input, generate_q2r_input, parse_epw_result_v2,
-    parse_ph_output, parse_transport_result, parse_wannier_hamiltonian,
+    add_phonon_symmetry_markers, build_epw_input, build_epw_keyword_map, build_hubbard_lrt_result,
+    build_transport_win, collect_epw_artifacts, epw_coarse_k_mesh, epw_coarse_q_mesh,
+    epw_fine_k_mesh, epw_fine_q_mesh, export_ludwig_bundle, generate_dos_input, generate_hp_input,
+    generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input, generate_q2r_input,
+    parse_epw_result_v2, parse_ph_output, parse_transport_result, parse_wannier_hamiltonian,
     prepare_wannier_nscf_calculation, read_phonon_dispersion_file, read_phonon_dos_file,
     read_wannier_result, validate_epw_config, validate_transport_config, validate_wannier_config,
     DosCalculation, EpwArtifactManifestEntry, EpwCalculationConfig, EpwCalculationV1,
     EpwErrorRecord, EpwInputPreviewResult, EpwPrerequisiteValidation, EpwSourceRef, EpwSourcesV1,
-    LudwigExportConfig, LudwigExportResult, MatdynCalculation, PhononPipelineConfig, PhononResult,
-    Pw2Wannier90Config, Q2RCalculation, QPathPoint, TransportCalculationConfig, TransportResult,
-    WannierCalculationConfig, WannierResult, EPW_SCHEMA_VERSION,
+    HubbardLrtConfig, HubbardLrtResult, LudwigExportConfig, LudwigExportResult, MatdynCalculation,
+    PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint,
+    TransportCalculationConfig, TransportResult, WannierCalculationConfig, WannierResult,
+    EPW_SCHEMA_VERSION,
 };
 use qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input, generate_pw_input,
@@ -332,10 +335,174 @@ fn qe_executable_uses_pencil_decomposition(executable: &str) -> bool {
             | "projwfc.x"
             | "dos.x"
             | "fermi_velocity.x"
+            | "hp.x"
             | "ph.x"
             | "q2r.x"
             | "matdyn.x"
             | "pw2wannier90.x"
+    )
+}
+
+fn qe_executable_default_extra_args(executable: &str) -> Option<&'static str> {
+    let executable_name = Path::new(executable)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(executable)
+        .to_ascii_lowercase();
+
+    match executable_name.as_str() {
+        // hp.x internally runs small PW NSCF diagonalizations for each q point.
+        // Auto ScaLAPACK diagonalization can choose large subgroups for tiny
+        // band counts, and Intel MPI can abort while freeing those communicators.
+        "hp.x" => Some("-ndiag 1"),
+        _ => None,
+    }
+}
+
+fn build_hpc_qe_invocation(
+    executable: &str,
+    extra_args: Option<&str>,
+    input_file: &str,
+) -> (String, bool) {
+    let mut invocation = format!("\"$QE_BIN/{}\"", executable);
+    let trimmed_extra_args = extra_args
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let has_pencil_decomposition_arg = trimmed_extra_args
+        .map(command_args_include_pencil_decomposition)
+        .unwrap_or(false);
+    if let Some(args) = trimmed_extra_args {
+        invocation.push(' ');
+        invocation.push_str(args);
+    }
+    if let Some(default_args) = qe_executable_default_extra_args(executable) {
+        invocation.push(' ');
+        invocation.push_str(default_args);
+    }
+    if qe_executable_uses_pencil_decomposition(executable) && !has_pencil_decomposition_arg {
+        invocation.push_str(" -pd .true.");
+    }
+    invocation.push_str(&format!(" -in {}", input_file));
+    (invocation, has_pencil_decomposition_arg)
+}
+
+fn build_hpc_mpirun_direct_log_command(
+    launcher: &str,
+    invocation: &str,
+    output_file: &str,
+) -> String {
+    let rank_stdout_pattern = format!(".qcortado-live/{}.rank.%r", output_file);
+    let rank_stderr_pattern = format!(".qcortado-live/{}.err.rank.%r", output_file);
+    let smoke_stdout_pattern = ".qcortado-live/qcortado-mpi-smoke.out.%r";
+    let smoke_stderr_pattern = ".qcortado-live/qcortado-mpi-smoke.err.%r";
+    let rank0_stdout = rank_stdout_pattern.replace("%r", "0");
+    let rank0_stderr = rank_stderr_pattern.replace("%r", "0");
+    let quoted_output = shell_single_quote_local(output_file);
+    let quoted_rank_stdout_pattern = shell_single_quote_local(&rank_stdout_pattern);
+    let quoted_rank_stderr_pattern = shell_single_quote_local(&rank_stderr_pattern);
+    let quoted_smoke_stdout_pattern = shell_single_quote_local(smoke_stdout_pattern);
+    let quoted_smoke_stderr_pattern = shell_single_quote_local(smoke_stderr_pattern);
+    let quoted_rank0_stdout = shell_single_quote_local(&rank0_stdout);
+    let quoted_rank0_stderr = shell_single_quote_local(&rank0_stderr);
+    let quoted_smoke_stdout = shell_single_quote_local(&smoke_stdout_pattern.replace("%r", "0"));
+    let quoted_smoke_stderr = shell_single_quote_local(&smoke_stderr_pattern.replace("%r", "0"));
+    let quoted_pty_invocation = shell_single_quote_local(invocation);
+    let unbuffered_env = "MPI_UNBUFFERED_STDIO=1 GFORTRAN_UNBUFFERED_PRECONNECTED=y GFORTRAN_UNBUFFERED_ALL=y FORT_BUFFERED=FALSE";
+
+    format!(
+        "export QE_BIN; mkdir -p .qcortado-live; rm -f {rank0} {out}; \
+__qcortado_mpi_live_probe() {{ \
+printf '[QCortado] MPI live heartbeat: %s\\n' \"$(date -u)\"; \
+__qcortado_live_count=$(find .qcortado-live -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d '[:space:]'); \
+printf '[QCortado] MPI live heartbeat: .qcortado-live files=%s\\n' \"$__qcortado_live_count\"; \
+for f in slurm.out slurm.err {out} {rank0} {rank0_err}; do \
+if [ -e \"$f\" ]; then \
+__qcortado_bytes=$(wc -c < \"$f\" | tr -d '[:space:]'); \
+__qcortado_lines=$(wc -l < \"$f\" | tr -d '[:space:]'); \
+printf '[QCortado] MPI live heartbeat: %s bytes=%s lines=%s\\n' \"$f\" \"$__qcortado_bytes\" \"$__qcortado_lines\"; \
+else \
+printf '[QCortado] MPI live heartbeat: %s missing\\n' \"$f\"; \
+fi; \
+done; \
+if command -v pgrep >/dev/null 2>&1; then \
+__qcortado_user=${{USER:-$(id -un)}}; \
+__qcortado_hp_pids=$(pgrep -u \"$__qcortado_user\" -f 'hp[.]x' | tr '\\n' ' ' || true); \
+if [ -n \"$__qcortado_hp_pids\" ]; then \
+__qcortado_hp_count=$(printf '%s\\n' \"$__qcortado_hp_pids\" | wc -w | tr -d '[:space:]'); \
+__qcortado_hp_sample=$(printf '%s\\n' \"$__qcortado_hp_pids\" | awk '{{ for (i = 1; i <= NF && i <= 8; i++) printf \"%s%s\", (i == 1 ? \"\" : \",\"), $i }}'); \
+__qcortado_hp_ps=$(ps -o pid=,stat=,etime=,time=,pcpu= -p \"$(printf '%s\\n' \"$__qcortado_hp_pids\" | tr ' ' ',' | sed 's/,$//')\" 2>/dev/null | awk '{{ count += 1; cpu += $5 }} END {{ if (count > 0) printf \"sample_cpu_pct=%.1f\", cpu }}' || true); \
+printf '[QCortado] MPI live heartbeat: hp.x processes=%s sample_pids=%s %s\\n' \"$__qcortado_hp_count\" \"$__qcortado_hp_sample\" \"$__qcortado_hp_ps\"; \
+fi; \
+fi; \
+if [ -d tmp ]; then \
+__qcortado_tmp_files=$(find tmp -type f 2>/dev/null | wc -l | tr -d '[:space:]'); \
+__qcortado_tmp_recent=$(find tmp -type f -mmin -2 2>/dev/null | wc -l | tr -d '[:space:]'); \
+__qcortado_tmp_kb=$(du -sk tmp 2>/dev/null | awk '{{print $1}}'); \
+printf '[QCortado] MPI live heartbeat: tmp files=%s recent_2m=%s size_kb=%s\\n' \"$__qcortado_tmp_files\" \"$__qcortado_tmp_recent\" \"${{__qcortado_tmp_kb:-0}}\"; \
+__qcortado_recent_files=$(find tmp -type f -mmin -2 -printf '%TY-%Tm-%TdT%TH:%TM:%TS %s %p\\n' 2>/dev/null | sort | tail -3); \
+if [ -n \"$__qcortado_recent_files\" ]; then printf '%s\\n' \"$__qcortado_recent_files\" | sed 's/^/[QCortado] MPI live heartbeat: recent file /'; fi; \
+fi; \
+}}; \
+__qcortado_mpi_stdout_smoke() {{ \
+rm -f {smoke_out0} {smoke_err0}; \
+set +e; \
+{env} mpirun -np 1 -outfile-pattern {smoke_out_pattern} -errfile-pattern {smoke_err_pattern} /bin/sh -c 'echo QCORTADO_MPI_STDOUT_SMOKE; echo QCORTADO_MPI_STDERR_SMOKE >&2'; \
+__qcortado_smoke_status=$?; \
+set -e; \
+printf '[QCortado] MPI stdout smoke: status=%s\\n' \"$__qcortado_smoke_status\"; \
+for f in {smoke_out0} {smoke_err0}; do \
+if [ -e \"$f\" ]; then \
+__qcortado_smoke_bytes=$(wc -c < \"$f\" | tr -d '[:space:]'); \
+__qcortado_smoke_lines=$(wc -l < \"$f\" | tr -d '[:space:]'); \
+printf '[QCortado] MPI stdout smoke: %s bytes=%s lines=%s\\n' \"$f\" \"$__qcortado_smoke_bytes\" \"$__qcortado_smoke_lines\"; \
+if [ -s \"$f\" ]; then sed 's/^/[QCortado] MPI stdout smoke content: /' \"$f\"; fi; \
+else \
+printf '[QCortado] MPI stdout smoke: %s missing\\n' \"$f\"; \
+fi; \
+done; \
+}}; \
+__qcortado_mpi_run_qe() {{ \
+if command -v script >/dev/null 2>&1 && script -qefc 'printf QCORTADO_PTY_STDOUT_SMOKE' /dev/null >/dev/null 2>&1; then \
+echo '[QCortado] Using script(1) PTY wrapper for QE stdout flushing.'; \
+{env} {launcher} -outfile-pattern {stdout_pattern} -errfile-pattern {stderr_pattern} script -qefc {pty_invocation} /dev/null; \
+else \
+echo '[QCortado] script(1) PTY wrapper unavailable; launching QE directly.'; \
+{env} {launcher} -outfile-pattern {stdout_pattern} -errfile-pattern {stderr_pattern} {invocation}; \
+fi; \
+}}; \
+if {env} mpirun -help 2>&1 | grep -q -- '-outfile-pattern'; then \
+echo '[QCortado] Using Intel MPI rank-pattern logs for live stdout.'; \
+__qcortado_mpi_stdout_smoke; \
+__qcortado_mpi_run_qe & \
+__qcortado_mpi_pid=$!; \
+( while kill -0 \"$__qcortado_mpi_pid\" 2>/dev/null; do __qcortado_mpi_live_probe; sleep 60; done ) & \
+__qcortado_probe_pid=$!; \
+set +e; \
+wait \"$__qcortado_mpi_pid\"; \
+__qcortado_mpi_status=$?; \
+set -e; \
+kill \"$__qcortado_probe_pid\" 2>/dev/null || true; \
+wait \"$__qcortado_probe_pid\" 2>/dev/null || true; \
+__qcortado_mpi_live_probe; \
+if [ -f {rank0} ]; then cp {rank0} {out}; fi; \
+[ $__qcortado_mpi_status -eq 0 ]; \
+else \
+echo '[QCortado] Intel MPI rank-pattern logs unavailable; falling back to aggregated stdout.'; \
+{env} {launcher} {invocation} > {out} 2>&1; \
+fi",
+        env = unbuffered_env,
+        rank0 = quoted_rank0_stdout,
+        rank0_err = quoted_rank0_stderr,
+        smoke_out_pattern = quoted_smoke_stdout_pattern,
+        smoke_err_pattern = quoted_smoke_stderr_pattern,
+        smoke_out0 = quoted_smoke_stdout,
+        smoke_err0 = quoted_smoke_stderr,
+        out = quoted_output,
+        launcher = launcher,
+        stdout_pattern = quoted_rank_stdout_pattern,
+        stderr_pattern = quoted_rank_stderr_pattern,
+        pty_invocation = quoted_pty_invocation,
+        invocation = invocation,
     )
 }
 
@@ -347,26 +514,14 @@ fn build_hpc_qe_input_command(
     input_file: &str,
     output_file: &str,
 ) -> String {
-    let mut command = format!(
-        "{} \"$QE_BIN/{}\"",
-        build_hpc_launcher_command(profile, resource_type),
-        executable
-    );
-    let trimmed_extra_args = extra_args
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty());
-    let has_pencil_decomposition_arg = trimmed_extra_args
-        .map(command_args_include_pencil_decomposition)
-        .unwrap_or(false);
-    if let Some(args) = trimmed_extra_args {
-        command.push(' ');
-        command.push_str(args);
+    let launcher = build_hpc_launcher_command(profile, resource_type);
+    let (invocation, _) = build_hpc_qe_invocation(executable, extra_args, input_file);
+    if ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING
+        && matches!(profile.launcher, hpc::profile::HpcLauncher::Mpirun)
+    {
+        return build_hpc_mpirun_direct_log_command(&launcher, &invocation, output_file);
     }
-    if qe_executable_uses_pencil_decomposition(executable) && !has_pencil_decomposition_arg {
-        command.push_str(" -pd .true.");
-    }
-    command.push_str(&format!(" -in {} > {} 2>&1", input_file, output_file));
-    command
+    format!("{} {} > {} 2>&1", launcher, invocation, output_file)
 }
 
 fn build_hpc_logged_qe_step_command(
@@ -455,6 +610,19 @@ fn sanitize_hpc_profile(
     profile.remote_postw90_path = None;
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
+    profile.remote_cpu_pseudo_dir = sanitize_optional_hpc_field(profile.remote_cpu_pseudo_dir);
+    profile.remote_gpu_pseudo_dir = sanitize_optional_hpc_field(profile.remote_gpu_pseudo_dir);
+    if profile.remote_cpu_pseudo_dir.is_none() {
+        profile.remote_cpu_pseudo_dir = Some(profile.remote_pseudo_dir.clone());
+    }
+    if profile.remote_gpu_pseudo_dir.is_none() {
+        profile.remote_gpu_pseudo_dir = Some(profile.remote_pseudo_dir.clone());
+    }
+    profile.remote_pseudo_dir = profile
+        .remote_cpu_pseudo_dir
+        .clone()
+        .or(profile.remote_gpu_pseudo_dir.clone())
+        .unwrap_or(profile.remote_pseudo_dir);
     profile.remote_workspace_root =
         normalize_hpc_text(&profile.remote_workspace_root, "Remote workspace root")?;
     profile.remote_project_root =
@@ -1010,6 +1178,78 @@ mod hpc_headless_recovery_tests {
     }
 
     #[test]
+    fn hp_uses_pencil_decomposition_for_hpc_launches() {
+        assert!(qe_executable_uses_pencil_decomposition("hp.x"));
+        assert!(qe_executable_uses_pencil_decomposition("/opt/qe/bin/hp.x"));
+    }
+
+    #[test]
+    fn hp_uses_serial_diagonalization_for_hpc_launches() {
+        assert_eq!(qe_executable_default_extra_args("hp.x"), Some("-ndiag 1"));
+        assert_eq!(
+            qe_executable_default_extra_args("/opt/qe/bin/hp.x"),
+            Some("-ndiag 1")
+        );
+        assert_eq!(qe_executable_default_extra_args("pw.x"), None);
+    }
+
+    #[test]
+    fn mpirun_hpc_launch_uses_rank_zero_direct_log_when_supported() {
+        let (invocation, _) = build_hpc_qe_invocation("hp.x", None, "hp.in");
+        let command = build_hpc_mpirun_direct_log_command(
+            "mpirun -np \"${SLURM_NTASKS:-1}\"",
+            &invocation,
+            "hp.out",
+        );
+        assert!(command.contains("-outfile-pattern '.qcortado-live/hp.out.rank.%r'"));
+        assert!(command.contains("-errfile-pattern '.qcortado-live/hp.out.err.rank.%r'"));
+        assert!(command.contains("cp '.qcortado-live/hp.out.rank.0' 'hp.out'"));
+        assert!(command.contains("MPI_UNBUFFERED_STDIO=1"));
+        assert!(command.contains("[QCortado] MPI live heartbeat: .qcortado-live files=%s"));
+        assert!(command.contains("pgrep -u \"$__qcortado_user\" -f 'hp[.]x'"));
+        assert!(command.contains("QCORTADO_MPI_STDOUT_SMOKE"));
+        assert!(command.contains("-outfile-pattern '.qcortado-live/qcortado-mpi-smoke.out.%r'"));
+        assert!(command
+            .contains("script -qefc '\"$QE_BIN/hp.x\" -ndiag 1 -pd .true. -in hp.in' /dev/null"));
+        assert!(command.contains("[QCortado] Using script(1) PTY wrapper for QE stdout flushing."));
+        assert!(command.contains(
+            "mpirun -np \"${SLURM_NTASKS:-1}\" \"$QE_BIN/hp.x\" -ndiag 1 -pd .true. -in hp.in"
+        ));
+    }
+
+    #[test]
+    fn mpirun_hpc_launch_uses_plain_redirect_when_experimental_live_logging_is_disabled() {
+        let profile: hpc::profile::HpcProfile = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "name": "test",
+            "host": "cluster.example",
+            "username": "user",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/scratch/qcortado/projects",
+            "launcher": "mpirun"
+        }))
+        .unwrap();
+        let command = build_hpc_qe_input_command(
+            &profile,
+            hpc::profile::ResourceType::Cpu,
+            "hp.x",
+            None,
+            "hp.in",
+            "hp.out",
+        );
+
+        assert!(!ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING);
+        assert_eq!(
+            command,
+            "mpirun -np \"${SLURM_NTASKS:-1}\" \"$QE_BIN/hp.x\" -ndiag 1 -pd .true. -in hp.in > hp.out 2>&1"
+        );
+        assert!(!command.contains("QCORTADO_MPI_STDOUT_SMOKE"));
+        assert!(!command.contains("-outfile-pattern"));
+    }
+
+    #[test]
     fn rejects_unsupported_recovery_metadata_schema() {
         let raw = r#"{
           "schema_version": 999,
@@ -1354,6 +1594,27 @@ Phonon calculations require the SCF .save data in ./tmp/qcortado_scf.save.",
             "SCF restart files are incomplete in {} (missing wfc* wavefunction files). \
 This usually means the SCF was compacted for small storage. \
 Phonon calculations require full SCF restart data. Re-run SCF with save size mode set to Large, then retry phonons.",
+            save_dir.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_hubbard_lrt_restart_inputs(work_path: &Path) -> Result<(), String> {
+    let save_dir = work_path.join("tmp").join("qcortado_scf.save");
+    if !save_dir.exists() {
+        return Err(format!(
+            "SCF restart directory not found at {}. \
+Hubbard LRT requires the SCF .save data in ./tmp/qcortado_scf.save.",
+            save_dir.display()
+        ));
+    }
+
+    if !has_wavefunction_restart_files(&save_dir)? {
+        return Err(format!(
+            "SCF restart files are incomplete in {} (missing wfc* wavefunction files). \
+Hubbard LRT requires full SCF restart data. Re-run SCF with save size mode set to Large, then retry.",
             save_dir.display()
         ));
     }
@@ -1775,6 +2036,10 @@ struct HpcPresetBundleProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_postw90_path: Option<String>,
     remote_pseudo_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_cpu_pseudo_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_gpu_pseudo_dir: Option<String>,
     remote_workspace_root: String,
     remote_project_root: String,
     #[serde(default)]
@@ -2023,6 +2288,8 @@ fn hpc_export_preset_bundle(
                 remote_wannier90_path: profile.remote_wannier90_path,
                 remote_postw90_path: profile.remote_postw90_path,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
+                remote_cpu_pseudo_dir: profile.remote_cpu_pseudo_dir,
+                remote_gpu_pseudo_dir: profile.remote_gpu_pseudo_dir,
                 remote_workspace_root: profile.remote_workspace_root,
                 remote_project_root: profile.remote_project_root,
                 resource_mode: profile.resource_mode,
@@ -2168,6 +2435,8 @@ fn hpc_import_preset_bundle(
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_postw90_path: imported_profile.remote_postw90_path,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
+                remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
+                remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
                 remote_workspace_root: imported_profile.remote_workspace_root,
                 remote_project_root: imported_profile.remote_project_root,
                 resource_mode: imported_profile.resource_mode,
@@ -2219,6 +2488,8 @@ fn hpc_import_preset_bundle(
             remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_postw90_path: imported_profile.remote_postw90_path,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
+            remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
+            remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
             remote_workspace_root: imported_profile.remote_workspace_root,
             remote_project_root: imported_profile.remote_project_root,
             resource_mode: imported_profile.resource_mode,
@@ -3030,7 +3301,7 @@ async fn hpc_list_remote_pseudopotentials(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3077,6 +3348,193 @@ done | LC_ALL=C sort -u",
     Ok(pseudos)
 }
 
+/// Lists remote pseudopotentials with cheap change-detection metadata.
+#[tauri::command]
+async fn hpc_list_remote_pseudopotential_inventory(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<PseudopotentialInventoryEntry>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let inventory_cmd = format!(
+        "dir={dir}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+for file in \"$dir\"/*.UPF \"$dir\"/*.upf; do \
+  [ -f \"$file\" ] || continue; \
+  name=$(basename \"$file\"); \
+  stat_line=$(stat -c '%s\t%Y' \"$file\" 2>/dev/null); \
+  if [ $? -eq 0 ]; then \
+    printf '%s\t%s\\n' \"$name\" \"$stat_line\"; \
+  else \
+    printf '%s\t0\t0\\n' \"$name\"; \
+  fi; \
+done | LC_ALL=C sort -u",
+        dir = shell_single_quote_local(&remote_pseudo_dir)
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &inventory_cmd).await?;
+    let mut entries = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
+        }
+        let parts: Vec<&str> = trimmed.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        entries.push(PseudopotentialInventoryEntry {
+            filename: parts[0].to_string(),
+            size_bytes: parts[1].parse::<u64>().unwrap_or(0),
+            modified_at_epoch: parts[2].parse::<u64>().unwrap_or(0),
+        });
+    }
+    entries.sort_by(|left, right| left.filename.cmp(&right.filename));
+    Ok(entries)
+}
+
+fn parse_remote_pslibrary_pseudo_repair_output(
+    output: &str,
+    pseudo_dir: String,
+) -> Result<PslibraryPseudoRepairResult, String> {
+    let mut result = PslibraryPseudoRepairResult {
+        pseudo_dir,
+        scanned: 0,
+        candidates: 0,
+        patched: 0,
+        already_clean: 0,
+        patched_files: Vec::new(),
+        clean_files: Vec::new(),
+    };
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
+        }
+        if let Some(error) = trimmed.strip_prefix("__QCORTADO_PSL_REPAIR_ERROR__:") {
+            return Err(format!(
+                "Failed to repair remote pseudopotential: {}",
+                error
+            ));
+        }
+        if let Some(count) = trimmed.strip_prefix("__QCORTADO_PSL_REPAIR_SCANNED__:") {
+            result.scanned = count.parse::<usize>().unwrap_or(0);
+            continue;
+        }
+        if let Some(filename) = trimmed.strip_prefix("__QCORTADO_PSL_REPAIR_PATCHED__:") {
+            result.candidates += 1;
+            result.patched += 1;
+            result.patched_files.push(filename.to_string());
+            continue;
+        }
+        if let Some(filename) = trimmed.strip_prefix("__QCORTADO_PSL_REPAIR_CLEAN__:") {
+            result.candidates += 1;
+            result.already_clean += 1;
+            result.clean_files.push(filename.to_string());
+        }
+    }
+
+    result.patched_files.sort();
+    result.clean_files.sort();
+    Ok(result)
+}
+
+#[tauri::command]
+async fn hpc_repair_remote_pslibrary_pseudopotentials(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<PslibraryPseudoRepairResult, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let repair_cmd = format!(
+        "dir={dir}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+scanned=0; \
+for file in \"$dir\"/*.UPF \"$dir\"/*.upf; do \
+  [ -f \"$file\" ] || continue; \
+  scanned=$((scanned + 1)); \
+  name=$(basename \"$file\"); \
+  case \"$name\" in *_psl.*.UPF|*_psl.*.upf) ;; *) continue ;; esac; \
+  if grep -q '<PP_CHI\\.1[^>]*index=\"10\"' \"$file\"; then \
+    if perl -0pi -e 's#<PP_CHI\\.1\\b([^>]*)\\bindex=\"10\"([^>]*)>(.*?)</PP_CHI\\.1>#<PP_CHI.10${{1}}index=\"10\"${{2}}>${{3}}</PP_CHI.10>#sg' \"$file\"; then \
+      echo \"__QCORTADO_PSL_REPAIR_PATCHED__:$name\"; \
+    else \
+      echo \"__QCORTADO_PSL_REPAIR_ERROR__:$name\"; \
+      exit 2; \
+    fi; \
+  elif grep -q '<PP_CHI\\.10[^>]*index=\"10\"' \"$file\"; then \
+    echo \"__QCORTADO_PSL_REPAIR_CLEAN__:$name\"; \
+  fi; \
+done; \
+echo \"__QCORTADO_PSL_REPAIR_SCANNED__:$scanned\"",
+        dir = shell_single_quote_local(&remote_pseudo_dir)
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &repair_cmd).await?;
+    parse_remote_pslibrary_pseudo_repair_output(&output, remote_pseudo_dir)
+}
+
 /// Lists remote pseudopotentials and parses SOC/cutoff metadata from their headers.
 #[tauri::command]
 async fn hpc_list_remote_pseudopotential_metadata(
@@ -3094,7 +3552,7 @@ async fn hpc_list_remote_pseudopotential_metadata(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3138,6 +3596,88 @@ done",
     parse_remote_pseudopotential_metadata_output(&output)
 }
 
+/// Parses SOC/cutoff metadata for one remote pseudopotential.
+#[tauri::command]
+async fn hpc_get_remote_pseudopotential_metadata(
+    profile_id: Option<String>,
+    pseudo_dir: Option<String>,
+    filename: String,
+    state: State<'_, AppState>,
+) -> Result<PseudopotentialMetadata, String> {
+    if filename.contains('/') || filename.contains('\\') || !is_upf_name(&filename) {
+        return Err(format!("Invalid pseudopotential file name: {}", filename));
+    }
+
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+
+    let remote_pseudo_dir = pseudo_dir
+        .as_deref()
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .trim()
+        .to_string();
+    if remote_pseudo_dir.is_empty() {
+        return Err("Remote pseudopotential directory is not configured".to_string());
+    }
+
+    let metadata_cmd = format!(
+        "dir={dir}; \
+name={name}; \
+if [ \"$dir\" = \"~\" ]; then \
+  dir=\"$HOME\"; \
+elif [ \"${{dir#~/}}\" != \"$dir\" ]; then \
+  dir=\"$HOME/${{dir#~/}}\"; \
+fi; \
+if [ ! -d \"$dir\" ]; then \
+  echo \"__QCORTADO_PSEUDO_DIR_MISSING__:$dir\"; \
+  exit 0; \
+fi; \
+file=\"$dir/$name\"; \
+if [ ! -f \"$file\" ]; then \
+  echo \"__QCORTADO_PSEUDO_FILE_MISSING__:$name\"; \
+  exit 0; \
+fi; \
+stem=${{name%.*}}; \
+echo \"__QCORTADO_REMOTE_METADATA_FILE__:upf_b64:$name\"; \
+head -n 200 \"$file\" | base64; \
+echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+if [ -f \"$dir/$stem.djrepo\" ]; then \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE__:djrepo_b64:$stem.djrepo\"; \
+  base64 < \"$dir/$stem.djrepo\"; \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+elif [ -f \"$dir/$stem.djrepo.gz\" ]; then \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE__:djrepo_gz_b64:$stem.djrepo.gz\"; \
+  gzip -dc \"$dir/$stem.djrepo.gz\" | base64; \
+  echo \"__QCORTADO_REMOTE_METADATA_FILE_END__\"; \
+fi",
+        dir = shell_single_quote_local(&remote_pseudo_dir),
+        name = shell_single_quote_local(&filename),
+    );
+
+    let output = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &metadata_cmd).await?;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(path) = trimmed.strip_prefix("__QCORTADO_PSEUDO_DIR_MISSING__:") {
+            return Err(format!(
+                "Remote pseudopotential directory not found: {}",
+                path
+            ));
+        }
+        if let Some(name) = trimmed.strip_prefix("__QCORTADO_PSEUDO_FILE_MISSING__:") {
+            return Err(format!("Remote pseudopotential not found: {}", name));
+        }
+    }
+    let mut metadata = parse_remote_pseudopotential_metadata_output(&output)?;
+    metadata
+        .pop()
+        .ok_or_else(|| format!("No metadata parsed for remote pseudopotential {}", filename))
+}
+
 /// Loads remote SSSP JSON data from the configured remote pseudo directory.
 #[tauri::command]
 async fn hpc_load_remote_sssp_data(
@@ -3155,7 +3695,7 @@ async fn hpc_load_remote_sssp_data(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or(profile.remote_pseudo_dir.as_str())
+        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -4606,6 +5146,13 @@ pub struct PseudopotentialMetadata {
     pub max_angular_momentum: Option<u8>,
 }
 
+#[derive(serde::Serialize, Clone)]
+pub struct PseudopotentialInventoryEntry {
+    pub filename: String,
+    pub size_bytes: u64,
+    pub modified_at_epoch: u64,
+}
+
 #[derive(serde::Deserialize)]
 struct DjrepoCutoffHint {
     ecut: Option<f64>,
@@ -5259,6 +5806,33 @@ fn is_upf_name(name: &str) -> bool {
     name.ends_with(".UPF") || name.ends_with(".upf")
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct PslibraryPseudoRepairResult {
+    pseudo_dir: String,
+    scanned: usize,
+    candidates: usize,
+    patched: usize,
+    already_clean: usize,
+    patched_files: Vec<String>,
+    clean_files: Vec<String>,
+}
+
+fn is_pslibrary_upf_name(name: &str) -> bool {
+    is_upf_name(name) && name.to_ascii_lowercase().contains("_psl.")
+}
+
+fn repair_pslibrary_pp_chi10_blocks(content: &str, malformed_re: &Regex) -> (String, usize) {
+    let replacement_count = malformed_re.find_iter(content).count();
+    if replacement_count == 0 {
+        return (content.to_string(), 0);
+    }
+
+    let repaired = malformed_re
+        .replace_all(content, "<PP_CHI.10${1}index=\"10\"${2}>${3}</PP_CHI.10>")
+        .to_string();
+    (repaired, replacement_count)
+}
+
 #[cfg(test)]
 mod pseudopotential_metadata_tests {
     use base64::Engine as _;
@@ -5266,7 +5840,7 @@ mod pseudopotential_metadata_tests {
     use super::{
         parse_djrepo_wavefunction_cutoff_ry, parse_pseudopotential_metadata_from_content,
         parse_pseudopotential_metadata_from_sources, parse_remote_pseudopotential_metadata_output,
-        BASE64_STANDARD,
+        repair_pslibrary_pp_chi10_blocks, Regex, BASE64_STANDARD,
     };
 
     #[test]
@@ -5288,6 +5862,43 @@ mod pseudopotential_metadata_tests {
         assert_eq!(metadata.relativistic.as_deref(), Some("full"));
         assert_eq!(metadata.cutoff_wfc, Some(60.0));
         assert_eq!(metadata.cutoff_rho, Some(480.0));
+        assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("upf"));
+        assert_eq!(metadata.cutoff_rho_source.as_deref(), Some("upf"));
+    }
+
+    #[test]
+    fn parses_pslibrary_cutoffs_from_modern_upf_headers() {
+        let content = r#"
+<UPF version="2.0.1">
+  <PP_INFO>
+    Generated using "atomic" code by A. Dal Corso  v.7.5
+    Author: ADC
+    Pseudopotential type: PAW
+    Element:  B
+    Suggested minimum cutoff for wavefunctions:  43. Ry
+    Suggested minimum cutoff for charge density: 325. Ry
+    The Pseudo was generated with a Fully-Relativistic Calculation
+  </PP_INFO>
+  <PP_HEADER generated="Generated using 'atomic' code by A. Dal Corso  v.7.5"
+             element=" B"
+             pseudo_type="PAW"
+             relativistic="full"
+             has_so="true"
+             has_wfc="true"
+             wfc_cutoff="42.557957626222603"
+             rho_cutoff="324.58942206554065"/>
+</UPF>
+"#;
+
+        let metadata = parse_pseudopotential_metadata_from_content(
+            "B.rel-pbesol-n-kjpaw_psl.1.0.0.UPF".to_string(),
+            content,
+        );
+        assert!(metadata.supports_soc);
+        assert_eq!(metadata.pseudo_type.as_deref(), Some("PAW"));
+        assert_eq!(metadata.relativistic.as_deref(), Some("full"));
+        assert_eq!(metadata.cutoff_wfc, Some(42.557957626222603));
+        assert_eq!(metadata.cutoff_rho, Some(324.58942206554065));
         assert_eq!(metadata.cutoff_wfc_source.as_deref(), Some("upf"));
         assert_eq!(metadata.cutoff_rho_source.as_deref(), Some("upf"));
     }
@@ -5491,6 +6102,30 @@ __QCORTADO_REMOTE_METADATA_FILE_END__
         assert_eq!(pseudos[0].cutoff_wfc_source.as_deref(), Some("djrepo"));
         assert_eq!(pseudos[0].cutoff_rho_source, None);
     }
+
+    #[test]
+    fn repairs_only_malformed_tenth_pslibrary_atomic_wfc_tag() {
+        let malformed_re =
+            Regex::new(r#"(?s)<PP_CHI\.1\b([^>]*)\bindex="10"([^>]*)>(.*?)</PP_CHI\.1>"#)
+                .expect("valid regex");
+        let content = r#"
+<PP_PSWFC>
+<PP_CHI.1 type="real" size="2" columns="4" index="1" label="5S" l="0">
+ 0.0
+</PP_CHI.1>
+<PP_CHI.1 type="real" size="2" columns="4" index="10" label="4F" l="3">
+ 1.0
+</PP_CHI.1>
+</PP_PSWFC>
+"#;
+
+        let (repaired, replacements) = repair_pslibrary_pp_chi10_blocks(content, &malformed_re);
+
+        assert_eq!(replacements, 1);
+        assert!(repaired.contains(r#"<PP_CHI.1 type="real" size="2" columns="4" index="1""#));
+        assert!(repaired.contains(r#"<PP_CHI.10 type="real" size="2" columns="4" index="10""#));
+        assert!(repaired.contains("</PP_CHI.10>"));
+    }
 }
 
 /// Lists available pseudopotentials in a directory.
@@ -5515,6 +6150,124 @@ fn list_pseudopotentials(pseudo_dir: String) -> Result<Vec<String>, String> {
     }
     pseudos.sort();
     Ok(pseudos)
+}
+
+/// Lists local pseudopotentials with cheap change-detection metadata.
+#[tauri::command]
+fn list_pseudopotential_inventory(
+    pseudo_dir: String,
+) -> Result<Vec<PseudopotentialInventoryEntry>, String> {
+    let path = PathBuf::from(&pseudo_dir);
+    if !path.exists() {
+        return Err(format!("Directory not found: {}", pseudo_dir));
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let file_path = entry.path();
+        if !file_path.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if !is_upf_name(&filename) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|e| format!("Failed to inspect pseudopotential {}: {}", filename, e))?;
+        let modified_at_epoch = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        entries.push(PseudopotentialInventoryEntry {
+            filename,
+            size_bytes: metadata.len(),
+            modified_at_epoch,
+        });
+    }
+    entries.sort_by(|left, right| left.filename.cmp(&right.filename));
+    Ok(entries)
+}
+
+fn repair_local_pslibrary_pseudopotentials_sync(
+    pseudo_dir: String,
+) -> Result<PslibraryPseudoRepairResult, String> {
+    let path = PathBuf::from(&pseudo_dir);
+    if !path.exists() {
+        return Err(format!("Directory not found: {}", pseudo_dir));
+    }
+
+    let malformed_re =
+        Regex::new(r#"(?s)<PP_CHI\.1\b([^>]*)\bindex="10"([^>]*)>(.*?)</PP_CHI\.1>"#)
+            .map_err(|e| format!("Failed to build pseudopotential repair matcher: {}", e))?;
+    let clean_re = Regex::new(r#"<PP_CHI\.10\b[^>]*\bindex="10""#)
+        .map_err(|e| format!("Failed to build pseudopotential repair matcher: {}", e))?;
+
+    let mut result = PslibraryPseudoRepairResult {
+        pseudo_dir,
+        scanned: 0,
+        candidates: 0,
+        patched: 0,
+        already_clean: 0,
+        patched_files: Vec::new(),
+        clean_files: Vec::new(),
+    };
+
+    let mut entries = std::fs::read_dir(&path)
+        .map_err(|e| format!("Failed to read pseudo directory {}: {}", path.display(), e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let file_path = entry.path();
+        if !file_path.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if !is_upf_name(&filename) {
+            continue;
+        }
+        result.scanned += 1;
+        if !is_pslibrary_upf_name(&filename) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&file_path)
+            .map_err(|e| format!("Failed to read pseudopotential {}: {}", filename, e))?;
+        let (repaired, replacements) = repair_pslibrary_pp_chi10_blocks(&content, &malformed_re);
+        if replacements > 0 {
+            std::fs::write(&file_path, repaired).map_err(|e| {
+                format!(
+                    "Failed to write repaired pseudopotential {}: {}",
+                    filename, e
+                )
+            })?;
+            result.candidates += 1;
+            result.patched += 1;
+            result.patched_files.push(filename);
+        } else if clean_re.is_match(&content) {
+            result.candidates += 1;
+            result.already_clean += 1;
+            result.clean_files.push(filename);
+        }
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn repair_local_pslibrary_pseudopotentials(
+    pseudo_dir: String,
+) -> Result<PslibraryPseudoRepairResult, String> {
+    tokio::task::spawn_blocking(move || repair_local_pslibrary_pseudopotentials_sync(pseudo_dir))
+        .await
+        .map_err(|e| format!("Failed to join pseudopotential repair task: {}", e))?
 }
 
 /// Lists pseudopotentials and parses SOC/cutoff metadata from their headers.
@@ -5552,6 +6305,30 @@ async fn list_pseudopotential_metadata(
     tokio::task::spawn_blocking(move || list_pseudopotential_metadata_sync(pseudo_dir))
         .await
         .map_err(|e| format!("Failed to join pseudopotential metadata task: {}", e))?
+}
+
+/// Parses SOC/cutoff metadata for one local pseudopotential.
+#[tauri::command]
+async fn get_pseudopotential_metadata(
+    pseudo_dir: String,
+    filename: String,
+) -> Result<PseudopotentialMetadata, String> {
+    tokio::task::spawn_blocking(move || {
+        if filename.contains('/') || filename.contains('\\') || !is_upf_name(&filename) {
+            return Err(format!("Invalid pseudopotential file name: {}", filename));
+        }
+        let path = PathBuf::from(&pseudo_dir);
+        if !path.exists() {
+            return Err(format!("Directory not found: {}", pseudo_dir));
+        }
+        let file_path = path.join(&filename);
+        if !file_path.is_file() {
+            return Err(format!("Pseudopotential not found: {}", filename));
+        }
+        read_pseudopotential_metadata(&file_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to join pseudopotential metadata task: {}", e))?
 }
 
 /// SSSP element data from JSON
@@ -9225,10 +10002,10 @@ async fn run_scf_hpc_background(
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<QEResult, String> {
-    let mut remote_calculation = calculation;
-    remote_calculation.pseudo_dir = profile.remote_pseudo_dir.clone();
-    let input = generate_pw_input(&remote_calculation);
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
+    let mut remote_calculation = calculation;
+    remote_calculation.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    let input = generate_pw_input(&remote_calculation);
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let commands = vec![
         "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
@@ -9488,8 +10265,9 @@ async fn run_bands_hpc_background(
     pm: ProcessManager,
 ) -> Result<BandData, String> {
     let pipeline_start = std::time::Instant::now();
+    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut bands_calc = config.base_calculation.clone();
-    bands_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    bands_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
     bands_calc.calculation = qe::CalculationType::Bands;
     if bands_calc.verbosity.is_none() {
         bands_calc.verbosity = Some("high".to_string());
@@ -9576,7 +10354,6 @@ async fn run_bands_hpc_background(
         pm.append_output(task_id, hydrate_line).await;
     }
 
-    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
@@ -10583,8 +11360,9 @@ async fn run_wannier_hpc_background(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "wannier90.x".to_string());
 
+    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let (mut nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
 
     let kpoints = match &nscf_calc.kpoints {
         qe::KPoints::Crystal { points } => points.clone(),
@@ -10604,7 +11382,6 @@ async fn run_wannier_hpc_background(
         config.scf_calc_id.as_deref(),
     )?;
 
-    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let pre_cmd = format!(
         "{} -pp {} > wannier90_pre.out 2>&1",
@@ -12088,8 +12865,9 @@ async fn run_dos_hpc_background(
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<ElectronicDosData, String> {
+    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
     nscf_calc.calculation = qe::CalculationType::Nscf;
     nscf_calc.verbosity = Some("high".to_string());
     nscf_calc.kpoints = qe::KPoints::Automatic {
@@ -12130,7 +12908,6 @@ async fn run_dos_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
-    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
@@ -12628,8 +13405,9 @@ async fn run_fermi_surface_hpc_background(
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<FermiSurfaceData, String> {
+    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir.clone();
+    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
     nscf_calc.calculation = qe::CalculationType::Nscf;
     if nscf_calc.verbosity.is_none() {
         nscf_calc.verbosity = Some("high".to_string());
@@ -12670,7 +13448,6 @@ async fn run_fermi_surface_hpc_background(
         bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
     }
 
-    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
@@ -13072,6 +13849,346 @@ async fn run_fermi_surface_background(
         primary_file,
         frmsf_files,
     })
+}
+
+fn collect_hubbard_lrt_artifacts(work_path: &Path) -> Vec<String> {
+    let mut artifacts = Vec::new();
+    for filename in ["hp.in", "hp.out", "parameters.out"] {
+        if work_path.join(filename).exists() {
+            artifacts.push(filename.to_string());
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(work_path) {
+        for entry in entries.flatten() {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            if filename.ends_with("Hubbard_parameters.dat") && !artifacts.contains(&filename) {
+                artifacts.push(filename);
+            }
+        }
+    }
+    artifacts
+}
+
+fn read_hubbard_lrt_parameters_output(work_path: &Path) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(work_path.join("parameters.out")) {
+        return Some(text);
+    }
+    let entries = std::fs::read_dir(work_path).ok()?;
+    for entry in entries.flatten() {
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if filename.ends_with("Hubbard_parameters.dat") {
+            if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn start_hubbard_lrt_calculation(
+    app: AppHandle,
+    config: HubbardLrtConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    execution_target: Option<hpc::profile::ExecutionTarget>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let hpc_target = resolve_hpc_execution(&state, execution_target.as_ref());
+
+    if hpc_target.is_none() && state.process_manager.has_running_tasks().await {
+        return Err(
+            "A calculation is already running. Please wait for it to complete or cancel it."
+                .to_string(),
+        );
+    }
+
+    let pm = state.process_manager.clone();
+    let (task_id, cancel_flag) = pm.register("hubbard_lrt".to_string(), label).await;
+
+    if let Some(hpc_target) = hpc_target {
+        let profile = resolve_hpc_profile_from_state(&state, hpc_target.profile_id.clone())?;
+        let secret = hpc::credentials::resolve_secret(
+            &profile.id,
+            &profile.username,
+            &profile.host,
+            profile.credential_persisted,
+        )?;
+        let tid = task_id.clone();
+        let app_handle = app.clone();
+
+        tokio::spawn(async move {
+            let result = run_hubbard_lrt_hpc_background(
+                app_handle.clone(),
+                &tid,
+                config,
+                working_dir,
+                profile,
+                secret,
+                hpc_target.resources,
+                hpc_target.recovery_save,
+                cancel_flag,
+                pm.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(lrt_result) => {
+                    let json = serde_json::to_value(&lrt_result).unwrap_or(serde_json::Value::Null);
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+                Err(e) => {
+                    pm.fail(&tid, e.clone()).await;
+                    let _ =
+                        app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+                }
+            }
+        });
+        return Ok(task_id);
+    }
+
+    let bin_dir = {
+        let guard = state.qe_bin_dir.lock().unwrap();
+        guard.as_ref().ok_or("QE path not configured")?.clone()
+    };
+    let execution_prefix = state.execution_prefix.lock().unwrap().clone();
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+
+    tokio::spawn(async move {
+        let result = run_hubbard_lrt_background(
+            app_handle.clone(),
+            &tid,
+            config,
+            working_dir,
+            mpi_config,
+            bin_dir,
+            execution_prefix,
+            cancel_flag,
+            pm.clone(),
+        )
+        .await;
+
+        match result {
+            Ok(lrt_result) => {
+                let json = serde_json::to_value(&lrt_result).unwrap_or(serde_json::Value::Null);
+                pm.complete(&tid, json).await;
+                let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+            }
+            Err(e) => {
+                pm.fail(&tid, e.clone()).await;
+                let _ = app_handle.emit(&format!("task-status:{}", tid), &format!("failed:{}", e));
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_hubbard_lrt_hpc_background(
+    app: AppHandle,
+    task_id: &str,
+    config: HubbardLrtConfig,
+    working_dir: String,
+    profile: hpc::profile::HpcProfile,
+    secret: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    recovery_save: Option<hpc::profile::HpcRecoverySaveSpec>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<HubbardLrtResult, String> {
+    let dependency_stage = resolve_hpc_scf_dependency_stage(
+        &app,
+        config.project_id.as_deref(),
+        config.scf_calc_id.as_deref(),
+    )?;
+
+    let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
+    if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy.clone() {
+        bundle_copies.push((local_scf_tmp_dir, ".".to_string()));
+    }
+
+    let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
+    let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(dependency_stage.remote_hydration_commands);
+    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    commands.push(build_hpc_qe_input_command(
+        &profile,
+        resource_type,
+        "hp.x",
+        None,
+        "hp.in",
+        "hp.out",
+    ));
+
+    let work_path = run_hpc_bundle_task(
+        app,
+        pm,
+        task_id,
+        "hubbard_lrt",
+        "Hubbard LRT",
+        profile,
+        secret,
+        resources,
+        &working_dir,
+        commands,
+        vec![("hp.in".to_string(), generate_hp_input(&config.hp))],
+        bundle_copies,
+        recovery_save,
+        cancel_flag,
+    )
+    .await?;
+
+    let hp_output = std::fs::read_to_string(work_path.join("hp.out")).unwrap_or_else(|_| {
+        std::fs::read_to_string(work_path.join("slurm.out")).unwrap_or_default()
+    });
+    let parameters_output = read_hubbard_lrt_parameters_output(&work_path);
+    let artifacts = collect_hubbard_lrt_artifacts(&work_path);
+    let result = build_hubbard_lrt_result(hp_output, parameters_output, config.hp.nq, artifacts);
+    if result.u_values.is_empty() {
+        return Err("hp.x completed but no Hubbard U values could be parsed.".to_string());
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_hubbard_lrt_background(
+    app: AppHandle,
+    task_id: &str,
+    config: HubbardLrtConfig,
+    working_dir: String,
+    mpi_config: Option<MpiConfig>,
+    bin_dir: PathBuf,
+    execution_prefix: Option<String>,
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pm: ProcessManager,
+) -> Result<HubbardLrtResult, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let work_path = PathBuf::from(&working_dir);
+    prepare_working_directory(&work_path, false)?;
+
+    macro_rules! emit_line {
+        ($line:expr) => {{
+            let line_str: String = $line.into();
+            let _ = app.emit(&format!("task-output:{}", task_id), &line_str);
+            pm.append_output(task_id, line_str).await;
+        }};
+    }
+
+    macro_rules! check_cancel {
+        () => {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("Cancelled by user".to_string());
+            }
+        };
+    }
+
+    if let (Some(ref project_id), Some(ref scf_calc_id)) = (&config.project_id, &config.scf_calc_id)
+    {
+        let projects_dir = projects::get_projects_dir(&app)?;
+        let scf_tmp_dir = projects_dir
+            .join(project_id)
+            .join("calculations")
+            .join(scf_calc_id)
+            .join("tmp");
+
+        if scf_tmp_dir.exists() {
+            emit_line!(format!("Copying SCF data from: {}", scf_tmp_dir.display()));
+            projects::copy_dir_contents(&scf_tmp_dir, &work_path)?;
+            emit_line!("SCF data copied successfully.".to_string());
+        } else {
+            return Err(missing_scf_tmp_error(&scf_tmp_dir));
+        }
+    }
+
+    ensure_hubbard_lrt_restart_inputs(&work_path)?;
+    check_cancel!();
+
+    emit_line!("Running hp.x Hubbard linear-response calculation".to_string());
+    let hp_exe = bin_dir.join("hp.x");
+    if !hp_exe.exists() {
+        return Err("hp.x not found. Make sure your QE installation includes hp.x".to_string());
+    }
+
+    let hp_input = generate_hp_input(&config.hp);
+    std::fs::write(work_path.join("hp.in"), &hp_input)
+        .map_err(|e| format!("Failed to write hp.x input: {}", e))?;
+
+    let mut child = if let Some(ref mpi) = mpi_config {
+        if mpi.enabled && mpi.nprocs > 1 {
+            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
+            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
+                .args(["-np", &mpi.nprocs.to_string()])
+                .arg(&hp_exe)
+                .args(["-ndiag", "1", "-pd", ".true."])
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start mpirun: {}", e))?
+        } else {
+            tokio_command_with_prefix(&hp_exe, execution_prefix.as_deref())
+                .args(["-ndiag", "1", "-pd", ".true."])
+                .current_dir(&work_path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start hp.x: {}", e))?
+        }
+    } else {
+        tokio_command_with_prefix(&hp_exe, execution_prefix.as_deref())
+            .args(["-ndiag", "1", "-pd", ".true."])
+            .current_dir(&work_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start hp.x: {}", e))?
+    };
+
+    if let Some(pid) = child.id() {
+        pm.set_child_id(task_id, pid).await;
+    }
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(hp_input.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write hp.x input: {}", e))?;
+    }
+
+    let stdout = child.stdout.take().ok_or("Failed to capture hp.x stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut full_output = String::new();
+    while let Some(line) = reader.next_line().await.map_err(|e| e.to_string())? {
+        check_cancel!();
+        full_output.push_str(&line);
+        full_output.push('\n');
+        emit_line!(line);
+    }
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    check_cancel!();
+    if !status.success() {
+        return Err(format!("hp.x failed with exit code: {:?}", status.code()));
+    }
+
+    emit_line!("Parsing Hubbard parameters".to_string());
+    let parameters_output = read_hubbard_lrt_parameters_output(&work_path);
+    let artifacts = collect_hubbard_lrt_artifacts(&work_path);
+    let result = build_hubbard_lrt_result(full_output, parameters_output, config.hp.nq, artifacts);
+    if result.u_values.is_empty() {
+        return Err("hp.x completed but no Hubbard U values could be parsed.".to_string());
+    }
+    emit_line!("=== Hubbard LRT Complete ===".to_string());
+    Ok(result)
 }
 
 /// Starts a phonon calculation as a background task.
@@ -14450,7 +15567,10 @@ pub fn run() {
         hpc_get_cluster_snapshot,
         hpc_sample_utilization,
         hpc_list_remote_pseudopotentials,
+        hpc_list_remote_pseudopotential_inventory,
+        hpc_repair_remote_pslibrary_pseudopotentials,
         hpc_list_remote_pseudopotential_metadata,
+        hpc_get_remote_pseudopotential_metadata,
         hpc_load_remote_sssp_data,
         hpc_preview_slurm_script,
         hpc_list_headless_jobs,
@@ -14480,7 +15600,10 @@ pub fn run() {
         set_project_dir,
         get_project_dir,
         list_pseudopotentials,
+        list_pseudopotential_inventory,
+        repair_local_pslibrary_pseudopotentials,
         list_pseudopotential_metadata,
+        get_pseudopotential_metadata,
         load_sssp_data,
         validate_epw_prerequisites,
         build_epw_input_preview,
@@ -14489,6 +15612,7 @@ pub fn run() {
         start_bands_calculation,
         start_dos_calculation,
         start_fermi_surface_calculation,
+        start_hubbard_lrt_calculation,
         start_phonon_calculation,
         start_epw_calculation,
         start_epw_calculation_hpc,

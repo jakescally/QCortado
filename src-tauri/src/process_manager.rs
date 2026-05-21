@@ -38,6 +38,8 @@ pub struct TaskInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_storage_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub hpc_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_sync_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_save: Option<serde_json::Value>,
@@ -68,6 +70,8 @@ pub struct TaskSummary {
     pub remote_project_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_storage_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hpc_profile_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_sync_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,6 +238,7 @@ impl ProcessManager {
             remote_workdir: t.remote_workdir.clone(),
             remote_project_path: t.remote_project_path.clone(),
             remote_storage_bytes: t.remote_storage_bytes,
+            hpc_profile_id: t.hpc_profile_id.clone(),
             local_sync_dir: t.local_sync_dir.clone(),
             recovery_save: t.recovery_save.clone(),
             headless_attached: t.headless_attached,
@@ -258,6 +263,7 @@ impl ProcessManager {
                 remote_workdir: t.remote_workdir.clone(),
                 remote_project_path: t.remote_project_path.clone(),
                 remote_storage_bytes: t.remote_storage_bytes,
+                hpc_profile_id: t.hpc_profile_id.clone(),
                 local_sync_dir: t.local_sync_dir.clone(),
                 recovery_save: t.recovery_save.clone(),
                 headless_attached: t.headless_attached,

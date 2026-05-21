@@ -10,6 +10,7 @@
 
 pub mod bands;
 pub mod epw;
+pub mod hubbard;
 pub mod input;
 pub mod output;
 pub mod phonon;
@@ -35,9 +36,10 @@ pub use epw::{
     EpwSourceRef, EpwSourcesV1, EpwSpectralData, EpwSuperconductivityData, EpwTransportData,
     EPW_SCHEMA_VERSION,
 };
+pub use hubbard::{build_hubbard_lrt_result, parse_hubbard_lrt_values};
 pub use input::{
-    generate_dos_input, generate_matdyn_bands_input, generate_matdyn_dos_input, generate_ph_input,
-    generate_pw_input, generate_q2r_input,
+    generate_dos_input, generate_hp_input, generate_matdyn_bands_input, generate_matdyn_dos_input,
+    generate_ph_input, generate_pw_input, generate_q2r_input,
 };
 pub use output::{parse_dos_file, parse_pw_output};
 pub use phonon::{

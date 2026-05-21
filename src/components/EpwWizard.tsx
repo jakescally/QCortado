@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   CrystalData,
@@ -23,6 +23,8 @@ import {
   resolveProfileRemoteQeBinDir,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 
 interface CalculationRun {
   id: string;
@@ -133,6 +135,31 @@ interface EpwWizardProps {
 type WizardStep = "source" | "controls" | "run" | "results";
 
 const EPW_WORK_DIR = "/tmp/qcortado_epw";
+const EPW_WIZARD_SETTINGS_ID = "epw";
+
+interface StoredEpwWizardSettings {
+  prefix: string;
+  outdir: string;
+  dvscfDir: string;
+  wannierDir: string;
+  kMesh: [number, number, number];
+  qMesh: [number, number, number];
+  fineQMesh: [number, number, number];
+  goals: EpwGoalSelection;
+  epbwrite: boolean;
+  epbread: boolean;
+  epwwrite: boolean;
+  epwread: boolean;
+  wannierize: boolean;
+  fsthickInput: string;
+  degausswInput: string;
+  nbndsubInput: string;
+  mode: string;
+  runtimePoolsInput: string;
+  runtimeMaxSecondsInput: string;
+  artifactSyncMode: "minimal" | "epw-ready" | "full";
+  advancedOverridesText: string;
+}
 
 function parseOptionalPositiveNumber(input: string, label: string): number | null {
   const trimmed = input.trim();
@@ -279,6 +306,11 @@ export function EpwWizard({
 }: EpwWizardProps) {
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredEpwWizardSettings>(projectId, EPW_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
+  const shouldPreserveStoredSettingsRef = useRef(Boolean(storedWizardSettings));
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -292,35 +324,35 @@ export function EpwWizard({
   const [selectedPhononId, setSelectedPhononId] = useState<string>("");
   const [selectedWannierId, setSelectedWannierId] = useState<string>("");
 
-  const [prefix, setPrefix] = useState("qcortado_scf");
-  const [outdir, setOutdir] = useState("./tmp");
-  const [dvscfDir, setDvscfDir] = useState("./save");
-  const [wannierDir, setWannierDir] = useState("./wannier");
-  const [kMesh, setKMesh] = useState<[number, number, number]>([24, 24, 24]);
-  const [qMesh, setQMesh] = useState<[number, number, number]>([6, 6, 6]);
-  const [fineQMesh, setFineQMesh] = useState<[number, number, number]>([24, 24, 24]);
-  const [goals, setGoals] = useState<EpwGoalSelection>({
+  const [prefix, setPrefix] = useState(() => storedWizardSettings?.prefix ?? "qcortado_scf");
+  const [outdir, setOutdir] = useState(() => storedWizardSettings?.outdir ?? "./tmp");
+  const [dvscfDir, setDvscfDir] = useState(() => storedWizardSettings?.dvscfDir ?? "./save");
+  const [wannierDir, setWannierDir] = useState(() => storedWizardSettings?.wannierDir ?? "./wannier");
+  const [kMesh, setKMesh] = useState<[number, number, number]>(() => storedWizardSettings?.kMesh ?? [24, 24, 24]);
+  const [qMesh, setQMesh] = useState<[number, number, number]>(() => storedWizardSettings?.qMesh ?? [6, 6, 6]);
+  const [fineQMesh, setFineQMesh] = useState<[number, number, number]>(() => storedWizardSettings?.fineQMesh ?? [24, 24, 24]);
+  const [goals, setGoals] = useState<EpwGoalSelection>(() => storedWizardSettings?.goals ?? {
     coupling: true,
     phonon_linewidth_a2f: true,
     electron_self_energy: false,
     transport_mobility: false,
     superconductivity: false,
   });
-  const [epbwrite, setEpbwrite] = useState(true);
-  const [epbread, setEpbread] = useState(false);
-  const [epwwrite, setEpwwrite] = useState(true);
-  const [epwread, setEpwread] = useState(false);
-  const [wannierize, setWannierize] = useState(true);
-  const [fsthickInput, setFsthickInput] = useState("0.4");
-  const [degausswInput, setDegausswInput] = useState("0.02");
-  const [nbndsubInput, setNbndsubInput] = useState("");
+  const [epbwrite, setEpbwrite] = useState(() => storedWizardSettings?.epbwrite ?? true);
+  const [epbread, setEpbread] = useState(() => storedWizardSettings?.epbread ?? false);
+  const [epwwrite, setEpwwrite] = useState(() => storedWizardSettings?.epwwrite ?? true);
+  const [epwread, setEpwread] = useState(() => storedWizardSettings?.epwread ?? false);
+  const [wannierize, setWannierize] = useState(() => storedWizardSettings?.wannierize ?? true);
+  const [fsthickInput, setFsthickInput] = useState(() => storedWizardSettings?.fsthickInput ?? "0.4");
+  const [degausswInput, setDegausswInput] = useState(() => storedWizardSettings?.degausswInput ?? "0.02");
+  const [nbndsubInput, setNbndsubInput] = useState(() => storedWizardSettings?.nbndsubInput ?? "");
 
-  const [mode, setMode] = useState("standard");
-  const [runtimePoolsInput, setRuntimePoolsInput] = useState("");
-  const [runtimeMaxSecondsInput, setRuntimeMaxSecondsInput] = useState("");
-  const [artifactSyncMode, setArtifactSyncMode] = useState<"minimal" | "epw-ready" | "full">("epw-ready");
+  const [mode, setMode] = useState(() => storedWizardSettings?.mode ?? "standard");
+  const [runtimePoolsInput, setRuntimePoolsInput] = useState(() => storedWizardSettings?.runtimePoolsInput ?? "");
+  const [runtimeMaxSecondsInput, setRuntimeMaxSecondsInput] = useState(() => storedWizardSettings?.runtimeMaxSecondsInput ?? "");
+  const [artifactSyncMode, setArtifactSyncMode] = useState<"minimal" | "epw-ready" | "full">(() => storedWizardSettings?.artifactSyncMode ?? "epw-ready");
 
-  const [advancedOverridesText, setAdvancedOverridesText] = useState("");
+  const [advancedOverridesText, setAdvancedOverridesText] = useState(() => storedWizardSettings?.advancedOverridesText ?? "");
 
   const [prereqValidation, setPrereqValidation] = useState<EpwPrerequisiteValidation | null>(null);
   const [isValidatingPrerequisites, setIsValidatingPrerequisites] = useState(false);
@@ -400,6 +432,55 @@ export function EpwWizard({
   }, [activeHpcProfile?.id, activeHpcProfile?.resource_mode, isHpcMode]);
 
   useEffect(() => {
+    writeProjectWizardSettings(projectId, EPW_WIZARD_SETTINGS_ID, {
+      prefix,
+      outdir,
+      dvscfDir,
+      wannierDir,
+      kMesh,
+      qMesh,
+      fineQMesh,
+      goals,
+      epbwrite,
+      epbread,
+      epwwrite,
+      epwread,
+      wannierize,
+      fsthickInput,
+      degausswInput,
+      nbndsubInput,
+      mode,
+      runtimePoolsInput,
+      runtimeMaxSecondsInput,
+      artifactSyncMode,
+      advancedOverridesText,
+    });
+  }, [
+    projectId,
+    prefix,
+    outdir,
+    dvscfDir,
+    wannierDir,
+    kMesh,
+    qMesh,
+    fineQMesh,
+    goals,
+    epbwrite,
+    epbread,
+    epwwrite,
+    epwread,
+    wannierize,
+    fsthickInput,
+    degausswInput,
+    nbndsubInput,
+    mode,
+    runtimePoolsInput,
+    runtimeMaxSecondsInput,
+    artifactSyncMode,
+    advancedOverridesText,
+  ]);
+
+  useEffect(() => {
     async function init() {
       try {
         const count = await invoke<number>("get_cpu_count");
@@ -468,7 +549,7 @@ export function EpwWizard({
   function handleSelectPhononSource(calc: CalculationRun) {
     setSelectedPhononId(calc.id);
     const savedQGrid = extractSavedPhononQGrid(calc);
-    if (savedQGrid) {
+    if (savedQGrid && !shouldPreserveStoredSettingsRef.current) {
       setQMesh(savedQGrid);
     }
     setError(null);
@@ -482,7 +563,7 @@ export function EpwWizard({
     }
     setSelectedWannierId(calc.id);
     const savedKGrid = extractSavedWannierKGrid(calc);
-    if (savedKGrid) {
+    if (savedKGrid && !shouldPreserveStoredSettingsRef.current) {
       setKMesh(savedKGrid);
     }
     setError(null);
@@ -830,6 +911,7 @@ export function EpwWizard({
           <div className="scf-list">
             {phononCalculations.map((calc) => {
               const isSelected = selectedPhononId === calc.id;
+              const calcName = getCalculationName(calc);
               return (
                 <div
                   key={calc.id}
@@ -842,6 +924,11 @@ export function EpwWizard({
                       checked={isSelected}
                       onChange={() => handleSelectPhononSource(calc)}
                     />
+                    {calcName && (
+                      <span className="scf-name" title={formatCalculationSourceLabel(calc, "Phonon")}>
+                        {calcName}
+                      </span>
+                    )}
                     <span className="scf-date">
                       {new Date(calc.started_at).toLocaleDateString()}
                     </span>
@@ -885,6 +972,7 @@ export function EpwWizard({
 
             {wannierCalculations.map((calc) => {
               const isSelected = selectedWannierId === calc.id;
+              const calcName = getCalculationName(calc);
               return (
                 <div
                   key={calc.id}
@@ -897,6 +985,11 @@ export function EpwWizard({
                       checked={isSelected}
                       onChange={() => handleSelectWannierSource(calc)}
                     />
+                    {calcName && (
+                      <span className="scf-name" title={formatCalculationSourceLabel(calc, "Wannier")}>
+                        {calcName}
+                      </span>
+                    )}
                     <span className="scf-date">
                       {new Date(calc.started_at).toLocaleDateString()}
                     </span>

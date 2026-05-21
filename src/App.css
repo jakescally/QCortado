@@ -985,6 +985,7 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
+.hubbard-lrt-wizard.wizard-step-run .wizard-content,
 .epw-wizard.wizard-step-run .wizard-content,
 .transport-wizard.wizard-step-run .wizard-content,
 .wannier-wizard.wizard-step-run .wizard-content {
@@ -1526,6 +1527,10 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   margin-top: 0.5rem;
 }
 
+.magnetization-angle-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+}
+
 .mag-row {
   display: flex;
   align-items: center;
@@ -1547,6 +1552,15 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   border: 1px solid #e2e8f0;
   border-radius: 4px;
   font-size: 0.85rem;
+}
+
+.mag-angle-row {
+  flex-wrap: wrap;
+}
+
+.mag-angle-row span {
+  font-size: 0.8rem;
+  color: #4a5568;
 }
 
 /* Hubbard grid */
@@ -1599,6 +1613,37 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 
 .hubbard-value-field input {
   min-width: 4rem;
+}
+
+.hubbard-default-label {
+  color: #4a5568;
+  font-size: 0.68rem;
+  line-height: 1.15;
+}
+
+.section-recommendation {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #b7c7a5;
+  border-radius: 999px;
+  color: #31511e;
+  background: #f0f7e8;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.field-hint {
+  margin: 0.4rem 0 0;
+  color: #718096;
+  font-size: 0.8rem;
+}
+
+.scf-option.disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
 }
 
 /* Dark mode for wizard */
@@ -4573,6 +4618,15 @@ html[data-theme="dark"] .node-activity-empty-cell {
   border-color: #38a169;
 }
 
+.settings-repair-button-wrap .tooltip-trigger-wrap {
+  display: flex;
+  width: 100%;
+}
+
+.settings-repair-button-wrap .settings-menu-item {
+  width: 100%;
+}
+
 .settings-local-tools .settings-menu-hint code {
   background: #edf2f7;
   padding: 0.1rem 0.35rem;
@@ -4801,6 +4855,7 @@ html[data-theme="dark"] .node-activity-empty-cell {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 1rem;
   padding: 0.875rem 1.25rem;
   cursor: pointer;
   transition: background 0.15s ease;
@@ -4810,20 +4865,35 @@ html[data-theme="dark"] .node-activity-empty-cell {
   background: #f7fafc;
 }
 
+.calc-selection-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.calc-selection-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #e53e3e;
+  cursor: pointer;
+}
+
 .calculation-info {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  flex-wrap: wrap;
-}
-
-.calculation-info:has(.calc-entry-name) {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .calc-entry-name {
-  flex: 0 1 16rem;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: min(16rem, 38vw);
   overflow: hidden;
@@ -4834,6 +4904,7 @@ html[data-theme="dark"] .node-activity-empty-cell {
 }
 
 .calc-type {
+  flex: 0 0 auto;
   font-weight: 600;
   color: #2d3748;
   background: #e2e8f0;
@@ -4861,9 +4932,17 @@ html[data-theme="dark"] .node-activity-empty-cell {
   font-family: "SF Mono", Monaco, Consolas, monospace;
 }
 
+.calc-hubbard-u {
+  font-size: 0.85rem;
+  color: #805ad5;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-weight: 700;
+}
+
 .calculation-meta {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 1rem;
 }
 
@@ -5006,13 +5085,10 @@ html[data-theme="dark"] .node-activity-empty-cell {
 /* Calculation Tags */
 .calc-tags {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 0.35rem;
   margin-left: 0.5rem;
-}
-
-.calc-entry-name ~ .calc-tags {
-  max-height: 1.5rem;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -5111,8 +5187,385 @@ html[data-theme="dark"] .node-activity-empty-cell {
   max-height: 200px;
 }
 
+.hubbard-lrt-results-step {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.results-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.results-hero h3,
+.results-hero .step-description {
+  margin-bottom: 0;
+}
+
+.lrt-results-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 1rem;
+}
+
+.lrt-results-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.lrt-results-card-header h4 {
+  margin: 0;
+  color: #1a202c;
+  font-size: 1rem;
+}
+
+.lrt-results-card-header span {
+  color: #718096;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.lrt-u-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+}
+
+.lrt-u-value {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.85rem;
+  border: 1px solid #bee3f8;
+  border-radius: 8px;
+  background: #ebf8ff;
+}
+
+.lrt-u-target {
+  color: #2b6cb0;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.lrt-u-value strong {
+  color: #1a202c;
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+
+.lrt-summary-grid {
+  margin-bottom: 0;
+}
+
+html[data-theme="dark"] .lrt-results-card {
+  background: #313244;
+  border-color: #45475a;
+}
+
+html[data-theme="dark"] .lrt-results-card-header h4,
+html[data-theme="dark"] .lrt-u-value strong {
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .lrt-u-value {
+  background: rgba(137, 180, 250, 0.14);
+  border-color: rgba(137, 180, 250, 0.35);
+}
+
+html[data-theme="dark"] .lrt-u-target {
+  color: #89b4fa;
+}
+
 .calculation-failure-banner {
   margin-bottom: 1rem;
+}
+
+.magnetism-viewer {
+  margin: 0 0 1rem 0;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.magnetism-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.85rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.magnetism-viewer-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 8rem;
+}
+
+.magnetism-viewer-title span {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #1a202c;
+}
+
+.magnetism-viewer-title small {
+  font-size: 0.72rem;
+  color: #718096;
+}
+
+.magnetism-species-toggles {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.magnetism-species-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.7rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #dbe3ee;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #2d3748;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.magnetism-species-toggle input {
+  margin: 0;
+}
+
+.magnetism-species-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 1px solid rgba(26, 32, 44, 0.22);
+}
+
+.magnetism-viewer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  min-height: 460px;
+}
+
+.magnetism-canvas {
+  min-height: 460px;
+  background: #111827;
+}
+
+.magnetism-selection-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 0.9rem;
+  border-left: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.magnetism-control-section {
+  flex-shrink: 0;
+}
+
+.magnetism-selection-panel .magnetism-control-static-header {
+  cursor: default;
+}
+
+.magnetism-selection-panel .magnetism-control-static-header:hover {
+  background: transparent;
+}
+
+.magnetism-selection-panel .band-control-grid {
+  gap: 0.65rem;
+}
+
+.magnetism-selection-panel .band-control-value {
+  align-self: flex-end;
+}
+
+.magnetism-selection-panel .band-control-row input[type="checkbox"].magnetism-weak-moments-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: #4299e1;
+  cursor: pointer;
+  opacity: 1;
+}
+
+html[data-theme="dark"] .magnetism-selection-panel .band-control-row input[type="checkbox"].magnetism-weak-moments-toggle {
+  accent-color: #89b4fa;
+}
+
+.magnetism-selection-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.magnetism-selection-heading span {
+  color: #1a202c;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.magnetism-selection-heading small {
+  color: #718096;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.76rem;
+}
+
+.magnetism-moment-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.magnetism-moment-grid div {
+  padding: 0.55rem 0.45rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.magnetism-moment-grid dt {
+  margin: 0 0 0.25rem 0;
+  color: #718096;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.magnetism-moment-grid dd {
+  margin: 0;
+  color: #1a202c;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.magnetism-empty-selection {
+  padding: 0.75rem;
+  border: 1px dashed #cbd5e0;
+  border-radius: 6px;
+  color: #718096;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.magnetism-total {
+  margin-top: auto;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.magnetism-total span {
+  color: #718096;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.magnetism-total strong {
+  color: #1a202c;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.magnetism-fullscreen-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  background: #f7fafc;
+}
+
+.magnetism-fullscreen-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.magnetism-fullscreen-header h2 {
+  margin: 0;
+  color: #1a202c;
+  font-size: 1.1rem;
+}
+
+.magnetism-fullscreen-header span {
+  display: block;
+  margin-top: 0.15rem;
+  color: #718096;
+  font-size: 0.82rem;
+}
+
+.magnetism-fullscreen-body {
+  flex: 1;
+  min-height: 0;
+  padding: 1rem;
+}
+
+.magnetism-fullscreen-body .magnetism-viewer {
+  height: 100%;
+  margin-bottom: 0;
+}
+
+.magnetism-fullscreen-body .magnetism-viewer-body {
+  min-height: 0;
+  height: calc(100% - 3.2rem);
+}
+
+.magnetism-fullscreen-body .magnetism-canvas {
+  min-height: 0;
+  height: 100%;
+}
+
+@media (max-width: 900px) {
+  .magnetism-viewer-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .magnetism-species-toggles {
+    justify-content: flex-start;
+  }
+
+  .magnetism-viewer-body {
+    grid-template-columns: 1fr;
+  }
+
+  .magnetism-canvas {
+    min-height: 360px;
+  }
+
+  .magnetism-fullscreen-body .magnetism-canvas {
+    min-height: 0;
+  }
+
+  .magnetism-selection-panel {
+    border-left: none;
+    border-top: 1px solid #e2e8f0;
+  }
 }
 
 /* Dark mode for project view */
@@ -5160,6 +5613,10 @@ html[data-theme="dark"] {
 
   .calc-energy {
     color: #e2e8f0;
+  }
+
+  .calc-hubbard-u {
+    color: #cba6f7;
   }
 
   .calc-size {
@@ -5239,6 +5696,75 @@ html[data-theme="dark"] {
   .calculation-details {
     background: #4a5568;
     border-color: #4a5568;
+  }
+
+  .magnetism-viewer {
+    background: #2d3748;
+    border-color: #5a6578;
+  }
+
+  .magnetism-viewer-toolbar {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .magnetism-viewer-title span,
+  .magnetism-selection-heading span,
+  .magnetism-moment-grid dd,
+  .magnetism-total strong {
+    color: #f7fafc;
+  }
+
+  .magnetism-viewer-title small,
+  .magnetism-selection-heading small,
+  .magnetism-empty-selection,
+  .magnetism-total span {
+    color: #a0aec0;
+  }
+
+  .magnetism-species-toggle {
+    background: #1f2937;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .magnetism-selection-panel {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .magnetism-selection-panel .magnetism-control-static-header:hover {
+    background: transparent;
+  }
+
+  .magnetism-moment-grid div {
+    background: #1f2937;
+    border-color: #4a5568;
+  }
+
+  .magnetism-empty-selection {
+    border-color: #718096;
+  }
+
+  .magnetism-total {
+    border-color: #4a5568;
+  }
+
+  .magnetism-fullscreen-viewer {
+    background: #1f2937;
+  }
+
+  .magnetism-fullscreen-header {
+    background: #2d3748;
+    border-color: #4a5568;
+  }
+
+  .magnetism-fullscreen-header h2 {
+    color: #f7fafc;
+  }
+
+  .magnetism-fullscreen-header span {
+    color: #a0aec0;
   }
 
   .detail-item span {
@@ -5784,6 +6310,65 @@ html[data-theme="dark"] {
   margin: 0;
 }
 
+.history-header-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.multi-delete-toolbar {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.multi-delete-count {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #4a5568;
+}
+
+.multi-delete-action-btn,
+.multi-delete-danger-btn {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.multi-delete-action-btn {
+  background: white;
+  border: 1px solid #cbd5e0;
+  color: #2d3748;
+}
+
+.multi-delete-action-btn:hover:not(:disabled) {
+  border-color: #4299e1;
+  color: #2b6cb0;
+}
+
+.multi-delete-danger-btn {
+  background: #e53e3e;
+  border: 1px solid #e53e3e;
+  color: white;
+}
+
+.multi-delete-danger-btn:hover:not(:disabled) {
+  background: #c53030;
+  border-color: #c53030;
+}
+
+.multi-delete-action-btn:disabled,
+.multi-delete-danger-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .history-sort-control {
   display: flex;
   align-items: center;
@@ -5931,6 +6516,21 @@ html[data-theme="dark"] {
     color: #e2e8f0;
   }
 
+  .multi-delete-count {
+    color: #cbd5e0;
+  }
+
+  .multi-delete-action-btn {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .multi-delete-action-btn:hover:not(:disabled) {
+    border-color: #63b3ed;
+    color: #bee3f8;
+  }
+
   .calc-action-btn {
     background: #2d3748;
     border-color: #4a5568;
@@ -5969,7 +6569,7 @@ html[data-theme="dark"] {
 }
 
 .calc-entry-name ~ .calc-kpath {
-  flex: 0 1 22rem;
+  flex: 0 1 auto;
   max-width: min(22rem, 46vw);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7889,6 +8489,33 @@ html[data-theme="dark"] {
   color: white;
 }
 
+.view-magnetism-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 156px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  background: transparent;
+  border: 1px solid #b45309;
+  color: #92400e;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.view-magnetism-btn:hover:not(:disabled) {
+  background: #b45309;
+  color: #ffffff;
+}
+
+.view-magnetism-btn:disabled {
+  border-color: #d6d3d1;
+  color: #a8a29e;
+  background: #fafaf9;
+  cursor: not-allowed;
+}
+
 .download-calc-btn {
   display: inline-flex;
   align-items: center;
@@ -7924,6 +8551,39 @@ html[data-theme="dark"] {
   border-color: #94a3b8;
   color: #64748b;
   background: #f1f5f9;
+}
+
+.bulk-delete-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 220px;
+  margin-top: 1rem;
+  overflow-y: auto;
+}
+
+.bulk-delete-summary-item {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #2d3748;
+  font-size: 0.82rem;
+}
+
+.bulk-delete-summary-item span:first-child {
+  font-weight: 700;
+  color: #e53e3e;
+}
+
+.bulk-delete-summary-item span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .view-logs-btn {
@@ -8102,6 +8762,22 @@ html[data-theme="dark"] {
     color: #1a202c;
   }
 
+  .view-magnetism-btn {
+    border-color: #f59e0b;
+    color: #fbbf24;
+  }
+
+  .view-magnetism-btn:hover:not(:disabled) {
+    background: #f59e0b;
+    color: #0f172a;
+  }
+
+  .view-magnetism-btn:disabled {
+    border-color: #57534e;
+    color: #78716c;
+    background: #1c1917;
+  }
+
   .download-calc-btn {
     border-color: #60a5fa;
     color: #93c5fd;
@@ -8122,6 +8798,16 @@ html[data-theme="dark"] {
     border-color: #475569;
     color: #94a3b8;
     background: #1f2937;
+  }
+
+  .bulk-delete-summary-item {
+    border-color: #334155;
+    background: #1e293b;
+    color: #e2e8f0;
+  }
+
+  .bulk-delete-summary-item span:first-child {
+    color: #fc8181;
   }
 
   .view-logs-btn {
@@ -8162,6 +8848,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard,
 .fermi-surface-wizard,
 .phonon-wizard,
+.hubbard-lrt-wizard,
 .epw-wizard,
 .transport-wizard,
 .wannier-wizard {
@@ -8180,6 +8867,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard.wizard-step-run,
 .fermi-surface-wizard.wizard-step-run,
 .phonon-wizard.wizard-step-run,
+.hubbard-lrt-wizard.wizard-step-run,
 .epw-wizard.wizard-step-run,
 .transport-wizard.wizard-step-run,
 .wannier-wizard.wizard-step-run {
@@ -8199,6 +8887,7 @@ html[data-theme="dark"] .band-structure-wizard,
 html[data-theme="dark"] .electronic-dos-wizard,
 html[data-theme="dark"] .fermi-surface-wizard,
 html[data-theme="dark"] .phonon-wizard,
+html[data-theme="dark"] .hubbard-lrt-wizard,
 html[data-theme="dark"] .epw-wizard,
 html[data-theme="dark"] .transport-wizard,
 html[data-theme="dark"] .wannier-wizard {
@@ -8209,6 +8898,7 @@ html[data-theme="dark"] .wannier-wizard {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.hubbard-lrt-wizard > .wizard-header,
 .epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header {
@@ -8234,6 +8924,7 @@ html[data-theme="dark"] .band-structure-wizard > .wizard-header,
 html[data-theme="dark"] .electronic-dos-wizard > .wizard-header,
 html[data-theme="dark"] .fermi-surface-wizard > .wizard-header,
 html[data-theme="dark"] .phonon-wizard > .wizard-header,
+html[data-theme="dark"] .hubbard-lrt-wizard > .wizard-header,
 html[data-theme="dark"] .epw-wizard > .wizard-header,
 html[data-theme="dark"] .transport-wizard > .wizard-header,
 html[data-theme="dark"] .wannier-wizard > .wizard-header {
@@ -8244,6 +8935,7 @@ html[data-theme="dark"] .wannier-wizard > .wizard-header {
 .electronic-dos-wizard .wizard-header h2,
 .fermi-surface-wizard .wizard-header h2,
 .phonon-wizard .wizard-header h2,
+.hubbard-lrt-wizard .wizard-header h2,
 .epw-wizard .wizard-header h2,
 .transport-wizard .wizard-header h2,
 .wannier-wizard .wizard-header h2 {
@@ -8257,6 +8949,7 @@ html[data-theme="dark"] .band-structure-wizard .wizard-header h2,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-header h2,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-header h2,
 html[data-theme="dark"] .phonon-wizard .wizard-header h2,
+html[data-theme="dark"] .hubbard-lrt-wizard .wizard-header h2,
 html[data-theme="dark"] .epw-wizard .wizard-header h2,
 html[data-theme="dark"] .transport-wizard .wizard-header h2,
 html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
@@ -8267,6 +8960,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
 .electronic-dos-wizard .step-indicator,
 .fermi-surface-wizard .step-indicator,
 .phonon-wizard .step-indicator,
+.hubbard-lrt-wizard .step-indicator,
 .epw-wizard .step-indicator,
 .transport-wizard .step-indicator,
 .wannier-wizard .step-indicator {
@@ -8279,6 +8973,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-header h2 {
 .electronic-dos-wizard .step-indicator span,
 .fermi-surface-wizard .step-indicator span,
 .phonon-wizard .step-indicator span,
+.hubbard-lrt-wizard .step-indicator span,
 .epw-wizard .step-indicator span,
 .transport-wizard .step-indicator span,
 .wannier-wizard .step-indicator span {
@@ -8291,6 +8986,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span,
 html[data-theme="dark"] .phonon-wizard .step-indicator span,
+html[data-theme="dark"] .hubbard-lrt-wizard .step-indicator span,
 html[data-theme="dark"] .epw-wizard .step-indicator span,
 html[data-theme="dark"] .transport-wizard .step-indicator span,
 html[data-theme="dark"] .wannier-wizard .step-indicator span {
@@ -8301,6 +8997,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span {
 .electronic-dos-wizard .step-indicator span.active,
 .fermi-surface-wizard .step-indicator span.active,
 .phonon-wizard .step-indicator span.active,
+.hubbard-lrt-wizard .step-indicator span.active,
 .epw-wizard .step-indicator span.active,
 .transport-wizard .step-indicator span.active,
 .wannier-wizard .step-indicator span.active {
@@ -8313,6 +9010,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span.active,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.active,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.active,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.active,
+html[data-theme="dark"] .hubbard-lrt-wizard .step-indicator span.active,
 html[data-theme="dark"] .epw-wizard .step-indicator span.active,
 html[data-theme="dark"] .transport-wizard .step-indicator span.active,
 html[data-theme="dark"] .wannier-wizard .step-indicator span.active {
@@ -8324,6 +9022,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.active {
 .electronic-dos-wizard .step-indicator span.completed,
 .fermi-surface-wizard .step-indicator span.completed,
 .phonon-wizard .step-indicator span.completed,
+.hubbard-lrt-wizard .step-indicator span.completed,
 .epw-wizard .step-indicator span.completed,
 .transport-wizard .step-indicator span.completed,
 .wannier-wizard .step-indicator span.completed {
@@ -8334,6 +9033,7 @@ html[data-theme="dark"] .band-structure-wizard .step-indicator span.completed,
 html[data-theme="dark"] .electronic-dos-wizard .step-indicator span.completed,
 html[data-theme="dark"] .fermi-surface-wizard .step-indicator span.completed,
 html[data-theme="dark"] .phonon-wizard .step-indicator span.completed,
+html[data-theme="dark"] .hubbard-lrt-wizard .step-indicator span.completed,
 html[data-theme="dark"] .epw-wizard .step-indicator span.completed,
 html[data-theme="dark"] .transport-wizard .step-indicator span.completed,
 html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
@@ -8344,6 +9044,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content,
+.hubbard-lrt-wizard .wizard-content,
 .epw-wizard .wizard-content,
 .transport-wizard .wizard-content,
 .wannier-wizard .wizard-content {
@@ -8364,6 +9065,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
 .electronic-dos-wizard .wizard-step.run-step,
 .fermi-surface-wizard .wizard-step.run-step,
 .phonon-wizard .wizard-step.run-step,
+.hubbard-lrt-wizard .wizard-step.run-step,
 .epw-wizard .wizard-step.run-step,
 .transport-wizard .wizard-step.run-step,
 .wannier-wizard .wizard-step.run-step {
@@ -8374,6 +9076,7 @@ html[data-theme="dark"] .wannier-wizard .step-indicator span.completed {
 .electronic-dos-wizard .wizard-step h3,
 .fermi-surface-wizard .wizard-step h3,
 .phonon-wizard .wizard-step h3,
+.hubbard-lrt-wizard .wizard-step h3,
 .epw-wizard .wizard-step h3,
 .transport-wizard .wizard-step h3,
 .wannier-wizard .wizard-step h3 {
@@ -8386,6 +9089,7 @@ html[data-theme="dark"] .band-structure-wizard .wizard-step h3,
 html[data-theme="dark"] .electronic-dos-wizard .wizard-step h3,
 html[data-theme="dark"] .fermi-surface-wizard .wizard-step h3,
 html[data-theme="dark"] .phonon-wizard .wizard-step h3,
+html[data-theme="dark"] .hubbard-lrt-wizard .wizard-step h3,
 html[data-theme="dark"] .epw-wizard .wizard-step h3,
 html[data-theme="dark"] .transport-wizard .wizard-step h3,
 html[data-theme="dark"] .wannier-wizard .wizard-step h3 {
@@ -8396,6 +9100,7 @@ html[data-theme="dark"] .wannier-wizard .wizard-step h3 {
 .electronic-dos-wizard .step-description,
 .fermi-surface-wizard .step-description,
 .phonon-wizard .step-description,
+.hubbard-lrt-wizard .step-description,
 .epw-wizard .step-description,
 .transport-wizard .step-description,
 .wannier-wizard .step-description {
@@ -8407,6 +9112,7 @@ html[data-theme="dark"] .band-structure-wizard .step-description,
 html[data-theme="dark"] .electronic-dos-wizard .step-description,
 html[data-theme="dark"] .fermi-surface-wizard .step-description,
 html[data-theme="dark"] .phonon-wizard .step-description,
+html[data-theme="dark"] .hubbard-lrt-wizard .step-description,
 html[data-theme="dark"] .epw-wizard .step-description,
 html[data-theme="dark"] .transport-wizard .step-description,
 html[data-theme="dark"] .wannier-wizard .step-description {
@@ -8513,6 +9219,7 @@ html[data-theme="dark"] .scf-option.selected {
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 0.5rem;
+  min-width: 0;
 }
 
 .scf-option-header input[type="radio"] {
@@ -8520,17 +9227,34 @@ html[data-theme="dark"] .scf-option.selected {
 }
 
 .scf-date {
+  flex: 0 0 auto;
   font-size: 0.9rem;
   color: #2d3748;
   font-weight: 500;
+}
+
+.scf-name {
+  min-width: 0;
+  max-width: min(22rem, 48vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1a202c;
+  font-size: 0.95rem;
+  font-weight: 700;
 }
 
 html[data-theme="dark"] .scf-date {
   color: #cdd6f4;
 }
 
+html[data-theme="dark"] .scf-name {
+  color: #f7fafc;
+}
+
 .scf-details {
   display: flex;
+  flex-wrap: wrap;
   gap: 1.5rem;
   padding-left: 1.75rem;
   font-size: 0.85rem;
@@ -11463,6 +12187,7 @@ html[data-theme="dark"] {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.hubbard-lrt-wizard > .wizard-header,
 .epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header,
@@ -11484,6 +12209,7 @@ html[data-platform="linux"] .band-structure-wizard > .wizard-header,
 html[data-platform="linux"] .electronic-dos-wizard > .wizard-header,
 html[data-platform="linux"] .fermi-surface-wizard > .wizard-header,
 html[data-platform="linux"] .phonon-wizard > .wizard-header,
+html[data-platform="linux"] .hubbard-lrt-wizard > .wizard-header,
 html[data-platform="linux"] .epw-wizard > .wizard-header,
 html[data-platform="linux"] .transport-wizard > .wizard-header,
 html[data-platform="linux"] .wannier-wizard > .wizard-header,
@@ -11514,6 +12240,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard > .wizard-header,
 .fermi-surface-wizard > .wizard-header,
 .phonon-wizard > .wizard-header,
+.hubbard-lrt-wizard > .wizard-header,
 .epw-wizard > .wizard-header,
 .transport-wizard > .wizard-header,
 .wannier-wizard > .wizard-header {
@@ -11524,6 +12251,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .wizard-content,
 .fermi-surface-wizard .wizard-content,
 .phonon-wizard .wizard-content,
+.hubbard-lrt-wizard .wizard-content,
 .epw-wizard .wizard-content,
 .transport-wizard .wizard-content,
 .wannier-wizard .wizard-content {
@@ -11534,6 +12262,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content,
+.hubbard-lrt-wizard.wizard-step-run .wizard-content,
 .epw-wizard.wizard-step-run .wizard-content,
 .transport-wizard.wizard-step-run .wizard-content,
 .wannier-wizard.wizard-step-run .wizard-content {
@@ -11547,6 +12276,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard.wizard-step-run .wizard-content,
 .phonon-wizard.wizard-step-run .wizard-content,
 .fermi-surface-wizard.wizard-step-run .wizard-content,
+.hubbard-lrt-wizard.wizard-step-run .wizard-content,
 .epw-wizard.wizard-step-run .wizard-content,
 .transport-wizard.wizard-step-run .wizard-content,
 .wannier-wizard.wizard-step-run .wizard-content {
@@ -11566,6 +12296,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .wizard-step.run-step,
 .fermi-surface-wizard .wizard-step.run-step,
 .phonon-wizard .wizard-step.run-step,
+.hubbard-lrt-wizard .wizard-step.run-step,
 .epw-wizard .wizard-step.run-step,
 .transport-wizard .wizard-step.run-step,
 .wannier-wizard .wizard-step.run-step {
@@ -11589,6 +12320,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions,
 .fermi-surface-wizard .step-actions,
 .phonon-wizard .step-actions,
+.hubbard-lrt-wizard .step-actions,
 .epw-wizard .step-actions,
 .transport-wizard .step-actions,
 .wannier-wizard .step-actions {
@@ -11623,6 +12355,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions > button,
 .fermi-surface-wizard .step-actions > button,
 .phonon-wizard .step-actions > button,
+.hubbard-lrt-wizard .step-actions > button,
 .epw-wizard .step-actions > button,
 .transport-wizard .step-actions > button,
 .wannier-wizard .step-actions > button {
@@ -11635,6 +12368,7 @@ html[data-platform="linux"] .phonon-viewer-header {
 .electronic-dos-wizard .step-actions > button:first-child,
 .fermi-surface-wizard .step-actions > button:first-child,
 .phonon-wizard .step-actions > button:first-child,
+.hubbard-lrt-wizard .step-actions > button:first-child,
 .epw-wizard .step-actions > button:first-child,
 .transport-wizard .step-actions > button:first-child,
 .wannier-wizard .step-actions > button:first-child {
@@ -12013,6 +12747,7 @@ html[data-theme="dark"] {
   .electronic-dos-wizard > .wizard-header,
   .fermi-surface-wizard > .wizard-header,
   .phonon-wizard > .wizard-header,
+  .hubbard-lrt-wizard > .wizard-header,
   .epw-wizard > .wizard-header,
   .transport-wizard > .wizard-header,
   .wannier-wizard > .wizard-header {

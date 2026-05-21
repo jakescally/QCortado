@@ -21,6 +21,8 @@ import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { isPhononReadyScf } from "../lib/phononReady";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
+import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import {
   createPathCoordinateConverters,
@@ -315,6 +317,38 @@ interface PhononWizardProps {
 
 type WizardStep = "source" | "qgrid" | "options" | "run" | "results";
 type PhononSavePolicy = "plot-only" | "epw-ready" | "full-archive";
+const PHONON_WIZARD_SETTINGS_ID = "phonon";
+
+interface StoredPhononWizardSettings {
+  qGrid: [number, number, number];
+  tr2PhInput: string;
+  asr: "none" | "simple" | "crystal" | "one-dim" | "zero-dim";
+  recover: boolean;
+  trans: boolean;
+  epsil: boolean;
+  fpol: boolean;
+  lraman: boolean;
+  verbosity: "default" | "high" | "debug";
+  nmixPhInput: string;
+  niterPhInput: string;
+  alphaMixInput: string;
+  startQInput: string;
+  lastQInput: string;
+  startIrrInput: string;
+  lastIrrInput: string;
+  electronPhononMode: "none" | "interpolated" | "lambda_tetra" | "gamma_tetra";
+  elPhSigmaInput: string;
+  elPhNsigmaInput: string;
+  fildvscfEnabled: boolean;
+  fildvscf: string;
+  phononSavePolicy: PhononSavePolicy;
+  calculateDos: boolean;
+  dosGrid: [number, number, number];
+  dosDeltaEInput: string;
+  calculateDispersion: boolean;
+  totalQPointsTarget: number;
+  totalQPointsInput: string;
+}
 const PHONON_WORK_DIR = "/tmp/qcortado_phonon";
 
 interface PhononTaskPlan {
@@ -342,6 +376,10 @@ export function PhononWizard({
 }: PhononWizardProps) {
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredPhononWizardSettings>(projectId, PHONON_WIZARD_SETTINGS_ID),
+    [projectId],
+  );
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -430,29 +468,29 @@ export function PhononWizard({
   }
 
   // Step 2: Q-Grid
-  const [qGrid, setQGrid] = useState<[number, number, number]>([4, 4, 4]);
-  const [tr2Ph, setTr2Ph] = useState<number>(1e-12);
-  const [tr2PhInput, setTr2PhInput] = useState<string>("1e-12");
-  const [asr, setAsr] = useState<"none" | "simple" | "crystal" | "one-dim" | "zero-dim">("crystal");
-  const [recover, setRecover] = useState(false);
-  const [trans, setTrans] = useState(true);
-  const [epsil, setEpsil] = useState(false);
-  const [fpol, setFpol] = useState(false);
-  const [lraman, setLraman] = useState(false);
-  const [verbosity, setVerbosity] = useState<"default" | "high" | "debug">("default");
-  const [nmixPhInput, setNmixPhInput] = useState<string>("");
-  const [niterPhInput, setNiterPhInput] = useState<string>("");
-  const [alphaMixInput, setAlphaMixInput] = useState<string>("");
-  const [startQInput, setStartQInput] = useState<string>("");
-  const [lastQInput, setLastQInput] = useState<string>("");
-  const [startIrrInput, setStartIrrInput] = useState<string>("");
-  const [lastIrrInput, setLastIrrInput] = useState<string>("");
-  const [electronPhononMode, setElectronPhononMode] = useState<"none" | "interpolated" | "lambda_tetra" | "gamma_tetra">("none");
-  const [elPhSigmaInput, setElPhSigmaInput] = useState<string>("0.02");
-  const [elPhNsigmaInput, setElPhNsigmaInput] = useState<string>("10");
-  const [fildvscfEnabled, setFildvscfEnabled] = useState(false);
-  const [fildvscf, setFildvscf] = useState("dvscf");
-  const [phononSavePolicy, setPhononSavePolicy] = useState<PhononSavePolicy>("plot-only");
+  const [qGrid, setQGrid] = useState<[number, number, number]>(() => storedWizardSettings?.qGrid ?? [4, 4, 4]);
+  const [tr2Ph, setTr2Ph] = useState<number>(() => Number(storedWizardSettings?.tr2PhInput ?? 1e-12));
+  const [tr2PhInput, setTr2PhInput] = useState<string>(() => storedWizardSettings?.tr2PhInput ?? "1e-12");
+  const [asr, setAsr] = useState<"none" | "simple" | "crystal" | "one-dim" | "zero-dim">(() => storedWizardSettings?.asr ?? "crystal");
+  const [recover, setRecover] = useState(() => storedWizardSettings?.recover ?? false);
+  const [trans, setTrans] = useState(() => storedWizardSettings?.trans ?? true);
+  const [epsil, setEpsil] = useState(() => storedWizardSettings?.epsil ?? false);
+  const [fpol, setFpol] = useState(() => storedWizardSettings?.fpol ?? false);
+  const [lraman, setLraman] = useState(() => storedWizardSettings?.lraman ?? false);
+  const [verbosity, setVerbosity] = useState<"default" | "high" | "debug">(() => storedWizardSettings?.verbosity ?? "default");
+  const [nmixPhInput, setNmixPhInput] = useState<string>(() => storedWizardSettings?.nmixPhInput ?? "");
+  const [niterPhInput, setNiterPhInput] = useState<string>(() => storedWizardSettings?.niterPhInput ?? "");
+  const [alphaMixInput, setAlphaMixInput] = useState<string>(() => storedWizardSettings?.alphaMixInput ?? "");
+  const [startQInput, setStartQInput] = useState<string>(() => storedWizardSettings?.startQInput ?? "");
+  const [lastQInput, setLastQInput] = useState<string>(() => storedWizardSettings?.lastQInput ?? "");
+  const [startIrrInput, setStartIrrInput] = useState<string>(() => storedWizardSettings?.startIrrInput ?? "");
+  const [lastIrrInput, setLastIrrInput] = useState<string>(() => storedWizardSettings?.lastIrrInput ?? "");
+  const [electronPhononMode, setElectronPhononMode] = useState<"none" | "interpolated" | "lambda_tetra" | "gamma_tetra">(() => storedWizardSettings?.electronPhononMode ?? "none");
+  const [elPhSigmaInput, setElPhSigmaInput] = useState<string>(() => storedWizardSettings?.elPhSigmaInput ?? "0.02");
+  const [elPhNsigmaInput, setElPhNsigmaInput] = useState<string>(() => storedWizardSettings?.elPhNsigmaInput ?? "10");
+  const [fildvscfEnabled, setFildvscfEnabled] = useState(() => storedWizardSettings?.fildvscfEnabled ?? false);
+  const [fildvscf, setFildvscf] = useState(() => storedWizardSettings?.fildvscf ?? "dvscf");
+  const [phononSavePolicy, setPhononSavePolicy] = useState<PhononSavePolicy>(() => storedWizardSettings?.phononSavePolicy ?? "plot-only");
   const epwPreparationEnabled = phononSavePolicy !== "plot-only";
 
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -471,14 +509,14 @@ export function PhononWizard({
   };
 
   // Step 3: Options
-  const [calculateDos, setCalculateDos] = useState(true);
-  const [dosGrid, setDosGrid] = useState<[number, number, number]>([20, 20, 20]);
-  const [dosDeltaEInput, setDosDeltaEInput] = useState<string>("1.0");
-  const [calculateDispersion, setCalculateDispersion] = useState(true);
+  const [calculateDos, setCalculateDos] = useState(() => storedWizardSettings?.calculateDos ?? true);
+  const [dosGrid, setDosGrid] = useState<[number, number, number]>(() => storedWizardSettings?.dosGrid ?? [20, 20, 20]);
+  const [dosDeltaEInput, setDosDeltaEInput] = useState<string>(() => storedWizardSettings?.dosDeltaEInput ?? "1.0");
+  const [calculateDispersion, setCalculateDispersion] = useState(() => storedWizardSettings?.calculateDispersion ?? true);
   const [qPath, setQPath] = useState<KPathPoint[]>([]);
   const [qPathRhombohedralConvention, setQPathRhombohedralConvention] = useState<RhombohedralConvention | undefined>(undefined);
-  const [totalQPointsTarget, setTotalQPointsTarget] = useState(120);
-  const [totalQPointsInput, setTotalQPointsInput] = useState("120");
+  const [totalQPointsTarget, setTotalQPointsTarget] = useState(() => storedWizardSettings?.totalQPointsTarget ?? 120);
+  const [totalQPointsInput, setTotalQPointsInput] = useState(() => storedWizardSettings?.totalQPointsInput ?? "120");
 
   // Step 4: Running
   const [isRunning, setIsRunning] = useState(false);
@@ -527,6 +565,69 @@ export function PhononWizard({
     if (!isHpcMode) return;
     setHpcResources(defaultResourcesForProfile(activeHpcProfile));
   }, [isHpcMode, activeHpcProfile?.id, activeHpcProfile?.resource_mode]);
+
+  useEffect(() => {
+    writeProjectWizardSettings(projectId, PHONON_WIZARD_SETTINGS_ID, {
+      qGrid,
+      tr2PhInput,
+      asr,
+      recover,
+      trans,
+      epsil,
+      fpol,
+      lraman,
+      verbosity,
+      nmixPhInput,
+      niterPhInput,
+      alphaMixInput,
+      startQInput,
+      lastQInput,
+      startIrrInput,
+      lastIrrInput,
+      electronPhononMode,
+      elPhSigmaInput,
+      elPhNsigmaInput,
+      fildvscfEnabled,
+      fildvscf,
+      phononSavePolicy,
+      calculateDos,
+      dosGrid,
+      dosDeltaEInput,
+      calculateDispersion,
+      totalQPointsTarget,
+      totalQPointsInput,
+    });
+  }, [
+    projectId,
+    qGrid,
+    tr2PhInput,
+    asr,
+    recover,
+    trans,
+    epsil,
+    fpol,
+    lraman,
+    verbosity,
+    nmixPhInput,
+    niterPhInput,
+    alphaMixInput,
+    startQInput,
+    lastQInput,
+    startIrrInput,
+    lastIrrInput,
+    electronPhononMode,
+    elPhSigmaInput,
+    elPhNsigmaInput,
+    fildvscfEnabled,
+    fildvscf,
+    phononSavePolicy,
+    calculateDos,
+    dosGrid,
+    dosDeltaEInput,
+    calculateDispersion,
+    totalQPointsTarget,
+    totalQPointsInput,
+  ]);
 
   // Load MPI info
   useEffect(() => {
@@ -870,6 +971,8 @@ export function PhononWizard({
       noncolin: scfParams.noncolin,
       lspinorb: scfParams.lspinorb,
       starting_magnetization: scfParams.starting_magnetization ?? null,
+      starting_magnetization_theta: scfParams.starting_magnetization_theta ?? scfParams.starting_magnetization_angle1 ?? scfParams.theta ?? scfParams.angle1 ?? null,
+      starting_magnetization_phi: scfParams.starting_magnetization_phi ?? scfParams.starting_magnetization_angle2 ?? scfParams.phi ?? scfParams.angle2 ?? null,
       lda_plus_u: scfParams.lda_plus_u,
       hubbard_projector: scfParams.hubbard_projector ?? null,
       hubbard_formulation: scfParams.hubbard_formulation ?? null,
@@ -1134,6 +1237,7 @@ export function PhononWizard({
         <div className="scf-list">
           {sortedScfs.map((scf) => {
             const ready = isPhononReady(scf);
+            const scfName = getCalculationName(scf);
             return (
               <div
                 key={scf.id}
@@ -1152,6 +1256,11 @@ export function PhononWizard({
                       setSelectedScf(scf);
                     }}
                   />
+                  {scfName && (
+                    <span className="scf-name" title={formatCalculationSourceLabel(scf)}>
+                      {scfName}
+                    </span>
+                  )}
                   <span className="scf-date">
                     {new Date(scf.started_at).toLocaleDateString()}
                   </span>

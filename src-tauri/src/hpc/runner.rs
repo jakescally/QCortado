@@ -15,6 +15,8 @@ use super::slurm::{
 };
 use super::ssh::{download_file, run_ssh_command, upload_directory};
 const LIVE_LINECOUNT_MARKER: &str = "__QCORTADO_INTERNAL_LINECOUNT__=";
+const LIVE_SIZE_MARKER: &str = "__QCORTADO_INTERNAL_SIZE__=";
+const ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct HpcBatchRequest {
@@ -103,6 +105,15 @@ pub struct HpcArtifactSyncRequest {
 struct RemoteFileEntry {
     rel_path: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LiveFileCursor {
+    byte_offset: u64,
+    line_count: usize,
+    pending_line: String,
+    warned_read_error: bool,
+    warned_parse_error: bool,
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -885,6 +896,107 @@ fn parse_redirect_target(after_redirect: &str) -> Option<String> {
     }
 }
 
+fn collect_redirect_targets(line: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for (idx, ch) in line.char_indices() {
+        if ch != '>' {
+            continue;
+        }
+        if let Some(target) = parse_redirect_target(&line[idx + ch.len_utf8()..]) {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+fn shell_words_for_live_scan(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if quote != Some('\'') && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_char) = quote {
+            if ch == quote_char {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == ';' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            words.push(";".to_string());
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    words
+}
+
+fn collect_option_targets(line: &str, option: &str) -> Vec<String> {
+    let words = shell_words_for_live_scan(line);
+    let mut targets = Vec::new();
+    for pair in words.windows(2) {
+        if pair[0] != option {
+            continue;
+        }
+        let target = pair[1].trim();
+        if target.is_empty() || target == ";" || target.starts_with('-') {
+            continue;
+        }
+        targets.push(target.to_string());
+    }
+    targets
+}
+
+fn rank_zero_output_pattern(pattern: &str) -> Option<String> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains("%r") {
+        return Some(trimmed.replace("%r", "0"));
+    }
+    if trimmed.contains("%g") {
+        return Some(trimmed.replace("%g", "0"));
+    }
+    Some(trimmed.to_string())
+}
+
+fn is_live_output_file_name(file_name: &str) -> bool {
+    file_name.ends_with(".out")
+        || file_name.ends_with(".err")
+        || file_name.ends_with(".wpout")
+        || file_name.ends_with(".werr")
+}
+
 fn collect_live_output_files(slurm_script: &str) -> Vec<String> {
     let mut files = vec!["slurm.out".to_string(), "slurm.err".to_string()];
     let mut seen: HashSet<String> = files.iter().cloned().collect();
@@ -894,20 +1006,29 @@ fn collect_live_output_files(slurm_script: &str) -> Vec<String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let Some((_, redirect_rhs)) = trimmed.split_once('>') else {
-            continue;
-        };
-        let Some(target) = parse_redirect_target(redirect_rhs) else {
-            continue;
-        };
-        if target == "&1" || target.starts_with('&') {
-            continue;
+        for target in collect_redirect_targets(trimmed) {
+            if target == "&1" || target.starts_with('&') {
+                continue;
+            }
+            if !is_live_output_file_name(&target) {
+                continue;
+            }
+            if seen.insert(target.clone()) {
+                files.push(target);
+            }
         }
-        if !(target.ends_with(".out") || target.ends_with(".err")) {
-            continue;
-        }
-        if seen.insert(target.clone()) {
-            files.push(target);
+        if ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING {
+            for pattern in ["-outfile-pattern", "-errfile-pattern"]
+                .into_iter()
+                .flat_map(|option| collect_option_targets(trimmed, option))
+            {
+                let Some(target) = rank_zero_output_pattern(&pattern) else {
+                    continue;
+                };
+                if seen.insert(target.clone()) {
+                    files.push(target);
+                }
+            }
         }
     }
 
@@ -915,6 +1036,23 @@ fn collect_live_output_files(slurm_script: &str) -> Vec<String> {
 }
 
 fn build_incremental_read_command(
+    remote_workdir: &str,
+    file_name: &str,
+    byte_offset: u64,
+) -> String {
+    format!(
+        "cd {} && if [ -f {} ]; then __qcortado_size=$(wc -c < {} | tr -d '[:space:]'); printf '{}%s\\n' \"$__qcortado_size\"; if [ \"$__qcortado_size\" -gt {} ]; then tail -c +$(({} + 1)) {}; fi; fi",
+        shell_single_quote(remote_workdir),
+        shell_single_quote(file_name),
+        shell_single_quote(file_name),
+        LIVE_SIZE_MARKER,
+        byte_offset,
+        byte_offset,
+        shell_single_quote(file_name)
+    )
+}
+
+fn build_linecount_read_command(
     remote_workdir: &str,
     file_name: &str,
     last_line_count: usize,
@@ -929,7 +1067,31 @@ fn build_incremental_read_command(
     )
 }
 
-fn parse_incremental_read_output(output: &str) -> Option<(Vec<String>, usize)> {
+fn build_live_probe_command(remote_workdir: &str, file_names: &[String]) -> String {
+    let mut set_args = "set --".to_string();
+    for file_name in file_names {
+        set_args.push(' ');
+        set_args.push_str(&shell_single_quote(file_name));
+    }
+
+    format!(
+        "cd {} && {}; printf '[QCortado] Remote live log probe: workdir=%s\\n' \"$PWD\"; for f do if [ -e \"$f\" ]; then __qcortado_bytes=$(wc -c < \"$f\" | tr -d '[:space:]'); __qcortado_lines=$(wc -l < \"$f\" | tr -d '[:space:]'); printf '[QCortado] Remote live log probe: %s exists bytes=%s lines=%s\\n' \"$f\" \"$__qcortado_bytes\" \"$__qcortado_lines\"; else printf '[QCortado] Remote live log probe: %s missing\\n' \"$f\"; fi; done",
+        shell_single_quote(remote_workdir),
+        set_args
+    )
+}
+
+fn parse_incremental_read_output(output: &str) -> Option<(String, u64)> {
+    let (marker_line, content) = output.split_once('\n')?;
+    let total_bytes = marker_line
+        .strip_prefix(LIVE_SIZE_MARKER)?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some((content.to_string(), total_bytes))
+}
+
+fn parse_linecount_read_output(output: &str) -> Option<(Vec<String>, usize)> {
     let mut lines: Vec<String> = output.lines().map(|line| line.to_string()).collect();
     let marker_line = lines.pop()?;
     let total_lines = marker_line
@@ -940,7 +1102,32 @@ fn parse_incremental_read_output(output: &str) -> Option<(Vec<String>, usize)> {
     Some((lines, total_lines))
 }
 
-async fn stream_remote_file_incremental(
+fn take_complete_lines(buffer: &mut String) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    let mut drain_to = 0usize;
+
+    for (idx, ch) in buffer.char_indices() {
+        if ch != '\n' {
+            continue;
+        }
+        let mut line = &buffer[start..idx];
+        if let Some(stripped) = line.strip_suffix('\r') {
+            line = stripped;
+        }
+        lines.push(line.to_string());
+        start = idx + ch.len_utf8();
+        drain_to = start;
+    }
+
+    if drain_to > 0 {
+        buffer.drain(..drain_to);
+    }
+
+    lines
+}
+
+async fn stream_remote_file_linecount(
     app: &AppHandle,
     pm: &ProcessManager,
     task_id: &str,
@@ -951,19 +1138,104 @@ async fn stream_remote_file_incremental(
     last_line_count: &mut usize,
     already_announced: bool,
 ) -> bool {
-    let read_cmd = build_incremental_read_command(remote_workdir, file_name, *last_line_count);
+    let read_cmd = build_linecount_read_command(remote_workdir, file_name, *last_line_count);
     let Ok(read_output) = run_ssh_command(profile, secret, &read_cmd).await else {
         return already_announced;
     };
 
-    let Some((mut lines_to_emit, mut total_lines)) = parse_incremental_read_output(&read_output)
-    else {
+    let Some((lines_to_emit, total_lines)) = parse_linecount_read_output(&read_output) else {
+        return already_announced;
+    };
+
+    let mut announced = already_announced;
+    if !lines_to_emit.is_empty() {
+        if !announced {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!("--- Remote {} (live) ---", file_name),
+            )
+            .await;
+            announced = true;
+        }
+        for line in lines_to_emit {
+            emit_task_line(app, pm, task_id, line).await;
+        }
+    }
+
+    *last_line_count = total_lines;
+    announced
+}
+
+async fn stream_remote_file_incremental(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    file_name: &str,
+    cursor: &mut LiveFileCursor,
+    already_announced: bool,
+    flush_partial: bool,
+) -> bool {
+    if !ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING {
+        return stream_remote_file_linecount(
+            app,
+            pm,
+            task_id,
+            profile,
+            secret,
+            remote_workdir,
+            file_name,
+            &mut cursor.line_count,
+            already_announced,
+        )
+        .await;
+    }
+
+    let read_cmd = build_incremental_read_command(remote_workdir, file_name, cursor.byte_offset);
+    let read_output = match run_ssh_command(profile, secret, &read_cmd).await {
+        Ok(output) => output,
+        Err(err) => {
+            if !cursor.warned_read_error {
+                emit_task_line(
+                    app,
+                    pm,
+                    task_id,
+                    format!(
+                        "HPC_WARNING|Live log read failed for {}: {}",
+                        file_name, err
+                    ),
+                )
+                .await;
+                cursor.warned_read_error = true;
+            }
+            return already_announced;
+        }
+    };
+
+    let Some((mut chunk, mut total_bytes)) = parse_incremental_read_output(&read_output) else {
+        if !read_output.trim().is_empty() && !cursor.warned_parse_error {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!(
+                    "HPC_WARNING|Live log read for {} returned an unexpected payload; skipping this poll.",
+                    file_name
+                ),
+            )
+            .await;
+            cursor.warned_parse_error = true;
+        }
         return already_announced;
     };
 
     let mut announced = already_announced;
 
-    if total_lines < *last_line_count {
+    if total_bytes < cursor.byte_offset {
         emit_task_line(
             app,
             pm,
@@ -979,11 +1251,21 @@ async fn stream_remote_file_incremental(
         let Ok(reset_output) = run_ssh_command(profile, secret, &reset_cmd).await else {
             return announced;
         };
-        let Some((reset_lines, reset_total)) = parse_incremental_read_output(&reset_output) else {
+        let Some((reset_chunk, reset_total)) = parse_incremental_read_output(&reset_output) else {
             return announced;
         };
-        lines_to_emit = reset_lines;
-        total_lines = reset_total;
+        cursor.pending_line.clear();
+        chunk = reset_chunk;
+        total_bytes = reset_total;
+    }
+
+    if !chunk.is_empty() {
+        cursor.pending_line.push_str(&chunk);
+    }
+
+    let mut lines_to_emit = take_complete_lines(&mut cursor.pending_line);
+    if flush_partial && !cursor.pending_line.is_empty() {
+        lines_to_emit.push(std::mem::take(&mut cursor.pending_line));
     }
 
     if !lines_to_emit.is_empty() {
@@ -1002,8 +1284,106 @@ async fn stream_remote_file_incremental(
         }
     }
 
-    *last_line_count = total_lines;
+    cursor.byte_offset = total_bytes;
     announced
+}
+
+async fn drain_remote_live_output(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    live_output_files: &[String],
+    live_cursors: &mut HashMap<String, LiveFileCursor>,
+    announced_live_files: &mut HashSet<String>,
+) {
+    for attempt in 0..3 {
+        for file_name in live_output_files {
+            let cursor = live_cursors.entry(file_name.clone()).or_default();
+            let announced = announced_live_files.contains(file_name);
+            let updated_announced = stream_remote_file_incremental(
+                app,
+                pm,
+                task_id,
+                profile,
+                secret,
+                remote_workdir,
+                file_name,
+                cursor,
+                announced,
+                false,
+            )
+            .await;
+            if updated_announced {
+                announced_live_files.insert(file_name.clone());
+            }
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+        }
+    }
+
+    for file_name in live_output_files {
+        let cursor = live_cursors.entry(file_name.clone()).or_default();
+        let announced = announced_live_files.contains(file_name);
+        let updated_announced = stream_remote_file_incremental(
+            app,
+            pm,
+            task_id,
+            profile,
+            secret,
+            remote_workdir,
+            file_name,
+            cursor,
+            announced,
+            true,
+        )
+        .await;
+        if updated_announced {
+            announced_live_files.insert(file_name.clone());
+        }
+    }
+}
+
+async fn emit_remote_live_probe(
+    app: &AppHandle,
+    pm: &ProcessManager,
+    task_id: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    live_output_files: &[String],
+) {
+    emit_task_line(
+        app,
+        pm,
+        task_id,
+        format!(
+            "[QCortado] Remote live streaming is watching: {}",
+            live_output_files.join(", ")
+        ),
+    )
+    .await;
+
+    let probe_cmd = build_live_probe_command(remote_workdir, live_output_files);
+    match run_ssh_command(profile, secret, &probe_cmd).await {
+        Ok(output) => {
+            for line in output.lines().filter(|line| !line.trim().is_empty()) {
+                emit_task_line(app, pm, task_id, line.to_string()).await;
+            }
+        }
+        Err(err) => {
+            emit_task_line(
+                app,
+                pm,
+                task_id,
+                format!("HPC_WARNING|Remote live log probe failed: {}", err),
+            )
+            .await;
+        }
+    }
 }
 
 async fn resolve_remote_path(
@@ -1157,8 +1537,9 @@ pub async fn run_batch_task(
 
     let mut last_scheduler_state: Option<String> = None;
     let live_output_files = collect_live_output_files(&request.slurm_script);
-    let mut live_line_counts: HashMap<String, usize> = HashMap::new();
+    let mut live_cursors: HashMap<String, LiveFileCursor> = HashMap::new();
     let mut announced_live_files: HashSet<String> = HashSet::new();
+    let mut emitted_live_probe = false;
 
     let terminal_snapshot = loop {
         if request.cancel_flag.load(Ordering::SeqCst) {
@@ -1168,7 +1549,7 @@ pub async fn run_batch_task(
         }
 
         for file_name in &live_output_files {
-            let previous_line_count = live_line_counts.entry(file_name.clone()).or_insert(0);
+            let cursor = live_cursors.entry(file_name.clone()).or_default();
             let announced = announced_live_files.contains(file_name);
             let updated_announced = stream_remote_file_incremental(
                 &app,
@@ -1178,8 +1559,9 @@ pub async fn run_batch_task(
                 request.secret.as_deref(),
                 &remote_workdir,
                 file_name,
-                previous_line_count,
+                cursor,
                 announced,
+                false,
             )
             .await;
             if updated_announced {
@@ -1225,6 +1607,22 @@ pub async fn run_batch_task(
                 update_scheduler_snapshot(&app, &pm, task_id(&request), &snapshot).await;
                 last_scheduler_state = Some(snapshot.state.clone());
             }
+            if ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING
+                && snapshot.state == "RUNNING"
+                && !emitted_live_probe
+            {
+                emit_remote_live_probe(
+                    &app,
+                    &pm,
+                    task_id(&request),
+                    &request.profile,
+                    request.secret.as_deref(),
+                    &remote_workdir,
+                    &live_output_files,
+                )
+                .await;
+                emitted_live_probe = true;
+            }
             if is_terminal_state(&snapshot.state) {
                 break snapshot;
             }
@@ -1233,6 +1631,18 @@ pub async fn run_batch_task(
         tokio::time::sleep(Duration::from_secs(4)).await;
     };
     let terminal_state = normalize_scheduler_state(&terminal_snapshot.state);
+    drain_remote_live_output(
+        &app,
+        &pm,
+        task_id(&request),
+        &request.profile,
+        request.secret.as_deref(),
+        &remote_workdir,
+        &live_output_files,
+        &mut live_cursors,
+        &mut announced_live_files,
+    )
+    .await;
 
     if terminal_state == "COMPLETED" {
         let completion_sync_mode = if request.task_kind == "epw" {
@@ -1502,9 +1912,10 @@ pub async fn run_attached_batch_task(
         .map(collect_live_output_files)
         .filter(|files| !files.is_empty())
         .unwrap_or_else(|| vec!["slurm.out".to_string(), "slurm.err".to_string()]);
-    let mut live_line_counts: HashMap<String, usize> = HashMap::new();
+    let mut live_cursors: HashMap<String, LiveFileCursor> = HashMap::new();
     let mut announced_live_files: HashSet<String> = HashSet::new();
     let mut last_scheduler_state: Option<String> = None;
+    let mut emitted_live_probe = false;
 
     let terminal_snapshot = loop {
         if request.cancel_flag.load(Ordering::SeqCst) {
@@ -1514,7 +1925,7 @@ pub async fn run_attached_batch_task(
         }
 
         for file_name in &live_output_files {
-            let previous_line_count = live_line_counts.entry(file_name.clone()).or_insert(0);
+            let cursor = live_cursors.entry(file_name.clone()).or_default();
             let announced = announced_live_files.contains(file_name);
             let updated_announced = stream_remote_file_incremental(
                 &app,
@@ -1524,8 +1935,9 @@ pub async fn run_attached_batch_task(
                 request.secret.as_deref(),
                 &remote_workdir,
                 file_name,
-                previous_line_count,
+                cursor,
                 announced,
+                false,
             )
             .await;
             if updated_announced {
@@ -1571,6 +1983,22 @@ pub async fn run_attached_batch_task(
                 update_scheduler_snapshot(&app, &pm, task_id, &snapshot).await;
                 last_scheduler_state = Some(snapshot.state.clone());
             }
+            if ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING
+                && snapshot.state == "RUNNING"
+                && !emitted_live_probe
+            {
+                emit_remote_live_probe(
+                    &app,
+                    &pm,
+                    task_id,
+                    &request.profile,
+                    request.secret.as_deref(),
+                    &remote_workdir,
+                    &live_output_files,
+                )
+                .await;
+                emitted_live_probe = true;
+            }
             if is_terminal_state(&snapshot.state) {
                 break snapshot;
             }
@@ -1580,6 +2008,18 @@ pub async fn run_attached_batch_task(
     };
 
     let terminal_state = normalize_scheduler_state(&terminal_snapshot.state);
+    drain_remote_live_output(
+        &app,
+        &pm,
+        task_id,
+        &request.profile,
+        request.secret.as_deref(),
+        &remote_workdir,
+        &live_output_files,
+        &mut live_cursors,
+        &mut announced_live_files,
+    )
+    .await;
     let planned_remote_project_path = if let Some(path) = request.remote_project_path.as_ref() {
         Some(path.clone())
     } else {
@@ -1765,29 +2205,82 @@ fn task_id(request: &HpcBatchRequest) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_incremental_read_output, push_unique_remote_path, should_download_minimal,
-        RemoteFileEntry, LIVE_LINECOUNT_MARKER,
+        collect_live_output_files, collect_option_targets, parse_incremental_read_output,
+        push_unique_remote_path, should_download_minimal, take_complete_lines, RemoteFileEntry,
+        LIVE_SIZE_MARKER,
     };
 
     #[test]
-    fn parses_incremental_payload_with_lines() {
-        let payload = format!("line-1\nline-2\n{}42\n", LIVE_LINECOUNT_MARKER);
+    fn parses_incremental_payload_with_content() {
+        let payload = format!("{}42\nline-1\nline-2\n", LIVE_SIZE_MARKER);
         let parsed = parse_incremental_read_output(&payload).expect("expected marker payload");
-        assert_eq!(parsed.0, vec!["line-1".to_string(), "line-2".to_string()]);
+        assert_eq!(parsed.0, "line-1\nline-2\n".to_string());
         assert_eq!(parsed.1, 42);
     }
 
     #[test]
     fn parses_incremental_payload_for_empty_file() {
-        let payload = format!("{}0\n", LIVE_LINECOUNT_MARKER);
+        let payload = format!("{}0\n", LIVE_SIZE_MARKER);
         let parsed = parse_incremental_read_output(&payload).expect("expected marker payload");
-        assert!(parsed.0.is_empty());
+        assert_eq!(parsed.0, "");
         assert_eq!(parsed.1, 0);
     }
 
     #[test]
     fn rejects_payload_without_marker() {
         assert!(parse_incremental_read_output("line-1\nline-2\n").is_none());
+    }
+
+    #[test]
+    fn keeps_partial_line_until_newline() {
+        let mut buffer = "rank 0 start".to_string();
+        assert!(take_complete_lines(&mut buffer).is_empty());
+        assert_eq!(buffer, "rank 0 start");
+
+        buffer.push_str(" done\nrank 1");
+        assert_eq!(
+            take_complete_lines(&mut buffer),
+            vec!["rank 0 start done".to_string()]
+        );
+        assert_eq!(buffer, "rank 1");
+    }
+
+    #[test]
+    fn live_output_files_include_multiple_redirects_on_one_line() {
+        let files = collect_live_output_files(
+            r#"
+#!/bin/bash
+srun "$EPW_EXE" -in epw.in > epw.out 2> epw.err
+mpirun "$QE_BIN/pw.x" -in pw.in > pw.out 2>&1
+postw90.x seed > seed.wpout 2> seed.werr
+if mpirun -help 2>&1 | grep -q -- '-outfile-pattern'; then mpirun -outfile-pattern .qcortado-live/hp.out.rank.%r -errfile-pattern .qcortado-live/hp.out.err.rank.%r "$QE_BIN/hp.x"; fi
+"#,
+        );
+        assert!(files.contains(&"epw.out".to_string()));
+        assert!(files.contains(&"epw.err".to_string()));
+        assert!(files.contains(&"pw.out".to_string()));
+        assert!(files.contains(&"seed.wpout".to_string()));
+        assert!(files.contains(&"seed.werr".to_string()));
+        assert!(!files.contains(&".qcortado-live/hp.out.rank.0".to_string()));
+        assert!(!files.contains(&".qcortado-live/hp.out.err.rank.0".to_string()));
+        assert!(!files.iter().any(|file| file.contains("; then mpirun")));
+    }
+
+    #[test]
+    fn shell_words_keep_quoted_option_probe_separate_from_real_option() {
+        let targets = collect_option_targets(
+            "if mpirun -help 2>&1 | grep -q -- '-outfile-pattern'; then mpirun -outfile-pattern '.qcortado-live/hp.out.rank.%r'; fi",
+            "-outfile-pattern",
+        );
+        assert_eq!(targets, vec![".qcortado-live/hp.out.rank.%r".to_string()]);
+    }
+
+    #[test]
+    fn live_probe_command_reports_watched_files() {
+        let command = super::build_live_probe_command("/remote/work dir", &["pw.out".to_string()]);
+        assert!(command.contains("cd '/remote/work dir'"));
+        assert!(command.contains("set -- 'pw.out'"));
+        assert!(command.contains("Remote live log probe"));
     }
 
     #[test]

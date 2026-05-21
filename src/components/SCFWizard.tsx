@@ -40,10 +40,13 @@ import {
   buildExecutionTarget,
   buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
+  getRemotePseudopotentialMetadata,
   loadRemoteSsspData,
+  listRemotePseudopotentialInventory,
   listRemotePseudopotentials,
   listRemotePseudopotentialMetadata,
   resolveProfileRemoteQeBinDir,
+  resolveProfileRemotePseudoDir,
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
@@ -51,6 +54,12 @@ import {
   getDefaultHubbardManifold,
   getOutermostOccupiedOrbitalManifold,
 } from "../lib/electronConfigurations";
+import {
+  getHubbardRecommendations,
+  getHundJDefaultEv,
+  HUBBARD_J_SOURCE,
+  resolveHubbardUDefault,
+} from "../lib/hubbard";
 import {
   CutoffDerivation,
   CutoffProvenance,
@@ -66,12 +75,23 @@ import {
   SCF_RUN_SETTINGS_UPDATED_EVENT,
   ScfRunSettingsClipboardPayload,
 } from "../lib/scfRunSettingsClipboard";
+import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import {
+  buildPseudopotentialFilenameSignature,
+  buildPseudopotentialInventorySignature,
+  isPseudopotentialMetadataCacheFresh,
+  readPseudopotentialMetadataCache,
+  updateCachedPseudopotentialMetadata,
+  writePseudopotentialMetadataCache,
+} from "../lib/pseudopotentialMetadataCache";
+import type { PseudopotentialInventoryEntry } from "../lib/pseudopotentialMetadataCache";
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;
   cifContent: string;
   filename: string;
   projectId: string;
+  calculations?: any[];
 }
 
 interface SCFWizardProps {
@@ -116,6 +136,8 @@ interface SCFConfig {
   noncolin: boolean;
   lspinorb: boolean;
   starting_magnetization: Record<string, number>;  // per element
+  starting_magnetization_theta: Record<string, number>;  // polar angle from z, degrees
+  starting_magnetization_phi: Record<string, number>;  // azimuthal angle in xy, degrees
   tot_magnetization: number | null;  // null = auto, only for nspin=2
   constrained_magnetization: "none" | "total" | "atomic" | "total direction" | "atomic direction";
 
@@ -177,6 +199,7 @@ interface ScfTaskPlan {
   taskLabel: string;
   taskParams: Record<string, any>;
   sourceStructure: SavedStructureData;
+  magnetismViewerStructure: SavedStructureData;
   sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string };
 }
 
@@ -229,6 +252,15 @@ function toOffsetTriplet(value: [number, number, number]): [number, number, numb
 }
 
 type PseudopotentialPreset = "sssp" | "paw" | "uspp" | "ncpp";
+const SCF_WIZARD_SETTINGS_ID = "scf";
+const PSEUDO_CACHE_REMOTE_CHECK_TTL_MS = 5 * 60 * 1000;
+
+interface StoredScfWizardSettings {
+  config: SCFConfig;
+  selectedPseudos: Record<string, string>;
+  selectedPseudoPreset: PseudopotentialPreset;
+  structureSource: string;
+}
 
 export function SCFWizard({
   onBack,
@@ -245,6 +277,10 @@ export function SCFWizard({
   const resolvedDefaultSmearing = normalizeDefaultSmearing(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const storedWizardSettings = useMemo(
+    () => readProjectWizardSettings<StoredScfWizardSettings>(initialCif?.projectId, SCF_WIZARD_SETTINGS_ID),
+    [initialCif?.projectId],
+  );
   // Track background task for this wizard
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const hasExternalRunningTask = taskContext.activeTasks.some(
@@ -267,7 +303,9 @@ export function SCFWizard({
     initialCif ? { projectId: initialCif.projectId, cifId: initialCif.cifId } : null
   );
   const [pseudopotentials, setPseudopotentials] = useState<PseudopotentialMetadata[]>([]);
-  const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>({});
+  const [selectedPseudos, setSelectedPseudos] = useState<Record<string, string>>(
+    () => storedWizardSettings?.selectedPseudos ?? {},
+  );
   const selectedPseudoMetadata = useMemo(() => {
     const next: Record<string, PseudopotentialMetadata> = {};
     for (const [element, filename] of Object.entries(selectedPseudos)) {
@@ -289,19 +327,11 @@ export function SCFWizard({
   const [resultSaved, setResultSaved] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [runSourceStructure, setRunSourceStructure] = useState<SavedStructureData | null>(null);
+  const [runMagnetismViewerStructure, setRunMagnetismViewerStructure] = useState<SavedStructureData | null>(null);
   const [runSourceDescriptor, setRunSourceDescriptor] = useState<{ type: "cif" | "optimization"; calc_id?: string } | null>(null);
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [symmetryTransform, setSymmetryTransform] = useState<SymmetryTransformResult | null>(null);
   const [symmetryError, setSymmetryError] = useState<string | null>(null);
-  const resolvedPseudoDir = useMemo(
-    () => (
-      isHpcMode
-        ? (activeHpcProfile?.remote_pseudo_dir || "")
-        : (qePath ? qePath.replace(/\/bin\/?$/, "/pseudo") : "")
-    ),
-    [activeHpcProfile?.remote_pseudo_dir, isHpcMode, qePath],
-  );
-
   const activeQueueItem = useMemo(
     () => (activeTaskId ? taskContext.queueItems.find((item) => item.taskId === activeTaskId) ?? null : null),
     [activeTaskId, taskContext.queueItems],
@@ -310,7 +340,7 @@ export function SCFWizard({
   const hasTaskLinkedAutosave = Boolean(activeQueueItem?.saveSpec);
   const autoSaveExpected = Boolean(projectContext || hasTaskLinkedAutosave);
 
-  const [config, setConfig] = useState<SCFConfig>({
+  const [config, setConfig] = useState<SCFConfig>(() => ({
     // Calculation type
     calculation: "scf",
 
@@ -337,6 +367,8 @@ export function SCFWizard({
     noncolin: false,
     lspinorb: false,
     starting_magnetization: {},
+    starting_magnetization_theta: {},
+    starting_magnetization_phi: {},
     tot_magnetization: null,
     constrained_magnetization: "none",
 
@@ -372,9 +404,14 @@ export function SCFWizard({
     tprnfor: true,
     tstress: true,
     disk_io: "low",
-  });
+    ...(storedWizardSettings?.config ?? {}),
+  }));
+  const [manuallyEditedHubbardU, setManuallyEditedHubbardU] = useState<Record<string, boolean>>({});
+  const [manuallyEditedHubbardJ, setManuallyEditedHubbardJ] = useState<Record<string, boolean>>({});
+  const [hubbardUDefaultLabels, setHubbardUDefaultLabels] = useState<Record<string, string>>({});
+  const [hubbardJDefaultLabels, setHubbardJDefaultLabels] = useState<Record<string, string>>({});
   const [selectedPreset, setSelectedPreset] = useState<SCFPreset | null>(null);
-  const [structureSource, setStructureSource] = useState<string>("cif");
+  const [structureSource, setStructureSource] = useState<string>(() => storedWizardSettings?.structureSource ?? "cif");
   const selectedOptimizedStructure =
     structureSource === "cif"
       ? null
@@ -653,12 +690,17 @@ export function SCFWizard({
   const [pseudoFilenames, setPseudoFilenames] = useState<string[]>([]);
   const [pseudoError, setPseudoError] = useState<string | null>(null);
   const [pseudoPresetWarnings, setPseudoPresetWarnings] = useState<Record<string, string>>({});
-  const [selectedPseudoPreset, setSelectedPseudoPreset] = useState<PseudopotentialPreset>("sssp");
+  const [selectedPseudoPreset, setSelectedPseudoPreset] = useState<PseudopotentialPreset>(
+    () => storedWizardSettings?.selectedPseudoPreset ?? "sssp",
+  );
   const [isPseudoListLoading, setIsPseudoListLoading] = useState(false);
   const [isPseudoMetadataLoading, setIsPseudoMetadataLoading] = useState(false);
   const [isSsspLoading, setIsSsspLoading] = useState(false);
   const [pseudoListLoaded, setPseudoListLoaded] = useState(false);
   const [pseudoMetadataLoaded, setPseudoMetadataLoaded] = useState(false);
+  const [autoCutoffFromPseudosEnabled, setAutoCutoffFromPseudosEnabled] = useState(
+    () => !storedWizardSettings?.config,
+  );
   const [progress, setProgress] = useState<ProgressState>({
     status: "idle",
     percent: null,
@@ -686,8 +728,40 @@ export function SCFWizard({
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
     defaultResourcesForProfile(activeHpcProfile),
   );
+  const resolvedPseudoDir = useMemo(
+    () => (
+      isHpcMode
+        ? resolveProfileRemotePseudoDir(activeHpcProfile, hpcResources.resource_type)
+        : (qePath ? qePath.replace(/\/bin\/?$/, "/pseudo") : "")
+    ),
+    [
+      activeHpcProfile?.remote_cpu_pseudo_dir,
+      activeHpcProfile?.remote_gpu_pseudo_dir,
+      activeHpcProfile?.remote_pseudo_dir,
+      hpcResources.resource_type,
+      isHpcMode,
+      qePath,
+    ],
+  );
+  const pseudoCacheScope = useMemo(
+    () => ({
+      kind: isHpcMode ? "remote" as const : "local" as const,
+      pseudoDir: resolvedPseudoDir,
+      profileId: isHpcMode ? activeHpcProfile?.id ?? null : null,
+    }),
+    [activeHpcProfile?.id, isHpcMode, resolvedPseudoDir],
+  );
   const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
   useViewportScrollLock(step === "run");
+
+  useEffect(() => {
+    writeProjectWizardSettings(projectContext?.projectId, SCF_WIZARD_SETTINGS_ID, {
+      config,
+      selectedPseudos,
+      selectedPseudoPreset,
+      structureSource,
+    });
+  }, [projectContext?.projectId, config, selectedPseudos, selectedPseudoPreset, structureSource]);
 
   useEffect(() => {
     if (visibleOutputLineCount > outputLineCount) {
@@ -711,12 +785,13 @@ export function SCFWizard({
 
   useEffect(() => {
     setPseudoDir(resolvedPseudoDir);
-    setPseudoFilenames([]);
-    setPseudopotentials([]);
-    setSsspData(null);
-    setPseudoListLoaded(false);
-    setPseudoMetadataLoaded(false);
-    setSsspMissing(false);
+    const cached = readPseudopotentialMetadataCache(pseudoCacheScope);
+    setPseudoFilenames(cached?.filenames ?? []);
+    setPseudopotentials(cached?.metadata ?? []);
+    setSsspData(cached?.ssspData ?? null);
+    setPseudoListLoaded(Boolean(cached));
+    setPseudoMetadataLoaded(Boolean(cached?.metadata.length));
+    setSsspMissing(cached?.ssspMissing ?? false);
     setPseudoPresetWarnings({});
     setIsPseudoListLoading(false);
     setIsPseudoMetadataLoading(false);
@@ -732,7 +807,7 @@ export function SCFWizard({
     }
 
     setPseudoError(null);
-  }, [isHpcMode, resolvedPseudoDir]);
+  }, [isHpcMode, pseudoCacheScope, resolvedPseudoDir]);
 
   const ensurePseudoFilenamesLoaded = useCallback(async (): Promise<string[]> => {
     if (!resolvedPseudoDir.trim()) {
@@ -787,6 +862,15 @@ export function SCFWizard({
       setPseudoMetadataLoaded(true);
       setPseudoListLoaded(true);
       setPseudoFilenames(pseudos.map((pseudo) => pseudo.filename));
+      writePseudopotentialMetadataCache(pseudoCacheScope, {
+        filenames: pseudos.map((pseudo) => pseudo.filename),
+        signature: buildPseudopotentialFilenameSignature(pseudos.map((pseudo) => pseudo.filename)),
+        metadata: pseudos,
+        ssspData,
+        ssspMissing,
+        updatedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+      });
       setPseudoError(null);
       return pseudos;
     } catch (e) {
@@ -798,7 +882,7 @@ export function SCFWizard({
     } finally {
       setIsPseudoMetadataLoading(false);
     }
-  }, [activeHpcProfile?.id, isHpcMode, pseudoMetadataLoaded, pseudopotentials, resolvedPseudoDir]);
+  }, [activeHpcProfile?.id, isHpcMode, pseudoCacheScope, pseudoMetadataLoaded, pseudopotentials, resolvedPseudoDir, ssspData, ssspMissing]);
 
   const ensureSsspDataLoaded = useCallback(async (): Promise<Record<string, SSSPElementData> | null> => {
     if (!resolvedPseudoDir.trim()) {
@@ -827,16 +911,155 @@ export function SCFWizard({
         });
       setSsspData(sssp);
       setSsspMissing(false);
+      const cached = readPseudopotentialMetadataCache(pseudoCacheScope);
+      if (cached) {
+        writePseudopotentialMetadataCache(pseudoCacheScope, {
+          ...cached,
+          ssspData: sssp,
+          ssspMissing: false,
+          updatedAt: new Date().toISOString(),
+          checkedAt: new Date().toISOString(),
+        });
+      }
       return sssp;
     } catch (e) {
       console.error("Failed to load SSSP data:", e);
       setSsspData(null);
       setSsspMissing(true);
+      const cached = readPseudopotentialMetadataCache(pseudoCacheScope);
+      if (cached) {
+        writePseudopotentialMetadataCache(pseudoCacheScope, {
+          ...cached,
+          ssspData: null,
+          ssspMissing: true,
+          updatedAt: new Date().toISOString(),
+          checkedAt: new Date().toISOString(),
+        });
+      }
       return null;
     } finally {
       setIsSsspLoading(false);
     }
-  }, [activeHpcProfile?.id, isHpcMode, resolvedPseudoDir, ssspData, ssspMissing]);
+  }, [activeHpcProfile?.id, isHpcMode, pseudoCacheScope, resolvedPseudoDir, ssspData, ssspMissing]);
+
+  useEffect(() => {
+    if (!resolvedPseudoDir.trim()) return;
+    let cancelled = false;
+
+    async function refreshPseudoRecordIfChanged() {
+      const cachedBeforeRefresh = readPseudopotentialMetadataCache(pseudoCacheScope);
+      if (isPseudopotentialMetadataCacheFresh(cachedBeforeRefresh, PSEUDO_CACHE_REMOTE_CHECK_TTL_MS)) {
+        return;
+      }
+
+      const hasUsableCachedRecord = Boolean(cachedBeforeRefresh?.filenames.length);
+      if (!hasUsableCachedRecord) {
+        setIsPseudoListLoading(true);
+      }
+      try {
+        const inventory = isHpcMode
+          ? await listRemotePseudopotentialInventory(resolvedPseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<PseudopotentialInventoryEntry[]>("list_pseudopotential_inventory", {
+            pseudoDir: resolvedPseudoDir,
+          });
+        if (cancelled) return;
+
+        const filenames = inventory.map((entry) => entry.filename);
+        const signature = buildPseudopotentialInventorySignature(inventory);
+        const cached = readPseudopotentialMetadataCache(pseudoCacheScope);
+        setPseudoFilenames(filenames);
+        setPseudoListLoaded(true);
+        setPseudoError(null);
+
+        if (cached && cached.signature === signature) {
+          const checkedAt = new Date().toISOString();
+          setPseudopotentials(cached.metadata);
+          setPseudoMetadataLoaded(cached.metadata.length > 0);
+          setSsspData(cached.ssspData);
+          setSsspMissing(cached.ssspMissing);
+          writePseudopotentialMetadataCache(pseudoCacheScope, {
+            ...cached,
+            checkedAt,
+          });
+          return;
+        }
+
+        const metadata = isHpcMode
+          ? await listRemotePseudopotentialMetadata(resolvedPseudoDir, activeHpcProfile?.id ?? null)
+          : await invoke<PseudopotentialMetadata[]>("list_pseudopotential_metadata", { pseudoDir: resolvedPseudoDir });
+        if (cancelled) return;
+
+        let nextSsspData: Record<string, SSSPElementData> | null = null;
+        let nextSsspMissing = false;
+        try {
+          nextSsspData = isHpcMode
+            ? await loadRemoteSsspData<Record<string, SSSPElementData>>(resolvedPseudoDir, activeHpcProfile?.id ?? null)
+            : await invoke<Record<string, SSSPElementData>>("load_sssp_data", { pseudoDir: resolvedPseudoDir });
+        } catch {
+          nextSsspMissing = true;
+        }
+        if (cancelled) return;
+
+        setPseudopotentials(metadata);
+        setPseudoMetadataLoaded(true);
+        setSsspData(nextSsspData);
+        setSsspMissing(nextSsspMissing);
+        writePseudopotentialMetadataCache(pseudoCacheScope, {
+          filenames,
+          signature,
+          metadata,
+          ssspData: nextSsspData,
+          ssspMissing: nextSsspMissing,
+          updatedAt: new Date().toISOString(),
+          checkedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        if (!cancelled) {
+          console.error("Failed to refresh pseudopotential metadata cache:", e);
+          setPseudoError(String(e));
+        }
+      } finally {
+        if (!cancelled) {
+          setIsPseudoListLoading(false);
+          setIsPseudoMetadataLoading(false);
+        }
+      }
+    }
+
+    void refreshPseudoRecordIfChanged();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeHpcProfile?.id, isHpcMode, pseudoCacheScope, resolvedPseudoDir]);
+
+  const ensurePseudoMetadataForFilename = useCallback(async (filename: string): Promise<void> => {
+    if (!filename || pseudoMetadataByFilename[filename]) return;
+    if (!resolvedPseudoDir.trim()) return;
+
+    setIsPseudoMetadataLoading(true);
+    try {
+      const metadata = isHpcMode
+        ? await getRemotePseudopotentialMetadata(filename, resolvedPseudoDir, activeHpcProfile?.id ?? null)
+        : await invoke<PseudopotentialMetadata>("get_pseudopotential_metadata", {
+          pseudoDir: resolvedPseudoDir,
+          filename,
+        });
+      setPseudopotentials((prev) => {
+        const next = prev.filter((pseudo) => pseudo.filename !== filename);
+        next.push(metadata);
+        next.sort((left, right) => left.filename.localeCompare(right.filename));
+        return next;
+      });
+      setPseudoMetadataLoaded(true);
+      updateCachedPseudopotentialMetadata(pseudoCacheScope, filename, metadata);
+      setPseudoError(null);
+    } catch (e) {
+      console.error("Failed to parse selected pseudopotential metadata:", e);
+      setPseudoError(String(e));
+    } finally {
+      setIsPseudoMetadataLoading(false);
+    }
+  }, [activeHpcProfile?.id, isHpcMode, pseudoCacheScope, pseudoMetadataByFilename, resolvedPseudoDir]);
 
   // Load CPU count and check MPI availability
   useEffect(() => {
@@ -873,6 +1096,11 @@ export function SCFWizard({
       lowerFile.startsWith(lowerEl + "_") ||
       lowerFile.startsWith(lowerEl + "-")
     );
+  }
+
+  function isPslibraryPseudoFilename(filename: string): boolean {
+    const lowerFile = filename.toLowerCase();
+    return lowerFile.includes("pslibrary") || /(^|[._-])psl([._-]|$)/.test(lowerFile);
   }
 
   function matchesPseudoPresetType(
@@ -1137,6 +1365,7 @@ export function SCFWizard({
   ]);
 
   const handlePseudopotentialPresetClick = useCallback((preset: PseudopotentialPreset) => {
+    setAutoCutoffFromPseudosEnabled(true);
     setSelectedPseudoPreset(preset);
     void applyPseudopotentialPresetSelection(preset).catch((e) => {
       console.error("Failed to apply pseudopotential preset:", e);
@@ -1144,6 +1373,9 @@ export function SCFWizard({
   }, [applyPseudopotentialPresetSelection]);
 
   useEffect(() => {
+    if (storedWizardSettings?.selectedPseudos && Object.keys(storedWizardSettings.selectedPseudos).length > 0) {
+      return;
+    }
     if (!resolvedPseudoDir.trim()) {
       return;
     }
@@ -1152,8 +1384,36 @@ export function SCFWizard({
     });
   }, [applyPseudopotentialPresetSelection, resolvedPseudoDir, structureSource, crystalData, selectedOptimizedStructure?.calcId, socPresetSelected]);
 
+  useEffect(() => {
+    if (!resolvedPseudoDir.trim() || pseudoMetadataLoaded || isPseudoMetadataLoading) {
+      return;
+    }
+
+    const selectedPslibraryPseudo = Object.values(selectedPseudos).some((filename) =>
+      isPslibraryPseudoFilename(filename),
+    );
+    if (!selectedPslibraryPseudo) {
+      return;
+    }
+
+    void Promise.all(
+      Object.values(selectedPseudos)
+        .filter((filename) => isPslibraryPseudoFilename(filename))
+        .map((filename) => ensurePseudoMetadataForFilename(filename)),
+    ).catch((e) => {
+      console.error("Failed to load PSLibrary pseudopotential metadata:", e);
+    });
+  }, [
+    ensurePseudoMetadataForFilename,
+    isPseudoMetadataLoading,
+    pseudoMetadataLoaded,
+    resolvedPseudoDir,
+    selectedPseudos,
+  ]);
+
   // Keep cutoffs aligned with the currently selected pseudopotentials, including manual changes.
   useEffect(() => {
+    if (!autoCutoffFromPseudosEnabled) return;
     if (pseudopotentials.length === 0 && !ssspData) return;
 
     setConfig((prev) => {
@@ -1180,7 +1440,7 @@ export function SCFWizard({
       }
       return prev;
     });
-  }, [pseudopotentials, selectedPseudoCutoffSummary]);
+  }, [autoCutoffFromPseudosEnabled, pseudopotentials, selectedPseudoCutoffSummary]);
 
   useEffect(() => {
     if (!crystalData || structureSource !== "cif") {
@@ -1489,6 +1749,18 @@ export function SCFWizard({
         if (Object.keys(startingMag).length > 0) {
           next.starting_magnetization = startingMag;
         }
+        const startingMagTheta = filterByCurrentElements(
+          settings.starting_magnetization_theta ?? settings.starting_magnetization_angle1 ?? settings.theta ?? settings.angle1,
+        );
+        if (Object.keys(startingMagTheta).length > 0) {
+          next.starting_magnetization_theta = startingMagTheta;
+        }
+        const startingMagPhi = filterByCurrentElements(
+          settings.starting_magnetization_phi ?? settings.starting_magnetization_angle2 ?? settings.phi ?? settings.angle2,
+        );
+        if (Object.keys(startingMagPhi).length > 0) {
+          next.starting_magnetization_phi = startingMagPhi;
+        }
 
         const ldaPlusU = asBoolean(settings.lda_plus_u);
         if (ldaPlusU != null) {
@@ -1588,6 +1860,14 @@ export function SCFWizard({
 
   const hubbardDefaultElements = getUniqueElements();
   const hubbardDefaultElementKey = hubbardDefaultElements.join("|");
+  const hubbardRecommendations = useMemo(
+    () => getHubbardRecommendations(hubbardDefaultElements),
+    [hubbardDefaultElementKey],
+  );
+  const hubbardRecommendationText = hubbardRecommendations
+    .map((entry) => `${entry.element}-${entry.manifold}`)
+    .join(", ");
+  const isHubbardRecommended = hubbardRecommendations.length > 0;
 
   useEffect(() => {
     if (hubbardDefaultElements.length === 0) return;
@@ -1618,6 +1898,71 @@ export function SCFWizard({
       return changed ? { ...prev, hubbard_manifold: nextManifolds } : prev;
     });
   }, [hubbardDefaultElementKey]);
+
+  useEffect(() => {
+    if (!isHubbardRecommended) return;
+    setExpandedSections((prev) => (prev.dftu ? prev : { ...prev, dftu: true }));
+  }, [isHubbardRecommended, hubbardDefaultElementKey]);
+
+  useEffect(() => {
+    if (hubbardRecommendations.length === 0) return;
+    const calculations = initialCif?.calculations ?? [];
+    const nextULabels: Record<string, string> = {};
+
+    setConfig((prev) => {
+      let changed = false;
+      const nextU = { ...prev.hubbard_u };
+
+      for (const recommendation of hubbardRecommendations) {
+        if (manuallyEditedHubbardU[recommendation.element]) continue;
+        const current = nextU[recommendation.element];
+        if (current != null && current !== 0) continue;
+        const resolved = resolveHubbardUDefault(
+          recommendation.element,
+          recommendation.manifold,
+          calculations,
+        );
+        nextU[recommendation.element] = resolved.value;
+        nextULabels[recommendation.element] = resolved.label;
+        changed = true;
+      }
+
+      if (!changed) return prev;
+      return { ...prev, hubbard_u: nextU };
+    });
+
+    if (Object.keys(nextULabels).length > 0) {
+      setHubbardUDefaultLabels((prev) => ({ ...prev, ...nextULabels }));
+    }
+  }, [hubbardDefaultElementKey, initialCif?.calculations, manuallyEditedHubbardU]);
+
+  useEffect(() => {
+    if (config.lda_plus_u_kind !== 1 || hubbardDefaultElements.length === 0) return;
+    const nextJLabels: Record<string, string> = {};
+
+    setConfig((prev) => {
+      let changed = false;
+      const nextJ = { ...prev.hubbard_j };
+
+      for (const element of hubbardDefaultElements) {
+        if (manuallyEditedHubbardJ[element]) continue;
+        const defaultJ = getHundJDefaultEv(element);
+        if (defaultJ == null) continue;
+        const current = nextJ[element];
+        if (current != null && current !== 0) continue;
+        nextJ[element] = defaultJ;
+        nextJLabels[element] = `${HUBBARD_J_SOURCE}: ${defaultJ.toFixed(3)} eV`;
+        changed = true;
+      }
+
+      if (!changed) return prev;
+      return { ...prev, hubbard_j: nextJ };
+    });
+
+    if (Object.keys(nextJLabels).length > 0) {
+      setHubbardJDefaultLabels((prev) => ({ ...prev, ...nextJLabels }));
+    }
+  }, [config.lda_plus_u_kind, hubbardDefaultElementKey, manuallyEditedHubbardJ]);
 
   function canRun(): boolean {
     if (!crystalData) return false;
@@ -1680,6 +2025,7 @@ export function SCFWizard({
     const sourceDescriptor = selectedOptimizedStructure
       ? { type: "optimization" as const, calc_id: selectedOptimizedStructure.calcId }
       : { type: "cif" as const };
+    let magnetismViewerStructure: SavedStructureData = sourceStructure;
 
     let resolvedSymmetry = symmetryTransform;
     if (!selectedOptimizedStructure && !resolvedSymmetry) {
@@ -1709,6 +2055,12 @@ export function SCFWizard({
       mass: ELEMENT_MASSES[el] || 1.0,
       pseudopotential: selectedPseudos[el],
       starting_magnetization: config.starting_magnetization[el] || 0,
+      ...(config.nspin === 4
+        ? {
+          theta: config.starting_magnetization_theta[el] ?? 0,
+          phi: config.starting_magnetization_phi[el] ?? 0,
+        }
+        : {}),
     }));
 
     // Build system configuration based on cell type
@@ -1754,6 +2106,13 @@ export function SCFWizard({
         position: atom.position,
         if_pos: [true, true, true],
       }));
+      magnetismViewerStructure = {
+        ...sourceStructure,
+        atoms: systemConfig.atoms.map((atom: { symbol: string; position: [number, number, number] }) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+        })),
+      };
     } else if (canUseSymmetryPrimitive && resolvedSymmetry) {
       const inferredBravais = inferQeBravaisCellFromCif(crystalData, resolvedSymmetry);
       if (inferredBravais) {
@@ -1766,6 +2125,15 @@ export function SCFWizard({
           position: atom.position,
           if_pos: [true, true, true],
         }));
+        magnetismViewerStructure = {
+          position_units: "crystal",
+          atoms: inferredBravais.atoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: atom.position,
+          })),
+          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
+          cell_units: "angstrom",
+        };
       } else {
         systemConfig.ibrav = "free";
         systemConfig.celldm = null;
@@ -1776,6 +2144,15 @@ export function SCFWizard({
           position: atom.position,
           if_pos: [true, true, true],
         }));
+        magnetismViewerStructure = {
+          position_units: "crystal",
+          atoms: resolvedSymmetry.standardizedPrimitiveAtoms.map((atom) => ({
+            symbol: atom.symbol,
+            position: atom.position,
+          })),
+          cell_parameters: resolvedSymmetry.standardizedPrimitiveLattice,
+          cell_units: "angstrom",
+        };
       }
     } else {
       // Conventional cell with ibrav=0 fallback when primitive extraction is unavailable.
@@ -1788,6 +2165,15 @@ export function SCFWizard({
         position: [site.fract_x, site.fract_y, site.fract_z],
         if_pos: [true, true, true],
       }));
+      magnetismViewerStructure = {
+        position_units: "crystal",
+        atoms: systemConfig.atoms.map((atom: { symbol: string; position: [number, number, number] }) => ({
+          symbol: atom.symbol,
+          position: atom.position,
+        })),
+        cell_parameters: systemConfig.cell_parameters,
+        cell_units: "angstrom",
+      };
     }
 
     // Build the calculation configuration with all options
@@ -1851,6 +2237,7 @@ export function SCFWizard({
         ),
       },
       sourceStructure,
+      magnetismViewerStructure,
       sourceDescriptor,
     };
   }
@@ -1878,7 +2265,7 @@ export function SCFWizard({
 
     try {
       const plan = await buildScfTaskPlan();
-      const { inputText, taskLabel, sourceStructure, sourceDescriptor } = plan;
+      const { inputText, taskLabel, sourceStructure, magnetismViewerStructure, sourceDescriptor } = plan;
       const draftCalcData = buildCalculationData(
         {
           converged: false,
@@ -1893,6 +2280,7 @@ export function SCFWizard({
         inputText,
         sourceStructure,
         sourceDescriptor,
+        magnetismViewerStructure,
       );
       const queueCalcType: "scf" | "optimization" = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
       const runSaveSpec = projectContext
@@ -1908,6 +2296,7 @@ export function SCFWizard({
         : null;
 
       setRunSourceStructure(sourceStructure);
+      setRunMagnetismViewerStructure(magnetismViewerStructure);
       setRunSourceDescriptor(sourceDescriptor);
       setGeneratedInput(inputText);
       setOutput(`=== Generated Input ===\n${inputText}\n\n=== Running pw.x ===\n`);
@@ -1974,6 +2363,7 @@ export function SCFWizard({
             inputText,
             sourceStructure,
             sourceDescriptor,
+            magnetismViewerStructure,
             finalTask.hpc,
           );
           await invoke("save_calculation", {
@@ -2051,6 +2441,7 @@ export function SCFWizard({
         plan.inputText,
         plan.sourceStructure,
         plan.sourceDescriptor,
+        plan.magnetismViewerStructure,
       );
       const queueCalcType = draftCalcData.calc_type === "optimization" ? "optimization" : "scf";
       const queueLabel = queueCalcType === "optimization"
@@ -2327,6 +2718,7 @@ export function SCFWizard({
     inputContent: string,
     sourceStructure: SavedStructureData,
     sourceDescriptor: { type: "cif" | "optimization"; calc_id?: string },
+    magnetismViewerStructure?: SavedStructureData | null,
     hpcMeta?: {
       backend?: string | null;
       hpc_resource_type?: "cpu" | "gpu" | null;
@@ -2372,6 +2764,7 @@ export function SCFWizard({
         selected_pseudo_metadata: selectedPseudoMetadata,
         structure_source: sourceDescriptor,
         source_structure: sourceStructure,
+        magnetism_viewer_structure: magnetismViewerStructure ?? sourceStructure,
         cell_representation:
           sourceDescriptor.type === "optimization"
             ? "optimized_source"
@@ -2391,6 +2784,22 @@ export function SCFWizard({
               config.starting_magnetization[element] ?? 0,
             ]),
           ),
+        starting_magnetization_theta: config.nspin === 4
+          ? Object.fromEntries(
+            getUniqueElements().map((element) => [
+              element,
+              config.starting_magnetization_theta[element] ?? 0,
+            ]),
+          )
+          : {},
+        starting_magnetization_phi: config.nspin === 4
+          ? Object.fromEntries(
+            getUniqueElements().map((element) => [
+              element,
+              config.starting_magnetization_phi[element] ?? 0,
+            ]),
+          )
+          : {},
         tot_magnetization: config.nspin === 2 ? config.tot_magnetization : null,
         constrained_magnetization: config.constrained_magnetization,
         lda_plus_u: config.lda_plus_u,
@@ -2462,6 +2871,7 @@ export function SCFWizard({
         generatedInput,
         runSourceStructure || currentSourceStructure!,
         currentSourceDescriptor,
+        runMagnetismViewerStructure || runSourceStructure || currentSourceStructure,
         activeTask?.hpc,
       )
     : null;
@@ -2629,10 +3039,14 @@ export function SCFWizard({
                               {
                                 const nextValue = e.target.value;
                                 clearPseudoPresetWarning(el);
+                                setAutoCutoffFromPseudosEnabled(true);
                                 setSelectedPseudos((prev) => ({
                                   ...prev,
                                   [el]: nextValue,
                                 }));
+                                if (nextValue) {
+                                  void ensurePseudoMetadataForFilename(nextValue);
+                                }
                               }
                             }
                           >
@@ -3124,6 +3538,43 @@ export function SCFWizard({
                               </div>
                             ))}
                           </div>
+                          {config.nspin === 4 && (
+                            <>
+                              <div className="param-row full-width">
+                                <label>
+                                  Starting Magnetization Direction (per element)
+                                  <InfoTooltip text="Noncollinear magnetization direction in degrees: theta is the polar angle from z, phi is the azimuthal angle in the xy plane." />
+                                </label>
+                              </div>
+                              <div className="magnetization-grid magnetization-angle-grid">
+                                {getUniqueElements().map((el) => (
+                                  <div key={el} className="mag-row mag-angle-row">
+                                    <label>{el}</label>
+                                    <span>theta</span>
+                                    <input type="number" step="1" min={0} max={180}
+                                      value={config.starting_magnetization_theta[el] ?? 0}
+                                      onChange={(e) => setConfig((prev) => ({
+                                        ...prev,
+                                        starting_magnetization_theta: {
+                                          ...prev.starting_magnetization_theta,
+                                          [el]: parseFloat(e.target.value) || 0,
+                                        },
+                                      }))} />
+                                    <span>phi</span>
+                                    <input type="number" step="1" min={0} max={360}
+                                      value={config.starting_magnetization_phi[el] ?? 0}
+                                      onChange={(e) => setConfig((prev) => ({
+                                        ...prev,
+                                        starting_magnetization_phi: {
+                                          ...prev.starting_magnetization_phi,
+                                          [el]: parseFloat(e.target.value) || 0,
+                                        },
+                                      }))} />
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          )}
                         </>
                       )}
                     </div>
@@ -3243,6 +3694,12 @@ export function SCFWizard({
                     <span className={`collapse-icon ${expandedSections.dftu ? "expanded" : ""}`}>▶</span>
                     DFT+U (Hubbard Correction)
                     <InfoTooltip text="Add Hubbard U correction to improve description of localized d and f electrons in transition metals and lanthanides." />
+                    {isHubbardRecommended && (
+                      <span className="section-recommendation">
+                        Recommended for this system
+                        <InfoTooltip text={`QCortado detected localized Hubbard manifolds (${hubbardRecommendationText}). ${hubbardRecommendations.map((entry) => entry.reason).join(" ")}`} />
+                      </span>
+                    )}
                   </h3>
                   {expandedSections.dftu && (
                     <div className="param-grid">
@@ -3256,6 +3713,11 @@ export function SCFWizard({
                             onChange={(e) => setConfig((prev) => ({ ...prev, lda_plus_u: e.target.checked }))} />
                           <span>Enable Hubbard correction</span>
                         </label>
+                        {isHubbardRecommended && (
+                          <p className="field-hint">
+                            Recommended for {hubbardRecommendationText}. U defaults use saved LRT values when available, otherwise a general 6.0 eV guess.
+                          </p>
+                        )}
                       </div>
                       {config.lda_plus_u && (
                         <>
@@ -3309,7 +3771,11 @@ export function SCFWizard({
                                     onChange={(e) => setConfig((prev) => ({
                                       ...prev,
                                       hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
-                                    }))} />
+                                    }))}
+                                    onInput={() => setManuallyEditedHubbardU((prev) => ({ ...prev, [el]: true }))} />
+                                  {hubbardUDefaultLabels[el] && (
+                                    <small className="hubbard-default-label">{hubbardUDefaultLabels[el]}</small>
+                                  )}
                                 </label>
                                 {config.lda_plus_u_kind > 0 && (
                                   <label className="hubbard-field hubbard-value-field">
@@ -3319,7 +3785,11 @@ export function SCFWizard({
                                       onChange={(e) => setConfig((prev) => ({
                                         ...prev,
                                         hubbard_j: { ...prev.hubbard_j, [el]: parseFloat(e.target.value) || 0 }
-                                      }))} />
+                                      }))}
+                                      onInput={() => setManuallyEditedHubbardJ((prev) => ({ ...prev, [el]: true }))} />
+                                    {config.lda_plus_u_kind === 1 && hubbardJDefaultLabels[el] && (
+                                      <small className="hubbard-default-label">{hubbardJDefaultLabels[el]}</small>
+                                    )}
                                   </label>
                                 )}
                               </div>

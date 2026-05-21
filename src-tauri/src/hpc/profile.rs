@@ -125,6 +125,10 @@ pub struct HpcProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_postw90_path: Option<String>,
     pub remote_pseudo_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_cpu_pseudo_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_gpu_pseudo_dir: Option<String>,
     pub remote_workspace_root: String,
     pub remote_project_root: String,
     #[serde(default)]
@@ -171,6 +175,24 @@ impl HpcProfile {
                 .unwrap_or(fallback),
             ResourceType::Gpu => self
                 .remote_qe_gpu_bin_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback),
+        }
+    }
+
+    pub fn remote_pseudo_dir_for_resource(&self, resource_type: ResourceType) -> &str {
+        let fallback = self.remote_pseudo_dir.trim();
+        match resource_type {
+            ResourceType::Cpu => self
+                .remote_cpu_pseudo_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback),
+            ResourceType::Gpu => self
+                .remote_gpu_pseudo_dir
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
