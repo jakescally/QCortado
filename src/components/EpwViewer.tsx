@@ -17,7 +17,7 @@ import {
   hasEpwSuperconductivityData,
   hasEpwTransportData,
   mergeEpwArtifacts,
-} from "../lib/epw";
+} from "../lib/engines/qe/epw";
 
 export type {
   EpwArtifactManifestEntry,
@@ -27,7 +27,7 @@ export type {
   EpwSourceRef,
   EpwViewerData,
   EpwViewerPayload,
-} from "../lib/epw";
+} from "../lib/engines/qe/epw";
 
 interface EpwViewerProps {
   payload: EpwViewerPayload;

@@ -8,8 +8,8 @@ import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
 import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
-import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
-import { isPhononReadyScf } from "../lib/phononReady";
+import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
 import type { EngineId } from "../lib/engines/types";
@@ -18,13 +18,13 @@ import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
-import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/engines/qe/wannierQuality";
 import { getMagnetismViewerData, isMagneticScfCalculation } from "../lib/magnetism";
-import { getScfHubbardUDisplayValues, isDudarevDftUScf, normalizeHubbardLrtUValues } from "../lib/hubbard";
+import { getScfHubbardUDisplayValues, isDudarevDftUScf, normalizeHubbardLrtUValues } from "../lib/engines/qe/hubbard";
 import {
   rememberScfRunSettingsClipboardText,
   serializeScfRunSettings,
-} from "../lib/scfRunSettingsClipboard";
+} from "../lib/engines/qe/scfRunSettingsClipboard";
 import { CifSubstitutionDialog } from "./CifSubstitutionDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
@@ -41,6 +41,7 @@ interface QEResult {
   wall_time_seconds: number | null;
   raw_output: string;
   band_data?: any;  // Band structure data for bands calculations
+  band_dataset?: any;  // Engine-neutral band dataset for bands calculations
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
   epw_data?: any;  // EPW data payload for EPW calculations
@@ -2398,7 +2399,11 @@ export function ProjectDashboard({
         return;
       }
       const detail = await ensureCalculationDetails(calc);
-      const bandData = detail.result?.band_data ?? calc.result?.band_data ?? null;
+      const bandData = detail.result?.band_dataset
+        ?? calc.result?.band_dataset
+        ?? detail.result?.band_data
+        ?? calc.result?.band_data
+        ?? null;
       if (!bandData) {
         setError("Saved band data is unavailable for this calculation.");
         return;
@@ -2461,7 +2466,11 @@ export function ProjectDashboard({
     const settled = await Promise.allSettled(
       matchingBandRuns.map(async (candidate) => {
         const candidateDetail = await ensureCalculationDetails(candidate);
-        const bandData = candidateDetail.result?.band_data ?? candidate.result?.band_data ?? null;
+        const bandData = candidateDetail.result?.band_dataset
+          ?? candidate.result?.band_dataset
+          ?? candidateDetail.result?.band_data
+          ?? candidate.result?.band_data
+          ?? null;
         if (!bandData) {
           return null;
         }

@@ -1354,6 +1354,7 @@ fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
     !result.raw_output.is_empty()
         || result.eigenvalues.is_some()
         || result.band_data.is_some()
+        || result.band_dataset.is_some()
         || result.dos_data.is_some()
         || result.phonon_data.is_some()
         || result.wannier_data.is_some()
@@ -1376,6 +1377,7 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
         eigenvalues: None,
         raw_output: String::new(),
         band_data: None,
+        band_dataset: None,
         phonon_data: None,
         dos_data: None,
         wannier_data: None,
@@ -5295,6 +5297,7 @@ pub fn recover_phonon_calculation(
         eigenvalues: None,
         raw_output: raw_output.clone(),
         band_data: None,
+        band_dataset: None,
         dos_data: None,
         phonon_data: Some(serde_json::json!({
             "dos_data": dos_data,
@@ -6502,6 +6505,7 @@ mod tests {
                 eigenvalues: None,
                 raw_output: String::new(),
                 band_data: None,
+                band_dataset: None,
                 dos_data: None,
                 phonon_data: Some(serde_json::json!({
                     "dos_data": null,

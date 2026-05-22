@@ -34,7 +34,7 @@ import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress"
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { isPhononReadyScf } from "../lib/phononReady";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
@@ -61,7 +61,7 @@ import {
   getHundJDefaultEv,
   HUBBARD_J_SOURCE,
   resolveHubbardUDefault,
-} from "../lib/hubbard";
+} from "../lib/engines/qe/hubbard";
 import {
   CutoffDerivation,
   CutoffProvenance,
@@ -76,7 +76,7 @@ import {
   rememberScfRunSettingsClipboardText,
   SCF_RUN_SETTINGS_UPDATED_EVENT,
   ScfRunSettingsClipboardPayload,
-} from "../lib/scfRunSettingsClipboard";
+} from "../lib/engines/qe/scfRunSettingsClipboard";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildPseudopotentialFilenameSignature,

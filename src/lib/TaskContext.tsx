@@ -2,9 +2,11 @@ import { createContext, useContext, useEffect, useMemo, useState, useCallback, u
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { ProgressState, progressReducer, defaultProgressState } from "./engines/qe/progress";
+import { qeBandDataToBandDataset } from "./engines/qe";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "./optimizedStructure";
 import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";
+import type { BandDataset } from "./viewers/bands";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
@@ -339,6 +341,33 @@ function appendVisibleTaskOutput(task: TaskState, taskType: TaskType, line: stri
   };
 }
 
+function isBandDatasetPayload(value: unknown): value is BandDataset {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    (value as BandDataset).schema === "cortado.band_path.v1" &&
+    Array.isArray((value as BandDataset).series),
+  );
+}
+
+function buildSavedBandDataset(taskResult: any, parameters: Record<string, any>): BandDataset | null {
+  if (!taskResult) {
+    return null;
+  }
+  if (isBandDatasetPayload(taskResult)) {
+    return taskResult;
+  }
+  return qeBandDataToBandDataset(taskResult, {
+    sourceCalculationIds: typeof parameters?.source_scf_id === "string"
+      ? [parameters.source_scf_id]
+      : undefined,
+    generatedAt: new Date().toISOString(),
+    metadata: {
+      sourceFormat: "legacy-band-data",
+    },
+  });
+}
+
 function buildQueuedResult(
   taskType: TaskType,
   taskResult: any,
@@ -375,6 +404,7 @@ function buildQueuedResult(
   if (taskType === "bands") {
     const fallbackEf = Number(parameters?.scf_fermi_energy);
     const fermiEnergy = Number.isFinite(fallbackEf) ? fallbackEf : null;
+    const bandDataset = failed ? null : buildSavedBandDataset(taskResult, parameters);
     return {
       converged: true,
       total_energy: null,
@@ -382,7 +412,8 @@ function buildQueuedResult(
       n_scf_steps: null,
       wall_time_seconds: null,
       raw_output: failureOutput,
-      band_data: failed ? null : taskResult,
+      band_data: failed || isBandDatasetPayload(taskResult) ? null : taskResult,
+      band_dataset: bandDataset,
     };
   }
 

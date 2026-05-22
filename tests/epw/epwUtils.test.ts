@@ -10,7 +10,7 @@ import {
   getEpwComponentOptions,
   getEpwMobilityValue,
   mergeEpwArtifacts,
-} from "../../src/lib/epw";
+} from "../../src/lib/engines/qe/epw";
 
 const mobilityDataset: EpwMobilityDataset = {
   carrier_type: "electron",

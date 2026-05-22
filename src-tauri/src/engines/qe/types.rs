@@ -539,6 +539,9 @@ pub struct QEResult {
     /// Full band structure data (for bands calculations)
     #[serde(default)]
     pub band_data: Option<serde_json::Value>,
+    /// Engine-neutral band dataset (for shared band viewers)
+    #[serde(default)]
+    pub band_dataset: Option<serde_json::Value>,
     /// Full phonon data (for phonon calculations)
     #[serde(default)]
     pub phonon_data: Option<serde_json::Value>,
@@ -574,6 +577,7 @@ impl Default for QEResult {
             eigenvalues: None,
             raw_output: String::new(),
             band_data: None,
+            band_dataset: None,
             phonon_data: None,
             dos_data: None,
             wannier_data: None,

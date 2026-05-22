@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { bandDatasetToBandData } from "../../src/components/BandPlot";
 import type { BandData } from "../../src/components/BandPlot";
 import {
   legacyBandDataToBandDataset,
@@ -139,4 +140,22 @@ test("qeBandDataToBandDataset pins the adapter provenance to the QE engine", () 
 
   assert.equal(dataset.provenance.engineId, "qe");
   assert.equal(dataset.referenceEnergyEv, null);
+});
+
+test("bandDatasetToBandData preserves legacy BandPlot fields for existing rendering", () => {
+  const dataset = legacyBandDataToBandDataset(legacyBandData);
+  const restored = bandDatasetToBandData(dataset);
+
+  assert.deepEqual(restored.k_points, legacyBandData.k_points);
+  assert.deepEqual(restored.energies, legacyBandData.energies);
+  assert.equal(restored.fermi_energy, legacyBandData.fermi_energy);
+  assert.deepEqual(restored.high_symmetry_points, legacyBandData.high_symmetry_points);
+  assert.equal(restored.n_bands, legacyBandData.n_bands);
+  assert.equal(restored.n_kpoints, legacyBandData.n_kpoints);
+  assert.deepEqual(restored.band_gap, legacyBandData.band_gap);
+  assert.deepEqual(restored.energy_range, legacyBandData.energy_range);
+  assert.deepEqual(
+    restored.projections?.element_orbital_groups,
+    legacyBandData.projections?.element_orbital_groups,
+  );
 });

@@ -39,10 +39,11 @@ This plan is for boundary extraction only. It does not implement Wien2k, change 
 
 - `src-tauri/src/lib.rs`
   - Main command registration and application state.
-  - Current hotspot for QE settings, pseudopotential parsing, HPC commands, task orchestration, and utility helpers.
+  - Current hotspot for stable Tauri command wrappers, QE settings, HPC commands, task orchestration, and utility helpers.
+  - QE pseudopotential parsing/repair implementation is owned by `src-tauri/src/engines/qe/pseudopotentials.rs`; command names remain here for compatibility.
 - `src-tauri/src/engines/qe`
   - QE engine source of truth.
-  - Contains QE types, input generation, output parsing, runner, bands, phonons, Hubbard, Wannier, EPW, and transport logic.
+  - Contains QE types, input generation, output parsing, runner, pseudopotentials, bands, phonons, Hubbard, Wannier, EPW, and transport logic.
 - `src-tauri/src/qe/mod.rs`
   - Compatibility shim re-exporting `crate::engines::qe`.
 - `src-tauri/src/hpc`
@@ -220,7 +221,7 @@ npm run test:unit
 PR size: one helper group at a time.
 
 - Move QE-specific helpers from `src/lib` to `src/lib/engines/qe`.
-- Start with low-risk pure helpers such as `qeProgress`, `qeBravaisInference`, `hubbard`, and `wannierQuality`.
+- Low-risk pure helpers such as `qeProgress`, `qeBravaisInference`, `hubbard`, `wannierQuality`, EPW helpers, SCF sorting, phonon readiness, and SCF run-settings clipboard now live under `src/lib/engines/qe`.
 - Leave re-export files in old locations until all imports are migrated.
 
 Validation:
@@ -235,6 +236,7 @@ npm run test:unit
 PR size: backend module extraction only.
 
 - Move UPF, SSSP, cutoff, and pseudopotential repair helpers out of `src-tauri/src/lib.rs`.
+- Current state: implementation lives in `src-tauri/src/engines/qe/pseudopotentials.rs`; Tauri command wrappers still live in `src-tauri/src/lib.rs` to preserve command names.
 - Keep Tauri command names stable.
 - Keep local and remote pseudopotential behavior unchanged.
 
@@ -333,3 +335,14 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - QE pseudopotential behavior remains inside QE-owned code.
 - Shared viewers consume normalized datasets only through explicit adapters.
 - Validation commands are run and failures are documented with exact logs.
+
+## Existing Data Migration Needs
+
+No destructive project migration is required for the QE abstraction pass.
+
+- Existing calculation records without `engine_id` must continue to default to `qe`.
+- Existing `calc_type` strings such as `scf`, `bands`, `dos`, `phonon`, `wannier`, `epw`, `transport`, and `hubbard_lrt` should not be renamed.
+- Existing `QEResult` payloads should remain readable and stored as QE-native provenance.
+- New normalized viewer datasets should be derived by adapters, not by rewriting old result payloads in place.
+- When future engines are added, new calculation records should include `engine_id` and may store engine-native result payloads beside normalized summaries.
+- A future optional migration can backfill `engine_id: "qe"` into old project JSON files, but runtime fallback must remain because users may import old archives.

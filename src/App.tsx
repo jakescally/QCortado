@@ -17,7 +17,8 @@ import {
   WannierWizard,
 } from "./components/qe";
 import type { EpwViewerPayload } from "./components/qe";
-import { BandData, BandPlot } from "./components/BandPlot";
+import { BandPlot } from "./components/BandPlot";
+import type { BandData, BandPlotData } from "./components/BandPlot";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { TransportPlot } from "./components/TransportPlot";
@@ -42,7 +43,7 @@ import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
-import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import {
   CrystalData,
   SCFPreset,
@@ -511,7 +512,7 @@ function AppInner() {
 
   // Context for viewing saved band data
   const [viewBandsData, setViewBandsData] = useState<{
-    bandData: any;
+    bandData: BandPlotData;
     fermiEnergy: number | null;
     calculationParameters?: Record<string, unknown> | null;
     calculationContext?: SavedBandsCalculationContext | null;

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
-import { BandData, BandPlot } from "./components/BandPlot";
+import { BandPlot } from "./components/BandPlot";
+import type { BandData, BandPlotData } from "./components/BandPlot";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
 import { EpwViewer } from "./components/qe";
 import type { EpwViewerPayload } from "./components/qe";
@@ -22,7 +23,7 @@ import { HpcProfile } from "./lib/types";
 import { useWindowSize } from "./lib/useWindowSize";
 import { BandsMultiview } from "./components/BandsMultiview";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
-import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import type { TransportResult } from "./lib/transport";
 
 interface ViewerSyncStatus {
@@ -94,7 +95,7 @@ function ViewerAppInner() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const [viewBandsData, setViewBandsData] = useState<{
-    bandData: any;
+    bandData: BandPlotData;
     fermiEnergy: number | null;
     calculationParameters?: Record<string, unknown> | null;
     calculationContext?: SavedBandsCalculationContext | null;

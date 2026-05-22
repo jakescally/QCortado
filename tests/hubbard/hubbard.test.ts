@@ -8,7 +8,7 @@ import {
   getHundJDefaultEv,
   isDudarevDftUScf,
   resolveHubbardUDefault,
-} from "../../src/lib/hubbard";
+} from "../../src/lib/engines/qe/hubbard";
 
 test("recommends Hubbard manifolds for transition metals and f elements", () => {
   const recommendations = getHubbardRecommendations(["O", "Fe", "Ce", "Si"]);

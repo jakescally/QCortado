@@ -22,7 +22,7 @@ import {
 } from "../lib/hpcConfig";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { TransportPlot } from "./TransportPlot";
-import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/engines/qe/wannierQuality";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import type { TransportResult } from "../lib/transport";

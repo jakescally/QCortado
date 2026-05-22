@@ -9,7 +9,7 @@ import {
   SlurmResourceRequest,
 } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
@@ -19,7 +19,7 @@ import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress"
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { isPhononReadyScf } from "../lib/phononReady";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";

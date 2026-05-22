@@ -32,7 +32,7 @@ import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
 } from "../lib/brillouinZoneData";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
@@ -41,8 +41,8 @@ import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress"
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { isPhononReadyScf } from "../lib/phononReady";
-import { getScfHubbardUDisplayValues } from "../lib/hubbard";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
+import { getScfHubbardUDisplayValues } from "../lib/engines/qe/hubbard";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
@@ -63,6 +63,7 @@ import {
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
+import { qeBandDataToBandDataset } from "../lib/engines/qe";
 
 interface CalculationRun {
   id: string;
@@ -1444,6 +1445,15 @@ export function BandStructureWizard({
       const result = finalTask.result as BandData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      const bandDataset = qeBandDataToBandDataset(result, {
+        projectId,
+        cifId: _cifId,
+        sourceCalculationIds: selectedScf?.id ? [selectedScf.id] : undefined,
+        generatedAt: endTime,
+        metadata: {
+          sourceFormat: "legacy-band-data",
+        },
+      });
       await persistLogToConfiguredPath(outputContent);
       const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")
         ? {
@@ -1489,6 +1499,7 @@ export function BandStructureWizard({
               raw_output: outputContent,
               // Store band data for later viewing
               band_data: result,
+              band_dataset: bandDataset,
             },
             started_at: startTime,
             completed_at: endTime,

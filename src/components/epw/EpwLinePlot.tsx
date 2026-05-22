@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { EpwSeriesPoint, formatEpwNumber } from "../../lib/epw";
+import { EpwSeriesPoint, formatEpwNumber } from "../../lib/engines/qe/epw";
 
 interface EpwLinePlotProps {
   title: string;

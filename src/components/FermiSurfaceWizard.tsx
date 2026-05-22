@@ -8,7 +8,7 @@ import {
   SavedStructureData,
   SlurmResourceRequest,
 } from "../lib/types";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";

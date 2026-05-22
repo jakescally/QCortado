@@ -33,7 +33,7 @@ import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
 } from "../lib/brillouinZoneData";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
@@ -57,7 +57,7 @@ import {
   formatWannierConvergenceFlag,
   getWannierQualityIssues,
   WannierQualityIssue,
-} from "../lib/wannierQuality";
+} from "../lib/engines/qe/wannierQuality";
 import {
   getNeutralElectronConfiguration,
   getOutermostOccupiedOrbital,

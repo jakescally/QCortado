@@ -61,6 +61,7 @@ Current QE-owned candidates:
   - `src-tauri/src/engines/qe/output.rs`
   - `src-tauri/src/engines/qe/runner.rs`
   - `src-tauri/src/engines/qe/types.rs`
+  - `src-tauri/src/engines/qe/pseudopotentials.rs`
   - `src-tauri/src/engines/qe/bands.rs`
   - `src-tauri/src/engines/qe/phonon.rs`
   - `src-tauri/src/engines/qe/hubbard.rs`
@@ -84,14 +85,16 @@ Current QE-owned candidates:
   - `src/lib/engines/qe/bravaisInference.ts`
   - `src/lib/engines/qe/pseudopotentialCutoffs.ts`
   - `src/lib/engines/qe/pseudopotentialMetadataCache.ts`
+  - `src/lib/engines/qe/hubbard.ts`
+  - `src/lib/engines/qe/wannierQuality.ts`
+  - `src/lib/engines/qe/epw.ts`
+  - `src/lib/engines/qe/scfRunSettingsClipboard.ts`
+  - `src/lib/engines/qe/scfSorting.ts`
+  - `src/lib/engines/qe/phononReady.ts`
   - `src/lib/engines/qe/hpc.ts`
   - `src/lib/engines/qe/hpcProfiles.ts`
   - `src/lib/engines/qe/bandDatasetAdapter.ts`
-  - `src/lib/qeProgress.ts`, `src/lib/qeBravaisInference.ts`, `src/lib/pseudopotentialCutoffs.ts`, and `src/lib/pseudopotentialMetadataCache.ts` are compatibility shims only.
-  - `src/lib/hubbard.ts`
-  - `src/lib/wannierQuality.ts`
-  - `src/lib/epw.ts`
-  - `src/lib/scfRunSettingsClipboard.ts`
+  - Top-level files such as `src/lib/qeProgress.ts`, `src/lib/hubbard.ts`, and `src/lib/epw.ts` are compatibility shims only.
 
 QE-specific concepts include:
 

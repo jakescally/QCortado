@@ -198,7 +198,7 @@ Future Wien2k adapter sources:
 
 Current frontend type:
 
-- `EpwViewerData` in `src/lib/epw.ts`.
+- `EpwViewerData` in `src/lib/engines/qe/epw.ts`.
 
 EPW is QE-specific. Keep the EPW payload engine-native, but expose generic table and series views where useful.
 
