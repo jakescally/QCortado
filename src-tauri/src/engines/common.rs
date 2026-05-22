@@ -42,3 +42,10 @@ pub fn qe_engine_descriptor() -> EngineDescriptor {
 pub fn implemented_engine_descriptors() -> Vec<EngineDescriptor> {
     vec![qe_engine_descriptor()]
 }
+
+/// Returns true when an engine can be selected for project execution today.
+pub fn is_implemented_engine(engine_id: EngineId) -> bool {
+    implemented_engine_descriptors()
+        .iter()
+        .any(|descriptor| descriptor.id == engine_id)
+}

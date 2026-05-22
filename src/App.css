@@ -6112,6 +6112,74 @@ html[data-theme="dark"] {
   letter-spacing: 0.5px;
 }
 
+.engine-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.engine-selector-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #718096;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.engine-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.18rem;
+  padding: 0.14rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 999px;
+  background: #f7fafc;
+}
+
+.engine-switcher button {
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #718096;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.34rem 0.58rem;
+  cursor: pointer;
+}
+
+.engine-switcher button.active {
+  background: #1d4ed8;
+  color: #eff6ff;
+}
+
+.engine-switcher button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.engine-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  border: 1px solid #cbd5e0;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #2d3748;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.engine-add-btn:hover {
+  background: #edf2f7;
+  border-color: #a0aec0;
+}
+
 .structure-selector select {
   padding: 0.5rem 1rem;
   font-size: 0.9rem;
@@ -6496,7 +6564,8 @@ html[data-theme="dark"] {
     color: #ebf8ff;
   }
 
-  .structure-selector-label {
+  .structure-selector-label,
+  .engine-selector-label {
     color: #a0aec0;
   }
 
@@ -6504,6 +6573,31 @@ html[data-theme="dark"] {
     background: #2d3748;
     border-color: #4a5568;
     color: #e2e8f0;
+  }
+
+  .engine-switcher {
+    background: #1a202c;
+    border-color: #4a5568;
+  }
+
+  .engine-switcher button {
+    color: #a0aec0;
+  }
+
+  .engine-switcher button.active {
+    background: #2b6cb0;
+    color: #ebf8ff;
+  }
+
+  .engine-add-btn {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .engine-add-btn:hover {
+    background: #4a5568;
+    border-color: #718096;
   }
 
   .history-sort-control label {

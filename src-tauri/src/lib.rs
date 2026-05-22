@@ -30,6 +30,11 @@ use process_manager::ProcessManager;
 
 const ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING: bool = false;
 
+#[tauri::command]
+fn list_available_engines() -> Vec<engines::EngineDescriptor> {
+    engines::common::implemented_engine_descriptors()
+}
+
 // Command names remain stable while QE-specific behavior is owned by the QE
 // engine module.
 use engines::qe as qe_engine;
@@ -14318,6 +14323,7 @@ pub fn run() {
     #[cfg(feature = "viewer")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_app_role,
+        list_available_engines,
         hpc_list_profiles,
         hpc_import_preset_bundle,
         hpc_save_profile,
@@ -14348,6 +14354,7 @@ pub fn run() {
     #[cfg(not(feature = "viewer"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_app_role,
+        list_available_engines,
         get_viewer_auto_publish_enabled,
         set_viewer_auto_publish_enabled,
         set_qe_path,
@@ -14455,6 +14462,7 @@ pub fn run() {
         projects::get_project_calculation_logs,
         projects::get_project_calculation_inputs,
         projects::update_project_metadata,
+        projects::set_project_active_engine,
         projects::update_calculation_name,
         projects::update_calculation_band_viewer_metadata,
         projects::rename_project_folder,

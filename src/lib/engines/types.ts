@@ -18,7 +18,7 @@ export type EngineId = ImplementedEngineId | ReservedEngineId;
 
 export type EngineImplementationStatus = "implemented" | "reserved";
 
-export type EngineExecutionMode = "local" | "hpc";
+export type EngineExecutionMode = "local" | "hpc" | "remote";
 
 /**
  * Normalized calculation categories for project/result metadata.
@@ -71,4 +71,3 @@ export interface EngineTagged {
    */
   engineId: EngineId;
 }
-

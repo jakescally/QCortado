@@ -12,7 +12,13 @@ import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorti
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
-import type { EngineId } from "../lib/engines/types";
+import {
+  DEFAULT_ENGINE_ID,
+  FALLBACK_ENGINE_DESCRIPTORS,
+  getEngineLabel,
+  getEngineShortLabel,
+} from "../lib/engines";
+import type { EngineDescriptor, EngineId } from "../lib/engines/types";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
@@ -95,6 +101,7 @@ interface Project {
   name: string;
   description: string | null;
   created_at: string;
+  active_engine_id?: EngineId | null;
   cif_variants: CifVariant[];
   last_opened_cif_id: string | null;
 }
@@ -1345,6 +1352,10 @@ export function ProjectDashboard({
 }: ProjectDashboardProps) {
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
+  const [engineDescriptors, setEngineDescriptors] = useState<EngineDescriptor[]>(
+    () => Array.from(FALLBACK_ENGINE_DESCRIPTORS),
+  );
+  const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -1412,10 +1423,39 @@ export function ProjectDashboard({
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
   const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>(() => getStoredSortMode());
+  const activeEngineId = project?.active_engine_id ?? DEFAULT_ENGINE_ID;
+  const displayedEngineDescriptors = useMemo(() => {
+    if (engineDescriptors.some((descriptor) => descriptor.id === activeEngineId)) {
+      return engineDescriptors;
+    }
+    const fallback = FALLBACK_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === activeEngineId);
+    return fallback ? [...engineDescriptors, fallback] : engineDescriptors;
+  }, [activeEngineId, engineDescriptors]);
 
   useEffect(() => {
     loadProject();
   }, [projectId, refreshToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadEngineDescriptors() {
+      try {
+        const descriptors = await invoke<EngineDescriptor[]>("list_available_engines");
+        if (!cancelled && descriptors.length > 0) {
+          setEngineDescriptors(descriptors);
+        }
+      } catch (e) {
+        console.warn("Failed to load engine descriptors:", e);
+      }
+    }
+
+    void loadEngineDescriptors();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setCalculationDetailsById({});
@@ -1464,6 +1504,75 @@ export function ProjectDashboard({
           </div>
         )}
       </>
+    );
+  }
+
+  async function handleEngineChange(nextEngineId: EngineId) {
+    if (!project || nextEngineId === activeEngineId || isSwitchingEngine) {
+      return;
+    }
+    if (readOnly) {
+      setInfoMessage("Engine switching is disabled in this synced project snapshot.");
+      return;
+    }
+
+    setIsSwitchingEngine(true);
+    setError(null);
+    try {
+      const updatedProject = await invoke<Project>("set_project_active_engine", {
+        projectId,
+        engineId: nextEngineId,
+      });
+      setProject(updatedProject);
+      setInfoMessage(`Active engine set to ${getEngineLabel(displayedEngineDescriptors, nextEngineId)}.`);
+    } catch (e) {
+      console.error("Failed to switch project engine:", e);
+      setError(`Failed to switch project engine: ${e}`);
+    } finally {
+      setIsSwitchingEngine(false);
+    }
+  }
+
+  function handleAddEngineClick() {
+    setInfoMessage("Additional engine setup is not implemented yet. Quantum ESPRESSO remains the only available engine.");
+  }
+
+  function renderEngineSelector() {
+    return (
+      <div className="engine-selector" aria-label="Computation engine">
+        <span className="engine-selector-label">Engine</span>
+        <div className="engine-switcher" role="group" aria-label="Active computation engine">
+          {displayedEngineDescriptors.map((engine) => {
+            const isActive = engine.id === activeEngineId;
+            const disabled = readOnly || isSwitchingEngine || engine.status !== "implemented";
+            return (
+              <button
+                key={engine.id}
+                type="button"
+                className={isActive ? "active" : ""}
+                aria-pressed={isActive}
+                title={engine.label}
+                disabled={disabled}
+                onClick={() => void handleEngineChange(engine.id)}
+              >
+                {getEngineShortLabel(engine)}
+              </button>
+            );
+          })}
+        </div>
+        {!readOnly && (
+          <InfoTooltip text="Add computation engine">
+            <button
+              type="button"
+              className="engine-add-btn"
+              aria-label="Add computation engine"
+              onClick={handleAddEngineClick}
+            >
+              +
+            </button>
+          </InfoTooltip>
+        )}
+      </div>
     );
   }
 
@@ -3285,6 +3394,7 @@ function normalizeSavedKPath(value: unknown): string {
             )}
           </div>
           <div className="dashboard-header-actions">
+            {renderEngineSelector()}
             <InfoTooltip text="Reload project data">
               <button
                 className="dashboard-refresh-btn"
@@ -3382,6 +3492,7 @@ function normalizeSavedKPath(value: unknown): string {
           )}
         </div>
         <div className="dashboard-header-actions">
+          {renderEngineSelector()}
           <InfoTooltip text="Reload project data">
             <button
               className="dashboard-refresh-btn"

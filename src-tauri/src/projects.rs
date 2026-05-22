@@ -26,6 +26,7 @@ use crate::engines::qe::{
     add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
     read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
+use crate::engines::common::{is_implemented_engine, LEGACY_PROJECT_ENGINE_ID};
 use crate::engines::EngineId;
 
 // ============================================================================
@@ -42,6 +43,9 @@ pub struct Project {
     /// Optional parent folder for organizing projects in the browser
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Currently selected computation engine for this project.
+    #[serde(default)]
+    pub active_engine_id: EngineId,
     pub cif_variants: Vec<CifVariant>,
     /// ID of the last opened CIF variant (for restoring view state)
     #[serde(default)]
@@ -4037,6 +4041,7 @@ pub fn create_project(
         description,
         created_at: now_iso(),
         folder_id: None,
+        active_engine_id: LEGACY_PROJECT_ENGINE_ID,
         cif_variants: Vec::new(),
         last_opened_cif_id: None,
     };
@@ -4318,6 +4323,42 @@ pub fn update_project_metadata(
     project.description = normalized_description;
 
     // Save updated project
+    write_project_json_summary(&project_json_path, &project)?;
+
+    queue_viewer_library_publish(&app);
+    Ok(project)
+}
+
+/// Updates the active computation engine for a project.
+///
+/// QE is the only implemented engine today. The validation here keeps the
+/// project-level switch path ready for future engines without allowing reserved
+/// engine identities to change workflow behavior prematurely.
+#[tauri::command]
+pub fn set_project_active_engine(
+    app: AppHandle,
+    project_id: String,
+    engine_id: EngineId,
+) -> Result<Project, String> {
+    ensure_research_mode()?;
+    if !is_implemented_engine(engine_id) {
+        return Err(format!(
+            "Engine '{}' is not implemented yet",
+            engine_id.as_str()
+        ));
+    }
+
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    project.active_engine_id = engine_id;
+
     write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
@@ -6337,6 +6378,7 @@ mod tests {
         remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
         summarize_qe_result_for_project, CalculationRun,
     };
+    use super::Project;
     use crate::engines::EngineId;
     use crate::engines::qe::QEResult;
     use std::fs;
@@ -6374,6 +6416,23 @@ mod tests {
 
         assert_eq!(calc.engine_id, EngineId::Qe);
         assert_eq!(calc.calc_type, "scf");
+    }
+
+    #[test]
+    fn project_without_active_engine_id_defaults_to_qe() {
+        let raw = serde_json::json!({
+            "id": "legacy-project",
+            "name": "Legacy Project",
+            "description": null,
+            "created_at": "2026-05-21T00:00:00.000Z",
+            "cif_variants": [],
+            "last_opened_cif_id": null
+        });
+
+        let project: Project =
+            serde_json::from_value(raw).expect("legacy project should deserialize");
+
+        assert_eq!(project.active_engine_id, EngineId::Qe);
     }
 
     #[test]
