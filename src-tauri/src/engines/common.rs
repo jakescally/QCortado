@@ -7,6 +7,7 @@
 use super::types::{
     CalculationKind, EngineDescriptor, EngineExecutionMode, EngineId, EngineImplementationStatus,
 };
+use super::plugin::EnginePlugin;
 
 /// Existing projects and saved calculations without explicit engine metadata
 /// should be treated as Quantum ESPRESSO during the migration.
@@ -40,12 +41,13 @@ pub fn qe_engine_descriptor() -> EngineDescriptor {
 
 /// Engine descriptors that are safe to present as implemented today.
 pub fn implemented_engine_descriptors() -> Vec<EngineDescriptor> {
-    vec![qe_engine_descriptor()]
+    super::plugin::implemented_engine_plugins()
+        .into_iter()
+        .map(EnginePlugin::descriptor)
+        .collect()
 }
 
 /// Returns true when an engine can be selected for project execution today.
 pub fn is_implemented_engine(engine_id: EngineId) -> bool {
-    implemented_engine_descriptors()
-        .iter()
-        .any(|descriptor| descriptor.id == engine_id)
+    super::plugin::get_implemented_engine_plugin(engine_id).is_some()
 }

@@ -43,6 +43,7 @@ import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
+import { getEngineWorkflowView } from "./lib/engines";
 import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import {
   CrystalData,
@@ -78,6 +79,7 @@ import {
 import { resolveProfileRemotePseudoDir } from "./lib/engines/qe/hpc";
 import type { HpcHeadlessJobCandidate } from "./lib/hpcConfig";
 import type { TransportResult } from "./lib/transport";
+import type { CalculationKind, EngineId } from "./lib/engines/types";
 
 interface TempCleanupResult {
   removed_paths: string[];
@@ -500,6 +502,15 @@ function AppInner() {
   const [migrateWorkspaceRootDraft, setMigrateWorkspaceRootDraft] = useState("");
   const [migrateProjectRootDraft, setMigrateProjectRootDraft] = useState("");
   const [projectDashboardRefreshToken, setProjectDashboardRefreshToken] = useState(0);
+
+  function resolveEngineWorkflowView(engineId: EngineId, kind: CalculationKind): AppView | null {
+    const view = getEngineWorkflowView(engineId, kind);
+    if (!view) {
+      console.warn(`No frontend workflow route registered for ${engineId}:${kind}`);
+      return null;
+    }
+    return view;
+  }
 
   // Active task ID for reconnection when navigating to wizard from indicator
   const [reconnectTaskId, setReconnectTaskId] = useState<string | null>(null);
@@ -3906,7 +3917,7 @@ function AppInner() {
             setCurrentView("project-browser");
             setSelectedProjectId(null);
           }}
-          onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures, calculations) => {
+          onRunSCF={(engineId, cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures, calculations) => {
             setScfContext({
               cifId,
               crystalData,
@@ -3918,16 +3929,16 @@ function AppInner() {
               optimizedStructures,
               calculations,
             });
-            setCurrentView("scf-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, preset === "relax" ? "structure_optimization" : "scf") ?? "scf-wizard");
           }}
-          onRunBands={(cifId, crystalData, scfCalculations) => {
+          onRunBands={(engineId, cifId, crystalData, scfCalculations) => {
             setBandsContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("bands-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "bands") ?? "bands-wizard");
           }}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({
@@ -3938,80 +3949,80 @@ function AppInner() {
             });
             setCurrentView("bands-viewer");
           }}
-          onRunDos={(cifId, crystalData, scfCalculations) => {
+          onRunDos={(engineId, cifId, crystalData, scfCalculations) => {
             setDosContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("dos-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "dos") ?? "dos-wizard");
           }}
           onViewDos={(dosData, fermiEnergy) => {
             setViewDosData({ dosData, fermiEnergy });
             setCurrentView("dos-viewer");
           }}
-          onRunWannier={(cifId, crystalData, scfCalculations) => {
+          onRunWannier={(engineId, cifId, crystalData, scfCalculations) => {
             setWannierContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("wannier-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "wannier") ?? "wannier-wizard");
           }}
           onViewWannier={(wannierData, fermiEnergy, overlayOptions = []) => {
             setViewWannierData({ result: wannierData, fermiEnergy, overlayOptions });
             setCurrentView("wannier-viewer");
           }}
-          onRunTransport={(cifId, crystalData, wannierCalculations) => {
+          onRunTransport={(engineId, cifId, crystalData, wannierCalculations) => {
             setTransportContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               wannierCalculations,
             });
-            setCurrentView("transport-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "transport") ?? "transport-wizard");
           }}
           onViewTransport={(transportData) => {
             setViewTransportData({ data: transportData });
             setCurrentView("transport-viewer");
           }}
-          onRunFermiSurface={(cifId, crystalData, scfCalculations) => {
+          onRunFermiSurface={(engineId, cifId, crystalData, scfCalculations) => {
             setFermiSurfaceContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("fermi-surface-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "fermi_surface") ?? "fermi-surface-wizard");
           }}
-          onRunPhonons={(cifId, crystalData, scfCalculations) => {
+          onRunPhonons={(engineId, cifId, crystalData, scfCalculations) => {
             setPhononsContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("phonon-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "phonon") ?? "phonon-wizard");
           }}
-          onRunHubbardLrt={(cifId, crystalData, scfCalculations) => {
+          onRunHubbardLrt={(engineId, cifId, crystalData, scfCalculations) => {
             setHubbardLrtContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("hubbard-lrt-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "hubbard_lrt") ?? "hubbard-lrt-wizard");
           }}
-          onRunEPW={(cifId, crystalData, calculations) => {
+          onRunEPW={(engineId, cifId, crystalData, calculations) => {
             setEpwContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               calculations,
             });
-            setCurrentView("epw-wizard");
+            setCurrentView(resolveEngineWorkflowView(engineId, "epw") ?? "epw-wizard");
           }}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({

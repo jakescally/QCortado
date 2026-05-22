@@ -16,6 +16,7 @@ pub mod hubbard;
 pub mod input;
 pub mod output;
 pub mod phonon;
+pub mod plugin;
 pub mod pseudopotentials;
 pub mod runner;
 pub mod transport;
@@ -52,6 +53,7 @@ pub use phonon::{
     add_phonon_symmetry_markers, parse_ph_output, parse_phonon_dispersion, parse_phonon_dos,
     read_phonon_dispersion_file, read_phonon_dos_file,
 };
+pub use plugin::{QeEnginePlugin, QE_ENGINE_PLUGIN};
 pub use pseudopotentials::{
     PseudopotentialInventoryEntry, PseudopotentialMetadata, PslibraryPseudoRepairResult,
     SSSPElementData,

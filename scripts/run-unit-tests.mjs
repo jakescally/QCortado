@@ -8,6 +8,7 @@ const testEntries = [
   "tests/bandDatasetAdapters/bandDatasetAdapters.test.ts",
   "tests/bandPlot/bandEnergyReference.test.ts",
   "tests/cifSubstitution/cifSubstitution.test.ts",
+  "tests/enginePlugin/enginePluginRegistry.test.ts",
   "tests/epw/epwUtils.test.ts",
   "tests/transport/transportUtils.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",

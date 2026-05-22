@@ -9,7 +9,9 @@
 //! metadata and result/viewer datasets where that is useful.
 
 pub mod common;
+pub mod plugin;
 pub mod qe;
 pub mod types;
 
+pub use plugin::*;
 pub use types::*;

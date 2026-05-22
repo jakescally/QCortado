@@ -35,6 +35,19 @@ fn list_available_engines() -> Vec<engines::EngineDescriptor> {
     engines::common::implemented_engine_descriptors()
 }
 
+#[tauri::command]
+fn list_engine_plugin_manifests() -> Vec<engines::EnginePluginManifest> {
+    engines::plugin::implemented_engine_manifests()
+}
+
+#[tauri::command]
+fn get_engine_plugin_manifest(
+    engine_id: engines::EngineId,
+) -> Result<engines::EnginePluginManifest, String> {
+    engines::plugin::get_implemented_engine_manifest(engine_id)
+        .ok_or_else(|| format!("Engine '{}' is not implemented yet", engine_id.as_str()))
+}
+
 // Command names remain stable while QE-specific behavior is owned by the QE
 // engine module.
 use engines::qe as qe_engine;
@@ -14324,6 +14337,8 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_app_role,
         list_available_engines,
+        list_engine_plugin_manifests,
+        get_engine_plugin_manifest,
         hpc_list_profiles,
         hpc_import_preset_bundle,
         hpc_save_profile,
@@ -14355,6 +14370,8 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         get_app_role,
         list_available_engines,
+        list_engine_plugin_manifests,
+        get_engine_plugin_manifest,
         get_viewer_auto_publish_enabled,
         set_viewer_auto_publish_enabled,
         set_qe_path,

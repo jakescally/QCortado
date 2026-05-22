@@ -15,9 +15,11 @@ import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
 import {
   DEFAULT_ENGINE_ID,
   FALLBACK_ENGINE_DESCRIPTORS,
+  FALLBACK_ENGINE_PLUGIN_MANIFESTS,
   getEngineLabel,
   getEngineShortLabel,
 } from "../lib/engines";
+import type { EnginePluginManifest } from "../lib/engines";
 import type { EngineDescriptor, EngineId } from "../lib/engines/types";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
@@ -113,6 +115,7 @@ interface ProjectDashboardProps {
   onBack: () => void;
   onDeleted: () => void;
   onRunSCF: (
+    engineId: EngineId,
     cifId: string,
     crystalData: CrystalData,
     cifContent: string,
@@ -122,27 +125,27 @@ interface ProjectDashboardProps {
     optimizedStructures?: OptimizedStructureOption[],
     calculations?: CalculationRun[],
   ) => void;
-  onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunBands: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
     bandData: any,
     scfFermiEnergy: number | null,
     calculationParameters?: Record<string, unknown> | null,
     calculationContext?: SavedBandsCalculationContext | null,
   ) => void;
-  onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunDos: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
-  onRunWannier: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunWannier: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewWannier: (
     wannierData: any,
     scfFermiEnergy: number | null,
     overlayOptions?: WannierBandOverlayOption[],
   ) => void;
-  onRunTransport: (cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
+  onRunTransport: (engineId: EngineId, cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
   onViewTransport: (transportData: TransportResult) => void;
-  onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunHubbardLrt: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunEPW: (cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
+  onRunFermiSurface: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunHubbardLrt: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunPhonons: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunEPW: (engineId: EngineId, cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
   onViewEPW: (epwData: any, rawOutput?: string | null) => void;
 }
@@ -1352,8 +1355,8 @@ export function ProjectDashboard({
 }: ProjectDashboardProps) {
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
-  const [engineDescriptors, setEngineDescriptors] = useState<EngineDescriptor[]>(
-    () => Array.from(FALLBACK_ENGINE_DESCRIPTORS),
+  const [enginePluginManifests, setEnginePluginManifests] = useState<EnginePluginManifest[]>(
+    () => Array.from(FALLBACK_ENGINE_PLUGIN_MANIFESTS),
   );
   const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -1424,6 +1427,10 @@ export function ProjectDashboard({
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
   const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>(() => getStoredSortMode());
   const activeEngineId = project?.active_engine_id ?? DEFAULT_ENGINE_ID;
+  const engineDescriptors = useMemo<EngineDescriptor[]>(
+    () => enginePluginManifests.map((manifest) => manifest.descriptor),
+    [enginePluginManifests],
+  );
   const displayedEngineDescriptors = useMemo(() => {
     if (engineDescriptors.some((descriptor) => descriptor.id === activeEngineId)) {
       return engineDescriptors;
@@ -1441,12 +1448,12 @@ export function ProjectDashboard({
 
     async function loadEngineDescriptors() {
       try {
-        const descriptors = await invoke<EngineDescriptor[]>("list_available_engines");
-        if (!cancelled && descriptors.length > 0) {
-          setEngineDescriptors(descriptors);
+        const manifests = await invoke<EnginePluginManifest[]>("list_engine_plugin_manifests");
+        if (!cancelled && manifests.length > 0) {
+          setEnginePluginManifests(manifests);
         }
       } catch (e) {
-        console.warn("Failed to load engine descriptors:", e);
+        console.warn("Failed to load engine plugin manifests:", e);
       }
     }
 
@@ -2437,6 +2444,7 @@ export function ProjectDashboard({
     if (!variant) return;
     const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
     onRunSCF(
+      activeEngineId,
       selectedCifId,
       crystalData,
       cifContent,
@@ -2454,6 +2462,7 @@ export function ProjectDashboard({
     if (!variant) return;
     const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
     onRunSCF(
+      activeEngineId,
       selectedCifId,
       crystalData,
       cifContent,
@@ -2470,35 +2479,35 @@ export function ProjectDashboard({
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     // Pass all calculations for this CIF - the wizard will filter for SCF
-    onRunBands(selectedCifId, crystalData, variant.calculations);
+    onRunBands(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunDos() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunDos(selectedCifId, crystalData, variant.calculations);
+    onRunDos(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunWannier() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunWannier(selectedCifId, crystalData, variant.calculations);
+    onRunWannier(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunTransport() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunTransport(selectedCifId, crystalData, variant.calculations);
+    onRunTransport(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunFermiSurface() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunFermiSurface(selectedCifId, crystalData, variant.calculations);
+    onRunFermiSurface(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   async function handleViewBands(calc: CalculationRun) {
@@ -2878,21 +2887,21 @@ export function ProjectDashboard({
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunPhonons(selectedCifId, crystalData, variant.calculations);
+    onRunPhonons(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunHubbardLrt() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunHubbardLrt(selectedCifId, crystalData, variant.calculations);
+    onRunHubbardLrt(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunEPW() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunEPW(selectedCifId, crystalData, variant.calculations);
+    onRunEPW(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   async function handleViewPhonon(
