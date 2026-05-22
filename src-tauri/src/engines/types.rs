@@ -2,8 +2,8 @@
 //!
 //! These types are deliberately narrow. They identify engines and broad result
 //! categories for platform metadata, but they are not calculation input
-//! schemas. QE-specific inputs remain in [`crate::qe`], and future Wien2k
-//! inputs should model Wien2k workflows directly.
+//! schemas. QE-specific inputs remain in [`crate::engines::qe`], and future
+//! Wien2k inputs should model Wien2k workflows directly.
 
 use serde::{Deserialize, Serialize};
 
@@ -155,7 +155,8 @@ pub struct EngineDescriptor {
 /// Platform-facing metadata for an engine task.
 ///
 /// This is not an input schema. Engine-native input payloads should stay in the
-/// corresponding engine module (`crate::qe` today, future engine modules later).
+/// corresponding engine module (`crate::engines::qe` today, future engine
+/// modules later).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineTaskMetadata {
@@ -355,8 +356,9 @@ pub enum ScfConvergenceState {
 
 /// Engine-neutral SCF result summary for shared project/result metadata.
 ///
-/// This is an output contract only. It does not replace [`crate::qe::QEResult`]
-/// in this phase and it should not be used as an engine-neutral input model.
+/// This is an output contract only. It does not replace
+/// [`crate::engines::qe::QEResult`] in this phase and it should not be used as
+/// an engine-neutral input model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedScfSummary {
@@ -441,9 +443,9 @@ pub struct BandProjectionSummary {
 /// Engine-neutral band-result metadata.
 ///
 /// This intentionally stores metadata and summary values, not full band-energy
-/// arrays. Full engine-native payloads such as QE [`crate::qe::BandData`] stay
-/// unchanged until a later adapter phase wires normalized viewer datasets into
-/// project storage or commands.
+/// arrays. Full engine-native payloads such as QE
+/// [`crate::engines::qe::BandData`] stay unchanged until a later adapter phase
+/// wires normalized viewer datasets into project storage or commands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedBandResultMetadata {

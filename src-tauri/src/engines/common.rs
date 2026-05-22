@@ -15,7 +15,8 @@ pub const LEGACY_PROJECT_ENGINE_ID: EngineId = EngineId::Qe;
 /// Returns the descriptor for the currently implemented QE engine.
 ///
 /// The descriptor is metadata for future engine selection boundaries. Runtime
-/// behavior still flows through [`crate::qe`] and the existing Tauri commands.
+/// behavior still flows through [`crate::engines::qe`] and the existing Tauri
+/// commands.
 pub fn qe_engine_descriptor() -> EngineDescriptor {
     EngineDescriptor {
         id: EngineId::Qe,

@@ -19,7 +19,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -37,7 +37,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -47,22 +47,26 @@ import { formatCalculationSourceLabel, getCalculationName } from "../lib/calcula
 import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import type { EngineId } from "../lib/engines/types";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
+  saveExecutionMode,
+} from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
-  saveExecutionMode,
-} from "../lib/hpcConfig";
+} from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {

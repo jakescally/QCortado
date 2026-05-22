@@ -57,17 +57,19 @@ QE code should own all QE-specific scientific behavior. These concepts should no
 Current QE-owned candidates:
 
 - Backend engine module:
-  - `src-tauri/src/qe/input.rs`
-  - `src-tauri/src/qe/output.rs`
-  - `src-tauri/src/qe/runner.rs`
-  - `src-tauri/src/qe/types.rs`
-  - `src-tauri/src/qe/bands.rs`
-  - `src-tauri/src/qe/phonon.rs`
-  - `src-tauri/src/qe/hubbard.rs`
-  - `src-tauri/src/qe/wannier.rs`
-  - `src-tauri/src/qe/epw.rs`
-  - `src-tauri/src/qe/transport.rs`
+  - `src-tauri/src/engines/qe/input.rs`
+  - `src-tauri/src/engines/qe/output.rs`
+  - `src-tauri/src/engines/qe/runner.rs`
+  - `src-tauri/src/engines/qe/types.rs`
+  - `src-tauri/src/engines/qe/bands.rs`
+  - `src-tauri/src/engines/qe/phonon.rs`
+  - `src-tauri/src/engines/qe/hubbard.rs`
+  - `src-tauri/src/engines/qe/wannier.rs`
+  - `src-tauri/src/engines/qe/epw.rs`
+  - `src-tauri/src/engines/qe/transport.rs`
+  - `src-tauri/src/qe/mod.rs` is a compatibility shim only.
 - Frontend QE workflow UI:
+  - `src/components/qe/index.ts` is the explicit app import boundary.
   - `src/components/SCFWizard.tsx`
   - `src/components/BandStructureWizard.tsx`
   - `src/components/ElectronicDOSWizard.tsx`
@@ -78,10 +80,14 @@ Current QE-owned candidates:
   - `src/components/TransportWizard.tsx`
   - `src/components/EpwWizard.tsx`
 - Frontend QE helpers:
-  - `src/lib/qeProgress.ts`
-  - `src/lib/qeBravaisInference.ts`
-  - `src/lib/pseudopotentialCutoffs.ts`
-  - `src/lib/pseudopotentialMetadataCache.ts`
+  - `src/lib/engines/qe/progress.ts`
+  - `src/lib/engines/qe/bravaisInference.ts`
+  - `src/lib/engines/qe/pseudopotentialCutoffs.ts`
+  - `src/lib/engines/qe/pseudopotentialMetadataCache.ts`
+  - `src/lib/engines/qe/hpc.ts`
+  - `src/lib/engines/qe/hpcProfiles.ts`
+  - `src/lib/engines/qe/bandDatasetAdapter.ts`
+  - `src/lib/qeProgress.ts`, `src/lib/qeBravaisInference.ts`, `src/lib/pseudopotentialCutoffs.ts`, and `src/lib/pseudopotentialMetadataCache.ts` are compatibility shims only.
   - `src/lib/hubbard.ts`
   - `src/lib/wannierQuality.ts`
   - `src/lib/epw.ts`
@@ -118,10 +124,10 @@ Wien2k does not use pseudopotentials. Do not require pseudopotential fields, UPF
 
 The first engine boundary should be intentionally small. It should describe orchestration without pretending every engine has the same physics input.
 
-Suggested frontend shape:
+Current frontend shape:
 
 ```ts
-type EngineId = "qe";
+type EngineId = "qe" | "wien2k"; // "wien2k" is reserved, not implemented.
 
 interface EngineDescriptor {
   id: EngineId;
@@ -144,13 +150,19 @@ interface EngineDescriptor {
 }
 ```
 
-Suggested backend shape:
+Current backend engine identity:
 
 ```rust
 pub enum EngineId {
     Qe,
-    // Wien2k is future work.
+    // Reserved for future work. This does not implement Wien2k.
+    Wien2k,
 }
+```
+
+Suggested future backend orchestration shape:
+
+```rust
 
 pub struct EngineJobBundle {
     pub engine_id: EngineId,
@@ -287,4 +299,3 @@ npm run build
 npm run test:unit
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
-

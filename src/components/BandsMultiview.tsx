@@ -20,10 +20,12 @@ import {
   ZeroEnergyReferenceMode,
 } from "./BandPlot";
 import { InfoTooltip } from "./InfoTooltip";
+import type { EngineId } from "../lib/engines/types";
 
 export interface BandsMultiviewCalculation {
   folder_id?: string | null;
   folder_name?: string | null;
+  engine_id?: EngineId | null;
   project_id: string;
   project_name: string;
   cif_id: string;

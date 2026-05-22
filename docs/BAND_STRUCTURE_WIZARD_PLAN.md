@@ -37,7 +37,7 @@ Dashboard (select SCF)
 - `src/lib/brillouinZone.ts` - Crystal system detection utilities
 
 **Backend:**
-- `src-tauri/src/qe/bands.rs` - Band structure input generation and output parsing
+- `src-tauri/src/engines/qe/bands.rs` - Band structure input generation and output parsing
 
 ---
 
@@ -138,7 +138,7 @@ UI Components:
 
 ## Phase 2: Backend - Band Calculation
 
-### 2.1 Input Generation (`src-tauri/src/qe/bands.rs`)
+### 2.1 Input Generation (`src-tauri/src/engines/qe/bands.rs`)
 
 Generate NSCF input for bands:
 

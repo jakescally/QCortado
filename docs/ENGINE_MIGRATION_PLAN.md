@@ -28,21 +28,23 @@ This plan is for boundary extraction only. It does not implement Wien2k, change 
 - `src/components`
   - Mixes shared UI and engine-specific workflows.
   - Shared candidates: `ProjectBrowser`, `ProjectDashboard`, `TaskQueuePage`, `LiveOutputPanel`, `StorageManagerPage`, HPC pages, `UnitCellViewer`, `BrillouinZoneViewer`.
-  - QE-specific workflows: `SCFWizard`, `BandStructureWizard`, `ElectronicDOSWizard`, `FermiSurfaceWizard`, `HubbardLrtWizard`, `PhononWizard`, `WannierWizard`, `TransportWizard`, `EpwWizard`.
+  - QE-specific workflows: imported by app shells through `src/components/qe/index.ts`; the large source files remain in `src/components` for now.
   - Viewer candidates: `BandPlot`, `ElectronicDOSPlot`, `PhononPlot`, `TransportPlot`, `EpwViewer`.
 - `src/lib`
   - Mixes platform utilities, viewer math, and QE-specific helpers.
   - Shared candidates: CIF parsing, symmetry transforms, reciprocal lattice, k-path transforms, live output, task context, theme, storage helpers.
-  - QE-specific candidates: `qeProgress`, `qeBravaisInference`, `pseudopotentialCutoffs`, `pseudopotentialMetadataCache`, `hubbard`, `wannierQuality`, `epw`, QE run settings clipboard.
+  - QE-specific helpers now have an explicit namespace under `src/lib/engines/qe`; top-level QE helper files are compatibility shims where they still exist.
 
 ### Backend
 
 - `src-tauri/src/lib.rs`
   - Main command registration and application state.
   - Current hotspot for QE settings, pseudopotential parsing, HPC commands, task orchestration, and utility helpers.
-- `src-tauri/src/qe`
-  - Existing QE module island.
+- `src-tauri/src/engines/qe`
+  - QE engine source of truth.
   - Contains QE types, input generation, output parsing, runner, bands, phonons, Hubbard, Wannier, EPW, and transport logic.
+- `src-tauri/src/qe/mod.rs`
+  - Compatibility shim re-exporting `crate::engines::qe`.
 - `src-tauri/src/hpc`
   - Shared SSH, Slurm, utilization, cluster snapshots, sync, and viewer library primitives.
   - Still contains QE-shaped profile fields and validation.
@@ -83,13 +85,10 @@ src/
       remote/
 
 src-tauri/src/
-  platform/
-    config.rs
-    projects.rs
-    tasks.rs
-    hpc/
-    storage.rs
-    viewer.rs
+  config.rs
+  projects.rs
+  process_manager.rs
+  hpc/
   results/
     mod.rs
     bands.rs
@@ -98,6 +97,9 @@ src-tauri/src/
     transport.rs
     tables.rs
   engines/
+    mod.rs
+    types.rs
+    common.rs
     qe/
       mod.rs
       types.rs
@@ -115,6 +117,8 @@ src-tauri/src/
       mod.rs
       types.rs
       remote.rs
+  qe/
+    mod.rs                 # compatibility shim only
 ```
 
 This is a target layout, not a single PR. Early PRs should use re-export shims so existing imports and Tauri commands keep working.
@@ -200,7 +204,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 PR size: viewer type extraction and adapters.
 
-- Define normalized result dataset types under `src/results`.
+- Define normalized result dataset types under `src/lib/viewers`.
 - Add QE adapters from current `BandData`, DOS, phonon, transport, and EPW table payloads.
 - Keep viewer props backward compatible during the transition.
 
@@ -215,7 +219,7 @@ npm run test:unit
 
 PR size: one helper group at a time.
 
-- Move QE-specific helpers from `src/lib` to `src/engines/qe/lib`.
+- Move QE-specific helpers from `src/lib` to `src/lib/engines/qe`.
 - Start with low-risk pure helpers such as `qeProgress`, `qeBravaisInference`, `hubbard`, and `wannierQuality`.
 - Leave re-export files in old locations until all imports are migrated.
 
@@ -314,7 +318,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## Files That Should Not Be Refactored in Parallel
 
-- `src-tauri/src/lib.rs` and `src-tauri/src/qe/*`.
+- `src-tauri/src/lib.rs` and `src-tauri/src/engines/qe/*`.
 - `src-tauri/src/projects.rs` and `src/lib/TaskContext.tsx`.
 - `src/lib/types.ts`, `src/lib/hpcConfig.ts`, and `src-tauri/src/hpc/profile.rs`.
 - `src/App.tsx` and `src/ViewerApp.tsx`.
@@ -329,4 +333,3 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - QE pseudopotential behavior remains inside QE-owned code.
 - Shared viewers consume normalized datasets only through explicit adapters.
 - Validation commands are run and failures are documented with exact logs.
-

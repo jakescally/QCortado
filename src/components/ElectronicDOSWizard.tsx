@@ -11,12 +11,12 @@ import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { ElectronicDOSData } from "./ElectronicDOSPlot";
@@ -27,19 +27,23 @@ import { formatCalculationSourceLabel, getCalculationName } from "../lib/calcula
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
+  saveExecutionMode,
+} from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
   listRemotePseudopotentials,
   resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
-  saveExecutionMode,
-} from "../lib/hpcConfig";
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {

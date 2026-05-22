@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   hpcProfileToEngineRuntimeProfile,
   qeHpcProfileToRuntimeProfile,
-} from "../../src/lib/engines";
+} from "../../src/lib/engines/qe";
 import type { HpcProfile } from "../../src/lib/types";
 
 const profile: HpcProfile = {

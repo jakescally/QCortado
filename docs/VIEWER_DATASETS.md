@@ -57,7 +57,8 @@ interface BandPathDataset {
 
 QE adapter sources:
 
-- `src-tauri/src/qe/bands.rs`
+- `src-tauri/src/engines/qe/bands.rs`
+- `src/lib/engines/qe/bandDatasetAdapter.ts`
 - current `BandData` result.
 - optional `projwfc.x` projection groups.
 
@@ -255,7 +256,20 @@ Legacy saved calculations currently store `QEResult`. Existing records should co
 Frontend adapters:
 
 ```text
-src/results/
+src/lib/viewers/
+  bands/
+    types.ts
+  dos/
+    types.ts
+
+src/lib/engines/qe/
+  bandDatasetAdapter.ts
+```
+
+Future target, after more viewer datasets are normalized:
+
+```text
+src/lib/viewers/
   bands/
     types.ts
   dos/
@@ -266,8 +280,12 @@ src/results/
     types.ts
   tables/
     types.ts
-  adapters/
-    qe.ts
+
+src/lib/engines/qe/
+  bandDatasetAdapter.ts
+  dosDatasetAdapter.ts
+  phononDatasetAdapter.ts
+  transportDatasetAdapter.ts
 ```
 
 Backend adapters:
@@ -348,4 +366,3 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - Do not drop QE-native result payloads.
 - Do not remove support for existing saved QE projects.
 - Do not infer Wien2k workflows before the QE boundary is stable.
-

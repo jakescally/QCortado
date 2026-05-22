@@ -7,8 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+use crate::engines::qe::SmearingType;
 use crate::hpc::profile::{ExecutionMode, HpcProfile};
-use crate::qe::SmearingType;
 
 /// Controls how much calculation scratch data is persisted in project history.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

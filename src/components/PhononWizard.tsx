@@ -15,7 +15,7 @@ import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -36,12 +36,15 @@ import {
 } from "../lib/brillouinZoneData";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
-  resolveProfileRemoteQeBinDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  resolveProfileRemoteQeBinDir,
+} from "../lib/engines/qe/hpc";
+import type { EngineId } from "../lib/engines/types";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
@@ -153,6 +156,7 @@ function applyTotalQPoints(path: KPathPoint[], totalQPoints: number): KPathPoint
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {

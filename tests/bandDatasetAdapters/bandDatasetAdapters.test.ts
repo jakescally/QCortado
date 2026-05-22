@@ -4,7 +4,7 @@ import type { BandData } from "../../src/components/BandPlot";
 import {
   legacyBandDataToBandDataset,
   qeBandDataToBandDataset,
-} from "../../src/lib/viewers/bands";
+} from "../../src/lib/engines/qe";
 
 const legacyBandData: BandData = {
   k_points: [0, 0.5, 1],

@@ -25,12 +25,12 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -38,8 +38,10 @@ import { isPhononReadyScf } from "../lib/phononReady";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
+} from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
   getRemotePseudopotentialMetadata,
   loadRemoteSsspData,
   listRemotePseudopotentialInventory,
@@ -47,7 +49,7 @@ import {
   listRemotePseudopotentialMetadata,
   resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
-} from "../lib/hpcConfig";
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import {
@@ -66,7 +68,7 @@ import {
   CutoffStatus,
   SSSPElementData,
   summarizeSelectedPseudoCutoffs,
-} from "../lib/pseudopotentialCutoffs";
+} from "../lib/engines/qe/pseudopotentialCutoffs";
 import {
   getStoredScfRunSettingsClipboardText,
   hasStoredScfRunSettingsClipboardText,
@@ -83,8 +85,8 @@ import {
   readPseudopotentialMetadataCache,
   updateCachedPseudopotentialMetadata,
   writePseudopotentialMetadataCache,
-} from "../lib/pseudopotentialMetadataCache";
-import type { PseudopotentialInventoryEntry } from "../lib/pseudopotentialMetadataCache";
+} from "../lib/engines/qe/pseudopotentialMetadataCache";
+import type { PseudopotentialInventoryEntry } from "../lib/engines/qe/pseudopotentialMetadataCache";
 interface InitialCifData {
   cifId: string;
   crystalData: CrystalData;

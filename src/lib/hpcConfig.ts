@@ -9,7 +9,7 @@ import {
   PseudopotentialMetadata,
   SlurmResourceRequest,
 } from "./types";
-import type { PseudopotentialInventoryEntry } from "./pseudopotentialMetadataCache";
+import type { PseudopotentialInventoryEntry } from "./engines/qe/pseudopotentialMetadataCache";
 
 export interface HpcConnectionTestResult {
   success: boolean;
@@ -276,6 +276,8 @@ export function defaultResourcesForProfile(profile: HpcProfile | null | undefine
   return cloneResourceTemplate(profile.default_cpu_resources, "cpu");
 }
 
+// Transitional QE-specific helpers. New QE call sites should import these via
+// ./engines/qe/hpc so platform code does not need to know QE path names.
 function normalizeRemoteQeBinDir(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
     return null;

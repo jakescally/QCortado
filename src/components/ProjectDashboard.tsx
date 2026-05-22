@@ -12,6 +12,7 @@ import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
 import { isPhononReadyScf } from "../lib/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
+import type { EngineId } from "../lib/engines/types";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
@@ -51,6 +52,7 @@ interface QEResult {
 export interface CalculationRun {
   id: string;
   name?: string | null;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: QEResult | null;

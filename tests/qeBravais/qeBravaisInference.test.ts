@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inferQeBravaisCellFromCif } from "../../src/lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../../src/lib/engines/qe/bravaisInference";
 import { Matrix3x3, Vec3 } from "../../src/lib/reciprocalLattice";
 import { SymmetryTransformResult } from "../../src/lib/symmetryTransform";
 import { CrystalData } from "../../src/lib/types";

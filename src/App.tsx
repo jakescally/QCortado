@@ -4,21 +4,23 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
-import { SCFWizard } from "./components/SCFWizard";
-import { BandStructureWizard } from "./components/BandStructureWizard";
+import {
+  BandStructureWizard,
+  ElectronicDOSWizard,
+  EpwViewer,
+  EpwWizard,
+  FermiSurfaceWizard,
+  HubbardLrtWizard,
+  PhononWizard,
+  SCFWizard,
+  TransportWizard,
+  WannierWizard,
+} from "./components/qe";
+import type { EpwViewerPayload } from "./components/qe";
 import { BandData, BandPlot } from "./components/BandPlot";
-import { ElectronicDOSWizard } from "./components/ElectronicDOSWizard";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
-import { EpwWizard } from "./components/EpwWizard";
-import { EpwViewer } from "./components/EpwViewer";
-import type { EpwViewerPayload } from "./components/EpwViewer";
-import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
-import { PhononWizard } from "./components/PhononWizard";
-import { HubbardLrtWizard } from "./components/HubbardLrtWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { TransportPlot } from "./components/TransportPlot";
-import { TransportWizard } from "./components/TransportWizard";
-import { WannierWizard } from "./components/WannierWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import {
   ProjectDashboard,
@@ -68,11 +70,11 @@ import {
   migrateHpcRemoteRoots,
   normalizeCliDashText,
   openHpcActivityWindow,
-  resolveProfileRemotePseudoDir,
   saveExecutionMode,
   setActiveHpcProfile,
   updateHpcProfileDefaults,
 } from "./lib/hpcConfig";
+import { resolveProfileRemotePseudoDir } from "./lib/engines/qe/hpc";
 import type { HpcHeadlessJobCandidate } from "./lib/hpcConfig";
 import type { TransportResult } from "./lib/transport";
 

@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { ProgressState, progressReducer, defaultProgressState } from "./qeProgress";
+import { ProgressState, progressReducer, defaultProgressState } from "./engines/qe/progress";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "./optimizedStructure";
 import { buildVisibleOutputWindow } from "./liveOutput";
 import { HpcTaskMeta } from "./types";

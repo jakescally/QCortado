@@ -22,10 +22,11 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::config::{self, SaveSizeMode};
-use crate::qe::{
+use crate::engines::qe::{
     add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
     read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
+use crate::engines::EngineId;
 
 // ============================================================================
 // Types
@@ -61,6 +62,8 @@ pub struct CifVariant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationRun {
     pub id: String,
+    #[serde(default)]
+    pub engine_id: EngineId,
     /// Optional user-facing label for the saved calculation entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -111,6 +114,8 @@ pub struct DeleteProjectFolderResult {
 /// Data needed to save a calculation to a project
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveCalculationData {
+    #[serde(default)]
+    pub engine_id: EngineId,
     pub calc_type: String,
     pub parameters: serde_json::Value,
     pub result: QEResult,
@@ -186,6 +191,8 @@ pub struct ProjectArchiveImportResult {
 /// Saved band-structure calculation data used by the multiview browser.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BandsMultiviewCalculation {
+    #[serde(default)]
+    pub engine_id: EngineId,
     #[serde(default)]
     pub folder_id: Option<String>,
     #[serde(default)]
@@ -3937,6 +3944,7 @@ pub async fn list_multiview_band_calculations(
                         })?;
 
                     calculations.push(BandsMultiviewCalculation {
+                        engine_id: full_calc.engine_id,
                         folder_id: folder_id.clone(),
                         folder_name: folder_name.clone(),
                         project_id: project_id.clone(),
@@ -4620,6 +4628,7 @@ pub fn save_calculation(
     // Create calculation run record
     let calc_run = CalculationRun {
         id: calc_id,
+        engine_id: calc_data.engine_id,
         name: None,
         calc_type: calc_data.calc_type,
         parameters: calculation_parameters,
@@ -5302,6 +5311,7 @@ pub fn recover_phonon_calculation(
     let started_at = completed_at.clone();
 
     let calc_data = SaveCalculationData {
+        engine_id: EngineId::Qe,
         calc_type: "phonon".to_string(),
         parameters,
         result,
@@ -6324,7 +6334,8 @@ mod tests {
         remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
         summarize_qe_result_for_project, CalculationRun,
     };
-    use crate::qe::QEResult;
+    use crate::engines::EngineId;
+    use crate::engines::qe::QEResult;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6342,6 +6353,24 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("failed to create temp test directory");
         dir
+    }
+
+    #[test]
+    fn calculation_run_without_engine_id_defaults_to_qe() {
+        let raw = serde_json::json!({
+            "id": "legacy-calc",
+            "calc_type": "scf",
+            "parameters": {},
+            "result": null,
+            "started_at": "2026-05-21T00:00:00.000Z",
+            "completed_at": null
+        });
+
+        let calc: CalculationRun =
+            serde_json::from_value(raw).expect("legacy calculation should deserialize");
+
+        assert_eq!(calc.engine_id, EngineId::Qe);
+        assert_eq!(calc.calc_type, "scf");
     }
 
     #[test]
@@ -6454,6 +6483,7 @@ mod tests {
 
         let mut calculation = CalculationRun {
             id: "test_calc".to_string(),
+            engine_id: EngineId::Qe,
             name: None,
             calc_type: "phonon".to_string(),
             parameters: serde_json::json!({

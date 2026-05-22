@@ -1,9 +1,10 @@
 #![cfg_attr(feature = "viewer", allow(dead_code))]
 
-//! QCortado - A modern UI for Quantum ESPRESSO
+//! QCortado Tauri backend.
 //!
 //! This is the Tauri backend providing:
-//! - QE input generation and validation
+//! - Stable Tauri command entrypoints
+//! - QE input generation and validation through `engines::qe`
 //! - Process execution with streaming output
 //! - Output parsing and result extraction
 //! - Project management
@@ -32,7 +33,10 @@ use process_manager::ProcessManager;
 
 const ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING: bool = false;
 
-use qe::{
+// Command names remain stable while QE-specific behavior is owned by the QE
+// engine module.
+use engines::qe as qe_engine;
+use engines::qe::{
     add_phonon_symmetry_markers, build_epw_input, build_epw_keyword_map, build_hubbard_lrt_result,
     build_transport_win, collect_epw_artifacts, epw_coarse_k_mesh, epw_coarse_q_mesh,
     epw_fine_k_mesh, epw_fine_q_mesh, export_ludwig_bundle, generate_dos_input, generate_hp_input,
@@ -47,7 +51,7 @@ use qe::{
     TransportCalculationConfig, TransportResult, WannierCalculationConfig, WannierResult,
     EPW_SCHEMA_VERSION,
 };
-use qe::{
+use engines::qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input, generate_pw_input,
     generate_wannier90_win, parse_dos_file, parse_projwfc_projection_groups_aligned,
     parse_pw_output, read_bands_gnu_file, BandData, BandsXConfig, KPathPoint, ProjwfcConfig,
@@ -139,7 +143,7 @@ fn normalize_mpi_defaults(
     })
 }
 
-fn get_qe_smearing_default(state: &AppState) -> qe::SmearingType {
+fn get_qe_smearing_default(state: &AppState) -> qe_engine::SmearingType {
     state.qe_defaults.lock().unwrap().smearing.clone()
 }
 
@@ -7427,22 +7431,22 @@ async fn run_bands_calculation(
 
     // Step 1: Create bands calculation from base SCF
     let mut bands_calc = config.base_calculation.clone();
-    bands_calc.calculation = qe::CalculationType::Bands;
+    bands_calc.calculation = qe_engine::CalculationType::Bands;
     if bands_calc.verbosity.is_none() {
         bands_calc.verbosity = Some("high".to_string());
     }
 
     // Convert k_path to KPoints::CrystalB
-    let band_path: Vec<qe::BandPathPoint> = config
+    let band_path: Vec<qe_engine::BandPathPoint> = config
         .k_path
         .iter()
-        .map(|p| qe::BandPathPoint {
+        .map(|p| qe_engine::BandPathPoint {
             k: p.coords,
             npoints: p.npoints,
             label: Some(p.label.clone()),
         })
         .collect();
-    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+    bands_calc.kpoints = qe_engine::KPoints::CrystalB { path: band_path };
 
     // Generate input
     let mut input = generate_pw_input(&bands_calc);
@@ -7741,7 +7745,7 @@ async fn run_bands_calculation(
     );
 
     // Add high-symmetry point markers
-    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+    qe_engine::bands::add_symmetry_markers(&mut band_data, &config.k_path);
 
     if projections_enabled {
         let _ = app.emit("qe-output-line", "");
@@ -9879,7 +9883,7 @@ fn validate_epw_prerequisites(
 
 #[tauri::command]
 fn build_epw_input_preview(config: EpwCalculationConfig) -> Result<EpwInputPreviewResult, String> {
-    qe::build_epw_input_preview(&config)
+    qe_engine::build_epw_input_preview(&config)
 }
 
 // ============================================================================
@@ -10269,20 +10273,20 @@ async fn run_bands_hpc_background(
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut bands_calc = config.base_calculation.clone();
     bands_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
-    bands_calc.calculation = qe::CalculationType::Bands;
+    bands_calc.calculation = qe_engine::CalculationType::Bands;
     if bands_calc.verbosity.is_none() {
         bands_calc.verbosity = Some("high".to_string());
     }
-    let band_path: Vec<qe::BandPathPoint> = config
+    let band_path: Vec<qe_engine::BandPathPoint> = config
         .k_path
         .iter()
-        .map(|point| qe::BandPathPoint {
+        .map(|point| qe_engine::BandPathPoint {
             k: point.coords,
             npoints: point.npoints,
             label: Some(point.label.clone()),
         })
         .collect();
-    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+    bands_calc.kpoints = qe_engine::KPoints::CrystalB { path: band_path };
 
     let mut nscf_input = generate_pw_input(&bands_calc);
     if let Some(nbnd) = config.nbnd {
@@ -10454,7 +10458,7 @@ async fn run_bands_hpc_background(
     let parse_started = std::time::Instant::now();
     let mut band_data = read_bands_gnu_file(&gnu_file, fermi_energy)
         .map_err(|e| format!("Failed to parse band data: {}", e))?;
-    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+    qe_engine::bands::add_symmetry_markers(&mut band_data, &config.k_path);
 
     if projections_enabled {
         let projection_text = {
@@ -10560,21 +10564,21 @@ async fn run_bands_background(
 
     // Step 1: NSCF along k-path
     let mut bands_calc = config.base_calculation.clone();
-    bands_calc.calculation = qe::CalculationType::Bands;
+    bands_calc.calculation = qe_engine::CalculationType::Bands;
     if bands_calc.verbosity.is_none() {
         bands_calc.verbosity = Some("high".to_string());
     }
 
-    let band_path: Vec<qe::BandPathPoint> = config
+    let band_path: Vec<qe_engine::BandPathPoint> = config
         .k_path
         .iter()
-        .map(|p| qe::BandPathPoint {
+        .map(|p| qe_engine::BandPathPoint {
             k: p.coords,
             npoints: p.npoints,
             label: Some(p.label.clone()),
         })
         .collect();
-    bands_calc.kpoints = qe::KPoints::CrystalB { path: band_path };
+    bands_calc.kpoints = qe_engine::KPoints::CrystalB { path: band_path };
 
     let mut input = generate_pw_input(&bands_calc);
     if let Some(nbnd) = config.nbnd {
@@ -10852,7 +10856,7 @@ async fn run_bands_background(
         band_data.energy_range[1]
     ));
 
-    qe::bands::add_symmetry_markers(&mut band_data, &config.k_path);
+    qe_engine::bands::add_symmetry_markers(&mut band_data, &config.k_path);
     emit_line!(format!(
         "[QCortado] bands.dat.gnu parse finished in {:.1}s.",
         parse_started.elapsed().as_secs_f64()
@@ -11184,7 +11188,7 @@ async fn run_wannier_background(
 
     let (nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
 
-    if !matches!(nscf_calc.system.position_units, qe::PositionUnits::Crystal) {
+    if !matches!(nscf_calc.system.position_units, qe_engine::PositionUnits::Crystal) {
         return Err(
             "Wannier v1 requires the base calculation to use crystal fractional atomic positions."
                 .to_string(),
@@ -11192,7 +11196,7 @@ async fn run_wannier_background(
     }
 
     let kpoints = match &nscf_calc.kpoints {
-        qe::KPoints::Crystal { points } => points.clone(),
+        qe_engine::KPoints::Crystal { points } => points.clone(),
         _ => unreachable!(),
     };
     let win_content = generate_wannier90_win(&config, &kpoints)?;
@@ -11366,7 +11370,7 @@ async fn run_wannier_hpc_background(
     nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
 
     let kpoints = match &nscf_calc.kpoints {
-        qe::KPoints::Crystal { points } => points.clone(),
+        qe_engine::KPoints::Crystal { points } => points.clone(),
         _ => unreachable!(),
     };
     let win_content = generate_wannier90_win(&config, &kpoints)?;
@@ -12862,24 +12866,24 @@ async fn run_dos_hpc_background(
     secret: Option<String>,
     resources: Option<hpc::profile::SlurmResourceRequest>,
     recovery_save: Option<hpc::profile::HpcRecoverySaveSpec>,
-    smearing_default: qe::SmearingType,
+    smearing_default: qe_engine::SmearingType,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<ElectronicDosData, String> {
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
     nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
-    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     nscf_calc.verbosity = Some("high".to_string());
-    nscf_calc.kpoints = qe::KPoints::Automatic {
+    nscf_calc.kpoints = qe_engine::KPoints::Automatic {
         grid: config.k_grid,
         offset: [0, 0, 0],
     };
     if nscf_calc.system.degauss.is_none() {
         nscf_calc.system.degauss = config.degauss;
     }
-    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
-        nscf_calc.system.occupations = qe::Occupations::Smearing;
+    if matches!(nscf_calc.system.occupations, qe_engine::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe_engine::Occupations::Smearing;
         nscf_calc.system.smearing = smearing_default;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
@@ -13007,7 +13011,7 @@ async fn run_dos_background(
     mpi_config: Option<MpiConfig>,
     bin_dir: PathBuf,
     execution_prefix: Option<String>,
-    smearing_default: qe::SmearingType,
+    smearing_default: qe_engine::SmearingType,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<ElectronicDosData, String> {
@@ -13055,9 +13059,9 @@ async fn run_dos_background(
     check_cancel!();
 
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     nscf_calc.verbosity = Some("high".to_string());
-    nscf_calc.kpoints = qe::KPoints::Automatic {
+    nscf_calc.kpoints = qe_engine::KPoints::Automatic {
         grid: config.k_grid,
         offset: [0, 0, 0],
     };
@@ -13065,8 +13069,8 @@ async fn run_dos_background(
     if nscf_calc.system.degauss.is_none() {
         nscf_calc.system.degauss = config.degauss;
     }
-    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
-        nscf_calc.system.occupations = qe::Occupations::Smearing;
+    if matches!(nscf_calc.system.occupations, qe_engine::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe_engine::Occupations::Smearing;
         nscf_calc.system.smearing = smearing_default;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
@@ -13402,14 +13406,14 @@ async fn run_fermi_surface_hpc_background(
     secret: Option<String>,
     resources: Option<hpc::profile::SlurmResourceRequest>,
     recovery_save: Option<hpc::profile::HpcRecoverySaveSpec>,
-    smearing_default: qe::SmearingType,
+    smearing_default: qe_engine::SmearingType,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<FermiSurfaceData, String> {
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
     nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
-    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     if nscf_calc.verbosity.is_none() {
         nscf_calc.verbosity = Some("high".to_string());
     }
@@ -13417,15 +13421,15 @@ async fn run_fermi_surface_hpc_background(
         .k_offset
         .unwrap_or([0, 0, 0])
         .map(|value| u32::from(value > 0));
-    nscf_calc.kpoints = qe::KPoints::Automatic {
+    nscf_calc.kpoints = qe_engine::KPoints::Automatic {
         grid: config.k_grid,
         offset: k_offset,
     };
     if nscf_calc.system.degauss.is_none() {
         nscf_calc.system.degauss = Some(0.02);
     }
-    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
-        nscf_calc.system.occupations = qe::Occupations::Smearing;
+    if matches!(nscf_calc.system.occupations, qe_engine::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe_engine::Occupations::Smearing;
         nscf_calc.system.smearing = smearing_default;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
@@ -13550,7 +13554,7 @@ async fn run_fermi_surface_background(
     mpi_config: Option<MpiConfig>,
     bin_dir: PathBuf,
     execution_prefix: Option<String>,
-    smearing_default: qe::SmearingType,
+    smearing_default: qe_engine::SmearingType,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pm: ProcessManager,
 ) -> Result<FermiSurfaceData, String> {
@@ -13598,7 +13602,7 @@ async fn run_fermi_surface_background(
     check_cancel!();
 
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.calculation = qe::CalculationType::Nscf;
+    nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     if nscf_calc.verbosity.is_none() {
         nscf_calc.verbosity = Some("high".to_string());
     }
@@ -13606,7 +13610,7 @@ async fn run_fermi_surface_background(
         .k_offset
         .unwrap_or([0, 0, 0])
         .map(|value| u32::from(value > 0));
-    nscf_calc.kpoints = qe::KPoints::Automatic {
+    nscf_calc.kpoints = qe_engine::KPoints::Automatic {
         grid: config.k_grid,
         offset: k_offset,
     };
@@ -13614,8 +13618,8 @@ async fn run_fermi_surface_background(
     if nscf_calc.system.degauss.is_none() {
         nscf_calc.system.degauss = Some(0.02);
     }
-    if matches!(nscf_calc.system.occupations, qe::Occupations::Fixed) {
-        nscf_calc.system.occupations = qe::Occupations::Smearing;
+    if matches!(nscf_calc.system.occupations, qe_engine::Occupations::Fixed) {
+        nscf_calc.system.occupations = qe_engine::Occupations::Smearing;
         nscf_calc.system.smearing = smearing_default;
         if nscf_calc.system.degauss.is_none() {
             nscf_calc.system.degauss = Some(0.02);
