@@ -63,10 +63,30 @@ fn requirement(
 
 fn structure_panels() -> Vec<SharedWorkflowPanelDescriptor> {
     vec![
-        shared_panel(SharedWorkflowPanelKind::StructureSource, "Project structure", 10, true),
-        shared_panel(SharedWorkflowPanelKind::StructureViewer, "Structure viewer", 20, true),
-        shared_panel(SharedWorkflowPanelKind::HpcRunSettings, "Remote execution settings", 90, true),
-        shared_panel(SharedWorkflowPanelKind::LiveOutput, "Live output", 100, true),
+        shared_panel(
+            SharedWorkflowPanelKind::StructureSource,
+            "Project structure",
+            10,
+            true,
+        ),
+        shared_panel(
+            SharedWorkflowPanelKind::StructureViewer,
+            "Structure viewer",
+            20,
+            true,
+        ),
+        shared_panel(
+            SharedWorkflowPanelKind::HpcRunSettings,
+            "Remote execution settings",
+            90,
+            true,
+        ),
+        shared_panel(
+            SharedWorkflowPanelKind::LiveOutput,
+            "Live output",
+            100,
+            true,
+        ),
         shared_panel(SharedWorkflowPanelKind::ResultSummary, "Results", 110, true),
     ]
 }
@@ -79,8 +99,18 @@ fn source_scf_panels() -> Vec<SharedWorkflowPanelDescriptor> {
             10,
             true,
         ),
-        shared_panel(SharedWorkflowPanelKind::HpcRunSettings, "Remote execution settings", 90, true),
-        shared_panel(SharedWorkflowPanelKind::LiveOutput, "Live output", 100, true),
+        shared_panel(
+            SharedWorkflowPanelKind::HpcRunSettings,
+            "Remote execution settings",
+            90,
+            true,
+        ),
+        shared_panel(
+            SharedWorkflowPanelKind::LiveOutput,
+            "Live output",
+            100,
+            true,
+        ),
         shared_panel(SharedWorkflowPanelKind::ResultSummary, "Results", 110, true),
     ]
 }
@@ -304,7 +334,10 @@ mod tests {
 
         let manifest = WIEN2K_RESERVED_ENGINE_PLUGIN.manifest();
         assert_eq!(manifest.descriptor.id, EngineId::Wien2k);
-        assert_eq!(manifest.descriptor.status, EngineImplementationStatus::Reserved);
+        assert_eq!(
+            manifest.descriptor.status,
+            EngineImplementationStatus::Reserved
+        );
         assert!(manifest.hpc.supports_remote_only);
         assert!(!manifest.hpc.supports_local);
     }

@@ -31,21 +31,30 @@ use process_manager::ProcessManager;
 const ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING: bool = false;
 
 #[tauri::command]
-fn list_available_engines() -> Vec<engines::EngineDescriptor> {
-    engines::common::implemented_engine_descriptors()
+fn list_available_engines(state: State<AppState>) -> Vec<engines::EngineDescriptor> {
+    let installations = state.engine_installations.lock().unwrap().clone();
+    engines::installations::selectable_engine_manifests(&installations)
+        .into_iter()
+        .map(|manifest| manifest.descriptor)
+        .collect()
 }
 
 #[tauri::command]
-fn list_engine_plugin_manifests() -> Vec<engines::EnginePluginManifest> {
-    engines::plugin::implemented_engine_manifests()
+fn list_engine_plugin_manifests(state: State<AppState>) -> Vec<engines::EnginePluginManifest> {
+    let installations = state.engine_installations.lock().unwrap().clone();
+    engines::installations::selectable_engine_manifests(&installations)
 }
 
 #[tauri::command]
 fn get_engine_plugin_manifest(
     engine_id: engines::EngineId,
+    state: State<AppState>,
 ) -> Result<engines::EnginePluginManifest, String> {
-    engines::plugin::get_implemented_engine_manifest(engine_id)
-        .ok_or_else(|| format!("Engine '{}' is not implemented yet", engine_id.as_str()))
+    let installations = state.engine_installations.lock().unwrap().clone();
+    engines::installations::selectable_engine_manifests(&installations)
+        .into_iter()
+        .find(|manifest| manifest.descriptor.id == engine_id)
+        .ok_or_else(|| format!("Engine '{}' has not been added yet", engine_id.as_str()))
 }
 
 // Command names remain stable while QE-specific behavior is owned by the QE
@@ -62,10 +71,10 @@ use engines::qe::{
     DosCalculation, EpwArtifactManifestEntry, EpwCalculationConfig, EpwCalculationV1,
     EpwErrorRecord, EpwInputPreviewResult, EpwPrerequisiteValidation, EpwSourceRef, EpwSourcesV1,
     HubbardLrtConfig, HubbardLrtResult, LudwigExportConfig, LudwigExportResult, MatdynCalculation,
-    PhononPipelineConfig, PhononResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint,
-    PseudopotentialInventoryEntry, PseudopotentialMetadata, PslibraryPseudoRepairResult,
-    SSSPElementData, TransportCalculationConfig, TransportResult, WannierCalculationConfig,
-    WannierResult, EPW_SCHEMA_VERSION,
+    PhononPipelineConfig, PhononResult, PseudopotentialInventoryEntry, PseudopotentialMetadata,
+    PslibraryPseudoRepairResult, Pw2Wannier90Config, Q2RCalculation, QPathPoint, SSSPElementData,
+    TransportCalculationConfig, TransportResult, WannierCalculationConfig, WannierResult,
+    EPW_SCHEMA_VERSION,
 };
 use engines::qe::{
     generate_bands_x_input, generate_projwfc_input, generate_pw2wannier90_input, generate_pw_input,
@@ -98,6 +107,8 @@ pub struct AppState {
     pub hpc_profiles: Mutex<Vec<hpc::profile::HpcProfile>>,
     /// Active HPC profile ID
     pub active_hpc_profile_id: Mutex<Option<String>>,
+    /// Verified remote engine installations.
+    pub engine_installations: Mutex<Vec<engines::installations::EngineInstallation>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -128,6 +139,7 @@ impl Default for AppState {
             execution_mode: Mutex::new(hpc::profile::ExecutionMode::Local),
             hpc_profiles: Mutex::new(Vec::new()),
             active_hpc_profile_id: Mutex::new(None),
+            engine_installations: Mutex::new(Vec::new()),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
@@ -2885,6 +2897,89 @@ fn hpc_get_active_profile_id(state: State<AppState>) -> Option<String> {
     state.active_hpc_profile_id.lock().unwrap().clone()
 }
 
+/// Lists verified remote computation-engine installations.
+#[tauri::command]
+fn list_engine_installations(
+    state: State<AppState>,
+) -> Vec<engines::installations::EngineInstallation> {
+    state.engine_installations.lock().unwrap().clone()
+}
+
+/// Verifies and persists a remote computation-engine installation.
+#[tauri::command]
+async fn add_engine_installation(
+    app: AppHandle,
+    request: engines::installations::EngineInstallationRequest,
+    state: State<'_, AppState>,
+) -> Result<engines::installations::AddEngineInstallationResult, String> {
+    let requested_profile_id = request.hpc_profile_id.trim().to_string();
+    let profile = resolve_hpc_profile_from_state(&state, Some(requested_profile_id))?;
+    let request = request.normalized_for_profile(&profile)?;
+
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let remote_command = engines::installations::build_remote_verification_command(&request);
+    let verification = match hpc::ssh::run_ssh_command_with_timeout(
+        &profile,
+        secret.as_deref(),
+        &remote_command,
+        30,
+    )
+    .await
+    {
+        Ok(output) => engines::installations::parse_verification_output(request.engine_id, &output),
+        Err(err) => engines::installations::EngineInstallationVerification {
+            success: false,
+            message: err,
+            checked_executables: engines::installations::required_engine_executables(
+                request.engine_id,
+            )
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+            version_hint: None,
+        },
+    };
+
+    if !verification.success {
+        return Err(verification.message);
+    }
+
+    let installation = engines::installations::EngineInstallation {
+        engine_id: request.engine_id,
+        hpc_profile_id: request.hpc_profile_id,
+        remote_install_root: request.remote_install_root,
+        remote_workspace_root: request.remote_workspace_root,
+        remote_project_root: request.remote_project_root,
+        verified_executables: verification.checked_executables.clone(),
+        version_hint: verification.version_hint.clone(),
+        verified_at: now_iso(),
+    };
+
+    let updated_installations = {
+        let mut installations = state.engine_installations.lock().unwrap();
+        if let Some(existing) = installations
+            .iter_mut()
+            .find(|entry| entry.engine_id == installation.engine_id)
+        {
+            *existing = installation.clone();
+        } else {
+            installations.push(installation.clone());
+        }
+        installations.clone()
+    };
+    config::update_engine_installations(&app, updated_installations)?;
+
+    Ok(engines::installations::AddEngineInstallationResult {
+        installation,
+        verification,
+    })
+}
+
 /// Tests SSH connection for the selected HPC profile.
 #[tauri::command]
 async fn hpc_test_connection(
@@ -3322,7 +3417,9 @@ async fn hpc_list_remote_pseudopotentials(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3386,7 +3483,9 @@ async fn hpc_list_remote_pseudopotential_inventory(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3513,7 +3612,9 @@ async fn hpc_repair_remote_pslibrary_pseudopotentials(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3573,7 +3674,9 @@ async fn hpc_list_remote_pseudopotential_metadata(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3642,7 +3745,9 @@ async fn hpc_get_remote_pseudopotential_metadata(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -3720,7 +3825,9 @@ async fn hpc_load_remote_sssp_data(
 
     let remote_pseudo_dir = pseudo_dir
         .as_deref()
-        .unwrap_or_else(|| profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type()))
+        .unwrap_or_else(|| {
+            profile.remote_pseudo_dir_for_resource(profile.preferred_resource_type())
+        })
         .trim()
         .to_string();
     if remote_pseudo_dir.is_empty() {
@@ -5211,9 +5318,11 @@ async fn get_pseudopotential_metadata(
 async fn load_sssp_data(
     pseudo_dir: String,
 ) -> Result<std::collections::HashMap<String, SSSPElementData>, String> {
-    tokio::task::spawn_blocking(move || qe_engine::pseudopotentials::load_sssp_data_sync(pseudo_dir))
-        .await
-        .map_err(|e| format!("Failed to join SSSP loading task: {}", e))?
+    tokio::task::spawn_blocking(move || {
+        qe_engine::pseudopotentials::load_sssp_data_sync(pseudo_dir)
+    })
+    .await
+    .map_err(|e| format!("Failed to join SSSP loading task: {}", e))?
 }
 
 // ============================================================================
@@ -8837,7 +8946,9 @@ async fn run_scf_hpc_background(
 ) -> Result<QEResult, String> {
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut remote_calculation = calculation;
-    remote_calculation.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    remote_calculation.pseudo_dir = profile
+        .remote_pseudo_dir_for_resource(resource_type)
+        .to_string();
     let input = generate_pw_input(&remote_calculation);
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let commands = vec![
@@ -9100,7 +9211,9 @@ async fn run_bands_hpc_background(
     let pipeline_start = std::time::Instant::now();
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut bands_calc = config.base_calculation.clone();
-    bands_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    bands_calc.pseudo_dir = profile
+        .remote_pseudo_dir_for_resource(resource_type)
+        .to_string();
     bands_calc.calculation = qe_engine::CalculationType::Bands;
     if bands_calc.verbosity.is_none() {
         bands_calc.verbosity = Some("high".to_string());
@@ -10016,7 +10129,10 @@ async fn run_wannier_background(
 
     let (nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
 
-    if !matches!(nscf_calc.system.position_units, qe_engine::PositionUnits::Crystal) {
+    if !matches!(
+        nscf_calc.system.position_units,
+        qe_engine::PositionUnits::Crystal
+    ) {
         return Err(
             "Wannier v1 requires the base calculation to use crystal fractional atomic positions."
                 .to_string(),
@@ -10195,7 +10311,9 @@ async fn run_wannier_hpc_background(
 
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let (mut nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    nscf_calc.pseudo_dir = profile
+        .remote_pseudo_dir_for_resource(resource_type)
+        .to_string();
 
     let kpoints = match &nscf_calc.kpoints {
         qe_engine::KPoints::Crystal { points } => points.clone(),
@@ -11700,7 +11818,9 @@ async fn run_dos_hpc_background(
 ) -> Result<ElectronicDosData, String> {
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    nscf_calc.pseudo_dir = profile
+        .remote_pseudo_dir_for_resource(resource_type)
+        .to_string();
     nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     nscf_calc.verbosity = Some("high".to_string());
     nscf_calc.kpoints = qe_engine::KPoints::Automatic {
@@ -12240,7 +12360,9 @@ async fn run_fermi_surface_hpc_background(
 ) -> Result<FermiSurfaceData, String> {
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let mut nscf_calc = config.base_calculation.clone();
-    nscf_calc.pseudo_dir = profile.remote_pseudo_dir_for_resource(resource_type).to_string();
+    nscf_calc.pseudo_dir = profile
+        .remote_pseudo_dir_for_resource(resource_type)
+        .to_string();
     nscf_calc.calculation = qe_engine::CalculationType::Nscf;
     if nscf_calc.verbosity.is_none() {
         nscf_calc.verbosity = Some("high".to_string());
@@ -14215,6 +14337,8 @@ pub fn run() {
             let mut execution_mode = hpc::profile::ExecutionMode::Local;
             let mut hpc_profiles: Vec<hpc::profile::HpcProfile> = Vec::new();
             let mut active_hpc_profile_id: Option<String> = None;
+            let mut engine_installations: Vec<engines::installations::EngineInstallation> =
+                Vec::new();
             let mut viewer_auto_publish_enabled = true;
             let mut viewer_sync_status = hpc::viewer_library::ViewerSyncStatus::default();
             match config::load_config(&app.handle()) {
@@ -14251,6 +14375,7 @@ pub fn run() {
                     execution_mode = cfg.execution_mode;
                     hpc_profiles = cfg.hpc_profiles;
                     active_hpc_profile_id = cfg.active_hpc_profile_id;
+                    engine_installations = cfg.engine_installations;
                     viewer_auto_publish_enabled = cfg.viewer_auto_publish_enabled;
                     viewer_sync_status.last_synced_at = cfg.viewer_last_sync_at;
                     viewer_sync_status.last_error = cfg.viewer_last_sync_error;
@@ -14273,6 +14398,7 @@ pub fn run() {
                 execution_mode: Mutex::new(execution_mode),
                 hpc_profiles: Mutex::new(hpc_profiles),
                 active_hpc_profile_id: Mutex::new(active_hpc_profile_id),
+                engine_installations: Mutex::new(engine_installations),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
@@ -14344,6 +14470,8 @@ pub fn run() {
         hpc_save_profile,
         hpc_set_active_profile,
         hpc_get_active_profile_id,
+        list_engine_installations,
+        add_engine_installation,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -14401,6 +14529,8 @@ pub fn run() {
         hpc_delete_profile,
         hpc_set_active_profile,
         hpc_get_active_profile_id,
+        list_engine_installations,
+        add_engine_installation,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,

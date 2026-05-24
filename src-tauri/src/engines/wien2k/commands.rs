@@ -134,10 +134,19 @@ mod tests {
         let plan = build_init_lapw_plan(&case_ref(), &Wien2kInitializationSettings::default());
 
         assert_eq!(plan.program.script_name(), "init_lapw");
-        assert_eq!(plan.working_directory, "/scratch/qcortado/projects/project-1/Si");
+        assert_eq!(
+            plan.working_directory,
+            "/scratch/qcortado/projects/project-1/Si"
+        );
         assert!(plan.argv.iter().any(|arg| arg == "-rkmax"));
-        assert!(plan.expected_artifacts.iter().any(|artifact| artifact.basename == "Si.struct"));
-        assert!(plan.expected_artifacts.iter().any(|artifact| artifact.basename == "Si.clmsum"));
+        assert!(plan
+            .expected_artifacts
+            .iter()
+            .any(|artifact| artifact.basename == "Si.struct"));
+        assert!(plan
+            .expected_artifacts
+            .iter()
+            .any(|artifact| artifact.basename == "Si.clmsum"));
     }
 
     #[test]
@@ -153,7 +162,10 @@ mod tests {
         assert!(plan.argv.iter().any(|arg| arg == "-p"));
         assert_eq!(
             plan.environment,
-            vec![("SCRATCH".to_string(), "/scratch/qcortado/work/Si".to_string())]
+            vec![(
+                "SCRATCH".to_string(),
+                "/scratch/qcortado/work/Si".to_string()
+            )]
         );
     }
 }

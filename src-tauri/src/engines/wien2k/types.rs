@@ -29,10 +29,7 @@ pub enum Wien2kCasePhase {
 
 impl Wien2kCasePhase {
     pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::ScfComplete | Self::BandsComplete | Self::Failed
-        )
+        matches!(self, Self::ScfComplete | Self::BandsComplete | Self::Failed)
     }
 }
 

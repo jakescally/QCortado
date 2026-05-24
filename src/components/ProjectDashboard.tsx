@@ -6,20 +6,26 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
-import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
+import { CrystalData, HpcProfile, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
-import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
+import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
 import {
   DEFAULT_ENGINE_ID,
   FALLBACK_ENGINE_DESCRIPTORS,
   FALLBACK_ENGINE_PLUGIN_MANIFESTS,
+  INSTALLABLE_ENGINE_DESCRIPTORS,
+  addEngineInstallation,
+  buildDefaultEngineInstallForm,
   getEngineLabel,
   getEngineShortLabel,
+  isEngineAlreadyAvailable,
+  isSelectableEngineStatus,
+  listEngineInstallations,
 } from "../lib/engines";
-import type { EnginePluginManifest } from "../lib/engines";
+import type { EngineInstallation, EnginePluginManifest } from "../lib/engines";
 import type { EngineDescriptor, EngineId } from "../lib/engines/types";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
@@ -1358,6 +1364,14 @@ export function ProjectDashboard({
   const [enginePluginManifests, setEnginePluginManifests] = useState<EnginePluginManifest[]>(
     () => Array.from(FALLBACK_ENGINE_PLUGIN_MANIFESTS),
   );
+  const [engineInstallations, setEngineInstallations] = useState<EngineInstallation[]>([]);
+  const [showAddEngineDialog, setShowAddEngineDialog] = useState(false);
+  const [availableHpcProfiles, setAvailableHpcProfiles] = useState<HpcProfile[]>([]);
+  const [selectedEngineToAdd, setSelectedEngineToAdd] = useState<EngineId | null>(null);
+  const [engineInstallForm, setEngineInstallForm] = useState(() => buildDefaultEngineInstallForm(null));
+  const [isLoadingEngineSetup, setIsLoadingEngineSetup] = useState(false);
+  const [isAddingEngine, setIsAddingEngine] = useState(false);
+  const [engineSetupError, setEngineSetupError] = useState<string | null>(null);
   const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1438,6 +1452,19 @@ export function ProjectDashboard({
     const fallback = FALLBACK_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === activeEngineId);
     return fallback ? [...engineDescriptors, fallback] : engineDescriptors;
   }, [activeEngineId, engineDescriptors]);
+  const selectedHpcProfile = useMemo(
+    () => availableHpcProfiles.find((profile) => profile.id === engineInstallForm.hpcProfileId) ?? null,
+    [availableHpcProfiles, engineInstallForm.hpcProfileId],
+  );
+  const selectedEngineDescriptor = useMemo(
+    () => INSTALLABLE_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === selectedEngineToAdd) ?? null,
+    [selectedEngineToAdd],
+  );
+  const canSubmitEngineSetup = Boolean(
+    selectedEngineToAdd
+    && engineInstallForm.hpcProfileId.trim()
+    && engineInstallForm.remoteInstallRoot.trim(),
+  );
 
   useEffect(() => {
     loadProject();
@@ -1448,9 +1475,15 @@ export function ProjectDashboard({
 
     async function loadEngineDescriptors() {
       try {
-        const manifests = await invoke<EnginePluginManifest[]>("list_engine_plugin_manifests");
+        const [manifests, installations] = await Promise.all([
+          invoke<EnginePluginManifest[]>("list_engine_plugin_manifests"),
+          listEngineInstallations(),
+        ]);
         if (!cancelled && manifests.length > 0) {
           setEnginePluginManifests(manifests);
+        }
+        if (!cancelled) {
+          setEngineInstallations(installations);
         }
       } catch (e) {
         console.warn("Failed to load engine plugin manifests:", e);
@@ -1540,8 +1573,93 @@ export function ProjectDashboard({
     }
   }
 
-  function handleAddEngineClick() {
-    setInfoMessage("Additional engine setup is not implemented yet. Quantum ESPRESSO remains the only available engine.");
+  async function refreshEngineRegistry() {
+    const [manifests, installations] = await Promise.all([
+      invoke<EnginePluginManifest[]>("list_engine_plugin_manifests"),
+      listEngineInstallations(),
+    ]);
+    if (manifests.length > 0) {
+      setEnginePluginManifests(manifests);
+    }
+    setEngineInstallations(installations);
+  }
+
+  async function handleAddEngineClick() {
+    setShowAddEngineDialog(true);
+    setEngineSetupError(null);
+    setIsLoadingEngineSetup(true);
+    try {
+      const [profiles, activeProfileId, installations] = await Promise.all([
+        listHpcProfiles(),
+        getActiveHpcProfileId(),
+        listEngineInstallations(),
+      ]);
+      setAvailableHpcProfiles(profiles);
+      setEngineInstallations(installations);
+      const defaultProfile =
+        profiles.find((profile) => profile.id === activeProfileId)
+        ?? profiles[0]
+        ?? null;
+      setEngineInstallForm(buildDefaultEngineInstallForm(defaultProfile));
+      const firstInstallable = INSTALLABLE_ENGINE_DESCRIPTORS.find(
+        (descriptor) => !isEngineAlreadyAvailable(descriptor.id, displayedEngineDescriptors, installations),
+      );
+      setSelectedEngineToAdd(firstInstallable?.id ?? null);
+    } catch (e) {
+      console.error("Failed to prepare engine setup:", e);
+      setEngineSetupError(`Failed to load HPC profiles: ${e}`);
+    } finally {
+      setIsLoadingEngineSetup(false);
+    }
+  }
+
+  function closeAddEngineDialog() {
+    if (isAddingEngine) return;
+    setShowAddEngineDialog(false);
+    setEngineSetupError(null);
+  }
+
+  function selectEngineForSetup(engineId: EngineId) {
+    if (isEngineAlreadyAvailable(engineId, displayedEngineDescriptors, engineInstallations)) {
+      return;
+    }
+    setSelectedEngineToAdd(engineId);
+    setEngineSetupError(null);
+  }
+
+  function updateEngineInstallForm(patch: Partial<typeof engineInstallForm>) {
+    setEngineInstallForm((current) => ({ ...current, ...patch }));
+  }
+
+  function handleEngineSetupProfileChange(profileId: string) {
+    setEngineInstallForm((current) => ({
+      ...current,
+      hpcProfileId: profileId,
+    }));
+  }
+
+  async function handleVerifyAndAddEngine() {
+    if (!selectedEngineToAdd || !canSubmitEngineSetup || isAddingEngine) {
+      return;
+    }
+
+    setIsAddingEngine(true);
+    setEngineSetupError(null);
+    try {
+      const result = await addEngineInstallation({
+        engineId: selectedEngineToAdd,
+        hpcProfileId: engineInstallForm.hpcProfileId.trim(),
+        remoteInstallRoot: engineInstallForm.remoteInstallRoot.trim(),
+      });
+      await refreshEngineRegistry();
+      setShowAddEngineDialog(false);
+      setInfoMessage(`${getEngineLabel(INSTALLABLE_ENGINE_DESCRIPTORS, result.installation.engineId)} added for ${selectedHpcProfile?.name ?? "the selected HPC profile"}.`);
+    } catch (e) {
+      console.error("Failed to add engine:", e);
+      setEngineSetupError(`Failed to verify engine: ${e}`);
+    } finally {
+      setIsAddingEngine(false);
+    }
   }
 
   function renderEngineSelector() {
@@ -1551,7 +1669,7 @@ export function ProjectDashboard({
         <div className="engine-switcher" role="group" aria-label="Active computation engine">
           {displayedEngineDescriptors.map((engine) => {
             const isActive = engine.id === activeEngineId;
-            const disabled = readOnly || isSwitchingEngine || engine.status !== "implemented";
+            const disabled = readOnly || isSwitchingEngine || !isSelectableEngineStatus(engine.status);
             return (
               <button
                 key={engine.id}
@@ -1579,6 +1697,148 @@ export function ProjectDashboard({
             </button>
           </InfoTooltip>
         )}
+      </div>
+    );
+  }
+
+  function renderAddEngineDialog() {
+    if (!showAddEngineDialog) return null;
+    const selectedEngineAvailable = selectedEngineToAdd
+      ? isEngineAlreadyAvailable(selectedEngineToAdd, displayedEngineDescriptors, engineInstallations)
+      : false;
+    const installRootPlaceholder =
+      selectedEngineToAdd === "wien2k"
+        ? "/opt/WIEN2k"
+        : "/opt/qe-7.5";
+    const installRootHint =
+      selectedEngineToAdd === "wien2k"
+        ? "Remote WIENROOT containing x, init_lapw, run_lapw, and runsp_lapw."
+        : "Remote QE root or bin directory containing pw.x and post-processing executables.";
+
+    return (
+      <div className="dialog-overlay" onClick={closeAddEngineDialog}>
+        <div className="dialog-content engine-add-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog-header">
+            <h2>Add Engine</h2>
+            <button
+              className="dialog-close"
+              onClick={closeAddEngineDialog}
+              disabled={isAddingEngine}
+            >
+              &times;
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleVerifyAndAddEngine();
+            }}
+          >
+            <div className="dialog-body">
+              {engineSetupError && <div className="dialog-error">{engineSetupError}</div>}
+              {isLoadingEngineSetup ? (
+                <p className="engine-setup-state">Loading remote profiles...</p>
+              ) : (
+                <div className="engine-setup-body">
+                  <div className="engine-option-grid" role="list" aria-label="Available engines">
+                    {INSTALLABLE_ENGINE_DESCRIPTORS.map((descriptor) => {
+                      const alreadyAvailable = isEngineAlreadyAvailable(
+                        descriptor.id,
+                        displayedEngineDescriptors,
+                        engineInstallations,
+                      );
+                      const selected = selectedEngineToAdd === descriptor.id;
+                      return (
+                        <button
+                          key={descriptor.id}
+                          type="button"
+                          className={`engine-option${selected ? " selected" : ""}`}
+                          disabled={alreadyAvailable || isAddingEngine}
+                          onClick={() => selectEngineForSetup(descriptor.id)}
+                          aria-pressed={selected}
+                        >
+                          <span>{descriptor.label}</span>
+                          <small>{alreadyAvailable ? "Already added" : descriptor.id === "wien2k" ? "Remote only" : "Remote setup"}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {availableHpcProfiles.length === 0 ? (
+                    <p className="engine-setup-state">
+                      Configure an HPC profile before adding a remote engine.
+                    </p>
+                  ) : selectedEngineDescriptor ? (
+                    <div className="save-form engine-setup-form">
+                      <div className="form-group">
+                        <label>HPC Profile</label>
+                        <select
+                          value={engineInstallForm.hpcProfileId}
+                          onChange={(e) => handleEngineSetupProfileChange(e.target.value)}
+                          disabled={isAddingEngine}
+                        >
+                          {availableHpcProfiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name} ({profile.host})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group">
+                        <label>{selectedEngineDescriptor.label} Install Directory</label>
+                        <input
+                          type="text"
+                          value={engineInstallForm.remoteInstallRoot}
+                          onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
+                          placeholder={installRootPlaceholder}
+                          disabled={isAddingEngine || selectedEngineAvailable}
+                        />
+                        <span className="form-hint">{installRootHint}</span>
+                      </div>
+                      {selectedHpcProfile && (
+                        <div className="engine-profile-roots">
+                          <div>
+                            <span>Workspace root</span>
+                            <code>{selectedHpcProfile.remote_workspace_root}</code>
+                          </div>
+                          <div>
+                            <span>Project root</span>
+                            <code>{selectedHpcProfile.remote_project_root}</code>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="engine-setup-state">All supported engines are already available.</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="dialog-footer">
+              <button
+                type="button"
+                className="dialog-btn cancel"
+                onClick={closeAddEngineDialog}
+                disabled={isAddingEngine}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="dialog-btn save width-lock"
+                disabled={
+                  isLoadingEngineSetup
+                  || isAddingEngine
+                  || !canSubmitEngineSetup
+                  || selectedEngineAvailable
+                  || availableHpcProfiles.length === 0
+                }
+              >
+                {isAddingEngine ? "Verifying..." : "Verify and Add"}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
     );
   }
@@ -5519,6 +5779,8 @@ function normalizeSavedKPath(value: unknown): string {
             onClose={() => setShowCifSubstitutionDialog(false)}
             onSaved={handleCifSubstitutionSaved}
           />
+
+          {renderAddEngineDialog()}
 
           {calculationNameEditor && (
             <div className="dialog-overlay" onClick={closeCalculationNameEditor}>

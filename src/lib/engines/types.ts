@@ -16,7 +16,7 @@ export type ReservedEngineId = "wien2k";
 
 export type EngineId = ImplementedEngineId | ReservedEngineId;
 
-export type EngineImplementationStatus = "implemented" | "reserved";
+export type EngineImplementationStatus = "implemented" | "configured" | "reserved";
 
 export type EngineExecutionMode = "local" | "hpc" | "remote";
 

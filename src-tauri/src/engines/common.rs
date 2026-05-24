@@ -4,10 +4,10 @@
 //! replace the current QE implementation and they do not introduce shared
 //! calculation input models.
 
+use super::plugin::EnginePlugin;
 use super::types::{
     CalculationKind, EngineDescriptor, EngineExecutionMode, EngineId, EngineImplementationStatus,
 };
-use super::plugin::EnginePlugin;
 
 /// Existing projects and saved calculations without explicit engine metadata
 /// should be treated as Quantum ESPRESSO during the migration.

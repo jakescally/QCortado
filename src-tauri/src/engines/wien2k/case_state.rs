@@ -34,9 +34,9 @@ pub fn normalize_case_name(raw: &str) -> Option<String> {
         return None;
     }
 
-    let safe = trimmed.chars().all(|ch| {
-        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
-    });
+    let safe = trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
     if safe {
         Some(trimmed.to_string())
     } else {
@@ -125,7 +125,10 @@ mod tests {
 
     #[test]
     fn case_names_reject_paths_and_whitespace() {
-        assert_eq!(normalize_case_name("Si_case-1.0"), Some("Si_case-1.0".to_string()));
+        assert_eq!(
+            normalize_case_name("Si_case-1.0"),
+            Some("Si_case-1.0".to_string())
+        );
         assert_eq!(normalize_case_name(""), None);
         assert_eq!(normalize_case_name("../case"), None);
         assert_eq!(normalize_case_name("case name"), None);
@@ -135,8 +138,14 @@ mod tests {
     #[test]
     fn artifacts_use_wien2k_case_prefix() {
         let artifacts = initialized_case_artifacts("GaAs");
-        assert!(artifacts.iter().any(|artifact| artifact.basename == "GaAs.struct"));
-        assert!(artifacts.iter().any(|artifact| artifact.basename == "GaAs.clmsum"));
-        assert!(artifacts.iter().any(|artifact| artifact.basename == "GaAs.klist"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.basename == "GaAs.struct"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.basename == "GaAs.clmsum"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.basename == "GaAs.klist"));
     }
 }

@@ -22,12 +22,13 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::config::{self, SaveSizeMode};
+use crate::engines::common::LEGACY_PROJECT_ENGINE_ID;
 use crate::engines::qe::{
     add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
     read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
-use crate::engines::common::{is_implemented_engine, LEGACY_PROJECT_ENGINE_ID};
 use crate::engines::EngineId;
+use crate::AppState;
 
 // ============================================================================
 // Types
@@ -4331,19 +4332,21 @@ pub fn update_project_metadata(
 
 /// Updates the active computation engine for a project.
 ///
-/// QE is the only implemented engine today. The validation here keeps the
-/// project-level switch path ready for future engines without allowing reserved
-/// engine identities to change workflow behavior prematurely.
+/// QE is the always-available default. Additional engines must first be
+/// verified as remote installations before they can become active project
+/// metadata.
 #[tauri::command]
 pub fn set_project_active_engine(
     app: AppHandle,
     project_id: String,
     engine_id: EngineId,
+    state: State<AppState>,
 ) -> Result<Project, String> {
     ensure_research_mode()?;
-    if !is_implemented_engine(engine_id) {
+    let installations = state.engine_installations.lock().unwrap().clone();
+    if !crate::engines::installations::is_engine_selectable(engine_id, &installations) {
         return Err(format!(
-            "Engine '{}' is not implemented yet",
+            "Engine '{}' has not been added yet",
             engine_id.as_str()
         ));
     }
@@ -6372,15 +6375,15 @@ pub fn get_saved_phonon_data(
 
 #[cfg(test)]
 mod tests {
+    use super::Project;
     use super::{
         calculation_can_lighten, is_wavefunction_archive_file, looks_like_completed_phonon_run,
         parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
         remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
         summarize_qe_result_for_project, CalculationRun,
     };
-    use super::Project;
-    use crate::engines::EngineId;
     use crate::engines::qe::QEResult;
+    use crate::engines::EngineId;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

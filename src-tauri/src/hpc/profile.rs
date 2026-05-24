@@ -240,12 +240,14 @@ impl HpcProfile {
             remote_workspace_root: self.remote_workspace_root.clone(),
             remote_project_root: self.remote_project_root.clone(),
             paths: QeHpcRuntimePaths {
-                remote_bin_dir: self.remote_qe_bin_dir_for_resource(resource_type).to_string(),
-                remote_pseudo_dir: self.remote_pseudo_dir_for_resource(resource_type).to_string(),
+                remote_bin_dir: self
+                    .remote_qe_bin_dir_for_resource(resource_type)
+                    .to_string(),
+                remote_pseudo_dir: self
+                    .remote_pseudo_dir_for_resource(resource_type)
+                    .to_string(),
                 remote_epw_path: normalize_optional_runtime_text(&self.remote_epw_path),
-                remote_wannier90_path: normalize_optional_runtime_text(
-                    &self.remote_wannier90_path,
-                ),
+                remote_wannier90_path: normalize_optional_runtime_text(&self.remote_wannier90_path),
                 remote_postw90_path: normalize_optional_runtime_text(&self.remote_postw90_path),
                 uses_pseudopotentials: true,
             },

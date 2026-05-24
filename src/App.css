@@ -6180,6 +6180,109 @@ html[data-theme="dark"] {
   border-color: #a0aec0;
 }
 
+.engine-add-dialog {
+  max-width: 620px;
+}
+
+.engine-setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.engine-option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.engine-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  min-height: 4.1rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid #cbd5e0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #2d3748;
+  cursor: pointer;
+  text-align: left;
+}
+
+.engine-option span {
+  font-weight: 700;
+}
+
+.engine-option small {
+  color: #718096;
+  font-size: 0.78rem;
+}
+
+.engine-option.selected {
+  border-color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.engine-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: #f7fafc;
+}
+
+.engine-setup-form {
+  gap: 0.9rem;
+}
+
+.engine-setup-state {
+  margin: 0;
+  color: #4a5568;
+  font-size: 0.9rem;
+}
+
+.engine-profile-roots {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f7fafc;
+}
+
+.engine-profile-roots div {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr);
+  gap: 0.7rem;
+  align-items: baseline;
+}
+
+.engine-profile-roots span {
+  color: #718096;
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.engine-profile-roots code {
+  color: #2d3748;
+  font-size: 0.8rem;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.form-hint {
+  color: #718096;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 640px) {
+  .engine-option-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .structure-selector select {
   padding: 0.5rem 1rem;
   font-size: 0.9rem;
@@ -6598,6 +6701,40 @@ html[data-theme="dark"] {
   .engine-add-btn:hover {
     background: #4a5568;
     border-color: #718096;
+  }
+
+  .engine-option {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .engine-option small,
+  .engine-setup-state,
+  .form-hint {
+    color: #a0aec0;
+  }
+
+  .engine-profile-roots {
+    background: #1a202c;
+    border-color: #4a5568;
+  }
+
+  .engine-profile-roots span {
+    color: #a0aec0;
+  }
+
+  .engine-profile-roots code {
+    color: #e2e8f0;
+  }
+
+  .engine-option.selected {
+    background: #2c5282;
+    border-color: #63b3ed;
+  }
+
+  .engine-option:disabled {
+    background: #1a202c;
   }
 
   .history-sort-control label {

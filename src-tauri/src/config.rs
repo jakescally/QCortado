@@ -7,6 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+use crate::engines::installations::EngineInstallation;
 use crate::engines::qe::SmearingType;
 use crate::hpc::profile::{ExecutionMode, HpcProfile};
 
@@ -83,6 +84,9 @@ pub struct AppConfig {
     /// Active HPC profile ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_hpc_profile_id: Option<String>,
+    /// Verified remote computation-engine installations.
+    #[serde(default)]
+    pub engine_installations: Vec<EngineInstallation>,
     /// Automatically publish a read-only viewer library after project mutations.
     #[serde(default = "default_true")]
     pub viewer_auto_publish_enabled: bool,
@@ -118,6 +122,7 @@ impl Default for AppConfig {
             execution_mode: ExecutionMode::Local,
             hpc_profiles: Vec::new(),
             active_hpc_profile_id: None,
+            engine_installations: Vec::new(),
             viewer_auto_publish_enabled: true,
             viewer_last_publish_at: None,
             viewer_last_publish_error: None,
@@ -244,6 +249,16 @@ pub fn update_hpc_profiles(
     let mut config = load_config(app)?;
     config.hpc_profiles = profiles;
     config.active_hpc_profile_id = active_hpc_profile_id;
+    save_config(app, &config)
+}
+
+/// Updates verified remote engine installations and saves.
+pub fn update_engine_installations(
+    app: &AppHandle,
+    installations: Vec<EngineInstallation>,
+) -> Result<(), String> {
+    let mut config = load_config(app)?;
+    config.engine_installations = installations;
     save_config(app, &config)
 }
 

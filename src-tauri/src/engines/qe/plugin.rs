@@ -76,13 +76,13 @@ fn common_structure_panels() -> Vec<SharedWorkflowPanelDescriptor> {
             90,
             true,
         ),
-        shared_panel(SharedWorkflowPanelKind::LiveOutput, "Live output", 100, true),
         shared_panel(
-            SharedWorkflowPanelKind::ResultSummary,
-            "Results",
-            110,
+            SharedWorkflowPanelKind::LiveOutput,
+            "Live output",
+            100,
             true,
         ),
+        shared_panel(SharedWorkflowPanelKind::ResultSummary, "Results", 110, true),
     ]
 }
 
@@ -100,13 +100,13 @@ fn source_scf_panels() -> Vec<SharedWorkflowPanelDescriptor> {
             90,
             true,
         ),
-        shared_panel(SharedWorkflowPanelKind::LiveOutput, "Live output", 100, true),
         shared_panel(
-            SharedWorkflowPanelKind::ResultSummary,
-            "Results",
-            110,
+            SharedWorkflowPanelKind::LiveOutput,
+            "Live output",
+            100,
             true,
         ),
+        shared_panel(SharedWorkflowPanelKind::ResultSummary, "Results", 110, true),
     ]
 }
 
@@ -514,6 +514,8 @@ mod tests {
             .workflows
             .iter()
             .any(|workflow| workflow.kind == CalculationKind::Bands
-                && workflow.produces.contains(&EngineResultDatasetKind::BandDataset)));
+                && workflow
+                    .produces
+                    .contains(&EngineResultDatasetKind::BandDataset)));
     }
 }

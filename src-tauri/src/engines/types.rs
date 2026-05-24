@@ -42,6 +42,10 @@ impl Default for EngineId {
 #[serde(rename_all = "snake_case")]
 pub enum EngineImplementationStatus {
     Implemented,
+    /// A reserved engine whose remote installation has been verified and can
+    /// be selected for project metadata. This does not imply workflow support
+    /// is complete.
+    Configured,
     Reserved,
 }
 

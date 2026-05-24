@@ -516,10 +516,8 @@ fn decode_remote_metadata_payload(kind: &str, payload: &str) -> Result<String, S
 pub fn parse_remote_pseudopotential_metadata_output(
     output: &str,
 ) -> Result<Vec<PseudopotentialMetadata>, String> {
-    let mut upf_contents: HashMap<String, String> =
-        HashMap::new();
-    let mut djrepo_contents: HashMap<String, String> =
-        HashMap::new();
+    let mut upf_contents: HashMap<String, String> = HashMap::new();
+    let mut djrepo_contents: HashMap<String, String> = HashMap::new();
     let mut current_kind: Option<String> = None;
     let mut current_filename: Option<String> = None;
     let mut current_content: Vec<String> = Vec::new();
@@ -662,7 +660,9 @@ fn read_optional_djrepo_companion(path: &Path) -> Result<Option<String>, String>
     Ok(None)
 }
 
-pub(crate) fn read_pseudopotential_metadata(path: &Path) -> Result<PseudopotentialMetadata, String> {
+pub(crate) fn read_pseudopotential_metadata(
+    path: &Path,
+) -> Result<PseudopotentialMetadata, String> {
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -1197,9 +1197,7 @@ pub struct SSSPElementData {
 
 /// Loads SSSP JSON data from the pseudo directory.
 /// Looks for any file matching SSSP*.json pattern.
-pub fn load_sssp_data_sync(
-    pseudo_dir: String,
-) -> Result<HashMap<String, SSSPElementData>, String> {
+pub fn load_sssp_data_sync(pseudo_dir: String) -> Result<HashMap<String, SSSPElementData>, String> {
     let path = PathBuf::from(&pseudo_dir);
     if !path.exists() {
         return Err(format!("Directory not found: {}", pseudo_dir));
