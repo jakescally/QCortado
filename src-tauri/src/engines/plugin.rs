@@ -31,6 +31,10 @@ pub enum WorkflowInputRequirementKind {
     SourceWannierCalculation,
     SourcePhononCalculation,
     EngineRuntimeProfile,
+    /// Engine-owned persisted run state, such as a future Wien2k remote case
+    /// directory. This is metadata about where native state lives, not a
+    /// shared calculation input schema.
+    EngineCaseState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

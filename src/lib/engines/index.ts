@@ -1,4 +1,5 @@
 export * as qe from "./qe";
+export * as wien2k from "./wien2k";
 export * from "./hpcProfiles";
 export * from "./registry";
 export * from "./workflowHost";

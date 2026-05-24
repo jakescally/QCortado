@@ -11,6 +11,7 @@ const testEntries = [
   "tests/enginePlugin/enginePluginRegistry.test.ts",
   "tests/epw/epwUtils.test.ts",
   "tests/transport/transportUtils.test.ts",
+  "tests/wien2k/wien2kSkeleton.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
   "tests/brillouinZoneData/tetragonalBodyCentered.test.ts",

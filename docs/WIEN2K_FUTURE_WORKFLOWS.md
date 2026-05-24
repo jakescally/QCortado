@@ -4,6 +4,11 @@
 
 Wien2k is not implemented in QCortado.
 
+A hidden skeleton exists under the engine namespace so future work can build
+the backend and UI part by part without changing current QE behavior. The
+skeleton is not registered as an implemented engine, is not selectable in the
+UI, and does not expose any Tauri commands.
+
 This document records future workflow boundaries so the current QE-to-engine migration does not block a later Wien2k backend. The immediate work is to isolate QE behavior behind explicit engine boundaries while preserving existing QE behavior.
 
 ## Core Difference From QE
@@ -202,7 +207,23 @@ src-tauri/src/engines/wien2k/
   adapters.rs
 ```
 
-This layout should be created only when Wien2k implementation work begins.
+The current hidden skeleton uses this narrower layout:
+
+```text
+src/lib/engines/wien2k/
+  caseState.ts
+  plugin.ts
+  types.ts
+
+src-tauri/src/engines/wien2k/
+  case_state.rs
+  commands.rs
+  plugin.rs
+  types.rs
+```
+
+The future implementation-specific files above should be added only when that
+workflow is actually built.
 
 ## Dependencies On Current Migration
 
@@ -244,4 +265,3 @@ Remote workflow PRs should also include manual validation notes for:
 - Do not change QE calculation behavior.
 - Do not remove QE pseudopotential features.
 - Do not rewrite project storage in a way that breaks existing QE records.
-

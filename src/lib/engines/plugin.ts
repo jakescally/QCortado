@@ -17,7 +17,13 @@ export type WorkflowInputRequirementKind =
   | "source_bands_calculation"
   | "source_wannier_calculation"
   | "source_phonon_calculation"
-  | "engine_runtime_profile";
+  | "engine_runtime_profile"
+  /**
+   * Engine-owned persisted run state, such as a future Wien2k remote case
+   * directory. This is metadata about where native state lives, not a shared
+   * calculation input schema.
+   */
+  | "engine_case_state";
 
 export type EngineResultDatasetKind =
   | "scf_summary"
@@ -93,4 +99,3 @@ export interface FrontendEnginePlugin {
   workflowViews: Partial<Record<CalculationKind, EngineWorkflowView>>;
   getWorkflowView: (kind: CalculationKind) => EngineWorkflowView | null;
 }
-

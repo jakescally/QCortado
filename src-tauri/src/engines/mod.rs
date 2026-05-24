@@ -12,6 +12,7 @@ pub mod common;
 pub mod plugin;
 pub mod qe;
 pub mod types;
+pub mod wien2k;
 
 pub use plugin::*;
 pub use types::*;
