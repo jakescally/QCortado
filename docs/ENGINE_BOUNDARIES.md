@@ -107,9 +107,16 @@ QE-specific concepts include:
 - QE Hubbard card syntax and `hp.x` output.
 - QE-specific output recovery.
 
-## What Belongs To Future Wien2k Engine Code
+## What Belongs To The WIEN2k Engine
 
-Wien2k is not implemented. These concepts should be reserved for a future engine module, not added to platform types or QE types.
+WIEN2k currently implements only remote structure-source setup. Its
+`case.struct` generator, transient refinement session, and native
+`setrmt_lapw`/`x nn`/`x sgroup`/`x symmetry` stages live under
+`src-tauri/src/engines/wien2k/structure.rs` and
+`src/lib/engines/wien2k/structure.ts`.
+
+Calculation runners remain future work. All of these concepts remain WIEN2k
+owned rather than platform or QE types:
 
 - Remote-only execution.
 - Case directory lifecycle.
@@ -130,7 +137,7 @@ The first engine boundary should be intentionally small. It should describe orch
 Current frontend shape:
 
 ```ts
-type EngineId = "qe" | "wien2k"; // "wien2k" is reserved, not implemented.
+type EngineId = "qe" | "wien2k"; // WIEN2k exposes engine_setup after installation.
 
 interface EngineDescriptor {
   id: EngineId;
@@ -158,7 +165,7 @@ Current backend engine identity:
 ```rust
 pub enum EngineId {
     Qe,
-    // Reserved for future work. This does not implement Wien2k.
+    // Remote structure-source setup is implemented; calculations are future work.
     Wien2k,
 }
 ```
@@ -187,7 +194,8 @@ Inputs are not shared across engines.
 
 - QE SCF input remains `QECalculation`.
 - QE bands, DOS, phonon, Wannier, EPW, and transport configs remain QE-owned.
-- Future Wien2k configs should model Wien2k case and initialization concepts directly.
+- WIEN2k structure settings and future initialization configs model native
+  WIEN2k case concepts directly.
 
 Do not create:
 
@@ -232,10 +240,17 @@ interface CalculationRun {
 ```
 
 During migration, legacy records without `engine_id` should be treated as QE.
+Accepted WIEN2k structure sources use `engine_id: "wien2k"`,
+`calc_type: "engine_setup"`, `parameters.setup_kind: "structure"`, and
+`result: null`. The accepted `.struct` file is stored locally as the canonical
+source for future SCF restaging.
 
 ### HPC Profiles
 
-Separate cluster access from engine toolchains.
+Cluster access and engine runtime locations are edited as one HPC profile,
+while individual runtime fields remain explicitly engine-owned. Verified
+installation metadata remains separately recorded so the platform can decide
+which engines are selectable and retain verification details.
 
 Shared profile fields:
 
@@ -253,11 +268,13 @@ QE toolchain fields:
 - remote EPW path.
 - remote Wannier90 and postw90 paths.
 
-Future Wien2k toolchain fields:
+WIEN2k toolchain fields:
 
-- remote Wien2k root or command environment.
-- default scratch/case root.
-- module preamble or profile-specific setup.
+- remote verified `WIENROOT` install location.
+
+The shared remote workspace/project roots are reused for all configured
+engines; WIEN2k transient case directories derive below the engine namespace
+rather than introducing independent user-selected project roots.
 
 ## Anti-Patterns To Avoid
 

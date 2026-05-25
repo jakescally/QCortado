@@ -91,7 +91,8 @@ export type EngineWorkflowView =
   | "phonon-wizard"
   | "epw-wizard"
   | "wannier-wizard"
-  | "transport-wizard";
+  | "transport-wizard"
+  | "wien2k-structure-wizard";
 
 export interface FrontendEnginePlugin {
   id: EngineId;

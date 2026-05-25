@@ -67,8 +67,8 @@ const sourceScfPanels: SharedWorkflowPanelDescriptor[] = [
 ];
 
 /**
- * Hidden reserved manifest. Do not add this to the frontend engine registry
- * until the WIEN2k implementation is intentionally exposed.
+ * Full planning manifest. Only workflows with implemented UI and command
+ * routing are promoted through the frontend registry.
  */
 export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
@@ -94,7 +94,6 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
       enginePanels: [
         enginePanel("wien2k-case-directory", "Case directory", "wien2k.case.directory", 30, true, "Remote WIEN2k case prefix and case-directory staging controls."),
         enginePanel("wien2k-struct-generation", "case.struct", "wien2k.case.struct", 40, true, "CIF-to-case.struct generation and validation owned by the WIEN2k engine."),
-        enginePanel("wien2k-init-lapw", "init_lapw", "wien2k.init.controls", 50, true, "WIEN2k initialization controls for RMT, RKmax, Gmax, lmax, lstart, kgen, and dstart."),
       ],
       inputRequirements: [
         requirement("crystal_structure", "Crystal structure"),
@@ -159,4 +158,17 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
       produces: ["dos_dataset", "native_artifacts"],
     },
   ],
+};
+
+/** The only WIEN2k workflow currently available after remote installation. */
+export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
+  ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST,
+  descriptor: {
+    ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
+    status: "configured",
+    calculationKinds: ["engine_setup"],
+  },
+  workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
+    (workflow) => workflow.kind === "engine_setup",
+  ),
 };

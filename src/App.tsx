@@ -27,6 +27,7 @@ import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
+import { HpcProfileEditor } from "./components/HpcProfileEditor";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
 import { StorageManagerPage } from "./components/StorageManagerPage";
 import { BandsMultiview } from "./components/BandsMultiview";
@@ -38,9 +39,10 @@ import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
 import {
+  listEngineInstallations,
   resolveEngineWorkflowHostRoute,
 } from "./lib/engines";
-import type { EngineWorkflowHostRoute } from "./lib/engines";
+import type { EngineInstallation, EngineWorkflowHostRoute } from "./lib/engines";
 import type { EngineWorkflowView } from "./lib/engines/plugin";
 import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import {
@@ -147,7 +149,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -220,6 +222,12 @@ interface HubbardLrtContext {
   crystalData: CrystalData;
   projectId: string;
   scfCalculations: CalculationRun[];
+}
+
+interface Wien2kStructureContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
 }
 
 interface PhononData {
@@ -435,11 +443,12 @@ function AppInner() {
   const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("project-browser");
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<"general" | "hpc">("general");
+  const [settingsPage, setSettingsPage] = useState<"general" | "hpc" | "hpc-profile">("general");
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
   const [hpcProfiles, setHpcProfiles] = useState<HpcProfile[]>([]);
   const [activeHpcProfileId, setActiveHpcProfileId] = useState<string | null>(null);
+  const [engineInstallations, setEngineInstallations] = useState<EngineInstallation[]>([]);
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
   const [hpcStatus, setHpcStatus] = useState<string | null>(null);
@@ -565,6 +574,9 @@ function AppInner() {
   // Context for running EPW from a project
   const [epwContext, setEpwContext] = useState<EpwContext | null>(null);
 
+  // Context for preparing a WIEN2k structure source from a project CIF
+  const [wien2kStructureContext, setWien2kStructureContext] = useState<Wien2kStructureContext | null>(null);
+
   // Context for viewing saved phonon data
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
   const [viewEpwData, setViewEpwData] = useState<EpwViewerPayload | null>(null);
@@ -656,7 +668,7 @@ function AppInner() {
   }, [showHpcSetupWizard]);
 
   useEffect(() => {
-    if (executionMode !== "hpc" && settingsPage === "hpc") {
+    if (executionMode !== "hpc" && (settingsPage === "hpc" || settingsPage === "hpc-profile")) {
       setSettingsPage("general");
     }
   }, [executionMode, settingsPage]);
@@ -985,19 +997,22 @@ function AppInner() {
 
   async function loadHpcExecutionSettings() {
     try {
-      const [mode, profiles, activeProfileId] = await Promise.all([
+      const [mode, profiles, activeProfileId, installations] = await Promise.all([
         loadExecutionMode(),
         listHpcProfiles(),
         getActiveHpcProfileId(),
+        listEngineInstallations(),
       ]);
       setExecutionMode(mode);
       setHpcProfiles(profiles);
       setActiveHpcProfileId(activeProfileId);
+      setEngineInstallations(installations);
     } catch (e) {
       console.error("Failed to load HPC settings:", e);
       setExecutionMode("local");
       setHpcProfiles([]);
       setActiveHpcProfileId(null);
+      setEngineInstallations([]);
     }
   }
 
@@ -1681,6 +1696,9 @@ function AppInner() {
       case "epw-wizard":
         setEpwContext(null);
         break;
+      case "wien2k-structure-wizard":
+        setWien2kStructureContext(null);
+        break;
     }
   }
 
@@ -1888,16 +1906,28 @@ function AppInner() {
         <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
           <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
             <div className="settings-window-header">
-              <h3>Settings</h3>
-              <button
-                className="settings-window-close"
-                onClick={() => setShowSettingsMenu(false)}
-                aria-label="Close settings"
-              >
-                &times;
-              </button>
+              {settingsPage === "hpc-profile" && (
+                <button className="settings-header-back" onClick={() => setSettingsPage("hpc")} aria-label="Back to HPC settings">
+                  Back
+                </button>
+              )}
+              <h3>{settingsPage === "hpc-profile" ? "Settings -> HPC -> Edit Profile" : "Settings"}</h3>
+              <div className="settings-header-actions">
+                {settingsPage === "hpc-profile" && (
+                  <button type="submit" form="hpc-profile-editor-form" className="settings-header-save">
+                    Save
+                  </button>
+                )}
+                <button
+                  className="settings-window-close"
+                  onClick={() => setShowSettingsMenu(false)}
+                  aria-label="Close settings"
+                >
+                  &times;
+                </button>
+              </div>
             </div>
-            <div className="settings-page-nav">
+            {settingsPage !== "hpc-profile" && <div className="settings-page-nav">
               <button
                 className={`settings-page-tab ${settingsPage === "general" ? "active" : ""}`}
                 onClick={() => setSettingsPage("general")}
@@ -1911,8 +1941,18 @@ function AppInner() {
               >
                 HPC
               </button>
-            </div>
+            </div>}
             <div className="settings-window-content">
+              {settingsPage === "hpc-profile" && editingHpcProfile ? (
+                <HpcProfileEditor
+                  profile={editingHpcProfile}
+                  installations={engineInstallations}
+                  onSaved={(_profile, message) => {
+                    setHpcStatus(message);
+                    void loadHpcExecutionSettings();
+                  }}
+                />
+              ) : (
               <div className="settings-pane">
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="execution-mode-select">
@@ -1973,7 +2013,7 @@ function AppInner() {
                         className="settings-menu-item"
                         onClick={() => {
                           setEditingHpcProfileId(activeHpcProfileId);
-                          setShowHpcSetupWizard(true);
+                          setSettingsPage("hpc-profile");
                         }}
                         disabled={!activeHpcProfile}
                       >
@@ -2893,6 +2933,7 @@ function AppInner() {
                 </>
               )}
               </div>
+              )}
             </div>
           </div>
         </div>
@@ -3270,13 +3311,13 @@ function AppInner() {
       {activeDialogModal}
       <HpcSetupWizard
         isOpen={showHpcSetupWizard}
-        initialProfile={editingHpcProfile}
+        initialProfile={null}
         onClose={() => {
           setShowHpcSetupWizard(false);
           setEditingHpcProfileId(null);
         }}
-        onSaved={(profile) => {
-          setEditingHpcProfileId(profile.id);
+        onSaved={() => {
+          setEditingHpcProfileId(null);
           setHpcStatus("HPC profile saved.");
           void loadHpcExecutionSettings();
         }}
@@ -3349,6 +3390,7 @@ function AppInner() {
     phonons: phononsContext,
     transport: transportContext,
     epw: epwContext,
+    structureSetup: wien2kStructureContext,
   };
 
   if (
@@ -3415,6 +3457,10 @@ function AppInner() {
             setActiveWorkflowRoute(null);
             setCurrentView("epw-viewer");
             setReconnectTaskId(null);
+          }}
+          onStructureSourceSaved={() => {
+            setProjectDashboardRefreshToken((previous) => previous + 1);
+            handleWorkflowBack("wien2k-structure-wizard", "project-dashboard");
           }}
         />
         {appChrome}
@@ -3810,6 +3856,14 @@ function AppInner() {
               calculations,
             });
             openEngineWorkflow(engineId, preset === "relax" ? "structure_optimization" : "scf", "scf-wizard");
+          }}
+          onRunEngineSetup={(engineId, cifId, crystalData) => {
+            setWien2kStructureContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+            });
+            openEngineWorkflow(engineId, "engine_setup", "wien2k-structure-wizard");
           }}
           onRunBands={(engineId, cifId, crystalData, scfCalculations) => {
             setBandsContext({

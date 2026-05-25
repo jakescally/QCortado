@@ -4,7 +4,11 @@
 
 QCortado currently behaves as a Quantum ESPRESSO desktop app. The migration target is an engine-based Cortado platform where shared application infrastructure is separated from engine-specific scientific workflows.
 
-This plan is for boundary extraction only. It does not implement Wien2k, change calculation behavior, or replace QE inputs with a generic universal SCF model.
+This plan began as boundary extraction. The current tree additionally exposes
+one remote-only WIEN2k workflow, `engine_setup`, for reviewed `case.struct`
+source creation. It does not implement WIEN2k SCF/bands/DOS calculations,
+change QE calculation behavior, or replace QE inputs with a generic universal
+SCF model.
 
 ## Migration Goals
 
@@ -283,9 +287,10 @@ cargo check --manifest-path src-tauri/Cargo.toml
 PR size: type compatibility plus adapters.
 
 - Keep cluster identity shared.
-- Move QE executable and pseudopotential paths into a QE toolchain sub-structure.
+- Present profile editing with explicit engine-specific sections for QE paths
+  and verified WIEN2k `WIENROOT` configuration.
 - Keep legacy config loading compatible with existing profiles.
-- Do not add Wien2k fields to QE structures.
+- Keep WIEN2k settings out of QE calculation input structures.
 
 Validation:
 

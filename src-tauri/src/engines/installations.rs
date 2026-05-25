@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::engines::plugin::{EnginePlugin, EnginePluginManifest};
-use crate::engines::types::{EngineId, EngineImplementationStatus};
+use crate::engines::types::{CalculationKind, EngineId, EngineImplementationStatus};
 use crate::hpc::profile::HpcProfile;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +110,10 @@ pub fn selectable_engine_manifests(
     {
         let mut manifest = crate::engines::wien2k::plugin::WIEN2K_RESERVED_ENGINE_PLUGIN.manifest();
         manifest.descriptor.status = EngineImplementationStatus::Configured;
+        manifest.descriptor.calculation_kinds = vec![CalculationKind::EngineSetup];
+        manifest
+            .workflows
+            .retain(|workflow| workflow.kind == CalculationKind::EngineSetup);
         manifests.push(manifest);
     }
     manifests
@@ -293,5 +297,34 @@ mod tests {
         assert!(parsed
             .checked_executables
             .contains(&"init_lapw".to_string()));
+    }
+
+    #[test]
+    fn installed_wien2k_exposes_only_implemented_structure_setup() {
+        let installation = EngineInstallation {
+            engine_id: EngineId::Wien2k,
+            hpc_profile_id: "andromeda".to_string(),
+            remote_install_root: "/opt/WIEN2k".to_string(),
+            remote_workspace_root: "/scratch/qcortado".to_string(),
+            remote_project_root: "/project/qcortado".to_string(),
+            verified_executables: vec![],
+            version_hint: None,
+            verified_at: "2026-05-24T00:00:00Z".to_string(),
+        };
+        let manifest = selectable_engine_manifests(&[installation])
+            .into_iter()
+            .find(|entry| entry.descriptor.id == EngineId::Wien2k)
+            .expect("configured WIEN2k manifest");
+
+        assert_eq!(
+            manifest.descriptor.status,
+            EngineImplementationStatus::Configured
+        );
+        assert_eq!(
+            manifest.descriptor.calculation_kinds,
+            vec![CalculationKind::EngineSetup]
+        );
+        assert_eq!(manifest.workflows.len(), 1);
+        assert_eq!(manifest.workflows[0].kind, CalculationKind::EngineSetup);
     }
 }

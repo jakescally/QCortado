@@ -18,6 +18,7 @@ export const ENGINE_WORKFLOW_VIEWS: readonly EngineWorkflowView[] = [
   "epw-wizard",
   "wannier-wizard",
   "transport-wizard",
+  "wien2k-structure-wizard",
 ];
 
 export function isEngineWorkflowView(view: string): view is EngineWorkflowView {

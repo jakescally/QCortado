@@ -210,6 +210,7 @@ export interface HpcProfile {
   remote_epw_path?: string | null;
   remote_wannier90_path?: string | null;
   remote_postw90_path?: string | null;
+  remote_wien2k_install_root?: string | null;
   remote_pseudo_dir: string;
   remote_cpu_pseudo_dir?: string | null;
   remote_gpu_pseudo_dir?: string | null;

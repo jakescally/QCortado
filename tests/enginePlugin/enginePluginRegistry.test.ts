@@ -10,7 +10,10 @@ import {
   isEngineWorkflowView,
   resolveEngineWorkflowHostRoute,
 } from "../../src/lib/engines";
-import { WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST } from "../../src/lib/engines/wien2k";
+import {
+  WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST,
+  WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST,
+} from "../../src/lib/engines/wien2k";
 
 test("QE frontend plugin is the default engine and exposes workflow routes", () => {
   const plugin = getFrontendEnginePlugin(DEFAULT_ENGINE_ID);
@@ -46,8 +49,13 @@ test("engine workflow host routes every QE workflow through a supported wizard v
   }
 });
 
-test("Wien2k skeleton is reserved and hidden from implemented frontend routes", () => {
-  assert.equal(getFrontendEnginePlugin("wien2k"), null);
+test("installed WIEN2k frontend exposure is limited to structure source setup", () => {
+  const plugin = getFrontendEnginePlugin("wien2k");
+
+  assert.ok(plugin);
+  assert.equal(plugin.getWorkflowView("engine_setup"), "wien2k-structure-wizard");
+  assert.equal(getEngineWorkflowView("wien2k", "engine_setup"), "wien2k-structure-wizard");
+  assert.equal(resolveEngineWorkflowHostRoute("wien2k", "engine_setup")?.view, "wien2k-structure-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "scf"), null);
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "scf"), null);
   assert.deepEqual(
@@ -59,6 +67,7 @@ test("Wien2k skeleton is reserved and hidden from implemented frontend routes", 
   assert.deepEqual(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor.executionModes, ["remote"]);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsRemoteOnly, true);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsLocal, false);
+  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup"]);
 });
 
 test("Wien2k reserved manifest models case state without QE pseudopotentials", () => {

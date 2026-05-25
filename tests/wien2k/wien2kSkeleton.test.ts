@@ -3,11 +3,14 @@ import test from "node:test";
 import {
   DEFAULT_WIEN2K_INITIALIZATION_SETTINGS,
   DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
+  DEFAULT_WIEN2K_STRUCTURE_CONTROLS,
   buildWien2kInitCommandPlan,
   buildWien2kScfCommandPlan,
   initializedWien2kCaseArtifacts,
   isTerminalWien2kCasePhase,
+  listWien2kStructureSources,
   normalizeWien2kCaseName,
+  validateWien2kStructureControls,
 } from "../../src/lib/engines/wien2k";
 import type { Wien2kCaseReference } from "../../src/lib/engines/wien2k";
 
@@ -57,4 +60,32 @@ test("Wien2k terminal phases are explicit", () => {
   assert.equal(isTerminalWien2kCasePhase("initialized"), false);
   assert.equal(isTerminalWien2kCasePhase("scf_complete"), true);
   assert.equal(isTerminalWien2kCasePhase("failed"), true);
+});
+
+test("WIEN2k structure controls validate native refinement limits", () => {
+  assert.equal(validateWien2kStructureControls(DEFAULT_WIEN2K_STRUCTURE_CONTROLS), null);
+  assert.match(
+    validateWien2kStructureControls({
+      ...DEFAULT_WIEN2K_STRUCTURE_CONTROLS,
+      sgroupTolerance: 1e-8,
+    }) ?? "",
+    /SGROUP tolerance/,
+  );
+  assert.match(
+    validateWien2kStructureControls({
+      ...DEFAULT_WIEN2K_STRUCTURE_CONTROLS,
+      siteOverrides: [{ siteIndex: 1, npt: 780 }],
+    }) ?? "",
+    /positive odd integer/,
+  );
+});
+
+test("WIEN2k structure source adapter selects saved setup artifacts only", () => {
+  const sources = listWien2kStructureSources([
+    { id: "source", engine_id: "wien2k", calc_type: "engine_setup", parameters: { setup_kind: "structure" } },
+    { id: "qe", engine_id: "qe", calc_type: "engine_setup", parameters: { setup_kind: "structure" } },
+    { id: "future-scf", engine_id: "wien2k", calc_type: "scf", parameters: {} },
+  ]);
+
+  assert.deepEqual(sources.map((source) => source.id), ["source"]);
 });

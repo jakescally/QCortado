@@ -9,6 +9,7 @@ import type {
   WorkflowInputRequirement,
   WorkflowInputRequirementKind,
 } from "./plugin";
+import { WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST } from "./wien2k";
 
 export const DEFAULT_ENGINE_ID: ImplementedEngineId = "qe";
 
@@ -286,6 +287,19 @@ export const QE_FRONTEND_ENGINE_PLUGIN: FrontendEnginePlugin = {
   },
 };
 
+export const WIEN2K_WORKFLOW_VIEWS: Partial<Record<CalculationKind, EngineWorkflowView>> = {
+  engine_setup: "wien2k-structure-wizard",
+};
+
+export const WIEN2K_FRONTEND_ENGINE_PLUGIN: FrontendEnginePlugin = {
+  id: "wien2k",
+  manifest: WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST,
+  workflowViews: WIEN2K_WORKFLOW_VIEWS,
+  getWorkflowView(kind) {
+    return WIEN2K_WORKFLOW_VIEWS[kind] ?? null;
+  },
+};
+
 export function isImplementedEngineId(engineId: EngineId): engineId is ImplementedEngineId {
   return engineId === DEFAULT_ENGINE_ID;
 }
@@ -293,6 +307,9 @@ export function isImplementedEngineId(engineId: EngineId): engineId is Implement
 export function getFrontendEnginePlugin(engineId: EngineId): FrontendEnginePlugin | null {
   if (engineId === "qe") {
     return QE_FRONTEND_ENGINE_PLUGIN;
+  }
+  if (engineId === "wien2k") {
+    return WIEN2K_FRONTEND_ENGINE_PLUGIN;
   }
   return null;
 }

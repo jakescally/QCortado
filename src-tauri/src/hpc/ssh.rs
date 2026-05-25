@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::profile::{HpcAuthMethod, HpcProfile};
@@ -166,6 +168,109 @@ pub async fn run_ssh_command_with_timeout(
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(format!("SSH command failed: {}", stderr.trim()))
+    }
+}
+
+/// Executes a short remote command while emitting stdout/stderr lines to an
+/// inline workflow event channel. This does not register a calculation task.
+pub async fn run_ssh_command_streaming(
+    app: &AppHandle,
+    event_name: &str,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_command: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let use_password = matches!(profile.auth_method, HpcAuthMethod::Password);
+    let mut args = ssh_options(profile, !use_password);
+    if use_password {
+        args.push("-o".to_string());
+        args.push("PreferredAuthentications=password,keyboard-interactive".to_string());
+        args.push("-o".to_string());
+        args.push("PubkeyAuthentication=no".to_string());
+    }
+    args.push(destination(profile));
+    args.push(remote_command.to_string());
+
+    let mut command = Command::new("ssh");
+    command.args(&args);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let askpass_path = if let Some(value) = secret {
+        let script_path = create_askpass_script(value)?;
+        command.env("SSH_ASKPASS", &script_path);
+        command.env("SSH_ASKPASS_REQUIRE", "force");
+        command.env("DISPLAY", ":0");
+        Some(script_path)
+    } else {
+        None
+    };
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("Failed to execute ssh: {}", err))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture SSH stdout.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture SSH stderr.".to_string())?;
+    let stdout_app = app.clone();
+    let stdout_event = event_name.to_string();
+    let stderr_app = app.clone();
+    let stderr_event = event_name.to_string();
+    let stdout_reader = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut collected = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = stdout_app.emit(&stdout_event, &line);
+            collected.push(line);
+        }
+        collected
+    });
+    let stderr_reader = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut collected = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let display = format!("[stderr] {}", line);
+            let _ = stderr_app.emit(&stderr_event, &display);
+            collected.push(display);
+        }
+        collected
+    });
+    let status =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), child.wait()).await {
+            Ok(result) => result.map_err(|err| format!("Failed to wait for ssh: {}", err))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                if let Some(path) = askpass_path.as_ref() {
+                    let _ = fs::remove_file(path);
+                }
+                return Err("ssh command timed out".to_string());
+            }
+        };
+    let mut lines = stdout_reader
+        .await
+        .map_err(|err| format!("Failed to read SSH stdout: {}", err))?;
+    lines.extend(
+        stderr_reader
+            .await
+            .map_err(|err| format!("Failed to read SSH stderr: {}", err))?,
+    );
+    if let Some(path) = askpass_path {
+        let _ = fs::remove_file(path);
+    }
+    let output = lines.join("\n");
+    if status.success() {
+        Ok(output)
+    } else {
+        Err(if output.trim().is_empty() {
+            "SSH command failed.".to_string()
+        } else {
+            format!("SSH command failed: {}", output)
+        })
     }
 }
 

@@ -27,6 +27,7 @@ import {
 } from "../lib/engines";
 import type { EngineInstallation, EnginePluginManifest } from "../lib/engines";
 import type { EngineDescriptor, EngineId } from "../lib/engines/types";
+import { listWien2kStructureSources } from "../lib/engines/wien2k";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
@@ -131,6 +132,7 @@ interface ProjectDashboardProps {
     optimizedStructures?: OptimizedStructureOption[],
     calculations?: CalculationRun[],
   ) => void;
+  onRunEngineSetup: (engineId: EngineId, cifId: string, crystalData: CrystalData) => void;
   onRunBands: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
     bandData: any,
@@ -1344,6 +1346,7 @@ export function ProjectDashboard({
   onBack,
   onDeleted,
   onRunSCF,
+  onRunEngineSetup,
   onRunBands,
   onViewBands,
   onRunDos,
@@ -2716,6 +2719,11 @@ export function ProjectDashboard({
     );
   }
 
+  function handleRunEngineSetup() {
+    if (!selectedCifId || !crystalData) return;
+    onRunEngineSetup(activeEngineId, selectedCifId, crystalData);
+  }
+
   async function handleRunOptimization() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -3445,6 +3453,13 @@ function normalizeSavedKPath(value: unknown): string {
     ),
     [selectedVariant, calculationSortMode, pinnedCalcIds],
   );
+  const wien2kStructureCalculations = useMemo<CalculationRun[]>(
+    () => listWien2kStructureSources(selectedVariant?.calculations ?? [])
+      .slice()
+      .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
+        - new Date(left.completed_at ?? left.started_at).getTime()),
+    [selectedVariant],
+  );
   const bandCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
       selectedVariant?.calculations.filter((calc) => calc.calc_type === "bands") || [],
@@ -3974,6 +3989,14 @@ function normalizeSavedKPath(value: unknown): string {
           </div>
           {!readOnly && (
             <div className="calc-action-grid">
+              {activeEngineId === "wien2k" ? (
+                <button className="calc-action-btn" onClick={handleRunEngineSetup}>
+                  <span className="calc-action-icon">Struct</span>
+                  <span className="calc-action-label">WIEN2k Structure</span>
+                  <span className="calc-action-hint">Prepare case.struct</span>
+                </button>
+              ) : (
+                <>
               <button className="calc-action-btn" onClick={handleRunSCF}>
                 <span className="calc-action-icon">SCF</span>
                 <span className="calc-action-label">Self-Consistent Field</span>
@@ -4072,9 +4095,89 @@ function normalizeSavedKPath(value: unknown): string {
                 <span className="calc-action-label">Geometry Optimization</span>
                 <span className="calc-action-hint">VC-Relax preset</span>
               </button>
+                </>
+              )}
             </div>
           )}
         </section>
+
+        {wien2kStructureCalculations.length > 0 && (
+          <section className="history-section">
+            <h3>WIEN2k Structures</h3>
+            <div className="calculations-list">
+              {wien2kStructureCalculations.map((calc) => {
+                const calcData = getCalculationRecord(calc);
+                const parameters = calcData.parameters ?? {};
+                const caseName = typeof parameters.case_name === "string" ? parameters.case_name : "case";
+                const finalSummary = parameters.final_structure_summary as {
+                  spacegroupSymbol?: string | null;
+                  spacegroupNumber?: number | null;
+                } | undefined;
+                const spaceGroup = typeof finalSummary?.spacegroupSymbol === "string"
+                  ? `${finalSummary.spacegroupSymbol} (#${finalSummary.spacegroupNumber ?? "?"})`
+                  : typeof parameters.standardized_spacegroup_symbol === "string"
+                  ? `${parameters.standardized_spacegroup_symbol} (#${parameters.standardized_spacegroup_number ?? "?"})`
+                  : "Native refinement accepted";
+                return (
+                  <div key={calc.id} className="calculation-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
+                    >
+                      {renderCalculationSelectionControl(calc)}
+                      <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
+                        <span className="calc-type">Structure</span>
+                        <span className="calc-status converged">Accepted</span>
+                        <span className="calc-energy">{caseName}.struct</span>
+                      </div>
+                      <div className="calculation-meta">
+                        {renderRenameCalculationButton(calc)}
+                        <span className="calc-date">
+                          {calc.completed_at ? formatDate(calc.completed_at) : "Saving..."}
+                        </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">{expandedCalc === calc.id ? "▼" : "▶"}</span>
+                      </div>
+                    </div>
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Case</label>
+                            <span>{caseName}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Space Group</label>
+                            <span>{spaceGroup}</span>
+                          </div>
+                        </div>
+                        <div className="calc-actions">
+                          {renderSavedFileButtons(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete Structure Source
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* SCF Calculations */}
         {scfCalculations.length > 0 && (

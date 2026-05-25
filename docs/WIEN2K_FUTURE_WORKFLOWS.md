@@ -2,14 +2,13 @@
 
 ## Status
 
-Wien2k is not implemented in QCortado.
+QCortado implements one WIEN2k-owned workflow: remote `case.struct` source
+setup (`engine_setup`). Once a remote WIEN2k installation is verified, a
+project with WIEN2k selected exposes a `WIEN2k Structure` tile.
 
-A hidden skeleton exists under the engine namespace so future work can build
-the backend and UI part by part without changing current QE behavior. The
-skeleton is not registered as an implemented engine, is not selectable in the
-UI, and does not expose any Tauri commands.
-
-This document records future workflow boundaries so the current QE-to-engine migration does not block a later Wien2k backend. The immediate work is to isolate QE behavior behind explicit engine boundaries while preserving existing QE behavior.
+SCF initialization, SCF runs, bands, and DOS are not implemented. Their
+descriptors remain reserved and are not exposed through the selectable
+frontend workflow registry.
 
 ## Core Difference From QE
 
@@ -24,7 +23,7 @@ This has direct architecture consequences:
 
 ## Execution Model
 
-The planned Wien2k backend is remote-only.
+The WIEN2k boundary is remote-only.
 
 Platform requirements:
 
@@ -56,7 +55,7 @@ Do not expose local execution controls for a future Wien2k workflow unless local
 
 ## Wien2k Concepts To Keep Engine-Specific
 
-Future Wien2k engine code should own:
+WIEN2k engine code owns:
 
 - `case.struct`.
 - Case directory lifecycle.
@@ -77,44 +76,58 @@ Future Wien2k engine code should own:
 
 These should not become platform concepts unless there is a proven equivalent across engines.
 
-## Candidate Workflow: Initialization
+## Implemented Workflow: Structure Source Setup
 
-Future flow:
+The structure-source miniapp deliberately precedes SCF initialization:
 
-1. Start from a project CIF structure.
-2. Convert structure to a Wien2k `case.struct` candidate.
-3. Stage a remote case directory.
-4. Run initialization sequence:
-   - `x nn`
-   - `x sgroup`
-   - `x symmetry`
-   - `lstart`
-   - `kgen`
-   - `dstart`
-5. Parse initialization outputs.
-6. Save an initialized case calculation entry.
+1. Start from the selected project's CIF data.
+2. Standardize the conventional cell through shared spglib analysis inside
+   the WIEN2k engine conversion boundary.
+3. Write an initial fixed-format `case.struct` locally. QCortado does not call
+   WIEN2k `cif2struct`.
+4. Stage the draft in a transient remote directory below
+   `{remote_workspace_root}/qcortado/{project_id}/wien2k/{session_id}`.
+5. Run native refinement in explicit review stages:
+   `setrmt_lapw` plus `x nn`, then `x sgroup -settol`, then `x symmetry`.
+6. Stream native output inline and require user approval of the final
+   symmetry candidate.
+7. Save an `engine_setup` calculation entry only after approval.
+
+The accepted local `<case>.struct` and its small diagnostic logs are the
+canonical project source. The transient remote directory is cleaned on save
+or discard when the remote profile is reachable; cleanup failure does not
+invalidate an accepted local source. A future SCF workflow must restage the
+accepted structure into its own remote case directory rather than depend on
+the refinement session.
 
 Platform-owned pieces:
 
 - Project and CIF selection.
-- Remote job submission.
+- Remote SSH transport and inline output streaming.
 - Live output.
 - Artifact sync.
 - Saved calculation record.
 
-Wien2k-owned pieces:
+WIEN2k-owned pieces:
 
 - Struct generation.
-- Initialization command sequence.
+- Structure refinement command sequence and native artifacts.
 - Input prompts or scripted choices.
 - Error parsing.
-- Case artifacts.
+- Case structure artifacts.
+
+## Future Workflow: SCF Initialization
+
+Future SCF initialization starts from an accepted saved structure source. It
+may run `lstart`, `kgen`, and `dstart` as required by the chosen WIEN2k SCF
+contract. Those operations are intentionally not part of the implemented
+structure miniapp.
 
 ## Candidate Workflow: SCF
 
 Future flow:
 
-1. Select an initialized Wien2k case.
+1. Select an accepted WIEN2k structure source and initialize a new SCF case.
 2. Choose spin mode and convergence controls.
 3. Submit remote `run_lapw` or `runsp_lapw`.
 4. Parse `case.scf`.
@@ -176,19 +189,13 @@ Wien2k-owned details:
 Frontend:
 
 ```text
-src/engines/wien2k/
-  components/
-    Wien2kInitWizard.tsx
-    Wien2kScfWizard.tsx
-    Wien2kBandsWizard.tsx
-    Wien2kDosWizard.tsx
-  lib/
-    wien2kProgress.ts
-    wien2kCaseSummary.ts
-  types/
-    index.ts
-  adapters/
-    viewerDatasets.ts
+src/components/wien2k/
+  Wien2kStructureWizard.tsx            # implemented engine_setup UI
+src/lib/engines/wien2k/
+  plugin.ts                             # structure route plus reserved contract
+  structure.ts                          # implemented structure types/API
+  caseState.ts                          # future case lifecycle support
+  types.ts                              # future native workflow types
 ```
 
 Backend:
@@ -196,8 +203,8 @@ Backend:
 ```text
 src-tauri/src/engines/wien2k/
   mod.rs
+  structure.rs                          # implemented struct/session/stage ownership
   types.rs
-  struct_file.rs
   init.rs
   scf.rs
   bands.rs
@@ -207,31 +214,17 @@ src-tauri/src/engines/wien2k/
   adapters.rs
 ```
 
-The current hidden skeleton uses this narrower layout:
-
-```text
-src/lib/engines/wien2k/
-  caseState.ts
-  plugin.ts
-  types.ts
-
-src-tauri/src/engines/wien2k/
-  case_state.rs
-  commands.rs
-  plugin.rs
-  types.rs
-```
-
-The future implementation-specific files above should be added only when that
-workflow is actually built.
+Future initialization/runner/parser files should be added only as those
+workflows are built.
 
 ## Dependencies On Current Migration
 
-Before Wien2k work starts, the QE migration should provide:
+The structure workflow relies on the following completed platform work:
 
 1. `engine_id` on saved calculations.
 2. Project storage that can distinguish QE calculations from future engine calculations.
-3. Shared HPC shell separated from QE toolchain fields.
+3. HPC profile editing that keeps shared SSH/Slurm roots alongside
+   engine-specific QE and verified WIEN2k runtime paths.
 4. Engine-specific remote job bundle generation.
 5. Shared normalized band and DOS datasets.
 6. QE pseudopotentials isolated inside the QE engine.
@@ -257,9 +250,9 @@ Remote workflow PRs should also include manual validation notes for:
 - artifact sync.
 - project save and reload.
 
-## Non-Goals For The Current Migration
+## Non-Goals For The Structure Workflow
 
-- Do not implement Wien2k.
+- Do not implement WIEN2k SCF initialization or calculation runners.
 - Do not add Wien2k settings to the current QE setup UI.
 - Do not add placeholder Wien2k commands that cannot run.
 - Do not change QE calculation behavior.

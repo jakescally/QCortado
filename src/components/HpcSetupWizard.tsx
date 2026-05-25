@@ -70,6 +70,7 @@ function makeDefaultProfile(): HpcProfile {
     remote_qe_gpu_bin_dir: "~/qe-gpu/bin",
     remote_epw_path: null,
     remote_wannier90_path: deriveRemoteWannier90PathFromQeBinDir(defaultCpuBin),
+    remote_wien2k_install_root: null,
     remote_pseudo_dir: "~/qe/pseudo",
     remote_cpu_pseudo_dir: "~/qe/pseudo",
     remote_gpu_pseudo_dir: "~/qe-gpu/pseudo",

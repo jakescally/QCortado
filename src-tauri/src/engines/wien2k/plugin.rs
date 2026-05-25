@@ -1,8 +1,8 @@
-//! Hidden WIEN2k plugin skeleton.
+//! WIEN2k plugin contract.
 //!
-//! This manifest is deliberately not registered in `implemented_engine_plugins`.
-//! It captures the future platform-to-engine contract while keeping the UI and
-//! command API unchanged.
+//! The complete manifest retains future workflows for planning and type
+//! ownership. Installed engines expose only implemented workflows; currently
+//! that is structure-source setup.
 
 use crate::engines::plugin::{
     EngineHpcInterfaceDescriptor, EnginePlugin, EnginePluginManifest, EngineResultDatasetKind,
@@ -139,14 +139,6 @@ fn workflows() -> Vec<EngineWorkflowDescriptor> {
                     40,
                     true,
                     "CIF-to-case.struct generation and validation owned by the WIEN2k engine.",
-                ),
-                engine_panel(
-                    "wien2k-init-lapw",
-                    "init_lapw",
-                    "wien2k.init.controls",
-                    50,
-                    true,
-                    "WIEN2k initialization controls for RMT, RKmax, Gmax, lmax, lstart, kgen, and dstart.",
                 ),
             ],
             input_requirements: vec![

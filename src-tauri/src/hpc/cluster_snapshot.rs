@@ -659,6 +659,7 @@ mod tests {
             remote_epw_path: None,
             remote_wannier90_path: Some("wannier90.x".to_string()),
             remote_postw90_path: Some("postw90.x".to_string()),
+            remote_wien2k_install_root: None,
             remote_pseudo_dir: "~/qe/pseudo".to_string(),
             remote_cpu_pseudo_dir: Some("~/qe/pseudo".to_string()),
             remote_gpu_pseudo_dir: Some("~/qe-gpu/pseudo".to_string()),

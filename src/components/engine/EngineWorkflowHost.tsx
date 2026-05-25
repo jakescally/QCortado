@@ -28,6 +28,7 @@ import type {
 import type { EngineWorkflowHostRoute } from "../../lib/engines";
 import type { EngineWorkflowView } from "../../lib/engines/plugin";
 import type { EpwViewerPayload } from "../qe";
+import { Wien2kStructureWizard } from "../wien2k/Wien2kStructureWizard";
 
 export interface ScfWorkflowContext {
   cifId: string;
@@ -62,6 +63,12 @@ export interface EpwWorkflowContext {
   calculations: CalculationRun[];
 }
 
+export interface Wien2kStructureWorkflowContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
+}
+
 export interface EngineWorkflowHostContexts {
   scf: ScfWorkflowContext | null;
   bands: SourceScfWorkflowContext | null;
@@ -72,6 +79,7 @@ export interface EngineWorkflowHostContexts {
   phonons: SourceScfWorkflowContext | null;
   transport: TransportWorkflowContext | null;
   epw: EpwWorkflowContext | null;
+  structureSetup: Wien2kStructureWorkflowContext | null;
 }
 
 export interface PhononWorkflowViewerData {
@@ -110,6 +118,7 @@ export interface EngineWorkflowHostProps {
   onViewTransport: (transportData: TransportResult) => void;
   onViewPhonons: (phononData: PhononWorkflowViewerData, viewMode: "bands" | "dos") => void;
   onViewEpw: (epwData: EpwViewerPayload["data"], rawOutput?: string | null) => void;
+  onStructureSourceSaved: () => void;
 }
 
 const EMPTY_CRYSTAL_DATA: CrystalData = {
@@ -130,6 +139,9 @@ export function canRenderEngineWorkflowHost({
   contexts,
   reconnectTaskId,
 }: Pick<EngineWorkflowHostProps, "route" | "runtime" | "contexts" | "reconnectTaskId">): boolean {
+  if (route.engineId === "wien2k") {
+    return route.view === "wien2k-structure-wizard" && Boolean(contexts.structureSetup);
+  }
   if (route.engineId !== "qe") {
     return false;
   }
@@ -158,6 +170,8 @@ export function canRenderEngineWorkflowHost({
       return Boolean(contexts.phonons || reconnectTaskId);
     case "epw-wizard":
       return Boolean(contexts.epw || reconnectTaskId);
+    default:
+      return false;
   }
 }
 
@@ -171,6 +185,19 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
   const reconnectTaskIdValue = reconnectTaskId ?? undefined;
 
   switch (route.view) {
+    case "wien2k-structure-wizard": {
+      const context = contexts.structureSetup;
+      if (!context) return null;
+      return (
+        <Wien2kStructureWizard
+          projectId={context.projectId}
+          cifId={context.cifId}
+          crystalData={context.crystalData}
+          onBack={() => onBack(route.view, "project-dashboard")}
+          onSaved={props.onStructureSourceSaved}
+        />
+      );
+    }
     case "bands-wizard": {
       const context = contexts.bands;
       return (

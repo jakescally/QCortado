@@ -9,8 +9,8 @@
 export type ImplementedEngineId = "qe";
 
 /**
- * Reserved for future remote-only Wien2k work. This is a type-level name only;
- * it does not indicate that a Wien2k backend is implemented.
+ * Remote-only WIEN2k engine. Its structure-source setup workflow is exposed
+ * after installation; calculation runners remain future work.
  */
 export type ReservedEngineId = "wien2k";
 

@@ -126,6 +126,9 @@ pub struct HpcProfile {
     pub remote_wannier90_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_postw90_path: Option<String>,
+    /// Remote WIENROOT for the installed WIEN2k engine, if this profile owns one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_wien2k_install_root: Option<String>,
     pub remote_pseudo_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_cpu_pseudo_dir: Option<String>,
@@ -550,4 +553,51 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
     );
 
     validation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_profile_without_wien2k_root_remains_readable() {
+        let legacy = serde_json::json!({
+            "id": "profile-1",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/project/qcortado"
+        });
+
+        let profile: HpcProfile = serde_json::from_value(legacy).expect("legacy HPC profile");
+
+        assert_eq!(profile.remote_wien2k_install_root, None);
+        assert_eq!(profile.resource_mode, HpcResourceMode::Both);
+    }
+
+    #[test]
+    fn profile_serializes_verified_wien2k_install_root() {
+        let configured = serde_json::json!({
+            "id": "profile-1",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/project/qcortado",
+            "remote_wien2k_install_root": "/opt/WIEN2k"
+        });
+
+        let profile: HpcProfile = serde_json::from_value(configured).expect("configured profile");
+        let saved = serde_json::to_value(profile).expect("serialize configured profile");
+
+        assert_eq!(
+            saved.get("remote_wien2k_install_root"),
+            Some(&serde_json::Value::String("/opt/WIEN2k".to_string()))
+        );
+    }
 }

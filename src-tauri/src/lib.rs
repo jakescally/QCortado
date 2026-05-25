@@ -109,6 +109,8 @@ pub struct AppState {
     pub active_hpc_profile_id: Mutex<Option<String>>,
     /// Verified remote engine installations.
     pub engine_installations: Mutex<Vec<engines::installations::EngineInstallation>>,
+    /// Transient inline WIEN2k structure-refinement sessions.
+    pub wien2k_structure_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kStructureSession>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -140,6 +142,7 @@ impl Default for AppState {
             hpc_profiles: Mutex::new(Vec::new()),
             active_hpc_profile_id: Mutex::new(None),
             engine_installations: Mutex::new(Vec::new()),
+            wien2k_structure_sessions: Mutex::new(HashMap::new()),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
@@ -641,6 +644,8 @@ fn sanitize_hpc_profile(
     profile.remote_epw_path = sanitize_optional_hpc_field(profile.remote_epw_path);
     profile.remote_wannier90_path = sanitize_optional_hpc_field(profile.remote_wannier90_path);
     profile.remote_postw90_path = None;
+    profile.remote_wien2k_install_root =
+        sanitize_optional_hpc_field(profile.remote_wien2k_install_root);
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_cpu_pseudo_dir = sanitize_optional_hpc_field(profile.remote_cpu_pseudo_dir);
@@ -2068,6 +2073,8 @@ struct HpcPresetBundleProfile {
     remote_wannier90_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_postw90_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_wien2k_install_root: Option<String>,
     remote_pseudo_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_cpu_pseudo_dir: Option<String>,
@@ -2320,6 +2327,7 @@ fn hpc_export_preset_bundle(
                 remote_epw_path: profile.remote_epw_path,
                 remote_wannier90_path: profile.remote_wannier90_path,
                 remote_postw90_path: profile.remote_postw90_path,
+                remote_wien2k_install_root: profile.remote_wien2k_install_root,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
                 remote_cpu_pseudo_dir: profile.remote_cpu_pseudo_dir,
                 remote_gpu_pseudo_dir: profile.remote_gpu_pseudo_dir,
@@ -2467,6 +2475,7 @@ fn hpc_import_preset_bundle(
                 remote_epw_path: imported_profile.remote_epw_path,
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_postw90_path: imported_profile.remote_postw90_path,
+                remote_wien2k_install_root: imported_profile.remote_wien2k_install_root,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
                 remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
                 remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
@@ -2520,6 +2529,7 @@ fn hpc_import_preset_bundle(
             remote_epw_path: imported_profile.remote_epw_path,
             remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_postw90_path: imported_profile.remote_postw90_path,
+            remote_wien2k_install_root: imported_profile.remote_wien2k_install_root,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
             remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
             remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
@@ -2974,10 +2984,413 @@ async fn add_engine_installation(
     };
     config::update_engine_installations(&app, updated_installations)?;
 
+    if installation.engine_id == engines::EngineId::Wien2k {
+        let updated_profiles = {
+            let mut profiles = state.hpc_profiles.lock().unwrap();
+            if let Some(profile) = profiles
+                .iter_mut()
+                .find(|profile| profile.id == installation.hpc_profile_id)
+            {
+                profile.remote_wien2k_install_root = Some(installation.remote_install_root.clone());
+                profile.updated_at = now_iso();
+            }
+            profiles.clone()
+        };
+        let active_profile_id = state.active_hpc_profile_id.lock().unwrap().clone();
+        config::update_hpc_profiles(&app, updated_profiles, active_profile_id)?;
+    }
+
     Ok(engines::installations::AddEngineInstallationResult {
         installation,
         verification,
     })
+}
+
+#[tauri::command]
+fn wien2k_prepare_structure_draft(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    case_name: String,
+    controls: engines::wien2k::Wien2kStructureControls,
+) -> Result<engines::wien2k::Wien2kStructureDraft, String> {
+    let crystal = projects::get_cif_crystal_data(app, project_id.clone(), cif_id.clone())?;
+    engines::wien2k::draft_from_crystal_json(project_id, cif_id, case_name, crystal, controls)
+}
+
+async fn resolve_wien2k_structure_runtime(
+    state: &AppState,
+) -> Result<
+    (
+        engines::installations::EngineInstallation,
+        hpc::profile::HpcProfile,
+        Option<String>,
+    ),
+    String,
+> {
+    let installation = state
+        .engine_installations
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|installation| installation.engine_id == engines::EngineId::Wien2k)
+        .cloned()
+        .ok_or_else(|| "WIEN2k has not been added for remote execution.".to_string())?;
+    let profile = {
+        let profiles = state.hpc_profiles.lock().unwrap();
+        profiles
+            .iter()
+            .find(|profile| profile.id == installation.hpc_profile_id)
+            .cloned()
+            .ok_or_else(|| "The HPC profile configured for WIEN2k no longer exists.".to_string())?
+    };
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    Ok((installation, profile, secret))
+}
+
+async fn expand_remote_structure_root(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    root: &str,
+) -> Result<String, String> {
+    let trimmed = root.trim().trim_end_matches('/');
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        let home =
+            hpc::ssh::run_ssh_command_with_timeout(profile, secret, "printf %s \"$HOME\"", 10)
+                .await?;
+        let home = home.trim().trim_end_matches('/');
+        if home.is_empty() {
+            return Err("Could not resolve remote HOME for WIEN2k staging.".to_string());
+        }
+        if trimmed == "~" {
+            return Ok(home.to_string());
+        }
+        return Ok(format!("{}/{}", home, trimmed.trim_start_matches("~/")));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[tauri::command]
+async fn wien2k_start_structure_session(
+    app: AppHandle,
+    draft: engines::wien2k::Wien2kStructureDraft,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kStructureSession, String> {
+    engines::wien2k::validate_controls(&draft.controls)?;
+    let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let root = expand_remote_structure_root(
+        &profile,
+        secret.as_deref(),
+        &installation.remote_workspace_root,
+    )
+    .await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let remote_case_dir = format!(
+        "{}/qcortado/{}/wien2k/{}",
+        root.trim_end_matches('/'),
+        draft.project_id,
+        session_id
+    );
+    let mkdir_command = format!("mkdir -p {}", shell_single_quote_local(&remote_case_dir));
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &mkdir_command, 20).await?;
+    let temp_path = std::env::temp_dir().join(format!(
+        "qcortado_wien2k_struct_{}_{}.struct",
+        std::process::id(),
+        session_id
+    ));
+    std::fs::write(&temp_path, &draft.struct_content)
+        .map_err(|err| format!("Failed to stage WIEN2k draft locally: {}", err))?;
+    let remote_struct = format!("{}/{}.struct", remote_case_dir, draft.case_name);
+    let upload_result =
+        hpc::ssh::upload_file(&profile, secret.as_deref(), &temp_path, &remote_struct).await;
+    let _ = std::fs::remove_file(&temp_path);
+    if let Err(error) = upload_result {
+        let cleanup_command = format!("rm -rf -- {}", shell_single_quote_local(&remote_case_dir));
+        let _ = hpc::ssh::run_ssh_command_with_timeout(
+            &profile,
+            secret.as_deref(),
+            &cleanup_command,
+            20,
+        )
+        .await;
+        return Err(error);
+    }
+
+    let session = engines::wien2k::Wien2kStructureSession {
+        session_id: session_id.clone(),
+        draft: draft.clone(),
+        remote_case_dir,
+        remote_install_root: installation.remote_install_root,
+        hpc_profile_id: profile.id,
+        phase: engines::wien2k::Wien2kStructureSessionPhase::Staged,
+        current_struct: draft.struct_content,
+        artifacts: std::collections::BTreeMap::new(),
+        transcript: vec!["Draft structure staged for remote WIEN2k refinement.".to_string()],
+        started_at: now_iso(),
+    };
+    state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id, session.clone());
+    let _ = app.emit(
+        &format!("wien2k-structure-output:{}", session.session_id),
+        "Draft structure staged for remote WIEN2k refinement.",
+    );
+    Ok(session)
+}
+
+async fn read_remote_wien2k_text(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    path: &str,
+) -> Result<String, String> {
+    hpc::ssh::run_ssh_command_with_timeout(
+        profile,
+        secret,
+        &format!("test -f {0} && cat {0}", shell_single_quote_local(path)),
+        20,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wien2k_run_structure_stage(
+    app: AppHandle,
+    session_id: String,
+    stage: engines::wien2k::Wien2kStructureStage,
+    controls: engines::wien2k::Wien2kStructureControls,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kStructureStageResult, String> {
+    let session = state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k structure session is no longer available.".to_string())?;
+    let next_phase = engines::wien2k::validate_stage_transition(session.phase, stage)?;
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if profile.id != session.hpc_profile_id {
+        return Err("The WIEN2k structure session HPC profile is unavailable.".to_string());
+    }
+    let command = engines::wien2k::stage_command(&session, stage, &controls)?;
+    let event_name = format!("wien2k-structure-output:{}", session_id);
+    let native_output = hpc::ssh::run_ssh_command_streaming(
+        &app,
+        &event_name,
+        &profile,
+        secret.as_deref(),
+        &command,
+        180,
+    )
+    .await?;
+    let candidate_suffix = engines::wien2k::expected_candidate_suffix(stage);
+    let candidate_path = format!(
+        "{}/{}.{}",
+        session.remote_case_dir, session.draft.case_name, candidate_suffix
+    );
+    let candidate_struct =
+        read_remote_wien2k_text(&profile, secret.as_deref(), &candidate_path).await?;
+    if candidate_struct.trim().is_empty() {
+        return Err("WIEN2k did not generate a structure candidate for this stage.".to_string());
+    }
+    let output_suffix = match stage {
+        engines::wien2k::Wien2kStructureStage::Rmt => "outputnn",
+        engines::wien2k::Wien2kStructureStage::Sgroup => "outputsgroup",
+        engines::wien2k::Wien2kStructureStage::Symmetry => "outputs",
+    };
+    let output_path = format!(
+        "{}/{}.{}",
+        session.remote_case_dir, session.draft.case_name, output_suffix
+    );
+    let detail_output = read_remote_wien2k_text(&profile, secret.as_deref(), &output_path)
+        .await
+        .unwrap_or_default();
+    let combined_output = if detail_output.trim().is_empty() {
+        native_output
+    } else {
+        format!("{}\n\n{}", native_output, detail_output)
+    };
+    let diagnostics = engines::wien2k::stage_diagnostics(stage, &combined_output);
+    let save_allowed =
+        stage == engines::wien2k::Wien2kStructureStage::Symmetry && diagnostics.is_empty();
+    let sites =
+        engines::wien2k::update_site_rmts_from_struct(&session.draft.sites, &candidate_struct);
+
+    let mut updated = session;
+    updated.phase = next_phase;
+    updated.current_struct = candidate_struct.clone();
+    updated.draft.controls = controls;
+    updated.artifacts.insert(
+        format!("{}.{}", updated.draft.case_name, output_suffix),
+        detail_output,
+    );
+    updated
+        .transcript
+        .push(format!("{:?}\n{}", stage, combined_output));
+    state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+
+    Ok(engines::wien2k::Wien2kStructureStageResult {
+        session_id,
+        stage,
+        phase: next_phase,
+        candidate_struct,
+        sites,
+        native_output: combined_output,
+        save_allowed,
+        diagnostics,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_save_structure_source(
+    app: AppHandle,
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<projects::CalculationRun, String> {
+    let session = state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k structure session is no longer available.".to_string())?;
+    if session.phase != engines::wien2k::Wien2kStructureSessionPhase::SymmetryReady {
+        return Err(
+            "Complete WIEN2k symmetry refinement before saving this structure.".to_string(),
+        );
+    }
+    let outputs = session
+        .artifacts
+        .get(&format!("{}.outputs", session.draft.case_name))
+        .cloned()
+        .unwrap_or_default();
+    let final_diagnostics_text = format!(
+        "{}\n{}",
+        session.transcript.last().cloned().unwrap_or_default(),
+        outputs
+    );
+    if !engines::wien2k::stage_diagnostics(
+        engines::wien2k::Wien2kStructureStage::Symmetry,
+        &final_diagnostics_text,
+    )
+    .is_empty()
+    {
+        return Err(
+            "Resolve WIEN2k symmetry diagnostics before saving this structure.".to_string(),
+        );
+    }
+    let final_sites = engines::wien2k::update_site_rmts_from_struct(
+        &session.draft.sites,
+        &session.current_struct,
+    );
+    let final_structure_summary =
+        engines::wien2k::parse_struct_summary(&session.current_struct).ok();
+    let parameters = serde_json::json!({
+        "setup_kind": "structure",
+        "case_name": session.draft.case_name,
+        "source_cif_id": session.draft.cif_id,
+        "standardized_cell": session.draft.cell_parameters,
+        "standardized_spacegroup_number": session.draft.spacegroup_number,
+        "standardized_spacegroup_symbol": session.draft.international_symbol,
+        "final_structure_summary": final_structure_summary,
+        "sites": final_sites,
+        "controls": session.draft.controls,
+        "hpc_profile_id": session.hpc_profile_id,
+        "execution_backend": "hpc",
+        "structure_source_ready": true,
+    });
+    let mut artifacts = vec![
+        projects::EngineSetupTextArtifact {
+            filename: format!("{}.struct", session.draft.case_name),
+            contents: session.current_struct.clone(),
+        },
+        projects::EngineSetupTextArtifact {
+            filename: format!("{}.draft.struct", session.draft.case_name),
+            contents: session.draft.struct_content.clone(),
+        },
+        projects::EngineSetupTextArtifact {
+            filename: "structure_setup.log".to_string(),
+            contents: session.transcript.join("\n\n"),
+        },
+    ];
+    artifacts.extend(session.artifacts.iter().map(|(filename, contents)| {
+        projects::EngineSetupTextArtifact {
+            filename: filename.clone(),
+            contents: contents.clone(),
+        }
+    }));
+    let calculation = projects::save_engine_setup_artifact(
+        &app,
+        &session.draft.project_id,
+        &session.draft.cif_id,
+        projects::SaveEngineSetupArtifactData {
+            engine_id: engines::EngineId::Wien2k,
+            setup_kind: "structure".to_string(),
+            parameters,
+            started_at: session.started_at.clone(),
+            completed_at: now_iso(),
+            tags: vec!["structure-source".to_string()],
+            artifacts,
+        },
+    )?;
+    if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
+        let cleanup_command = format!(
+            "rm -rf -- {}",
+            shell_single_quote_local(&session.remote_case_dir)
+        );
+        let _ = hpc::ssh::run_ssh_command_with_timeout(
+            &profile,
+            secret.as_deref(),
+            &cleanup_command,
+            20,
+        )
+        .await;
+    }
+    state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .remove(&session_id);
+    Ok(calculation)
+}
+
+#[tauri::command]
+async fn wien2k_discard_structure_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .remove(&session_id);
+    if let Some(session) = session {
+        if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
+            let cleanup_command = format!(
+                "rm -rf -- {}",
+                shell_single_quote_local(&session.remote_case_dir)
+            );
+            let _ = hpc::ssh::run_ssh_command_with_timeout(
+                &profile,
+                secret.as_deref(),
+                &cleanup_command,
+                20,
+            )
+            .await;
+        }
+    }
+    Ok(())
 }
 
 /// Tests SSH connection for the selected HPC profile.
@@ -14385,6 +14798,24 @@ pub fn run() {
                 }
             }
 
+            // Compatibility bridge: installation records created before engine
+            // configuration lived on the HPC profile remain editable in the
+            // profile settings surface.
+            for installation in &engine_installations {
+                if installation.engine_id != engines::EngineId::Wien2k {
+                    continue;
+                }
+                if let Some(profile) = hpc_profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == installation.hpc_profile_id)
+                {
+                    if profile.remote_wien2k_install_root.is_none() {
+                        profile.remote_wien2k_install_root =
+                            Some(installation.remote_install_root.clone());
+                    }
+                }
+            }
+
             // Initialize AppState with loaded config
             app.manage(AppState {
                 qe_bin_dir: Mutex::new(qe_bin_dir),
@@ -14399,6 +14830,7 @@ pub fn run() {
                 hpc_profiles: Mutex::new(hpc_profiles),
                 active_hpc_profile_id: Mutex::new(active_hpc_profile_id),
                 engine_installations: Mutex::new(engine_installations),
+                wien2k_structure_sessions: Mutex::new(HashMap::new()),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
@@ -14472,6 +14904,11 @@ pub fn run() {
         hpc_get_active_profile_id,
         list_engine_installations,
         add_engine_installation,
+        wien2k_prepare_structure_draft,
+        wien2k_start_structure_session,
+        wien2k_run_structure_stage,
+        wien2k_save_structure_source,
+        wien2k_discard_structure_session,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -14531,6 +14968,11 @@ pub fn run() {
         hpc_get_active_profile_id,
         list_engine_installations,
         add_engine_installation,
+        wien2k_prepare_structure_draft,
+        wien2k_start_structure_session,
+        wien2k_run_structure_stage,
+        wien2k_save_structure_source,
+        wien2k_discard_structure_session,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,
