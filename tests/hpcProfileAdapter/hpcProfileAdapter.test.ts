@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
   hpcProfileToEngineRuntimeProfile,
   qeHpcProfileToRuntimeProfile,
 } from "../../src/lib/engines/qe";
@@ -68,6 +70,8 @@ test("qeHpcProfileToRuntimeProfile resolves QE paths without changing the source
   assert.equal(runtimeProfile.supported, true);
   assert.equal(runtimeProfile.supportsResourceType, true);
   assert.equal(runtimeProfile.resourceType, "gpu");
+  assert.equal(runtimeProfile.pathMode, "path");
+  assert.equal(runtimeProfile.moduleLoad, null);
   assert.equal(runtimeProfile.launcherCommand, "srun --gpu-bind=closest");
   assert.equal(runtimeProfile.paths.remoteBinDir, "/opt/qe/gpu/bin");
   assert.equal(runtimeProfile.paths.remotePseudoDir, "/opt/qe/gpu/pseudo");
@@ -79,6 +83,27 @@ test("qeHpcProfileToRuntimeProfile resolves QE paths without changing the source
 
   runtimeProfile.defaultResources.additional_sbatch?.push("--mutated");
   assert.deepEqual(profile.default_gpu_resources.additional_sbatch, ["--gres=gpu:1"]);
+});
+
+test("QE module mode loads its environment and invokes tools from PATH", () => {
+  const moduleProfile: HpcProfile = {
+    ...profile,
+    qe_path_mode: "module",
+    qe_module_use: "/cluster/modulefiles",
+    qe_module_load: "quantum-espresso/7.5",
+  };
+
+  assert.deepEqual(
+    buildHpcQeRuntimeSetupLines(moduleProfile, "cpu"),
+    ["module use '/cluster/modulefiles'", "module load 'quantum-espresso/7.5'"],
+  );
+  assert.equal(
+    buildHpcQeInputCommandLine(moduleProfile, "pw.x", "pw.in", "pw.out", undefined, "cpu"),
+    "srun --cpu-bind=cores pw.x -pd .true. -in pw.in > pw.out 2>&1",
+  );
+  const runtimeProfile = qeHpcProfileToRuntimeProfile(moduleProfile);
+  assert.equal(runtimeProfile.pathMode, "module");
+  assert.equal(runtimeProfile.moduleLoad, "quantum-espresso/7.5");
 });
 
 test("hpcProfileToEngineRuntimeProfile does not synthesize future engine paths", () => {

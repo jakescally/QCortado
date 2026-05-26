@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CrystalData } from "../../lib/types";
 import {
@@ -19,8 +19,8 @@ import type {
   Wien2kStructureStageResult,
   Wien2kStructureSite,
 } from "../../lib/engines/wien2k";
+import { InfoTooltip } from "../InfoTooltip";
 import { LiveOutputPanel } from "../LiveOutputPanel";
-import { UnitCellViewer } from "../UnitCellViewer";
 
 interface Wien2kStructureWizardProps {
   projectId: string;
@@ -40,6 +40,23 @@ function displaySiteValue(site: Wien2kStructureSite, controls: Wien2kStructureCo
   const override = controls.siteOverrides.find((entry) => entry.siteIndex === site.siteIndex);
   return override?.[field] ?? site[field];
 }
+
+function stageOutputArtifact(stage: Wien2kStructureStage): string {
+  switch (stage) {
+    case "rmt": return "outputnn";
+    case "sgroup": return "outputsgroup";
+    case "symmetry": return "outputs";
+  }
+}
+
+type StructureWizardStep = "draft" | "rmt" | "sgroup" | "symmetry" | "save";
+const STRUCTURE_STEPS: Array<{ id: StructureWizardStep; label: string }> = [
+  { id: "draft", label: "Draft" },
+  { id: "rmt", label: "RMT" },
+  { id: "sgroup", label: "SGROUP" },
+  { id: "symmetry", label: "SYMMETRY" },
+  { id: "save", label: "Save" },
+];
 
 export function Wien2kStructureWizard({
   projectId,
@@ -69,35 +86,16 @@ export function Wien2kStructureWizard({
     r0,
   })));
   const sites = lastResult?.sites ?? draft?.sites ?? [];
+  const hasNativeRmtValues = Boolean(session && session.phase !== "staged");
   const canOperate = Boolean(draft && !draftStale && !controlsError && caseNameValid);
-  const displayedCrystalData = useMemo<CrystalData>(() => {
-    if (!draft) return crystalData;
-    let atomIndex = 0;
-    return {
-      ...crystalData,
-      cell_length_a: { value: draft.cellParameters[0] },
-      cell_length_b: { value: draft.cellParameters[1] },
-      cell_length_c: { value: draft.cellParameters[2] },
-      cell_angle_alpha: { value: draft.cellParameters[3] },
-      cell_angle_beta: { value: draft.cellParameters[4] },
-      cell_angle_gamma: { value: draft.cellParameters[5] },
-      space_group_HM: draft.internationalSymbol,
-      space_group_IT_number: draft.spacegroupNumber,
-      atom_sites: draft.sites.flatMap((site) => site.positions.map((position) => {
-        atomIndex += 1;
-        return {
-          label: `${site.symbol}${atomIndex}`,
-          type_symbol: site.symbol,
-          fract_x: position[0],
-          fract_y: position[1],
-          fract_z: position[2],
-          occupancy: 1,
-        };
-      })),
-      symmetry_operations: [],
-      anisotropic_params: [],
-    };
-  }, [crystalData, draft]);
+  const currentStep: StructureWizardStep = (() => {
+    if (!draft || draftStale || isPreparing) return "draft";
+    if (!session || session.phase === "staged") return "rmt";
+    if (session.phase === "rmt_ready") return "sgroup";
+    if (session.phase === "sgroup_ready") return "symmetry";
+    return lastResult?.saveAllowed ? "save" : "symmetry";
+  })();
+  const currentStepIndex = STRUCTURE_STEPS.findIndex((step) => step.id === currentStep);
 
   useEffect(() => {
     return () => {
@@ -144,7 +142,7 @@ export function Wien2kStructureWizard({
         setIsPreparing(false);
       }
     };
-    // Stage-only controls (RMT reduction, RMT overrides and SGROUP tolerance)
+    // Stage-only controls (RMT reduction, NN validation, RMT overrides and SGROUP tolerance)
     // do not alter the local draft file and are applied during native refinement.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseName, caseNameValid, cifId, controlsError, draftSiteSettingsKey, projectId, session]);
@@ -196,6 +194,14 @@ export function Wien2kStructureWizard({
       const result = await runWien2kStructureStage(activeSession.sessionId, stage, controls);
       setSession((current) => current ? { ...current, phase: result.phase, currentStruct: result.candidateStruct } : current);
       setLastResult(result);
+      if (result.artifactOutput.trim()) {
+        const nativeLines = result.artifactOutput.trimEnd().split(/\r?\n/);
+        setOutputLines((current) => [
+          ...current,
+          `[native ${draft?.caseName ?? "case"}.${stageOutputArtifact(stage)}]`,
+          ...nativeLines,
+        ].slice(-1000));
+      }
       if (result.diagnostics.length > 0) {
         setOutputLines((current) => [...current, ...result.diagnostics.map((item) => `[diagnostic] ${item}`)]);
       }
@@ -236,15 +242,6 @@ export function Wien2kStructureWizard({
     }
   }
 
-  const stageLabel = useMemo(() => {
-    switch (session?.phase) {
-      case "rmt_ready": return "RMT candidate ready";
-      case "sgroup_ready": return "Space-group candidate ready";
-      case "symmetry_ready": return "Symmetry candidate ready";
-      default: return isPreparing ? "Generating draft" : draft ? "Draft ready" : "Preparing draft";
-    }
-  }, [draft, isPreparing, session?.phase]);
-
   return (
     <div className="wizard-container wien2k-structure-wizard">
       <div className="wizard-header">
@@ -252,7 +249,16 @@ export function Wien2kStructureWizard({
           Back
         </button>
         <h2>WIEN2k Structure</h2>
-        <span className="wien2k-stage-badge">{stageLabel}</span>
+        <div className="step-indicator">
+          {STRUCTURE_STEPS.map((step, index) => (
+            <span
+              key={step.id}
+              className={index === currentStepIndex ? "active" : index < currentStepIndex ? "completed" : ""}
+            >
+              {index + 1}. {step.label}
+            </span>
+          ))}
+        </div>
       </div>
       {error && <div className="error-banner">{error}</div>}
       <div className="wien2k-structure-content">
@@ -260,6 +266,7 @@ export function Wien2kStructureWizard({
           <div className="wien2k-control-grid">
             <label>
               Case name
+              <InfoTooltip text="Defines the WIEN2k case prefix used for every native input and output file. Recommended choice: a short filesystem-safe material label using letters, numbers, underscore, hyphen, or period." />
               <input
                 value={caseName}
                 disabled={Boolean(session)}
@@ -271,6 +278,7 @@ export function Wien2kStructureWizard({
             </label>
             <label>
               RMT reduction (%)
+              <InfoTooltip text="Uniformly reduces muffin-tin sphere radii before native overlap validation; smaller spheres avoid overlap but make a fixed RKMAX basis more expensive. Typical range: 0 to 10%, increasing only when overlap requires it." />
               <input
                 type="number"
                 min="0"
@@ -303,7 +311,14 @@ export function Wien2kStructureWizard({
               <h3 className="wien2k-site-heading">Muffin-tin radii</h3>
               <table className="wien2k-site-table">
                 <thead>
-                  <tr><th>Site</th><th>Multiplicity</th><th>RMT</th></tr>
+                  <tr>
+                    <th>Site</th>
+                    <th>Multiplicity</th>
+                    <th>
+                      RMT
+                      <InfoTooltip text="Muffin-tin sphere radius in bohr for each inequivalent site; larger non-overlapping spheres generally reduce LAPW basis cost. Typical starting range: about 1.5 to 2.5 bohr, then accept native overlap checks." />
+                    </th>
+                  </tr>
                 </thead>
                 <tbody>
                   {sites.map((site) => (
@@ -313,6 +328,7 @@ export function Wien2kStructureWizard({
                       <td>
                         <input
                           type="number"
+                          className={hasNativeRmtValues ? "cutoff-input cutoff-input-parsed" : undefined}
                           min="0.000001"
                           step="0.01"
                           disabled={Boolean(session && session.phase !== "rmt_ready")}
@@ -327,7 +343,23 @@ export function Wien2kStructureWizard({
               <details className="wien2k-advanced">
                 <summary>Advanced structure settings</summary>
                 <label>
+                  NN bond-length factor
+                  <InfoTooltip text="Controls the distance window used by WIEN2k NN to inspect nearest neighbors and sphere overlap. Recommended starting value: 2.0; values near 1 to 3 usually bracket relevant neighbors." />
+                  <input
+                    type="number"
+                    min="0.000001"
+                    step="0.1"
+                    disabled={Boolean(session && session.phase !== "rmt_ready")}
+                    value={controls.nnBondlengthFactor}
+                    onChange={(event) => setControls((current) => ({
+                      ...current,
+                      nnBondlengthFactor: Number(event.target.value),
+                    }))}
+                  />
+                </label>
+                <label>
                   SGROUP tolerance
+                  <InfoTooltip text="Numerical tolerance used while identifying space-group symmetry; too loose can merge distinct sites and too tight can miss intended symmetry. Typical range: 1e-6 to 1e-4." />
                   <input
                     type="number"
                     min="0.0000001"
@@ -342,7 +374,17 @@ export function Wien2kStructureWizard({
                 </label>
                 <table className="wien2k-site-table">
                   <thead>
-                    <tr><th>Site</th><th>NPT</th><th>R0</th></tr>
+                    <tr>
+                      <th>Site</th>
+                      <th>
+                        NPT
+                        <InfoTooltip text="Number of radial mesh points inside the atomic sphere; more points resolve radial functions with modest added cost. Recommended generic value: the WIEN2k default of 781; use a positive odd value." />
+                      </th>
+                      <th>
+                        R0
+                        <InfoTooltip text="First radial-mesh radius in bohr near the nucleus; it must resolve the core region and remain below RMT. WIEN2k defaults are element-dependent, typically 5e-6 to 1e-4 bohr." />
+                      </th>
+                    </tr>
                   </thead>
                   <tbody>
                     {sites.map((site) => (
@@ -384,10 +426,7 @@ export function Wien2kStructureWizard({
             </>
           )}
         </section>
-        <section className="wien2k-preview-column">
-          <div className="wien2k-viewer-frame">
-            <UnitCellViewer crystalData={displayedCrystalData} />
-          </div>
+        <section className="wien2k-output-column">
           <LiveOutputPanel
             title="WIEN2k structure refinement"
             output={outputLines.join("\n")}
@@ -400,27 +439,27 @@ export function Wien2kStructureWizard({
       </div>
       <div className="step-actions">
         {session && (
-          <button type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
+          <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
             Discard Session
           </button>
         )}
         {draft && !session && (
-          <button type="button" className="run-btn" disabled={!canOperate || isRunning} onClick={() => void runStage("rmt")}>
+          <button type="button" className="primary-button" disabled={!canOperate || isRunning} onClick={() => void runStage("rmt")}>
             Start RMT Refinement
           </button>
         )}
         {session?.phase === "rmt_ready" && (
           <>
-            <button type="button" disabled={isRunning} onClick={() => void runStage("rmt")}>Re-run RMT</button>
-            <button type="button" className="run-btn" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("sgroup")}>
+            <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void runStage("rmt")}>Re-run RMT</button>
+            <button type="button" className="primary-button" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("sgroup")}>
               Accept RMT and Run SGROUP
             </button>
           </>
         )}
         {session?.phase === "sgroup_ready" && (
           <>
-            <button type="button" disabled={isRunning} onClick={() => void runStage("sgroup")}>Re-run SGROUP</button>
-            <button type="button" className="run-btn" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("symmetry")}>
+            <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void runStage("sgroup")}>Re-run SGROUP</button>
+            <button type="button" className="primary-button" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("symmetry")}>
               Accept SGROUP and Run SYMMETRY
             </button>
           </>
@@ -428,11 +467,11 @@ export function Wien2kStructureWizard({
         {session?.phase === "symmetry_ready" && (
           <>
             {!lastResult?.saveAllowed && (
-              <button type="button" disabled={isRunning || isSaving} onClick={() => void runStage("symmetry")}>
+              <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void runStage("symmetry")}>
                 Retry SYMMETRY
               </button>
             )}
-            <button type="button" className="run-btn" disabled={isSaving || !lastResult?.saveAllowed} onClick={() => void saveSource()}>
+            <button type="button" className="primary-button" disabled={isSaving || !lastResult?.saveAllowed} onClick={() => void saveSource()}>
               {isSaving ? "Saving..." : "Save Structure Source"}
             </button>
           </>

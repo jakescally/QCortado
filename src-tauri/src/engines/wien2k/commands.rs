@@ -1,7 +1,7 @@
-//! Hidden WIEN2k command-plan skeleton.
+//! WIEN2k command-plan construction.
 //!
-//! These helpers produce data-only plans for future remote execution. They do
-//! not run WIEN2k and are not exposed through Tauri commands.
+//! RMT refinement remains owned by the accepted structure source. SCF v1 is
+//! deliberately serial, so these plans never generate `-red` or `-p`.
 
 use super::case_state::{core_case_artifacts, initialized_case_artifacts};
 use super::types::{
@@ -33,10 +33,6 @@ pub fn build_init_lapw_plan(
         format_float(settings.lstart_energy_cutoff_ry),
     ];
 
-    if let Some(reduction) = settings.rmt_reduction_percent {
-        argv.push("-red".to_string());
-        argv.push(format_float(reduction));
-    }
     if settings.spin_mode == Wien2kSpinMode::SpinPolarized {
         argv.push("-sp".to_string());
     }
@@ -53,6 +49,7 @@ pub fn build_init_lapw_plan(
 pub fn build_scf_run_plan(
     case_ref: &Wien2kCaseReference,
     settings: &Wien2kScfRunSettings,
+    continuation: bool,
 ) -> Wien2kCommandPlan {
     let program = match settings.spin_mode {
         Wien2kSpinMode::NonSpinPolarized => Wien2kCommandProgram::RunLapw,
@@ -70,8 +67,8 @@ pub fn build_scf_run_plan(
         argv.push("-fc".to_string());
         argv.push(format_float(force_cutoff));
     }
-    if settings.parallel {
-        argv.push("-p".to_string());
+    if continuation {
+        argv.push("-NI".to_string());
     }
 
     command_plan(
@@ -153,13 +150,13 @@ mod tests {
     fn spin_polarized_scf_uses_runsp_lapw() {
         let settings = Wien2kScfRunSettings {
             spin_mode: Wien2kSpinMode::SpinPolarized,
-            parallel: true,
             ..Wien2kScfRunSettings::default()
         };
-        let plan = build_scf_run_plan(&case_ref(), &settings);
+        let plan = build_scf_run_plan(&case_ref(), &settings, true);
 
         assert_eq!(plan.program.script_name(), "runsp_lapw");
-        assert!(plan.argv.iter().any(|arg| arg == "-p"));
+        assert!(!plan.argv.iter().any(|arg| arg == "-p"));
+        assert!(plan.argv.iter().any(|arg| arg == "-NI"));
         assert_eq!(
             plan.environment,
             vec![(

@@ -60,7 +60,7 @@ pub fn core_case_artifacts(case_name: &str) -> Vec<Wien2kCaseArtifact> {
         artifact(
             Wien2kCaseArtifactRole::InitializationOutput,
             case_name,
-            "outputsgroup",
+            "outputst",
             false,
         ),
         artifact(
@@ -76,7 +76,29 @@ pub fn core_case_artifacts(case_name: &str) -> Vec<Wien2kCaseArtifact> {
 }
 
 pub fn initialized_case_artifacts(case_name: &str) -> Vec<Wien2kCaseArtifact> {
-    let mut artifacts = core_case_artifacts(case_name);
+    let mut artifacts = vec![
+        artifact(Wien2kCaseArtifactRole::Struct, case_name, "struct", true),
+        artifact(
+            Wien2kCaseArtifactRole::InitializationOutput,
+            case_name,
+            "outputnn",
+            false,
+        ),
+        artifact(
+            Wien2kCaseArtifactRole::InitializationOutput,
+            case_name,
+            "outputs",
+            false,
+        ),
+        artifact(
+            Wien2kCaseArtifactRole::InitializationOutput,
+            case_name,
+            "outputst",
+            false,
+        ),
+        artifact(Wien2kCaseArtifactRole::Density, case_name, "clmsum", true),
+        artifact(Wien2kCaseArtifactRole::Dayfile, case_name, "dayfile", false),
+    ];
     artifacts.extend([
         artifact(
             Wien2kCaseArtifactRole::InitializationInput,
@@ -94,6 +116,18 @@ pub fn initialized_case_artifacts(case_name: &str) -> Vec<Wien2kCaseArtifact> {
             Wien2kCaseArtifactRole::InitializationInput,
             case_name,
             "in2",
+            true,
+        ),
+        artifact(
+            Wien2kCaseArtifactRole::InitializationInput,
+            case_name,
+            "inc",
+            true,
+        ),
+        artifact(
+            Wien2kCaseArtifactRole::InitializationInput,
+            case_name,
+            "inm",
             true,
         ),
         artifact(

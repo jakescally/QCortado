@@ -66,10 +66,7 @@ const sourceScfPanels: SharedWorkflowPanelDescriptor[] = [
   sharedPanel("result_summary", "Results", 110),
 ];
 
-/**
- * Full planning manifest. Only workflows with implemented UI and command
- * routing are promoted through the frontend registry.
- */
+/** Complete WIEN2k manifest, including workflows reserved for later phases. */
 export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
     id: "wien2k",
@@ -110,8 +107,8 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
       sharedPanels: structurePanels,
       enginePanels: [
         enginePanel("wien2k-case-state", "Case state", "wien2k.case.state", 30, true, "Remote case-state selection, staging, and resume policy for WIEN2k."),
-        enginePanel("wien2k-scf-basis", "Basis and spheres", "wien2k.scf.basis", 40, true, "WIEN2k RMT, RKmax, Gmax, and lmax controls. No pseudopotentials are used."),
-        enginePanel("wien2k-scf-cycle", "SCF cycle", "wien2k.scf.cycle", 50, true, "WIEN2k run_lapw/runsp_lapw convergence, spin mode, and parallel flags."),
+        enginePanel("wien2k-scf-basis", "Basis and k mesh", "wien2k.scf.basis", 40, true, "WIEN2k RKmax, Gmax, lmax, k-mesh, and LSTART controls. Accepted RMT values remain owned by case.struct."),
+        enginePanel("wien2k-scf-cycle", "SCF cycle", "wien2k.scf.cycle", 50, true, "Serial WIEN2k run_lapw/runsp_lapw convergence and basic spin-mode controls."),
       ],
       inputRequirements: [
         requirement("crystal_structure", "Crystal structure"),
@@ -160,15 +157,15 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   ],
 };
 
-/** The only WIEN2k workflow currently available after remote installation. */
+/** WIEN2k workflows currently available after remote installation. */
 export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST,
   descriptor: {
     ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
     status: "configured",
-    calculationKinds: ["engine_setup"],
+    calculationKinds: ["engine_setup", "scf"],
   },
   workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
-    (workflow) => workflow.kind === "engine_setup",
+    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf",
   ),
 };

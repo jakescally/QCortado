@@ -8,6 +8,7 @@ import {
 } from "./hpc";
 import type {
   HpcLauncher,
+  HpcEnginePathMode,
   HpcProfile,
   HpcResourceMode,
   HpcResourceType,
@@ -48,6 +49,9 @@ export interface QeHpcRuntimePaths {
 export interface QeHpcRuntimeProfile extends EngineHpcRuntimeProfileBase<"qe"> {
   supported: true;
   supportsResourceType: boolean;
+  pathMode: HpcEnginePathMode;
+  moduleUse: string | null;
+  moduleLoad: string | null;
   paths: QeHpcRuntimePaths;
 }
 
@@ -113,6 +117,9 @@ export function qeHpcProfileToRuntimeProfile(
     resourceMode: profile.resource_mode,
     resourceType,
     supportsResourceType: supportsProfileResourceType(profile, resourceType),
+    pathMode: profile.qe_path_mode === "module" ? "module" : "path",
+    moduleUse: normalizeOptionalText(profile.qe_module_use),
+    moduleLoad: normalizeOptionalText(profile.qe_module_load),
     launcher: profile.launcher,
     launcherCommand: buildHpcLauncherCommand(profile, resourceType),
     remoteWorkspaceRoot: profile.remote_workspace_root,

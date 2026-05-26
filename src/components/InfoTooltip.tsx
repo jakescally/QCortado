@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { getTooltipOpenDelay } from "./tooltipTiming";
 
 interface InfoTooltipProps {
   text: string;
@@ -24,6 +25,7 @@ const CLOSE_DELAY_MS = 120;
 export function InfoTooltip({ text, className, children }: InfoTooltipProps) {
   const triggerRef = useRef<HTMLSpanElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const openTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const tooltipId = useId();
 
@@ -37,17 +39,41 @@ export function InfoTooltip({ text, className, children }: InfoTooltipProps) {
     }
   }, []);
 
+  const clearOpenTimer = useCallback(() => {
+    if (openTimerRef.current != null) {
+      window.clearTimeout(openTimerRef.current);
+      openTimerRef.current = null;
+    }
+  }, []);
+
   const showTooltip = useCallback(() => {
+    clearOpenTimer();
     clearCloseTimer();
     setOpen(true);
-  }, [clearCloseTimer]);
+  }, [clearCloseTimer, clearOpenTimer]);
+
+  const showTooltipOnHover = useCallback(() => {
+    const openDelay = getTooltipOpenDelay(children != null);
+    if (openDelay === 0) {
+      showTooltip();
+      return;
+    }
+
+    clearOpenTimer();
+    clearCloseTimer();
+    openTimerRef.current = window.setTimeout(() => {
+      openTimerRef.current = null;
+      setOpen(true);
+    }, openDelay);
+  }, [children, clearCloseTimer, clearOpenTimer, showTooltip]);
 
   const hideTooltip = useCallback(() => {
+    clearOpenTimer();
     clearCloseTimer();
     closeTimerRef.current = window.setTimeout(() => {
       setOpen(false);
     }, CLOSE_DELAY_MS);
-  }, [clearCloseTimer]);
+  }, [clearCloseTimer, clearOpenTimer]);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -104,9 +130,10 @@ export function InfoTooltip({ text, className, children }: InfoTooltipProps) {
 
   useEffect(() => {
     return () => {
+      clearOpenTimer();
       clearCloseTimer();
     };
-  }, [clearCloseTimer]);
+  }, [clearCloseTimer, clearOpenTimer]);
 
   const bubble = open ? createPortal(
     <div
@@ -138,7 +165,7 @@ export function InfoTooltip({ text, className, children }: InfoTooltipProps) {
         className={children ? "tooltip-trigger-wrap" : "tooltip-container"}
         tabIndex={children ? undefined : 0}
         role={children ? undefined : "button"}
-        onMouseEnter={showTooltip}
+        onMouseEnter={showTooltipOnHover}
         onMouseLeave={hideTooltip}
         onFocus={showTooltip}
         onBlur={hideTooltip}

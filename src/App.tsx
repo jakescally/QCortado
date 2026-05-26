@@ -149,7 +149,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -444,6 +444,7 @@ function AppInner() {
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"general" | "hpc" | "hpc-profile">("general");
+  const [hpcProfileEditorDirty, setHpcProfileEditorDirty] = useState(false);
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
   const [hpcProfiles, setHpcProfiles] = useState<HpcProfile[]>([]);
@@ -592,6 +593,25 @@ function AppInner() {
     [hpcProfiles, editingHpcProfileId],
   );
 
+  function confirmDiscardHpcProfileChanges(): boolean {
+    return settingsPage !== "hpc-profile"
+      || !hpcProfileEditorDirty
+      || window.confirm("Discard unsaved changes to this HPC profile?");
+  }
+
+  function closeSettingsMenu() {
+    if (!confirmDiscardHpcProfileChanges()) return false;
+    setHpcProfileEditorDirty(false);
+    setShowSettingsMenu(false);
+    return true;
+  }
+
+  function leaveHpcProfileEditor() {
+    if (!confirmDiscardHpcProfileChanges()) return;
+    setHpcProfileEditorDirty(false);
+    setSettingsPage("hpc");
+  }
+
   useEffect(() => {
     if (!activeHpcProfile) {
       setHpcDefaultCpuDraft(defaultCpuResources());
@@ -654,12 +674,12 @@ function AppInner() {
         return;
       }
       if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
-        setShowSettingsMenu(false);
+        closeSettingsMenu();
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showRemotePhononSelectionDialog]);
+  }, [showRemotePhononSelectionDialog, settingsPage, hpcProfileEditorDirty]);
 
   useEffect(() => {
     if (showHpcSetupWizard) {
@@ -1699,6 +1719,9 @@ function AppInner() {
       case "wien2k-structure-wizard":
         setWien2kStructureContext(null);
         break;
+      case "wien2k-scf-wizard":
+        setScfContext(null);
+        break;
     }
   }
 
@@ -1831,7 +1854,7 @@ function AppInner() {
         <button
           className="floating-queue-btn"
           onClick={() => {
-            setShowSettingsMenu(false);
+            if (!closeSettingsMenu()) return;
             setShowQueueMenu((prev) => !prev);
           }}
           aria-label={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
@@ -1861,7 +1884,7 @@ function AppInner() {
           className="floating-activity-btn"
           onClick={() => {
             setShowQueueMenu(false);
-            setShowSettingsMenu(false);
+            if (!closeSettingsMenu()) return;
             void openHpcActivityWindow();
           }}
           aria-label="Open cluster activity console"
@@ -1892,7 +1915,11 @@ function AppInner() {
           className="floating-settings-btn"
           onClick={() => {
             setShowQueueMenu(false);
-            setShowSettingsMenu((prev) => !prev);
+            if (showSettingsMenu) {
+              closeSettingsMenu();
+            } else {
+              setShowSettingsMenu(true);
+            }
           }}
           aria-label="Settings"
         >
@@ -1903,15 +1930,15 @@ function AppInner() {
       </InfoTooltip>
 
       {showSettingsMenu && (
-        <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
+        <div className="settings-window-overlay" onClick={() => closeSettingsMenu()}>
           <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
             <div className="settings-window-header">
               {settingsPage === "hpc-profile" && (
-                <button className="settings-header-back" onClick={() => setSettingsPage("hpc")} aria-label="Back to HPC settings">
+                <button className="settings-header-back" onClick={leaveHpcProfileEditor} aria-label="Back to HPC settings">
                   Back
                 </button>
               )}
-              <h3>{settingsPage === "hpc-profile" ? "Settings -> HPC -> Edit Profile" : "Settings"}</h3>
+              <h3>Settings</h3>
               <div className="settings-header-actions">
                 {settingsPage === "hpc-profile" && (
                   <button type="submit" form="hpc-profile-editor-form" className="settings-header-save">
@@ -1920,7 +1947,7 @@ function AppInner() {
                 )}
                 <button
                   className="settings-window-close"
-                  onClick={() => setShowSettingsMenu(false)}
+                  onClick={() => closeSettingsMenu()}
                   aria-label="Close settings"
                 >
                   &times;
@@ -1947,6 +1974,7 @@ function AppInner() {
                 <HpcProfileEditor
                   profile={editingHpcProfile}
                   installations={engineInstallations}
+                  onDirtyChange={setHpcProfileEditorDirty}
                   onSaved={(_profile, message) => {
                     setHpcStatus(message);
                     void loadHpcExecutionSettings();
@@ -2013,6 +2041,7 @@ function AppInner() {
                         className="settings-menu-item"
                         onClick={() => {
                           setEditingHpcProfileId(activeHpcProfileId);
+                          setHpcProfileEditorDirty(false);
                           setSettingsPage("hpc-profile");
                         }}
                         disabled={!activeHpcProfile}
@@ -3391,6 +3420,7 @@ function AppInner() {
     transport: transportContext,
     epw: epwContext,
     structureSetup: wien2kStructureContext,
+    wien2kScf: scfContext,
   };
 
   if (
@@ -3461,6 +3491,10 @@ function AppInner() {
           onStructureSourceSaved={() => {
             setProjectDashboardRefreshToken((previous) => previous + 1);
             handleWorkflowBack("wien2k-structure-wizard", "project-dashboard");
+          }}
+          onWien2kScfSaved={() => {
+            setProjectDashboardRefreshToken((previous) => previous + 1);
+            handleWorkflowBack("wien2k-scf-wizard", "project-dashboard");
           }}
         />
         {appChrome}

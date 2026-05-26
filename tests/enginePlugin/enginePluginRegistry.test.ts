@@ -49,15 +49,15 @@ test("engine workflow host routes every QE workflow through a supported wizard v
   }
 });
 
-test("installed WIEN2k frontend exposure is limited to structure source setup", () => {
+test("installed WIEN2k frontend exposure includes structure setup and SCF", () => {
   const plugin = getFrontendEnginePlugin("wien2k");
 
   assert.ok(plugin);
   assert.equal(plugin.getWorkflowView("engine_setup"), "wien2k-structure-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "engine_setup"), "wien2k-structure-wizard");
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "engine_setup")?.view, "wien2k-structure-wizard");
-  assert.equal(getEngineWorkflowView("wien2k", "scf"), null);
-  assert.equal(resolveEngineWorkflowHostRoute("wien2k", "scf"), null);
+  assert.equal(getEngineWorkflowView("wien2k", "scf"), "wien2k-scf-wizard");
+  assert.equal(resolveEngineWorkflowHostRoute("wien2k", "scf")?.view, "wien2k-scf-wizard");
   assert.deepEqual(
     FALLBACK_ENGINE_PLUGIN_MANIFESTS.map((manifest) => manifest.descriptor.id),
     ["qe"],
@@ -67,7 +67,7 @@ test("installed WIEN2k frontend exposure is limited to structure source setup", 
   assert.deepEqual(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor.executionModes, ["remote"]);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsRemoteOnly, true);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsLocal, false);
-  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup"]);
+  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup", "scf"]);
 });
 
 test("Wien2k reserved manifest models case state without QE pseudopotentials", () => {

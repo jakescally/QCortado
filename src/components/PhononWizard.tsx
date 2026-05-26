@@ -42,7 +42,7 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
-  resolveProfileRemoteQeBinDir,
+  buildHpcQeRuntimeSetupLines,
 } from "../lib/engines/qe/hpc";
 import type { EngineId } from "../lib/engines/types";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -549,10 +549,9 @@ export function PhononWizard({
   const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
   useViewportScrollLock(step === "run");
   const hpcCommandLines = useMemo(() => {
-    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${qeBinDir}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out", undefined, hpcResources.resource_type),
     ];

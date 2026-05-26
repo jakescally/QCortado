@@ -12,6 +12,7 @@ export interface Wien2kStructureSiteOverride {
 
 export interface Wien2kStructureControls {
   rmtReductionPercent: number;
+  nnBondlengthFactor: number;
   sgroupTolerance: number;
   siteOverrides: Wien2kStructureSiteOverride[];
 }
@@ -60,6 +61,7 @@ export interface Wien2kStructureStageResult {
   candidateStruct: string;
   sites: Wien2kStructureSite[];
   nativeOutput: string;
+  artifactOutput: string;
   saveAllowed: boolean;
   diagnostics: string[];
 }
@@ -74,6 +76,7 @@ export interface Wien2kStructureSourceRecord {
 
 export const DEFAULT_WIEN2K_STRUCTURE_CONTROLS: Wien2kStructureControls = {
   rmtReductionPercent: 0,
+  nnBondlengthFactor: 2,
   sgroupTolerance: 1e-5,
   siteOverrides: [],
 };
@@ -83,6 +86,9 @@ export function validateWien2kStructureControls(controls: Wien2kStructureControl
     || controls.rmtReductionPercent < 0
     || controls.rmtReductionPercent >= 100) {
     return "RMT reduction must be at least 0 and less than 100 percent.";
+  }
+  if (!Number.isFinite(controls.nnBondlengthFactor) || controls.nnBondlengthFactor <= 0) {
+    return "NN bond-length factor must be positive.";
   }
   if (!Number.isFinite(controls.sgroupTolerance)
     || controls.sgroupTolerance < 1e-7

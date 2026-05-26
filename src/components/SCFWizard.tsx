@@ -42,12 +42,12 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
   getRemotePseudopotentialMetadata,
   loadRemoteSsspData,
   listRemotePseudopotentialInventory,
   listRemotePseudopotentials,
   listRemotePseudopotentialMetadata,
-  resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -779,7 +779,7 @@ export function SCFWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "pw.in", "pw.out", undefined, hpcResources.resource_type),
     ],
     [activeHpcProfile, hpcResources.resource_type],

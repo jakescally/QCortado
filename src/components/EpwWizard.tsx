@@ -21,7 +21,10 @@ import {
   buildHpcLauncherCommand,
   defaultResourcesForProfile,
 } from "../lib/hpcConfig";
-import { resolveProfileRemoteQeBinDir } from "../lib/engines/qe/hpc";
+import {
+  buildHpcQeRuntimeSetupLines,
+  qeEngineUsesModuleMode,
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
@@ -405,10 +408,12 @@ export function EpwWizard({
   const hpcCommandLines = useMemo(
     () => {
       const remoteEpw = (activeHpcProfile?.remote_epw_path || "").trim();
-      const epwExecutable = remoteEpw.length > 0 ? `"${remoteEpw}"` : "\"$QE_BIN/epw.x\"";
+      const epwExecutable = qeEngineUsesModuleMode(activeHpcProfile)
+        ? "epw.x"
+        : remoteEpw.length > 0 ? `"${remoteEpw}"` : "\"$QE_BIN/epw.x\"";
       return [
         "cd \"$SLURM_SUBMIT_DIR\"",
-        `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
+        ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
         `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${epwExecutable} -in epw.in > epw.out 2> epw.err`,
       ];
     },

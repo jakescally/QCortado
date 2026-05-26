@@ -109,14 +109,20 @@ QE-specific concepts include:
 
 ## What Belongs To The WIEN2k Engine
 
-WIEN2k currently implements only remote structure-source setup. Its
-`case.struct` generator, transient refinement session, and native
-`setrmt_lapw`/`x nn`/`x sgroup`/`x symmetry` stages live under
-`src-tauri/src/engines/wien2k/structure.rs` and
-`src/lib/engines/wien2k/structure.ts`.
+WIEN2k currently implements remote structure-source setup and SCF. Its
+`case.struct` generator and transient refinement session live under the
+WIEN2k structure adapter; its retained SCF case lifecycle, `init_lapw` /
+`run_lapw` / `runsp_lapw` execution, and `case.scf` normalization live under
+the WIEN2k SCF adapter.
+The RMT stage owns its NN bond-length factor and feeds it non-interactively to
+the post-RMT `x nn` overlap validation.
+Transient sessions may not use the case name as their directory name, so
+WIEN2k-native structure commands explicitly select the case through `-f`.
+Native per-stage output artifacts are shown inline; only SYMMETRY output can
+convert a shifted-origin report into a save blocker.
 
-Calculation runners remain future work. All of these concepts remain WIEN2k
-owned rather than platform or QE types:
+These calculation concepts remain WIEN2k owned rather than platform or QE
+input types:
 
 - Remote-only execution.
 - Case directory lifecycle.
@@ -137,7 +143,7 @@ The first engine boundary should be intentionally small. It should describe orch
 Current frontend shape:
 
 ```ts
-type EngineId = "qe" | "wien2k"; // WIEN2k exposes engine_setup after installation.
+type EngineId = "qe" | "wien2k"; // WIEN2k exposes engine_setup and scf after installation.
 
 interface EngineDescriptor {
   id: EngineId;
@@ -243,7 +249,9 @@ During migration, legacy records without `engine_id` should be treated as QE.
 Accepted WIEN2k structure sources use `engine_id: "wien2k"`,
 `calc_type: "engine_setup"`, `parameters.setup_kind: "structure"`, and
 `result: null`. The accepted `.struct` file is stored locally as the canonical
-source for future SCF restaging.
+source for SCF restaging. WIEN2k SCF records use `calc_type: "scf"`,
+`result: null`, and an optional normalized `scf_summary`, while keeping native
+artifacts and the retained remote case reference in engine-owned metadata.
 
 ### HPC Profiles
 
@@ -258,6 +266,8 @@ Shared profile fields:
 - remote workspace root.
 - remote project root.
 - Slurm defaults.
+- lightweight utility-job Slurm defaults for setup/refinement and
+  module-loaded environment checks.
 - launcher settings.
 
 QE toolchain fields:
@@ -267,14 +277,29 @@ QE toolchain fields:
 - remote pseudopotential directories.
 - remote EPW path.
 - remote Wannier90 and postw90 paths.
+- executable resolution mode: explicit paths (the compatibility default) or
+  environment modules.
+- optional `module use` and required `module load` values in module mode.
+  Module-mode QE jobs resolve `pw.x`, post-processors, EPW, and Wannier tools
+  through the loaded environment.
 
 WIEN2k toolchain fields:
 
 - remote verified `WIENROOT` install location.
+- executable resolution mode: explicit `WIENROOT` or environment modules.
+- optional `module use` and required `module load` values in module mode;
+  native structure refinement commands then resolve through the loaded
+  environment.
 
 The shared remote workspace/project roots are reused for all configured
 engines; WIEN2k transient case directories derive below the engine namespace
 rather than introducing independent user-selected project roots.
+
+Login-node SSH is restricted to orchestration: staging files, submitting
+Slurm work, polling job state, and retrieving artifacts. Engine executables
+and environment-module bootstraps run within scheduler allocations. WIEN2k
+structure refinement and reviewed SCF submissions use inline scheduled jobs;
+terminal SCF attempts create engine-owned calculation records.
 
 ## Anti-Patterns To Avoid
 

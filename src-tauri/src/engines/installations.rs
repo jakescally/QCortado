@@ -110,10 +110,14 @@ pub fn selectable_engine_manifests(
     {
         let mut manifest = crate::engines::wien2k::plugin::WIEN2K_RESERVED_ENGINE_PLUGIN.manifest();
         manifest.descriptor.status = EngineImplementationStatus::Configured;
-        manifest.descriptor.calculation_kinds = vec![CalculationKind::EngineSetup];
-        manifest
-            .workflows
-            .retain(|workflow| workflow.kind == CalculationKind::EngineSetup);
+        manifest.descriptor.calculation_kinds =
+            vec![CalculationKind::EngineSetup, CalculationKind::Scf];
+        manifest.workflows.retain(|workflow| {
+            matches!(
+                workflow.kind,
+                CalculationKind::EngineSetup | CalculationKind::Scf
+            )
+        });
         manifests.push(manifest);
     }
     manifests
@@ -300,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_wien2k_exposes_only_implemented_structure_setup() {
+    fn installed_wien2k_exposes_structure_setup_and_scf() {
         let installation = EngineInstallation {
             engine_id: EngineId::Wien2k,
             hpc_profile_id: "andromeda".to_string(),
@@ -322,9 +326,10 @@ mod tests {
         );
         assert_eq!(
             manifest.descriptor.calculation_kinds,
-            vec![CalculationKind::EngineSetup]
+            vec![CalculationKind::EngineSetup, CalculationKind::Scf]
         );
-        assert_eq!(manifest.workflows.len(), 1);
+        assert_eq!(manifest.workflows.len(), 2);
         assert_eq!(manifest.workflows[0].kind, CalculationKind::EngineSetup);
+        assert_eq!(manifest.workflows[1].kind, CalculationKind::Scf);
     }
 }

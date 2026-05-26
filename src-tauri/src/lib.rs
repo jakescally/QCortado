@@ -111,6 +111,8 @@ pub struct AppState {
     pub engine_installations: Mutex<Vec<engines::installations::EngineInstallation>>,
     /// Transient inline WIEN2k structure-refinement sessions.
     pub wien2k_structure_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kStructureSession>>,
+    /// WIEN2k SCF sessions retaining a remote native case for initialization and continuation.
+    pub wien2k_scf_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kScfSession>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -143,6 +145,7 @@ impl Default for AppState {
             active_hpc_profile_id: Mutex::new(None),
             engine_installations: Mutex::new(Vec::new()),
             wien2k_structure_sessions: Mutex::new(HashMap::new()),
+            wien2k_scf_sessions: Mutex::new(HashMap::new()),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
@@ -342,6 +345,59 @@ fn resolve_hpc_qe_bin_dir_for_resources(
         .to_string()
 }
 
+fn build_engine_module_setup_commands(
+    profile: &hpc::profile::HpcProfile,
+    engine_id: engines::EngineId,
+) -> Vec<String> {
+    if profile.engine_path_mode(engine_id) != hpc::profile::EnginePathMode::Module {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    if let Some(module_use) = profile.engine_module_use(engine_id) {
+        commands.push(format!(
+            "module use {}",
+            shell_single_quote_local(module_use)
+        ));
+    }
+    if let Some(module_load) = profile.engine_module_load(engine_id) {
+        commands.push(format!(
+            "module load {}",
+            shell_single_quote_local(module_load)
+        ));
+    }
+    commands
+}
+
+fn append_hpc_qe_runtime_setup(
+    commands: &mut Vec<String>,
+    profile: &hpc::profile::HpcProfile,
+    qe_bin_dir: &str,
+) {
+    if profile.qe_path_mode == hpc::profile::EnginePathMode::Module {
+        commands.extend(build_engine_module_setup_commands(
+            profile,
+            engines::EngineId::Qe,
+        ));
+    } else {
+        commands.push(format!("QE_BIN={}", shell_single_quote_local(qe_bin_dir)));
+    }
+}
+
+fn resolve_hpc_qe_auxiliary_executable(
+    profile: &hpc::profile::HpcProfile,
+    configured_path: Option<&str>,
+    command_name: &str,
+) -> String {
+    if profile.qe_path_mode == hpc::profile::EnginePathMode::Module {
+        return command_name.to_string();
+    }
+    configured_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or(command_name)
+        .to_string()
+}
+
 fn command_args_include_pencil_decomposition(raw_args: &str) -> bool {
     normalize_cli_dash_text(raw_args)
         .split_whitespace()
@@ -399,8 +455,13 @@ fn build_hpc_qe_invocation(
     executable: &str,
     extra_args: Option<&str>,
     input_file: &str,
+    module_mode: bool,
 ) -> (String, bool) {
-    let mut invocation = format!("\"$QE_BIN/{}\"", executable);
+    let mut invocation = if module_mode {
+        executable.to_string()
+    } else {
+        format!("\"$QE_BIN/{}\"", executable)
+    };
     let trimmed_extra_args = extra_args
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
@@ -551,7 +612,12 @@ fn build_hpc_qe_input_command(
     output_file: &str,
 ) -> String {
     let launcher = build_hpc_launcher_command(profile, resource_type);
-    let (invocation, _) = build_hpc_qe_invocation(executable, extra_args, input_file);
+    let (invocation, _) = build_hpc_qe_invocation(
+        executable,
+        extra_args,
+        input_file,
+        profile.qe_path_mode == hpc::profile::EnginePathMode::Module,
+    );
     if ENABLE_EXPERIMENTAL_HPC_MPI_LIVE_LOGGING
         && matches!(profile.launcher, hpc::profile::HpcLauncher::Mpirun)
     {
@@ -646,6 +712,20 @@ fn sanitize_hpc_profile(
     profile.remote_postw90_path = None;
     profile.remote_wien2k_install_root =
         sanitize_optional_hpc_field(profile.remote_wien2k_install_root);
+    profile.qe_module_use = sanitize_optional_hpc_field(profile.qe_module_use);
+    profile.qe_module_load = sanitize_optional_hpc_field(profile.qe_module_load);
+    profile.wien2k_module_use = sanitize_optional_hpc_field(profile.wien2k_module_use);
+    profile.wien2k_module_load = sanitize_optional_hpc_field(profile.wien2k_module_load);
+    if profile.qe_path_mode == hpc::profile::EnginePathMode::Module
+        && profile.qe_module_load.is_none()
+    {
+        return Err("Quantum ESPRESSO module load value is required in module mode.".to_string());
+    }
+    if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module
+        && profile.wien2k_module_load.is_none()
+    {
+        return Err("WIEN2k module load value is required in module mode.".to_string());
+    }
     profile.remote_pseudo_dir =
         normalize_hpc_text(&profile.remote_pseudo_dir, "Remote pseudo path")?;
     profile.remote_cpu_pseudo_dir = sanitize_optional_hpc_field(profile.remote_cpu_pseudo_dir);
@@ -697,6 +777,9 @@ fn sanitize_hpc_profile(
         profile.default_gpu_resources,
         hpc::profile::ResourceType::Gpu,
     );
+    profile.utility_resources = profile.utility_resources.map(|resources| {
+        sanitize_hpc_resource_defaults(resources, hpc::profile::ResourceType::Cpu)
+    });
     Ok(profile)
 }
 
@@ -1233,7 +1316,7 @@ mod hpc_headless_recovery_tests {
 
     #[test]
     fn mpirun_hpc_launch_uses_rank_zero_direct_log_when_supported() {
-        let (invocation, _) = build_hpc_qe_invocation("hp.x", None, "hp.in");
+        let (invocation, _) = build_hpc_qe_invocation("hp.x", None, "hp.in", false);
         let command = build_hpc_mpirun_direct_log_command(
             "mpirun -np \"${SLURM_NTASKS:-1}\"",
             &invocation,
@@ -1285,6 +1368,44 @@ mod hpc_headless_recovery_tests {
         );
         assert!(!command.contains("QCORTADO_MPI_STDOUT_SMOKE"));
         assert!(!command.contains("-outfile-pattern"));
+    }
+
+    #[test]
+    fn qe_module_mode_bootstraps_module_and_invokes_path_command() {
+        let profile: hpc::profile::HpcProfile = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "name": "test",
+            "host": "cluster.example",
+            "username": "user",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/scratch/qcortado/projects",
+            "qe_path_mode": "module",
+            "qe_module_use": "/cluster/modulefiles",
+            "qe_module_load": "quantum-espresso/7.5"
+        }))
+        .unwrap();
+        let mut setup = Vec::new();
+        append_hpc_qe_runtime_setup(&mut setup, &profile, "/ignored/qe/bin");
+        let command = build_hpc_qe_input_command(
+            &profile,
+            hpc::profile::ResourceType::Cpu,
+            "pw.x",
+            None,
+            "pw.in",
+            "pw.out",
+        );
+
+        assert_eq!(
+            setup,
+            vec![
+                "module use '/cluster/modulefiles'".to_string(),
+                "module load 'quantum-espresso/7.5'".to_string()
+            ]
+        );
+        assert_eq!(command, "srun pw.x -pd .true. -in pw.in > pw.out 2>&1");
+        assert!(!command.contains("QE_BIN"));
     }
 
     #[test]
@@ -2075,6 +2196,18 @@ struct HpcPresetBundleProfile {
     remote_postw90_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_wien2k_install_root: Option<String>,
+    #[serde(default)]
+    qe_path_mode: hpc::profile::EnginePathMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qe_module_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qe_module_load: Option<String>,
+    #[serde(default)]
+    wien2k_path_mode: hpc::profile::EnginePathMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wien2k_module_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wien2k_module_load: Option<String>,
     remote_pseudo_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_cpu_pseudo_dir: Option<String>,
@@ -2096,6 +2229,8 @@ struct HpcPresetBundleProfile {
     default_cpu_resources: hpc::profile::SlurmResourceRequest,
     #[serde(default = "hpc::profile::default_gpu_resources")]
     default_gpu_resources: hpc::profile::SlurmResourceRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    utility_resources: Option<hpc::profile::SlurmResourceRequest>,
     #[serde(default)]
     warning_acknowledged: bool,
 }
@@ -2328,6 +2463,12 @@ fn hpc_export_preset_bundle(
                 remote_wannier90_path: profile.remote_wannier90_path,
                 remote_postw90_path: profile.remote_postw90_path,
                 remote_wien2k_install_root: profile.remote_wien2k_install_root,
+                qe_path_mode: profile.qe_path_mode,
+                qe_module_use: profile.qe_module_use,
+                qe_module_load: profile.qe_module_load,
+                wien2k_path_mode: profile.wien2k_path_mode,
+                wien2k_module_use: profile.wien2k_module_use,
+                wien2k_module_load: profile.wien2k_module_load,
                 remote_pseudo_dir: profile.remote_pseudo_dir,
                 remote_cpu_pseudo_dir: profile.remote_cpu_pseudo_dir,
                 remote_gpu_pseudo_dir: profile.remote_gpu_pseudo_dir,
@@ -2340,6 +2481,7 @@ fn hpc_export_preset_bundle(
                 launcher_extra_args: profile.launcher_extra_args,
                 default_cpu_resources: profile.default_cpu_resources,
                 default_gpu_resources: profile.default_gpu_resources,
+                utility_resources: profile.utility_resources,
                 warning_acknowledged: profile.warning_acknowledged,
             })
             .collect(),
@@ -2476,6 +2618,12 @@ fn hpc_import_preset_bundle(
                 remote_wannier90_path: imported_profile.remote_wannier90_path,
                 remote_postw90_path: imported_profile.remote_postw90_path,
                 remote_wien2k_install_root: imported_profile.remote_wien2k_install_root,
+                qe_path_mode: imported_profile.qe_path_mode,
+                qe_module_use: imported_profile.qe_module_use,
+                qe_module_load: imported_profile.qe_module_load,
+                wien2k_path_mode: imported_profile.wien2k_path_mode,
+                wien2k_module_use: imported_profile.wien2k_module_use,
+                wien2k_module_load: imported_profile.wien2k_module_load,
                 remote_pseudo_dir: imported_profile.remote_pseudo_dir,
                 remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
                 remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
@@ -2488,6 +2636,7 @@ fn hpc_import_preset_bundle(
                 launcher_extra_args: imported_profile.launcher_extra_args,
                 default_cpu_resources: imported_profile.default_cpu_resources,
                 default_gpu_resources: imported_profile.default_gpu_resources,
+                utility_resources: imported_profile.utility_resources,
                 credential_persisted: existing_profile.credential_persisted,
                 warning_acknowledged: imported_profile.warning_acknowledged,
                 created_at: existing_profile.created_at.clone(),
@@ -2530,6 +2679,12 @@ fn hpc_import_preset_bundle(
             remote_wannier90_path: imported_profile.remote_wannier90_path,
             remote_postw90_path: imported_profile.remote_postw90_path,
             remote_wien2k_install_root: imported_profile.remote_wien2k_install_root,
+            qe_path_mode: imported_profile.qe_path_mode,
+            qe_module_use: imported_profile.qe_module_use,
+            qe_module_load: imported_profile.qe_module_load,
+            wien2k_path_mode: imported_profile.wien2k_path_mode,
+            wien2k_module_use: imported_profile.wien2k_module_use,
+            wien2k_module_load: imported_profile.wien2k_module_load,
             remote_pseudo_dir: imported_profile.remote_pseudo_dir,
             remote_cpu_pseudo_dir: imported_profile.remote_cpu_pseudo_dir,
             remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
@@ -2542,6 +2697,7 @@ fn hpc_import_preset_bundle(
             launcher_extra_args: imported_profile.launcher_extra_args,
             default_cpu_resources: imported_profile.default_cpu_resources,
             default_gpu_resources: imported_profile.default_gpu_resources,
+            utility_resources: imported_profile.utility_resources,
             credential_persisted: false,
             warning_acknowledged: imported_profile.warning_acknowledged,
             created_at: now_iso(),
@@ -3179,17 +3335,27 @@ async fn wien2k_run_structure_stage(
     if profile.id != session.hpc_profile_id {
         return Err("The WIEN2k structure session HPC profile is unavailable.".to_string());
     }
-    let command = engines::wien2k::stage_command(&session, stage, &controls)?;
+    let command = engines::wien2k::stage_command(
+        &session,
+        stage,
+        &controls,
+        profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module,
+        profile.wien2k_module_use.as_deref(),
+        profile.wien2k_module_load.as_deref(),
+    )?;
     let event_name = format!("wien2k-structure-output:{}", session_id);
-    let native_output = hpc::ssh::run_ssh_command_streaming(
-        &app,
-        &event_name,
+    let native_output = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&event_name),
         &profile,
         secret.as_deref(),
-        &command,
-        180,
+        &session.remote_case_dir,
+        "qc-w2k-struct",
+        &[command],
+        900,
     )
-    .await?;
+    .await?
+    .output;
     let candidate_suffix = engines::wien2k::expected_candidate_suffix(stage);
     let candidate_path = format!(
         "{}/{}.{}",
@@ -3229,7 +3395,7 @@ async fn wien2k_run_structure_stage(
     updated.draft.controls = controls;
     updated.artifacts.insert(
         format!("{}.{}", updated.draft.case_name, output_suffix),
-        detail_output,
+        detail_output.clone(),
     );
     updated
         .transcript
@@ -3247,6 +3413,7 @@ async fn wien2k_run_structure_stage(
         candidate_struct,
         sites,
         native_output: combined_output,
+        artifact_output: detail_output,
         save_allowed,
         diagnostics,
     })
@@ -3393,6 +3560,585 @@ async fn wien2k_discard_structure_session(
     Ok(())
 }
 
+fn build_wien2k_native_command(
+    session: &engines::wien2k::Wien2kScfSession,
+    profile: &hpc::profile::HpcProfile,
+    program: engines::wien2k::Wien2kCommandProgram,
+    argv: &[String],
+) -> Result<String, String> {
+    let mut commands = vec![format!(
+        "cd {}",
+        shell_single_quote_local(&session.remote_case_dir)
+    )];
+    let executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
+        commands.extend(build_engine_module_setup_commands(
+            profile,
+            engines::EngineId::Wien2k,
+        ));
+        program.script_name().to_string()
+    } else {
+        commands.push(format!(
+            "export WIENROOT={}",
+            shell_single_quote_local(&session.remote_install_root)
+        ));
+        commands.push("export PATH=\"$WIENROOT:$PATH\"".to_string());
+        format!("\"$WIENROOT/{}\"", program.script_name())
+    };
+    let arguments = argv
+        .iter()
+        .map(|argument| shell_single_quote_local(argument))
+        .collect::<Vec<_>>()
+        .join(" ");
+    commands.push(
+        format!("{} {}", executable, arguments)
+            .trim_end()
+            .to_string(),
+    );
+    Ok(commands.join(" && "))
+}
+
+async fn collect_remote_wien2k_text_artifacts(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kScfSession,
+    suffixes: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut artifacts = std::collections::BTreeMap::new();
+    for suffix in suffixes {
+        let filename = format!("{}.{}", session.case_name, suffix);
+        let path = format!("{}/{}", session.remote_case_dir, filename);
+        if let Ok(contents) = read_remote_wien2k_text(profile, secret, &path).await {
+            if !contents.trim().is_empty() {
+                artifacts.insert(filename, contents);
+            }
+        }
+    }
+    artifacts
+}
+
+async fn validate_wien2k_initialization_artifacts(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kScfSession,
+    spin_mode: engines::wien2k::Wien2kSpinMode,
+) -> Result<(), String> {
+    let file = |suffix: &str| {
+        shell_single_quote_local(&format!(
+            "{}/{}.{}",
+            session.remote_case_dir, session.case_name, suffix
+        ))
+    };
+    let mut checks = engines::wien2k::required_initialization_suffixes(spin_mode)
+        .into_iter()
+        .map(|suffix| format!("test -s {}", file(suffix)))
+        .collect::<Vec<_>>();
+    checks.push(format!(
+        "(test -s {} || test -s {})",
+        file("in1"),
+        file("in1c")
+    ));
+    checks.push(format!(
+        "(test -s {} || test -s {})",
+        file("in2"),
+        file("in2c")
+    ));
+    hpc::ssh::run_ssh_command_with_timeout(profile, secret, &checks.join(" && "), 30)
+        .await
+        .map(|_| ())
+        .map_err(|_| {
+            "WIEN2k initialization did not produce all required active inputs and starting densities.".to_string()
+        })
+}
+
+#[tauri::command]
+async fn wien2k_start_scf_session(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    structure_calculation_id: String,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kScfSession, String> {
+    let source = projects::get_project_calculation(
+        app.clone(),
+        project_id.clone(),
+        structure_calculation_id.clone(),
+    )?;
+    let is_source = source.engine_id == engines::EngineId::Wien2k
+        && source.calc_type == "engine_setup"
+        && source
+            .parameters
+            .get("setup_kind")
+            .and_then(|value| value.as_str())
+            == Some("structure")
+        && source
+            .parameters
+            .get("structure_source_ready")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    if !is_source {
+        return Err("Select an accepted WIEN2k Structure source before starting SCF.".to_string());
+    }
+    if source
+        .parameters
+        .get("source_cif_id")
+        .and_then(|value| value.as_str())
+        != Some(cif_id.as_str())
+    {
+        return Err(
+            "The selected WIEN2k Structure source belongs to another structure variant."
+                .to_string(),
+        );
+    }
+    let case_name = source
+        .parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .and_then(engines::wien2k::normalize_case_name)
+        .ok_or_else(|| {
+            "The selected structure source has no valid WIEN2k case name.".to_string()
+        })?;
+    let struct_content = projects::read_engine_text_artifact(
+        &app,
+        &project_id,
+        &structure_calculation_id,
+        &format!("{}.struct", case_name),
+    )?;
+    let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let root = expand_remote_structure_root(
+        &profile,
+        secret.as_deref(),
+        &installation.remote_project_root,
+    )
+    .await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let remote_session_dir = format!(
+        "{}/qcortado/{}/wien2k/scf/{}",
+        root.trim_end_matches('/'),
+        project_id,
+        session_id
+    );
+    let remote_case_dir = format!("{}/{}", remote_session_dir, case_name);
+    let mkdir_command = format!("mkdir -p {}", shell_single_quote_local(&remote_case_dir));
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &mkdir_command, 20).await?;
+    let temp_path = std::env::temp_dir().join(format!(
+        "qcortado_wien2k_scf_{}_{}.struct",
+        std::process::id(),
+        session_id
+    ));
+    std::fs::write(&temp_path, struct_content).map_err(|err| {
+        format!(
+            "Failed to stage the accepted WIEN2k structure locally: {}",
+            err
+        )
+    })?;
+    let remote_struct = format!("{}/{}.struct", remote_case_dir, case_name);
+    let upload_result =
+        hpc::ssh::upload_file(&profile, secret.as_deref(), &temp_path, &remote_struct).await;
+    let _ = std::fs::remove_file(&temp_path);
+    if let Err(error) = upload_result {
+        let cleanup_command = format!(
+            "rm -rf -- {}",
+            shell_single_quote_local(&remote_session_dir)
+        );
+        let _ = hpc::ssh::run_ssh_command_with_timeout(
+            &profile,
+            secret.as_deref(),
+            &cleanup_command,
+            20,
+        )
+        .await;
+        return Err(error);
+    }
+
+    let session = engines::wien2k::Wien2kScfSession {
+        session_id: session_id.clone(),
+        project_id,
+        cif_id,
+        source_structure_calculation_id: structure_calculation_id,
+        case_name,
+        remote_case_dir,
+        remote_install_root: installation.remote_install_root,
+        hpc_profile_id: profile.id,
+        phase: engines::wien2k::Wien2kScfSessionPhase::Staged,
+        initialization: None,
+        latest_run: None,
+        latest_calculation_id: None,
+        artifacts: std::collections::BTreeMap::new(),
+        transcript: vec!["Accepted case.struct staged for WIEN2k SCF initialization.".to_string()],
+        started_at: now_iso(),
+    };
+    state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session.clone());
+    let _ = app.emit(
+        &format!("wien2k-scf-output:{}", session_id),
+        "Accepted case.struct staged for WIEN2k SCF initialization.",
+    );
+    Ok(session)
+}
+
+#[tauri::command]
+async fn wien2k_initialize_scf_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kInitializationSettings,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kInitializationResult, String> {
+    engines::wien2k::validate_initialization_settings(&settings)?;
+    let session = state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
+    if session.phase != engines::wien2k::Wien2kScfSessionPhase::Staged {
+        return Err(
+            "Discard or restart this session before changing initialization settings.".to_string(),
+        );
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if profile.id != session.hpc_profile_id {
+        return Err("The WIEN2k SCF session HPC profile is unavailable.".to_string());
+    }
+    let case_ref = engines::wien2k::Wien2kCaseReference {
+        case_name: session.case_name.clone(),
+        remote_case_dir: session.remote_case_dir.clone(),
+        remote_scratch_dir: None,
+        remote_archive_dir: None,
+        local_shadow_dir: None,
+        project_id: Some(session.project_id.clone()),
+        cif_id: Some(session.cif_id.clone()),
+    };
+    let plan = engines::wien2k::build_init_lapw_plan(&case_ref, &settings);
+    let command = build_wien2k_native_command(&session, &profile, plan.program, &plan.argv)?;
+    let event_name = format!("wien2k-scf-output:{}", session_id);
+    let output = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&event_name),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-init",
+        &[command],
+        3600,
+    )
+    .await?
+    .output;
+    let diagnostics = engines::wien2k::initialization_diagnostics(&output);
+    if !diagnostics.is_empty() {
+        return Err(diagnostics.join(" "));
+    }
+    validate_wien2k_initialization_artifacts(
+        &profile,
+        secret.as_deref(),
+        &session,
+        settings.spin_mode,
+    )
+    .await?;
+    let artifacts = collect_remote_wien2k_text_artifacts(
+        &profile,
+        secret.as_deref(),
+        &session,
+        &[
+            "struct",
+            "in0",
+            "in1",
+            "in1c",
+            "in2",
+            "in2c",
+            "inc",
+            "inm",
+            "inst",
+            "klist",
+            "outputnn",
+            "outputs",
+            "outputst",
+            "outputkgen",
+            "outputd",
+            "dayfile",
+        ],
+    )
+    .await;
+    let mut updated = session;
+    updated.phase = engines::wien2k::Wien2kScfSessionPhase::Initialized;
+    updated.initialization = Some(settings);
+    updated.artifacts.extend(artifacts.clone());
+    updated
+        .transcript
+        .push(format!("Initialization\n{}", output));
+    state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kInitializationResult {
+        session_id,
+        phase: engines::wien2k::Wien2kScfSessionPhase::Initialized,
+        native_output: output,
+        diagnostics,
+        artifacts,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_run_scf_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kScfRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kScfExecutionResult, String> {
+    engines::wien2k::validate_run_settings(&settings)?;
+    let session = state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
+    if continuation {
+        if session.phase != engines::wien2k::Wien2kScfSessionPhase::ScfComplete
+            || session.latest_calculation_id.is_none()
+        {
+            return Err("Only a saved completed SCF attempt can be continued.".to_string());
+        }
+    } else if session.phase != engines::wien2k::Wien2kScfSessionPhase::Initialized {
+        return Err("Complete and review WIEN2k initialization before running SCF.".to_string());
+    }
+    let initialization = session
+        .initialization
+        .clone()
+        .ok_or_else(|| "WIEN2k initialization settings are unavailable.".to_string())?;
+    if initialization.spin_mode != settings.spin_mode {
+        return Err(
+            "Spin mode cannot change after initialization; restart initialization instead."
+                .to_string(),
+        );
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let case_ref = engines::wien2k::Wien2kCaseReference {
+        case_name: session.case_name.clone(),
+        remote_case_dir: session.remote_case_dir.clone(),
+        remote_scratch_dir: None,
+        remote_archive_dir: Some(session.remote_case_dir.clone()),
+        local_shadow_dir: None,
+        project_id: Some(session.project_id.clone()),
+        cif_id: Some(session.cif_id.clone()),
+    };
+    let plan = engines::wien2k::build_scf_run_plan(&case_ref, &settings, continuation);
+    let command = build_wien2k_native_command(&session, &profile, plan.program, &plan.argv)?;
+    let event_name = format!("wien2k-scf-output:{}", session_id);
+    let operation = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&event_name),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-scf",
+        &[command],
+        86400,
+    )
+    .await;
+    let (native_output, command_failed) = match operation {
+        Ok(result) => (result.output, false),
+        Err(error) => (error, true),
+    };
+    let mut artifacts = session.artifacts.clone();
+    artifacts.extend(
+        collect_remote_wien2k_text_artifacts(
+            &profile,
+            secret.as_deref(),
+            &session,
+            &[
+                "struct",
+                "in0",
+                "in1",
+                "in1c",
+                "in2",
+                "in2c",
+                "inc",
+                "inm",
+                "inst",
+                "klist",
+                "outputnn",
+                "outputs",
+                "outputst",
+                "outputkgen",
+                "outputd",
+                "scf",
+                "dayfile",
+            ],
+        )
+        .await,
+    );
+    artifacts.insert("scf_execution.log".to_string(), native_output.clone());
+    let scf_output = artifacts
+        .get(&format!("{}.scf", session.case_name))
+        .cloned()
+        .unwrap_or_default();
+    let dayfile = artifacts
+        .get(&format!("{}.dayfile", session.case_name))
+        .cloned()
+        .unwrap_or_default();
+    let summary = engines::wien2k::parse_scf_summary(
+        &session.project_id,
+        &session.cif_id,
+        &session.source_structure_calculation_id,
+        &settings,
+        &scf_output,
+        &dayfile,
+        command_failed,
+    );
+    let diagnostics = summary
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>();
+    let parameters = serde_json::json!({
+        "case_name": session.case_name.clone(),
+        "source_structure_calculation_id": session.source_structure_calculation_id.clone(),
+        "parent_calculation_id": parent_calculation_id.or_else(|| if continuation { session.latest_calculation_id.clone() } else { None }),
+        "initialization": initialization.clone(),
+        "run": settings.clone(),
+        "continuation": continuation,
+        "hpc_profile_id": session.hpc_profile_id.clone(),
+        "remote_case_dir": session.remote_case_dir.clone(),
+        "execution_backend": "hpc",
+        "native_artifacts_retained_remote": true,
+    });
+    let saved = projects::save_engine_calculation_artifact(
+        &app,
+        &session.project_id,
+        &session.cif_id,
+        projects::SaveEngineCalculationArtifactData {
+            engine_id: engines::EngineId::Wien2k,
+            calc_type: "scf".to_string(),
+            parameters,
+            scf_summary: Some(summary.clone()),
+            started_at: session.started_at.clone(),
+            completed_at: now_iso(),
+            tags: vec!["wien2k-native".to_string()],
+            artifacts: artifacts
+                .iter()
+                .map(|(filename, contents)| projects::EngineSetupTextArtifact {
+                    filename: filename.clone(),
+                    contents: contents.clone(),
+                })
+                .collect(),
+        },
+    )?;
+    let phase = if summary.convergence == engines::ScfConvergenceState::Failed {
+        engines::wien2k::Wien2kScfSessionPhase::Failed
+    } else {
+        engines::wien2k::Wien2kScfSessionPhase::ScfComplete
+    };
+    let mut updated = session;
+    updated.phase = phase;
+    updated.latest_run = Some(settings);
+    updated.latest_calculation_id = Some(saved.id.clone());
+    updated.artifacts = artifacts;
+    updated
+        .transcript
+        .push(format!("SCF attempt\n{}", native_output));
+    state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kScfExecutionResult {
+        session_id,
+        phase,
+        native_output,
+        diagnostics,
+        summary,
+        calculation_id: saved.id,
+        continuation,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_discard_scf_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .remove(&session_id);
+    if let Some(session) = session {
+        if session.latest_calculation_id.is_none() {
+            if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
+                let remote_session_dir = session
+                    .remote_case_dir
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .unwrap_or(session.remote_case_dir.as_str());
+                let cleanup_command =
+                    format!("rm -rf -- {}", shell_single_quote_local(remote_session_dir));
+                let _ = hpc::ssh::run_ssh_command_with_timeout(
+                    &profile,
+                    secret.as_deref(),
+                    &cleanup_command,
+                    20,
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_scheduled_engine_module_probe(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    engine_id: engines::EngineId,
+    tool_names: &[&str],
+) -> Result<String, String> {
+    let root =
+        expand_remote_structure_root(profile, secret, &profile.remote_workspace_root).await?;
+    let remote_workdir = format!(
+        "{}/qcortado/validation/{}",
+        root.trim_end_matches('/'),
+        uuid::Uuid::new_v4()
+    );
+    hpc::ssh::run_ssh_command_with_timeout(
+        profile,
+        secret,
+        &format!("mkdir -p {}", shell_single_quote_local(&remote_workdir)),
+        20,
+    )
+    .await?;
+    let mut commands = build_engine_module_setup_commands(profile, engine_id);
+    commands.extend(tool_names.iter().map(|tool| {
+        let marker = tool.replace('.', "_");
+        format!(
+            "command -v {tool} >/dev/null 2>&1 && echo 'QCORTADO_TOOL_{marker}=ok' || echo 'QCORTADO_TOOL_{marker}=missing'",
+            tool = shell_single_quote_local(tool),
+            marker = marker,
+        )
+    }));
+    let result = hpc::utility::run_scheduled_utility_operation(
+        None,
+        None,
+        profile,
+        secret,
+        &remote_workdir,
+        "qc-module-check",
+        &commands,
+        900,
+    )
+    .await
+    .map(|result| result.output);
+    let cleanup_command = format!("rm -rf -- {}", shell_single_quote_local(&remote_workdir));
+    let _ = hpc::ssh::run_ssh_command_with_timeout(profile, secret, &cleanup_command, 20).await;
+    result
+}
+
 /// Tests SSH connection for the selected HPC profile.
 #[tauri::command]
 async fn hpc_test_connection(
@@ -3494,172 +4240,224 @@ async fn hpc_validate_environment(
         .remote_qe_bin_dir_for_resource(hpc::profile::ResourceType::Gpu)
         .trim_end_matches('/')
         .to_string();
-    let qe_path_checks: Vec<(String, String)> = match profile.resource_mode {
-        hpc::profile::HpcResourceMode::CpuOnly => vec![("CPU".to_string(), cpu_qe_bin_dir)],
-        hpc::profile::HpcResourceMode::GpuOnly => vec![("GPU".to_string(), gpu_qe_bin_dir)],
-        hpc::profile::HpcResourceMode::Both => {
-            if cpu_qe_bin_dir == gpu_qe_bin_dir {
-                vec![("CPU/GPU".to_string(), cpu_qe_bin_dir)]
-            } else {
-                vec![
-                    ("CPU".to_string(), cpu_qe_bin_dir),
-                    ("GPU".to_string(), gpu_qe_bin_dir),
-                ]
+    let qe_module_mode = profile.qe_path_mode == hpc::profile::EnginePathMode::Module;
+    let qe_path_checks: Vec<(String, String)> = if qe_module_mode {
+        vec![("module".to_string(), String::new())]
+    } else {
+        match profile.resource_mode {
+            hpc::profile::HpcResourceMode::CpuOnly => vec![("CPU".to_string(), cpu_qe_bin_dir)],
+            hpc::profile::HpcResourceMode::GpuOnly => vec![("GPU".to_string(), gpu_qe_bin_dir)],
+            hpc::profile::HpcResourceMode::Both => {
+                if cpu_qe_bin_dir == gpu_qe_bin_dir {
+                    vec![("CPU/GPU".to_string(), cpu_qe_bin_dir)]
+                } else {
+                    vec![
+                        ("CPU".to_string(), cpu_qe_bin_dir),
+                        ("GPU".to_string(), gpu_qe_bin_dir),
+                    ]
+                }
             }
         }
     };
 
-    let mut qe_pw_available = true;
-    let mut qe_epw_available = true;
-    let mut qe_pw2wannier_available = true;
-    let remote_epw_override = profile
-        .remote_epw_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    for (role, qe_bin_dir) in &qe_path_checks {
-        let pw_available_for_role = hpc::ssh::run_ssh_command(
+    let (
+        qe_pw_available,
+        qe_epw_available,
+        qe_pw2wannier_available,
+        wannier90_available,
+        postw90_available,
+    ) = if qe_module_mode {
+        match run_scheduled_engine_module_probe(
             &profile,
             secret.as_deref(),
-            &format!("test -x {}/pw.x && echo ok || echo missing", qe_bin_dir),
+            engines::EngineId::Qe,
+            &[
+                "pw.x",
+                "pw2wannier90.x",
+                "epw.x",
+                "wannier90.x",
+                "postw90.x",
+            ],
         )
         .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
-        if !pw_available_for_role {
-            messages.push(format!(
-                "pw.x not found/executable at {} ({} QE path)",
-                qe_bin_dir, role
-            ));
-        }
-        qe_pw_available &= pw_available_for_role;
-
-        let pw2wannier_available_for_role = hpc::ssh::run_ssh_command(
-            &profile,
-            secret.as_deref(),
-            &format!(
-                "test -x {}/pw2wannier90.x && echo ok || echo missing",
-                qe_bin_dir
-            ),
-        )
-        .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
-        if !pw2wannier_available_for_role {
-            messages.push(format!(
-                "pw2wannier90.x not found/executable at {} ({} QE path)",
-                qe_bin_dir, role
-            ));
-        }
-        qe_pw2wannier_available &= pw2wannier_available_for_role;
-    }
-
-    if let Some(remote_epw_override) = remote_epw_override {
-        let epw_override_resolved = hpc::ssh::run_ssh_command(
-            &profile,
-            secret.as_deref(),
-            &resolve_remote_epw_path_shell("", Some(remote_epw_override)),
-        )
-        .await
-        .ok()
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() || trimmed == "missing" {
-                None
-            } else {
-                Some(trimmed.to_string())
+        {
+            Ok(output) => {
+                let found = |tool: &str| {
+                    output.contains(&format!("QCORTADO_TOOL_{}=ok", tool.replace('.', "_")))
+                };
+                let results = (
+                    found("pw.x"),
+                    found("epw.x"),
+                    found("pw2wannier90.x"),
+                    found("wannier90.x"),
+                    found("postw90.x"),
+                );
+                for (available, tool) in [
+                    (results.0, "pw.x"),
+                    (results.1, "epw.x"),
+                    (results.2, "pw2wannier90.x"),
+                    (results.3, "wannier90.x"),
+                    (results.4, "postw90.x"),
+                ] {
+                    if !available {
+                        messages.push(format!(
+                                "{} not found after loading the configured QE module in a scheduled utility job.",
+                                tool
+                            ));
+                    }
+                }
+                results
             }
-        });
-        qe_epw_available = epw_override_resolved.is_some();
-        if !qe_epw_available {
-            messages.push(format!(
-                "epw.x not found/executable at configured path '{}'. EPW requires manual compilation.",
-                remote_epw_override
-            ));
+            Err(error) => {
+                messages.push(format!(
+                    "QE module validation could not run in a scheduled utility job: {}",
+                    error
+                ));
+                (false, false, false, false, false)
+            }
         }
     } else {
+        let mut qe_pw_available = true;
+        let mut qe_epw_available = true;
+        let mut qe_pw2wannier_available = true;
         for (role, qe_bin_dir) in &qe_path_checks {
-            let epw_resolved_for_role = hpc::ssh::run_ssh_command(
+            let pw_available_for_role = hpc::ssh::run_ssh_command(
                 &profile,
                 secret.as_deref(),
-                &resolve_remote_epw_path_shell(qe_bin_dir, None),
+                &format!("test -x {}/pw.x && echo ok || echo missing", qe_bin_dir),
             )
-            .await
-            .ok()
-            .and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() || trimmed == "missing" {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
-            let epw_available_for_role = epw_resolved_for_role.is_some();
-            if !epw_available_for_role {
-                messages.push(format!(
-                    "epw.x not found/executable at {} or fallback EPW/bin locations ({} QE path). EPW requires manual compilation.",
-                    qe_bin_dir, role
-                ));
-            }
-            qe_epw_available &= epw_available_for_role;
-        }
-    }
-
-    let remote_wannier90 = profile
-        .remote_wannier90_path
-        .as_deref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("wannier90.x");
-    let wannier90_check = if remote_wannier90.contains('/') || remote_wannier90.starts_with('~') {
-        format!(
-            "tool={}; \
-if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
-test -x \"$tool\" && echo ok || echo missing",
-            shell_single_quote_local(remote_wannier90)
-        )
-    } else {
-        format!(
-            "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
-            remote_wannier90
-        )
-    };
-    let wannier90_available =
-        hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &wannier90_check)
             .await
             .map(|value| value.contains("ok"))
             .unwrap_or(false);
-    if !wannier90_available {
-        messages.push(format!(
-            "wannier90.x not found/executable at {}",
-            remote_wannier90
-        ));
-    }
-
-    let remote_postw90 = derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
-    let postw90_check = if remote_postw90.contains('/') || remote_postw90.starts_with('~') {
-        format!(
-            "tool={}; \
-if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; \
-test -x \"$tool\" && echo ok || echo missing",
-            shell_single_quote_local(&remote_postw90)
-        )
-    } else {
-        format!(
-            "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
-            remote_postw90
+            if !pw_available_for_role {
+                messages.push(format!(
+                    "pw.x not found/executable at {} ({} QE path)",
+                    qe_bin_dir, role
+                ));
+            }
+            qe_pw_available &= pw_available_for_role;
+            let pw2wannier_available_for_role = hpc::ssh::run_ssh_command(
+                &profile,
+                secret.as_deref(),
+                &format!(
+                    "test -x {}/pw2wannier90.x && echo ok || echo missing",
+                    qe_bin_dir
+                ),
+            )
+            .await
+            .map(|value| value.contains("ok"))
+            .unwrap_or(false);
+            if !pw2wannier_available_for_role {
+                messages.push(format!(
+                    "pw2wannier90.x not found/executable at {} ({} QE path)",
+                    qe_bin_dir, role
+                ));
+            }
+            qe_pw2wannier_available &= pw2wannier_available_for_role;
+        }
+        if let Some(remote_epw_override) = profile
+            .remote_epw_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            qe_epw_available = hpc::ssh::run_ssh_command(
+                &profile,
+                secret.as_deref(),
+                &resolve_remote_epw_path_shell("", Some(remote_epw_override)),
+            )
+            .await
+            .ok()
+            .map(|value| !value.trim().is_empty() && value.trim() != "missing")
+            .unwrap_or(false);
+            if !qe_epw_available {
+                messages.push(format!(
+                        "epw.x not found/executable at configured path '{}'. EPW requires manual compilation.",
+                        remote_epw_override
+                    ));
+            }
+        } else {
+            for (role, qe_bin_dir) in &qe_path_checks {
+                let available = hpc::ssh::run_ssh_command(
+                    &profile,
+                    secret.as_deref(),
+                    &resolve_remote_epw_path_shell(qe_bin_dir, None),
+                )
+                .await
+                .ok()
+                .map(|value| !value.trim().is_empty() && value.trim() != "missing")
+                .unwrap_or(false);
+                if !available {
+                    messages.push(format!(
+                            "epw.x not found/executable at {} or fallback EPW/bin locations ({} QE path). EPW requires manual compilation.",
+                            qe_bin_dir, role
+                        ));
+                }
+                qe_epw_available &= available;
+            }
+        }
+        let remote_wannier90 = resolve_hpc_qe_auxiliary_executable(
+            &profile,
+            profile.remote_wannier90_path.as_deref(),
+            "wannier90.x",
+        );
+        let wannier90_check = if remote_wannier90.contains('/') || remote_wannier90.starts_with('~')
+        {
+            format!(
+                    "tool={}; if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; test -x \"$tool\" && echo ok || echo missing",
+                    shell_single_quote_local(&remote_wannier90)
+                )
+        } else {
+            format!(
+                "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
+                shell_single_quote_local(&remote_wannier90)
+            )
+        };
+        let wannier90_available =
+            hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &wannier90_check)
+                .await
+                .map(|value| value.contains("ok"))
+                .unwrap_or(false);
+        if !wannier90_available {
+            messages.push(format!(
+                "wannier90.x not found/executable at {}",
+                remote_wannier90
+            ));
+        }
+        let configured_postw90 =
+            derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
+        let remote_postw90 =
+            resolve_hpc_qe_auxiliary_executable(&profile, Some(&configured_postw90), "postw90.x");
+        let postw90_check = if remote_postw90.contains('/') || remote_postw90.starts_with('~') {
+            format!(
+                    "tool={}; if [ \"$tool\" = \"~\" ]; then tool=\"$HOME\"; elif [ \"${{tool#~/}}\" != \"$tool\" ]; then tool=\"$HOME/${{tool#~/}}\"; fi; test -x \"$tool\" && echo ok || echo missing",
+                    shell_single_quote_local(&remote_postw90)
+                )
+        } else {
+            format!(
+                "command -v {} >/dev/null 2>&1 && echo ok || echo missing",
+                shell_single_quote_local(&remote_postw90)
+            )
+        };
+        let postw90_available =
+            hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &postw90_check)
+                .await
+                .map(|value| value.contains("ok"))
+                .unwrap_or(false);
+        if !postw90_available {
+            messages.push(format!(
+                "postw90.x not found/executable at {}",
+                remote_postw90
+            ));
+        }
+        (
+            qe_pw_available,
+            qe_epw_available,
+            qe_pw2wannier_available,
+            wannier90_available,
+            postw90_available,
         )
     };
-    let postw90_available = hpc::ssh::run_ssh_command(&profile, secret.as_deref(), &postw90_check)
-        .await
-        .map(|value| value.contains("ok"))
-        .unwrap_or(false);
-    if !postw90_available {
-        messages.push(format!(
-            "postw90.x not found/executable at {}",
-            remote_postw90
-        ));
-    }
 
     let probe_file = format!(
         "{}/.qcortado_probe_{}",
@@ -9364,11 +10162,16 @@ async fn run_scf_hpc_background(
         .to_string();
     let input = generate_pw_input(&remote_calculation);
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
-    let commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        build_hpc_qe_input_command(&profile, resource_type, "pw.x", None, "pw.in", "pw.out"),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
+    commands.push(build_hpc_qe_input_command(
+        &profile,
+        resource_type,
+        "pw.x",
+        None,
+        "pw.in",
+        "pw.out",
+    ));
 
     let work_path = run_hpc_bundle_task(
         app,
@@ -9716,7 +10519,7 @@ async fn run_bands_hpc_background(
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_logged_qe_step_command(
         &profile,
         resource_type,
@@ -10715,12 +11518,11 @@ async fn run_wannier_hpc_background(
     pm: ProcessManager,
 ) -> Result<WannierResult, String> {
     let pipeline_start = std::time::Instant::now();
-    let remote_wannier90 = profile
-        .remote_wannier90_path
-        .as_deref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "wannier90.x".to_string());
+    let remote_wannier90 = resolve_hpc_qe_auxiliary_executable(
+        &profile,
+        profile.remote_wannier90_path.as_deref(),
+        "wannier90.x",
+    );
 
     let resource_type = resolve_hpc_resource_type_for_resources(&profile, resources.as_ref());
     let (mut nscf_calc, nscf_notes) = prepare_wannier_nscf_calculation(&config)?;
@@ -10760,7 +11562,7 @@ async fn run_wannier_hpc_background(
 
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_logged_shell_step_command(
         "wannier90.x preprocessing",
         &pre_cmd,
@@ -11093,7 +11895,9 @@ async fn run_transport_hpc_background(
     pm: ProcessManager,
 ) -> Result<TransportResult, String> {
     let pipeline_start = std::time::Instant::now();
-    let remote_postw90 = derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
+    let configured_postw90 = derive_remote_postw90_path(profile.remote_wannier90_path.as_deref());
+    let remote_postw90 =
+        resolve_hpc_qe_auxiliary_executable(&profile, Some(&configured_postw90), "postw90.x");
 
     let stage_dir = PathBuf::from(&working_dir)
         .join("transport_source_stage")
@@ -11116,10 +11920,15 @@ async fn run_transport_hpc_background(
         shell_single_quote_local(&source.seedname),
         shell_single_quote_local(&source.seedname)
     );
-    let commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        build_hpc_logged_shell_step_command("postw90.x / BoltzWann", &transport_cmd),
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    commands.extend(build_engine_module_setup_commands(
+        &profile,
+        engines::EngineId::Qe,
+    ));
+    commands.push(build_hpc_logged_shell_step_command(
+        "postw90.x / BoltzWann",
+        &transport_cmd,
+    ));
     let bundle_files = vec![(format!("{}.win", source.seedname), transport_win)];
     let bundle_copies = vec![(stage_dir.clone(), ".".to_string())];
 
@@ -11937,7 +12746,11 @@ async fn run_epw_hpc_background(
         "{} \"$EPW_EXE\" -npool {} -in epw.in > epw.out 2> epw.err",
         launcher, parallel_plan.npool
     );
-    let epw_resolver_cmd = if let Some(remote_epw) = remote_epw_override {
+    let epw_resolver_cmd = if profile.qe_path_mode == hpc::profile::EnginePathMode::Module {
+        "if command -v epw.x >/dev/null 2>&1; then EPW_EXE=\"$(command -v epw.x)\"; \
+else echo \"[QCortado] ERROR: epw.x not found after loading the configured QE module\" >&2; exit 1; fi"
+            .to_string()
+    } else if let Some(remote_epw) = remote_epw_override {
         if remote_epw.contains('/') || remote_epw.starts_with('~') {
             format!(
                 "tool={}; \
@@ -11961,11 +12774,9 @@ elif [ -x \"$(dirname \"$QE_BIN\")/EPW/bin/epw.x\" ]; then EPW_EXE=\"$(dirname \
 else echo \"[QCortado] ERROR: epw.x not found in $QE_BIN or EPW/bin fallback paths\" >&2; exit 1; fi"
             .to_string()
     };
-    let mut commands = vec![
-        "cd \"$SLURM_SUBMIT_DIR\"".to_string(),
-        format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)),
-        epw_resolver_cmd,
-    ];
+    let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
+    commands.push(epw_resolver_cmd);
     if sources.rebuild_wannier_nscf_save {
         if !stage_dir.join("nscf.in").exists() {
             return Err(build_epw_taxonomy_error(
@@ -12277,7 +13088,7 @@ async fn run_dos_hpc_background(
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_qe_input_command(
         &profile,
         resource_type,
@@ -12819,7 +13630,7 @@ async fn run_fermi_surface_hpc_background(
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_qe_input_command(
         &profile,
         resource_type,
@@ -13383,7 +14194,7 @@ async fn run_hubbard_lrt_hpc_background(
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_qe_input_command(
         &profile,
         resource_type,
@@ -13751,7 +14562,7 @@ async fn run_phonon_hpc_background(
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let mut commands = vec!["cd \"$SLURM_SUBMIT_DIR\"".to_string()];
     commands.extend(dependency_stage.remote_hydration_commands);
-    commands.push(format!("QE_BIN={}", shell_single_quote_local(&qe_bin_dir)));
+    append_hpc_qe_runtime_setup(&mut commands, &profile, &qe_bin_dir);
     commands.push(build_hpc_qe_input_command(
         &profile,
         resource_type,
@@ -14831,6 +15642,7 @@ pub fn run() {
                 active_hpc_profile_id: Mutex::new(active_hpc_profile_id),
                 engine_installations: Mutex::new(engine_installations),
                 wien2k_structure_sessions: Mutex::new(HashMap::new()),
+                wien2k_scf_sessions: Mutex::new(HashMap::new()),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
@@ -14909,6 +15721,10 @@ pub fn run() {
         wien2k_run_structure_stage,
         wien2k_save_structure_source,
         wien2k_discard_structure_session,
+        wien2k_start_scf_session,
+        wien2k_initialize_scf_session,
+        wien2k_run_scf_session,
+        wien2k_discard_scf_session,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -14973,6 +15789,10 @@ pub fn run() {
         wien2k_run_structure_stage,
         wien2k_save_structure_source,
         wien2k_discard_structure_session,
+        wien2k_start_scf_session,
+        wien2k_initialize_scf_session,
+        wien2k_run_scf_session,
+        wien2k_discard_scf_session,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,

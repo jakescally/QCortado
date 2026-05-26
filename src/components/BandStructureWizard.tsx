@@ -56,8 +56,8 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
   listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
@@ -956,10 +956,9 @@ export function BandStructureWizard({
     MAX_VIEWER_POINTS_PER_SEGMENT,
   );
   const hpcCommandLines = useMemo(() => {
-    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${qeBinDir}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out", undefined, hpcResources.resource_type),
     ];

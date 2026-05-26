@@ -72,6 +72,14 @@ export interface CalculationRun {
   calc_type: string;
   parameters: any;
   result: QEResult | null;
+  scf_summary?: {
+    convergence: "converged" | "not_converged" | "failed" | "cancelled" | "unknown";
+    totalEnergy?: { value: number; unit: string } | null;
+    fermiEnergyEv?: number | null;
+    scfSteps?: number | null;
+    wallTimeSeconds?: number | null;
+    totalMagnetization?: number | null;
+  } | null;
   started_at: string;
   completed_at: string | null;
   tags?: string[];
@@ -161,6 +169,7 @@ interface ProjectDashboardProps {
 type CalcTagType = "info" | "feature" | "special" | "geometry";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
+type CalculationEngineFilter = EngineId | "all";
 type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
@@ -244,6 +253,56 @@ interface DashboardBravaisInfo {
   shortCode: string;
   qeIbrav: number;
   label: string;
+}
+
+interface EngineSwitcherProps {
+  engines: readonly EngineDescriptor[];
+  value: CalculationEngineFilter;
+  onChange: (engineId: CalculationEngineFilter) => void;
+  ariaLabel: string;
+  includeAll?: boolean;
+  isEngineDisabled?: (engine: EngineDescriptor) => boolean;
+}
+
+function EngineSwitcher({
+  engines,
+  value,
+  onChange,
+  ariaLabel,
+  includeAll = false,
+  isEngineDisabled,
+}: EngineSwitcherProps) {
+  return (
+    <div className="engine-switcher" role="group" aria-label={ariaLabel}>
+      {includeAll && (
+        <button
+          type="button"
+          className={value === "all" ? "active" : ""}
+          aria-pressed={value === "all"}
+          onClick={() => onChange("all")}
+        >
+          All
+        </button>
+      )}
+      {engines.map((engine) => {
+        const isActive = engine.id === value;
+        const disabled = isEngineDisabled?.(engine) ?? false;
+        return (
+          <button
+            key={engine.id}
+            type="button"
+            className={isActive ? "active" : ""}
+            aria-pressed={isActive}
+            title={engine.label}
+            onClick={() => onChange(engine.id)}
+            disabled={disabled}
+          >
+            {getEngineShortLabel(engine)}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 const DASHBOARD_BRAVAIS_INFO: Record<BravaisLattice, Omit<DashboardBravaisInfo, "bravais">> = {
@@ -1375,6 +1434,7 @@ export function ProjectDashboard({
   const [isLoadingEngineSetup, setIsLoadingEngineSetup] = useState(false);
   const [isAddingEngine, setIsAddingEngine] = useState(false);
   const [engineSetupError, setEngineSetupError] = useState<string | null>(null);
+  const [calculationEngineFilter, setCalculationEngineFilter] = useState<CalculationEngineFilter>("all");
   const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1455,6 +1515,15 @@ export function ProjectDashboard({
     const fallback = FALLBACK_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === activeEngineId);
     return fallback ? [...engineDescriptors, fallback] : engineDescriptors;
   }, [activeEngineId, engineDescriptors]);
+
+  useEffect(() => {
+    setCalculationEngineFilter((current) => (
+      current === "all" || displayedEngineDescriptors.some((descriptor) => descriptor.id === current)
+        ? current
+        : "all"
+    ));
+  }, [displayedEngineDescriptors]);
+
   const selectedHpcProfile = useMemo(
     () => availableHpcProfiles.find((profile) => profile.id === engineInstallForm.hpcProfileId) ?? null,
     [availableHpcProfiles, engineInstallForm.hpcProfileId],
@@ -1669,25 +1738,16 @@ export function ProjectDashboard({
     return (
       <div className="engine-selector" aria-label="Computation engine">
         <span className="engine-selector-label">Engine</span>
-        <div className="engine-switcher" role="group" aria-label="Active computation engine">
-          {displayedEngineDescriptors.map((engine) => {
-            const isActive = engine.id === activeEngineId;
-            const disabled = readOnly || isSwitchingEngine || !isSelectableEngineStatus(engine.status);
-            return (
-              <button
-                key={engine.id}
-                type="button"
-                className={isActive ? "active" : ""}
-                aria-pressed={isActive}
-                title={engine.label}
-                disabled={disabled}
-                onClick={() => void handleEngineChange(engine.id)}
-              >
-                {getEngineShortLabel(engine)}
-              </button>
-            );
-          })}
-        </div>
+        <EngineSwitcher
+          engines={displayedEngineDescriptors}
+          value={activeEngineId}
+          onChange={(engineId) => {
+            if (engineId === "all") return;
+            void handleEngineChange(engineId);
+          }}
+          ariaLabel="Active computation engine"
+          isEngineDisabled={(engine) => readOnly || isSwitchingEngine || !isSelectableEngineStatus(engine.status)}
+        />
         {!readOnly && (
           <InfoTooltip text="Add computation engine">
             <button
@@ -2436,8 +2496,7 @@ export function ProjectDashboard({
   }
 
   function selectAllVisibleCalculations() {
-    if (!selectedVariant) return;
-    setSelectedCalcIds(new Set(selectedVariant.calculations.map((calc) => calc.id)));
+    setSelectedCalcIds(new Set(filteredVariantCalculations.map((calc) => calc.id)));
   }
 
   function clearSelectedCalculations() {
@@ -3276,7 +3335,7 @@ export function ProjectDashboard({
   }
 
   function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
-    const wallSeconds = calc.result?.wall_time_seconds;
+    const wallSeconds = calc.result?.wall_time_seconds ?? calc.scf_summary?.wallTimeSeconds;
     if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
       return { kind: "wall", seconds: wallSeconds };
     }
@@ -3353,12 +3412,20 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
     .join(", ");
 }
 
-function normalizeSavedKPath(value: unknown): string {
-  return String(value || "")
-    .replace(/\s*→\s*/g, "→")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+  function normalizeSavedKPath(value: unknown): string {
+    return String(value || "")
+      .replace(/\s*→\s*/g, "→")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getCalculationEngineId(calc: CalculationRun): EngineId {
+    return calc.engine_id ?? DEFAULT_ENGINE_ID;
+  }
+
+  function matchesCalculationEngineFilter(calc: CalculationRun, filter: CalculationEngineFilter): boolean {
+    return filter === "all" || getCalculationEngineId(calc) === filter;
+  }
 
   function getSelectedVariant(): CifVariant | undefined {
     return project?.cif_variants.find(v => v.id === selectedCifId);
@@ -3402,16 +3469,20 @@ function normalizeSavedKPath(value: unknown): string {
   }
 
   const selectedVariant = getSelectedVariant();
+  const filteredVariantCalculations = useMemo<CalculationRun[]>(
+    () => selectedVariant?.calculations.filter((calc) => matchesCalculationEngineFilter(calc, calculationEngineFilter)) ?? [],
+    [selectedVariant, calculationEngineFilter],
+  );
   const selectedVariantCalculationIds = useMemo<string[]>(
-    () => selectedVariant?.calculations.map((calc) => calc.id) ?? [],
-    [selectedVariant],
+    () => filteredVariantCalculations.map((calc) => calc.id),
+    [filteredVariantCalculations],
   );
   const selectedCalculationsForDeletion = useMemo<CalculationRun[]>(
-    () => selectedVariant?.calculations.filter((calc) => selectedCalcIds.has(calc.id)) ?? [],
-    [selectedVariant, selectedCalcIds],
+    () => filteredVariantCalculations.filter((calc) => selectedCalcIds.has(calc.id)),
+    [filteredVariantCalculations, selectedCalcIds],
   );
   const selectedCalculationCount = selectedCalculationsForDeletion.length;
-  const visibleCalculationCount = selectedVariant?.calculations.length ?? 0;
+  const visibleCalculationCount = filteredVariantCalculations.length;
 
   useEffect(() => {
     setSelectedCalcIds((current) => {
@@ -3439,107 +3510,107 @@ function normalizeSavedKPath(value: unknown): string {
   const pinnedCalcIds = useMemo<Set<string>>(() => {
     if (!selectedVariant) return new Set<string>();
     return new Set(
-      selectedVariant.calculations
+      filteredVariantCalculations
         .filter((calc) => Array.isArray(calc.tags) && calc.tags.includes(PINNED_TAG))
         .map((calc) => calc.id),
     );
-  }, [selectedVariant]);
+  }, [filteredVariantCalculations, selectedVariant]);
   const scfCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "scf") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "scf"),
       calculationSortMode,
       "scf",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const wien2kStructureCalculations = useMemo<CalculationRun[]>(
-    () => listWien2kStructureSources(selectedVariant?.calculations ?? [])
+    () => listWien2kStructureSources(filteredVariantCalculations)
       .slice()
       .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
         - new Date(left.completed_at ?? left.started_at).getTime()),
-    [selectedVariant],
+    [filteredVariantCalculations],
   );
   const bandCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "bands") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "bands"),
       calculationSortMode,
       "bands",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const dosCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "dos") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "dos"),
       calculationSortMode,
       "dos",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const wannierCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "wannier") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "wannier"),
       calculationSortMode,
       "wannier",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const transportCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "transport") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "transport"),
       calculationSortMode,
       "transport",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const fermiSurfaceCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "fermi_surface") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "fermi_surface"),
       calculationSortMode,
       "fermi_surface",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const hubbardLrtCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "hubbard_lrt") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "hubbard_lrt"),
       calculationSortMode,
       "hubbard_lrt",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const phononCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "phonon") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "phonon"),
       calculationSortMode,
       "phonon",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const epwCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "epw") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "epw"),
       calculationSortMode,
       "epw",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const optimizationCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => isOptimizationCalculation(calc)) || [],
+      filteredVariantCalculations.filter((calc) => isOptimizationCalculation(calc)),
       calculationSortMode,
       "optimization",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const primitiveCell = useMemo(() => {
     if (!crystalData) return null;
@@ -3990,11 +4061,24 @@ function normalizeSavedKPath(value: unknown): string {
           {!readOnly && (
             <div className="calc-action-grid">
               {activeEngineId === "wien2k" ? (
-                <button className="calc-action-btn" onClick={handleRunEngineSetup}>
-                  <span className="calc-action-icon">Struct</span>
-                  <span className="calc-action-label">WIEN2k Structure</span>
-                  <span className="calc-action-hint">Prepare case.struct</span>
-                </button>
+                <>
+                  <button className="calc-action-btn" onClick={handleRunEngineSetup}>
+                    <span className="calc-action-icon">Struct</span>
+                    <span className="calc-action-label">WIEN2k Structure</span>
+                    <span className="calc-action-hint">Prepare case.struct</span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={() => void handleRunSCF()}
+                    disabled={wien2kStructureCalculations.length === 0}
+                  >
+                    <span className="calc-action-icon">SCF</span>
+                    <span className="calc-action-label">WIEN2k SCF</span>
+                    <span className="calc-action-hint">
+                      {wien2kStructureCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                    </span>
+                  </button>
+                </>
               ) : (
                 <>
               <button className="calc-action-btn" onClick={handleRunSCF}>
@@ -4099,7 +4183,27 @@ function normalizeSavedKPath(value: unknown): string {
               )}
             </div>
           )}
+          <div className="calculation-history-filter">
+            <span className="calculation-history-filter-label">Entries</span>
+            <EngineSwitcher
+              engines={displayedEngineDescriptors}
+              value={calculationEngineFilter}
+              onChange={setCalculationEngineFilter}
+              ariaLabel="Filter calculation entries by engine"
+              includeAll
+            />
+          </div>
         </section>
+
+        {selectedVariant && selectedVariant.calculations.length > 0 && visibleCalculationCount === 0 && (
+          <div className="history-empty-state">
+            No calculations from {
+              calculationEngineFilter === "all"
+                ? "all engines"
+                : getEngineLabel(displayedEngineDescriptors, calculationEngineFilter)
+            } were found for this structure.
+          </div>
+        )}
 
         {wien2kStructureCalculations.length > 0 && (
           <section className="history-section">
@@ -4189,6 +4293,11 @@ function normalizeSavedKPath(value: unknown): string {
                 const calcData = getCalculationRecord(calc);
                 const runtime = getCalculationRuntime(calcData);
                 const hubbardUDisplay = formatScfDashboardHubbardU(calc);
+                const wien2kSummary = calc.scf_summary ?? calcData.scf_summary ?? null;
+                const isWien2k = calc.engine_id === "wien2k";
+                const converged = isWien2k
+                  ? wien2kSummary?.convergence === "converged"
+                  : Boolean(calc.result?.converged);
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
@@ -4206,18 +4315,20 @@ function normalizeSavedKPath(value: unknown): string {
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">SCF</span>
-                        {calc.result && (
+                        {(calc.result || wien2kSummary) && (
                           <span
                             className={`calc-status ${
-                              calc.result.converged ? "converged" : "failed"
+                              converged ? "converged" : "failed"
                             }`}
                           >
-                            {calc.result.converged ? "Converged" : "Not converged"}
+                            {converged ? "Converged" : wien2kSummary?.convergence === "failed" ? "Failed" : "Not converged"}
                           </span>
                         )}
-                        {calc.result?.total_energy && (
+                        {(calc.result?.total_energy != null || wien2kSummary?.totalEnergy) && (
                           <span className="calc-energy">
-                            E = {formatEnergy(calc.result.total_energy)}
+                            E = {calc.result?.total_energy != null
+                              ? formatEnergy(calc.result.total_energy)
+                              : `${wien2kSummary?.totalEnergy?.value.toFixed(6)} ${wien2kSummary?.totalEnergy?.unit}`}
                           </span>
                         )}
                         {hubbardUDisplay && (
@@ -4249,7 +4360,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
-                        {renderCopyScfSettingsButton(calc)}
+                        {!isWien2k && renderCopyScfSettingsButton(calc)}
                         {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
@@ -4270,26 +4381,28 @@ function normalizeSavedKPath(value: unknown): string {
                       </div>
                     </div>
 
-                    {expandedCalc === calc.id && calcData.result && (
+                    {expandedCalc === calc.id && (calcData.result || wien2kSummary) && (
                       <div className="calculation-details">
-                        {renderCalculationFailure(calcData)}
+                        {calcData.result && renderCalculationFailure(calcData)}
                         <div className="details-grid">
-                          {calcData.result.total_energy && (
+                          {(calcData.result?.total_energy != null || wien2kSummary?.totalEnergy) && (
                             <div className="detail-item">
                               <label>Total Energy</label>
-                              <span>{formatEnergy(calcData.result.total_energy)}</span>
+                              <span>{calcData.result?.total_energy != null
+                                ? formatEnergy(calcData.result.total_energy)
+                                : `${wien2kSummary?.totalEnergy?.value.toFixed(8)} ${wien2kSummary?.totalEnergy?.unit}`}</span>
                             </div>
                           )}
-                          {calcData.result.fermi_energy && (
+                          {(calcData.result?.fermi_energy != null || wien2kSummary?.fermiEnergyEv != null) && (
                             <div className="detail-item">
                               <label>Fermi Energy</label>
-                              <span>{calcData.result.fermi_energy.toFixed(4)} eV</span>
+                              <span>{(calcData.result?.fermi_energy ?? wien2kSummary?.fermiEnergyEv)?.toFixed(4)} eV</span>
                             </div>
                           )}
-                          {calcData.result.n_scf_steps && (
+                          {(calcData.result?.n_scf_steps != null || wien2kSummary?.scfSteps != null) && (
                             <div className="detail-item">
                               <label>SCF Steps</label>
-                              <span>{calcData.result.n_scf_steps}</span>
+                              <span>{calcData.result?.n_scf_steps ?? wien2kSummary?.scfSteps}</span>
                             </div>
                           )}
                           {runtime && (

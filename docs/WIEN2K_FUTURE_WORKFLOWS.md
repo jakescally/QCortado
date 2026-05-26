@@ -2,12 +2,13 @@
 
 ## Status
 
-QCortado implements one WIEN2k-owned workflow: remote `case.struct` source
-setup (`engine_setup`). Once a remote WIEN2k installation is verified, a
-project with WIEN2k selected exposes a `WIEN2k Structure` tile.
+QCortado implements two WIEN2k-owned workflows: remote `case.struct` source
+setup (`engine_setup`) and reviewed SCF initialization/execution (`scf`).
+Once a remote WIEN2k installation is verified, a project with WIEN2k selected
+exposes `WIEN2k Structure` and, after an accepted structure exists, `WIEN2k
+SCF`.
 
-SCF initialization, SCF runs, bands, and DOS are not implemented. Their
-descriptors remain reserved and are not exposed through the selectable
+Bands and DOS remain reserved and are not exposed through the selectable
 frontend workflow registry.
 
 ## Core Difference From QE
@@ -87,23 +88,31 @@ The structure-source miniapp deliberately precedes SCF initialization:
    WIEN2k `cif2struct`.
 4. Stage the draft in a transient remote directory below
    `{remote_workspace_root}/qcortado/{project_id}/wien2k/{session_id}`.
-5. Run native refinement in explicit review stages:
-   `setrmt_lapw` plus `x nn`, then `x sgroup -settol`, then `x symmetry`.
-6. Stream native output inline and require user approval of the final
-   symmetry candidate.
-7. Save an `engine_setup` calculation entry only after approval.
+5. Submit native refinement as lightweight Slurm utility jobs in explicit
+   review stages, keeping module loading and native commands on allocated
+   compute nodes rather than login nodes:
+   `setrmt_lapw` plus a non-interactive `x nn` overlap check using the
+   engine-owned NN bond-length factor, then `x sgroup -settol`, then
+   `x symmetry`. Each native `x` invocation passes `-f <case>` explicitly
+   because the transient staging directory is session-named, not case-named.
+6. Stream both scheduler output and native `outputnn`/`outputsgroup`/`outputs`
+   artifacts inline. `sgroup` may propose shifted cells; origin-shift
+   rejection is determined from the accepted candidate's `symmetry` result.
+7. Require user approval of the final symmetry candidate.
+8. Save an `engine_setup` calculation entry only after approval.
 
 The accepted local `<case>.struct` and its small diagnostic logs are the
 canonical project source. The transient remote directory is cleaned on save
 or discard when the remote profile is reachable; cleanup failure does not
-invalidate an accepted local source. A future SCF workflow must restage the
-accepted structure into its own remote case directory rather than depend on
-the refinement session.
+invalidate an accepted local source. SCF restages the accepted structure into
+its own retained remote case directory rather than depending on the refinement
+session.
 
 Platform-owned pieces:
 
 - Project and CIF selection.
-- Remote SSH transport and inline output streaming.
+- Remote SSH orchestration, lightweight Slurm utility submission, and inline
+  output streaming.
 - Live output.
 - Artifact sync.
 - Saved calculation record.
@@ -116,22 +125,24 @@ WIEN2k-owned pieces:
 - Error parsing.
 - Case structure artifacts.
 
-## Future Workflow: SCF Initialization
+## Implemented Workflow: SCF
 
-Future SCF initialization starts from an accepted saved structure source. It
-may run `lstart`, `kgen`, and `dstart` as required by the chosen WIEN2k SCF
-contract. Those operations are intentionally not part of the implemented
-structure miniapp.
+SCF starts from an accepted saved structure source. The wizard uses the same
+configuration-left/output-right shell as Structure and separates native
+initialization review from the SCF submission:
 
-## Candidate Workflow: SCF
-
-Future flow:
-
-1. Select an accepted WIEN2k structure source and initialize a new SCF case.
-2. Choose spin mode and convergence controls.
-3. Submit remote `run_lapw` or `runsp_lapw`.
-4. Parse `case.scf`.
-5. Save native result and normalized summary.
+1. Select an accepted structure and stage it in a retained case directory
+   whose leaf directory is `<case>`, matching WIEN2k's native file-prefix
+   convention.
+2. Configure `RKMAX`, `GMAX`, `LMAX`, k mesh, native initialization XC
+   (`PBE vxc=13`, `LDA vxc=5`, `WC vxc=11`, or `PBEsol vxc=19`), LSTART cutoff,
+   and scalar or basic spin-polarized mode.
+3. Submit `init_lapw -b` without `-red`; batch initialization validates the
+   accepted structure and produces active inputs and starting densities.
+4. Review initialization logs/artifacts, then submit serial `run_lapw` or
+   `runsp_lapw` with convergence controls.
+5. Parse `case.scf`/`case.dayfile`, save native artifacts plus a normalized
+   SCF summary, and offer `-NI` continuation for non-converged attempts.
 
 Possible normalized outputs:
 
@@ -191,11 +202,13 @@ Frontend:
 ```text
 src/components/wien2k/
   Wien2kStructureWizard.tsx            # implemented engine_setup UI
+  Wien2kScfWizard.tsx                  # implemented reviewed SCF UI
 src/lib/engines/wien2k/
-  plugin.ts                             # structure route plus reserved contract
+  plugin.ts                             # exposed structure/SCF plus reserved contract
   structure.ts                          # implemented structure types/API
-  caseState.ts                          # future case lifecycle support
-  types.ts                              # future native workflow types
+  scf.ts                                # implemented native SCF API
+  caseState.ts                          # case lifecycle and command plans
+  types.ts                              # native workflow settings/types
 ```
 
 Backend:
@@ -204,9 +217,8 @@ Backend:
 src-tauri/src/engines/wien2k/
   mod.rs
   structure.rs                          # implemented struct/session/stage ownership
+  scf.rs                                # implemented SCF session/parser ownership
   types.rs
-  init.rs
-  scf.rs
   bands.rs
   dos.rs
   remote.rs
@@ -214,8 +226,8 @@ src-tauri/src/engines/wien2k/
   adapters.rs
 ```
 
-Future initialization/runner/parser files should be added only as those
-workflows are built.
+Bands/DOS runner/parser files should be added only as those workflows are
+built.
 
 ## Dependencies On Current Migration
 
@@ -224,13 +236,14 @@ The structure workflow relies on the following completed platform work:
 1. `engine_id` on saved calculations.
 2. Project storage that can distinguish QE calculations from future engine calculations.
 3. HPC profile editing that keeps shared SSH/Slurm roots alongside
-   engine-specific QE and verified WIEN2k runtime paths.
+   engine-specific QE and verified WIEN2k runtime locations, each selectable
+   as explicit-path or environment-module execution.
 4. Engine-specific remote job bundle generation.
 5. Shared normalized band and DOS datasets.
 6. QE pseudopotentials isolated inside the QE engine.
 7. Compatibility path for old QE projects.
 
-## Future Validation Expectations
+## Validation Expectations
 
 Wien2k implementation PRs will need more than current QE validation. At minimum:
 
@@ -240,7 +253,7 @@ npm run test:unit
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-Future backend parser modules should add Rust unit tests for representative Wien2k outputs.
+Backend parser modules include Rust unit tests for representative WIEN2k outputs.
 
 Remote workflow PRs should also include manual validation notes for:
 
@@ -250,9 +263,10 @@ Remote workflow PRs should also include manual validation notes for:
 - artifact sync.
 - project save and reload.
 
-## Non-Goals For The Structure Workflow
+## Non-Goals For The WIEN2k V1 Workflows
 
-- Do not implement WIEN2k SCF initialization or calculation runners.
+- Do not add RMT changes, `sgroup` review, or structure editing to SCF.
+- Do not implement parallel `.machines`, AFM, SOC, or `+U` configuration in SCF v1.
 - Do not add Wien2k settings to the current QE setup UI.
 - Do not add placeholder Wien2k commands that cannot run.
 - Do not change QE calculation behavior.

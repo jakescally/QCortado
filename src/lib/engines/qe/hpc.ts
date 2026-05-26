@@ -5,13 +5,15 @@
 // pseudopotential, and executable-command ownership explicit at call sites.
 
 export {
+  buildHpcQeRuntimeSetupLines,
   buildHpcQeInputCommandLine,
   getRemotePseudopotentialMetadata,
   listRemotePseudopotentialInventory,
   listRemotePseudopotentialMetadata,
   listRemotePseudopotentials,
   loadRemoteSsspData,
+  qeEngineUsesModuleMode,
+  resolveProfileRemoteQeAuxiliaryExecutable,
   resolveProfileRemotePseudoDir,
   resolveProfileRemoteQeBinDir,
 } from "../../hpcConfig";
-

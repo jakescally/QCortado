@@ -33,8 +33,8 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
   listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
@@ -338,7 +338,7 @@ export function FermiSurfaceWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(
         activeHpcProfile,
         "fermi_velocity.x",

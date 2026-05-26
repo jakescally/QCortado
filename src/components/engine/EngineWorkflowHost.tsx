@@ -29,6 +29,7 @@ import type { EngineWorkflowHostRoute } from "../../lib/engines";
 import type { EngineWorkflowView } from "../../lib/engines/plugin";
 import type { EpwViewerPayload } from "../qe";
 import { Wien2kStructureWizard } from "../wien2k/Wien2kStructureWizard";
+import { Wien2kScfWizard } from "../wien2k/Wien2kScfWizard";
 
 export interface ScfWorkflowContext {
   cifId: string;
@@ -80,6 +81,7 @@ export interface EngineWorkflowHostContexts {
   transport: TransportWorkflowContext | null;
   epw: EpwWorkflowContext | null;
   structureSetup: Wien2kStructureWorkflowContext | null;
+  wien2kScf: ScfWorkflowContext | null;
 }
 
 export interface PhononWorkflowViewerData {
@@ -119,6 +121,7 @@ export interface EngineWorkflowHostProps {
   onViewPhonons: (phononData: PhononWorkflowViewerData, viewMode: "bands" | "dos") => void;
   onViewEpw: (epwData: EpwViewerPayload["data"], rawOutput?: string | null) => void;
   onStructureSourceSaved: () => void;
+  onWien2kScfSaved: () => void;
 }
 
 const EMPTY_CRYSTAL_DATA: CrystalData = {
@@ -140,7 +143,9 @@ export function canRenderEngineWorkflowHost({
   reconnectTaskId,
 }: Pick<EngineWorkflowHostProps, "route" | "runtime" | "contexts" | "reconnectTaskId">): boolean {
   if (route.engineId === "wien2k") {
-    return route.view === "wien2k-structure-wizard" && Boolean(contexts.structureSetup);
+    if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
+    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
+    return false;
   }
   if (route.engineId !== "qe") {
     return false;
@@ -195,6 +200,19 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           crystalData={context.crystalData}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onStructureSourceSaved}
+        />
+      );
+    }
+    case "wien2k-scf-wizard": {
+      const context = contexts.wien2kScf;
+      if (!context) return null;
+      return (
+        <Wien2kScfWizard
+          projectId={context.projectId}
+          cifId={context.cifId}
+          calculations={context.calculations ?? []}
+          onBack={() => onBack(route.view, "project-dashboard")}
+          onSaved={props.onWien2kScfSaved}
         />
       );
     }

@@ -10,6 +10,8 @@ import {
   isTerminalWien2kCasePhase,
   listWien2kStructureSources,
   normalizeWien2kCaseName,
+  validateWien2kInitializationSettings,
+  validateWien2kScfRunSettings,
   validateWien2kStructureControls,
 } from "../../src/lib/engines/wien2k";
 import type { Wien2kCaseReference } from "../../src/lib/engines/wien2k";
@@ -34,26 +36,53 @@ test("Wien2k initialized case artifacts preserve remote case-directory state", (
 
   assert.ok(basenames.includes("Si.struct"));
   assert.ok(basenames.includes("Si.clmsum"));
-  assert.ok(basenames.includes("Si.scf"));
+  assert.ok(!basenames.includes("Si.scf"));
   assert.ok(basenames.includes("Si.klist"));
+  assert.ok(basenames.includes("Si.inc"));
+  assert.ok(basenames.includes("Si.inm"));
 });
 
 test("Wien2k command plans are data-only remote case plans", () => {
   const initPlan = buildWien2kInitCommandPlan(caseRef, DEFAULT_WIEN2K_INITIALIZATION_SETTINGS);
+  const ldaInitPlan = buildWien2kInitCommandPlan(caseRef, {
+    ...DEFAULT_WIEN2K_INITIALIZATION_SETTINGS,
+    exchangeCorrelation: 5,
+  });
   const scfPlan = buildWien2kScfCommandPlan(caseRef, {
     ...DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
     spinMode: "spin_polarized",
-    parallel: true,
-  });
+  }, true);
 
   assert.equal(initPlan.program, "init_lapw");
   assert.equal(initPlan.workingDirectory, caseRef.remoteCaseDir);
   assert.ok(initPlan.argv.includes("-rkmax"));
+  assert.ok(!initPlan.argv.includes("-red"));
+  assert.deepEqual(ldaInitPlan.argv.slice(ldaInitPlan.argv.indexOf("-vxc"), ldaInitPlan.argv.indexOf("-vxc") + 2), ["-vxc", "5"]);
   assert.deepEqual(initPlan.environment, [["SCRATCH", "/scratch/qcortado/work/Si"]]);
 
   assert.equal(scfPlan.program, "runsp_lapw");
-  assert.ok(scfPlan.argv.includes("-p"));
+  assert.ok(!scfPlan.argv.includes("-p"));
+  assert.ok(scfPlan.argv.includes("-NI"));
   assert.equal(scfPlan.phase, "scf_running");
+});
+
+test("WIEN2k SCF v1 validates reviewed serial-native settings", () => {
+  assert.equal(validateWien2kInitializationSettings(DEFAULT_WIEN2K_INITIALIZATION_SETTINGS), null);
+  for (const exchangeCorrelation of [5, 11, 13, 19]) {
+    assert.equal(
+      validateWien2kInitializationSettings({ ...DEFAULT_WIEN2K_INITIALIZATION_SETTINGS, exchangeCorrelation }),
+      null,
+    );
+  }
+  assert.equal(validateWien2kScfRunSettings(DEFAULT_WIEN2K_SCF_RUN_SETTINGS), null);
+  assert.match(
+    validateWien2kInitializationSettings({ ...DEFAULT_WIEN2K_INITIALIZATION_SETTINGS, exchangeCorrelation: 999 }) ?? "",
+    /native initialization options/,
+  );
+  assert.match(
+    validateWien2kScfRunSettings({ ...DEFAULT_WIEN2K_SCF_RUN_SETTINGS, maxIterations: 0 }) ?? "",
+    /positive integer/,
+  );
 });
 
 test("Wien2k terminal phases are explicit", () => {
@@ -64,6 +93,13 @@ test("Wien2k terminal phases are explicit", () => {
 
 test("WIEN2k structure controls validate native refinement limits", () => {
   assert.equal(validateWien2kStructureControls(DEFAULT_WIEN2K_STRUCTURE_CONTROLS), null);
+  assert.match(
+    validateWien2kStructureControls({
+      ...DEFAULT_WIEN2K_STRUCTURE_CONTROLS,
+      nnBondlengthFactor: 0,
+    }) ?? "",
+    /NN bond-length factor/,
+  );
   assert.match(
     validateWien2kStructureControls({
       ...DEFAULT_WIEN2K_STRUCTURE_CONTROLS,

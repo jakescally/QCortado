@@ -19,7 +19,7 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
-  resolveProfileRemoteQeBinDir,
+  buildHpcQeRuntimeSetupLines,
 } from "../lib/engines/qe/hpc";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
@@ -345,7 +345,7 @@ export function HubbardLrtWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "hp.x", "hp.in", "hp.out", undefined, hpcResources.resource_type),
     ],
     [activeHpcProfile, hpcResources.resource_type],

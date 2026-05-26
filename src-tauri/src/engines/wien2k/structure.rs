@@ -16,6 +16,7 @@ use crate::symmetry::{self, Matrix3, SymmetryAnalyzeInput, SymmetryAtomInput, Ve
 const BOHR_PER_ANGSTROM: f64 = 1.889_726_125_457_828_1;
 const DEFAULT_NPT: u32 = 781;
 const DEFAULT_RMT: f64 = 2.0;
+const DEFAULT_NN_BONDLENGTH_FACTOR: f64 = 2.0;
 const DEFAULT_SYMPREC: f64 = 1e-5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,11 +59,17 @@ fn default_sgroup_tolerance() -> f64 {
     1e-5
 }
 
+fn default_nn_bondlength_factor() -> f64 {
+    DEFAULT_NN_BONDLENGTH_FACTOR
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Wien2kStructureControls {
     #[serde(default)]
     pub rmt_reduction_percent: f64,
+    #[serde(default = "default_nn_bondlength_factor")]
+    pub nn_bondlength_factor: f64,
     #[serde(default = "default_sgroup_tolerance")]
     pub sgroup_tolerance: f64,
     #[serde(default)]
@@ -73,6 +80,7 @@ impl Default for Wien2kStructureControls {
     fn default() -> Self {
         Self {
             rmt_reduction_percent: 0.0,
+            nn_bondlength_factor: default_nn_bondlength_factor(),
             sgroup_tolerance: default_sgroup_tolerance(),
             site_overrides: Vec::new(),
         }
@@ -151,6 +159,9 @@ pub struct Wien2kStructureStageResult {
     pub candidate_struct: String,
     pub sites: Vec<Wien2kStructureSite>,
     pub native_output: String,
+    /// The WIEN2k case output artifact for the completed stage (`outputnn`,
+    /// `outputsgroup`, or `outputs`) without scheduler-wrapper output.
+    pub artifact_output: String,
     pub save_allowed: bool,
     #[serde(default)]
     pub diagnostics: Vec<String>,
@@ -180,6 +191,9 @@ pub fn validate_controls(controls: &Wien2kStructureControls) -> Result<(), Strin
         || controls.rmt_reduction_percent >= 100.0
     {
         return Err("RMT reduction must be between 0 and 100 percent.".to_string());
+    }
+    if !controls.nn_bondlength_factor.is_finite() || controls.nn_bondlength_factor <= 0.0 {
+        return Err("NN bond-length factor must be positive.".to_string());
     }
     if !controls.sgroup_tolerance.is_finite()
         || controls.sgroup_tolerance < 1e-7
@@ -600,13 +614,36 @@ pub fn stage_command(
     session: &Wien2kStructureSession,
     stage: Wien2kStructureStage,
     controls: &Wien2kStructureControls,
+    use_module: bool,
+    module_use: Option<&str>,
+    module_load: Option<&str>,
 ) -> Result<String, String> {
     validate_controls(controls)?;
     let root = shell_quote(&session.remote_install_root);
     let dir = shell_quote(&session.remote_case_dir);
     let case_name = shell_quote(&session.draft.case_name);
-    let prefix =
-        format!("cd {dir} && export WIENROOT={root} && export PATH=\"$WIENROOT:$PATH\" && ");
+    let (prefix, setrmt, x_command) = if use_module {
+        let mut setup = vec![format!("cd {dir}")];
+        if let Some(module_use) = module_use.map(str::trim).filter(|value| !value.is_empty()) {
+            setup.push(format!("module use {}", shell_quote(module_use)));
+        }
+        let module_load = module_load
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "WIEN2k module load value is required in module mode.".to_string())?;
+        setup.push(format!("module load {}", shell_quote(module_load)));
+        (
+            format!("{} && ", setup.join(" && ")),
+            "setrmt_lapw".to_string(),
+            "x".to_string(),
+        )
+    } else {
+        (
+            format!("cd {dir} && export WIENROOT={root} && export PATH=\"$WIENROOT:$PATH\" && "),
+            "\"$WIENROOT/setrmt_lapw\"".to_string(),
+            "\"$WIENROOT/x\"".to_string(),
+        )
+    };
     let command = match stage {
         Wien2kStructureStage::Rmt => {
             let mut explicit = BTreeMap::<String, f64>::new();
@@ -632,16 +669,22 @@ pub fn stage_command(
                     .join(",");
                 format!("-a {}", shell_quote(&assignments))
             };
+            let nn_input = shell_quote(&format!(
+                "-{} 1d-4 20.",
+                controls.nn_bondlength_factor
+            ));
             format!(
-                "{prefix}\"$WIENROOT/setrmt_lapw\" {case_name} {selection} && cp {case_name}.struct_setrmt {case_name}.struct && \"$WIENROOT/x\" nn"
+                "{prefix}{setrmt} {case_name} {selection} && cp {case_name}.struct_setrmt {case_name}.struct && printf '%s\\n' {nn_input} | {x_command} nn -f {case_name}"
             )
         }
-        Wien2kStructureStage::Sgroup => format!(
-            "{prefix}\"$WIENROOT/x\" sgroup -settol {}",
-            controls.sgroup_tolerance
-        ),
+        Wien2kStructureStage::Sgroup => {
+            format!(
+                "{prefix}{x_command} sgroup -f {case_name} -settol {}",
+                controls.sgroup_tolerance
+            )
+        }
         Wien2kStructureStage::Symmetry => format!(
-            "{prefix}test -f {case_name}.struct_sgroup && cp {case_name}.struct_sgroup {case_name}.struct && \"$WIENROOT/x\" symmetry"
+            "{prefix}test -f {case_name}.struct_sgroup && cp {case_name}.struct_sgroup {case_name}.struct && {x_command} symmetry -f {case_name}"
         ),
     };
     Ok(command)
@@ -687,13 +730,14 @@ pub fn stage_diagnostics(stage: Wien2kStructureStage, output: &str) -> Vec<Strin
             "WIEN2k reported an error; review the native output before retrying.".to_string(),
         );
     }
-    if upper.contains("SHIFTED") || upper.contains("MOVE THE ORIGIN") {
+    if stage == Wien2kStructureStage::Symmetry
+        && (upper.contains("SHIFTED") || upper.contains("MOVE THE ORIGIN"))
+    {
         diagnostics.push("WIEN2k requires an origin shift; the structure cannot be saved until this is resolved.".to_string());
     }
     if stage == Wien2kStructureStage::Sgroup && upper.contains("WARNING") {
         diagnostics.push(
-            "SGROUP emitted a warning; compare the proposed structure before continuing."
-                .to_string(),
+            "SGROUP reported a warning. Review its native output and either accept the proposed structure for SYMMETRY validation or adjust the tolerance and rerun.".to_string(),
         );
     }
     diagnostics
@@ -776,6 +820,11 @@ mod tests {
             ..Wien2kStructureControls::default()
         };
         assert!(validate_controls(&invalid_r0).is_err());
+        let invalid_nn_factor = Wien2kStructureControls {
+            nn_bondlength_factor: 0.0,
+            ..Wien2kStructureControls::default()
+        };
+        assert!(validate_controls(&invalid_nn_factor).is_err());
     }
 
     #[test]
@@ -822,26 +871,92 @@ mod tests {
             &session,
             Wien2kStructureStage::Rmt,
             &Wien2kStructureControls::default(),
+            false,
+            None,
+            None,
         )
         .expect("RMT command");
         let sgroup = stage_command(
             &session,
             Wien2kStructureStage::Sgroup,
             &Wien2kStructureControls::default(),
+            false,
+            None,
+            None,
         )
         .expect("SGROUP command");
         let symmetry = stage_command(
             &session,
             Wien2kStructureStage::Symmetry,
             &Wien2kStructureControls::default(),
+            false,
+            None,
+            None,
         )
         .expect("SYMMETRY command");
 
         assert!(rmt.contains("setrmt_lapw"));
         assert!(rmt.contains("-r 0"));
-        assert!(rmt.contains("\"$WIENROOT/x\" nn"));
-        assert!(sgroup.contains("\"$WIENROOT/x\" sgroup -settol 0.00001"));
-        assert!(symmetry.contains("\"$WIENROOT/x\" symmetry"));
+        assert!(rmt.contains("printf '%s\\n' '-2 1d-4 20.' | \"$WIENROOT/x\" nn -f 'Si'"));
+        assert!(sgroup.contains("\"$WIENROOT/x\" sgroup -f 'Si' -settol 0.00001"));
+        assert!(symmetry.contains("\"$WIENROOT/x\" symmetry -f 'Si'"));
+    }
+
+    #[test]
+    fn rmt_postcheck_uses_configured_noninteractive_nn_factor() {
+        let controls = Wien2kStructureControls {
+            nn_bondlength_factor: 2.4,
+            ..Wien2kStructureControls::default()
+        };
+        let command = stage_command(
+            &staged_session(),
+            Wien2kStructureStage::Rmt,
+            &controls,
+            true,
+            None,
+            Some("WIEN2k/24.1"),
+        )
+        .expect("module RMT command");
+
+        assert!(command.contains("setrmt_lapw 'Si' -r 0"));
+        assert!(command.contains("printf '%s\\n' '-2.4 1d-4 20.' | x nn -f 'Si'"));
+    }
+
+    #[test]
+    fn module_stage_commands_use_path_tools_after_module_setup() {
+        let command = stage_command(
+            &staged_session(),
+            Wien2kStructureStage::Symmetry,
+            &Wien2kStructureControls::default(),
+            true,
+            Some("/cluster/modulefiles"),
+            Some("WIEN2k/24.1"),
+        )
+        .expect("module command");
+
+        assert!(command.contains("module use '/cluster/modulefiles'"));
+        assert!(command.contains("module load 'WIEN2k/24.1'"));
+        assert!(command.contains("&& x symmetry -f 'Si'"));
+        assert!(!command.contains("WIENROOT"));
+    }
+
+    #[test]
+    fn sgroup_shift_candidates_are_validated_by_symmetry_before_blocking_save() {
+        let sgroup = stage_diagnostics(
+            Wien2kStructureStage::Sgroup,
+            "WARNING: compare this candidate\nList of shifted cells:",
+        );
+        assert!(sgroup
+            .iter()
+            .any(|message| message.contains("SGROUP reported")));
+        assert!(!sgroup
+            .iter()
+            .any(|message| message.contains("origin shift")));
+
+        let symmetry = stage_diagnostics(Wien2kStructureStage::Symmetry, "ATOM POSITIONS SHIFTED");
+        assert!(symmetry
+            .iter()
+            .any(|message| message.contains("origin shift")));
     }
 
     #[test]

@@ -93,6 +93,7 @@ export type ExecutionMode = "local" | "hpc";
 export type StorageInventoryMode = "local" | "hpc";
 export type QeSmearingType = "gaussian" | "methfessel-paxton" | "marzari-vanderbilt" | "fermi-dirac";
 export type HpcAuthMethod = "ssh_key" | "password";
+export type HpcEnginePathMode = "path" | "module";
 export type HpcResourceType = "cpu" | "gpu";
 export type HpcResourceMode = "cpu_only" | "gpu_only" | "both";
 export type HpcLauncher = "srun" | "mpirun";
@@ -211,6 +212,12 @@ export interface HpcProfile {
   remote_wannier90_path?: string | null;
   remote_postw90_path?: string | null;
   remote_wien2k_install_root?: string | null;
+  qe_path_mode?: HpcEnginePathMode;
+  qe_module_use?: string | null;
+  qe_module_load?: string | null;
+  wien2k_path_mode?: HpcEnginePathMode;
+  wien2k_module_use?: string | null;
+  wien2k_module_load?: string | null;
   remote_pseudo_dir: string;
   remote_cpu_pseudo_dir?: string | null;
   remote_gpu_pseudo_dir?: string | null;
@@ -223,6 +230,7 @@ export interface HpcProfile {
   launcher_extra_args?: string | null;
   default_cpu_resources: SlurmResourceRequest;
   default_gpu_resources: SlurmResourceRequest;
+  utility_resources?: SlurmResourceRequest | null;
   credential_persisted: boolean;
   warning_acknowledged: boolean;
   created_at: string;

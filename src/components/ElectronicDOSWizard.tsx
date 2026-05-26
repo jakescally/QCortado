@@ -33,8 +33,8 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
   listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -286,7 +286,7 @@ export function ElectronicDOSWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "dos.x", "dos.in", "dos.out", undefined, hpcResources.resource_type),
     ],

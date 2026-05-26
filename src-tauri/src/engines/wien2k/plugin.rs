@@ -1,8 +1,7 @@
 //! WIEN2k plugin contract.
 //!
 //! The complete manifest retains future workflows for planning and type
-//! ownership. Installed engines expose only implemented workflows; currently
-//! that is structure-source setup.
+//! ownership. Installed engines expose structure-source setup and SCF.
 
 use crate::engines::plugin::{
     EngineHpcInterfaceDescriptor, EnginePlugin, EnginePluginManifest, EngineResultDatasetKind,
@@ -169,11 +168,11 @@ fn workflows() -> Vec<EngineWorkflowDescriptor> {
                 ),
                 engine_panel(
                     "wien2k-scf-basis",
-                    "Basis and spheres",
+                    "Basis and k mesh",
                     "wien2k.scf.basis",
                     40,
                     true,
-                    "WIEN2k RMT, RKmax, Gmax, and lmax controls. No pseudopotentials are used.",
+                    "WIEN2k RKmax, Gmax, lmax, k-mesh, and LSTART controls. Accepted RMT values remain owned by case.struct.",
                 ),
                 engine_panel(
                     "wien2k-scf-cycle",
@@ -181,7 +180,7 @@ fn workflows() -> Vec<EngineWorkflowDescriptor> {
                     "wien2k.scf.cycle",
                     50,
                     true,
-                    "WIEN2k run_lapw/runsp_lapw convergence, spin mode, and parallel flags.",
+                    "Serial WIEN2k run_lapw/runsp_lapw convergence and basic spin-mode controls.",
                 ),
             ],
             input_requirements: vec![

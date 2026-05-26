@@ -7,6 +7,7 @@ import type {
   Wien2kInitializationSettings,
   Wien2kScfRunSettings,
 } from "./types";
+import { WIEN2K_EXCHANGE_CORRELATION_OPTIONS } from "./types";
 
 export function normalizeWien2kCaseName(raw: string): string | null {
   const trimmed = raw.trim();
@@ -26,7 +27,7 @@ export function coreWien2kCaseArtifacts(caseName: string): Wien2kCaseArtifact[] 
   return [
     artifact("struct", caseName, "struct", true),
     artifact("initialization_output", caseName, "outputnn", false),
-    artifact("initialization_output", caseName, "outputsgroup", false),
+    artifact("initialization_output", caseName, "outputst", false),
     artifact("initialization_output", caseName, "outputs", false),
     artifact("density", caseName, "clmsum", true),
     artifact("scf_output", caseName, "scf", true),
@@ -36,10 +37,17 @@ export function coreWien2kCaseArtifacts(caseName: string): Wien2kCaseArtifact[] 
 
 export function initializedWien2kCaseArtifacts(caseName: string): Wien2kCaseArtifact[] {
   return [
-    ...coreWien2kCaseArtifacts(caseName),
+    artifact("struct", caseName, "struct", true),
+    artifact("initialization_output", caseName, "outputnn", false),
+    artifact("initialization_output", caseName, "outputs", false),
+    artifact("initialization_output", caseName, "outputst", false),
+    artifact("density", caseName, "clmsum", true),
+    artifact("dayfile", caseName, "dayfile", false),
     artifact("initialization_input", caseName, "in0", true),
     artifact("initialization_input", caseName, "in1", true),
     artifact("initialization_input", caseName, "in2", true),
+    artifact("initialization_input", caseName, "inc", true),
+    artifact("initialization_input", caseName, "inm", true),
     artifact("initialization_input", caseName, "klist", true),
   ];
 }
@@ -67,9 +75,6 @@ export function buildWien2kInitCommandPlan(
     formatNumber(settings.lstartEnergyCutoffRy),
   ];
 
-  if (settings.rmtReductionPercent != null) {
-    argv.push("-red", formatNumber(settings.rmtReductionPercent));
-  }
   if (settings.spinMode === "spin_polarized") {
     argv.push("-sp");
   }
@@ -87,6 +92,7 @@ export function buildWien2kInitCommandPlan(
 export function buildWien2kScfCommandPlan(
   caseRef: Wien2kCaseReference,
   settings: Wien2kScfRunSettings,
+  continuation = false,
 ): Wien2kCommandPlan {
   const argv = [
     "-ec",
@@ -100,8 +106,8 @@ export function buildWien2kScfCommandPlan(
   if (settings.forceConvergenceMryBohr != null) {
     argv.push("-fc", formatNumber(settings.forceConvergenceMryBohr));
   }
-  if (settings.parallel) {
-    argv.push("-p");
+  if (continuation) {
+    argv.push("-NI");
   }
 
   return {
@@ -112,6 +118,37 @@ export function buildWien2kScfCommandPlan(
     phase: "scf_running",
     expectedArtifacts: coreWien2kCaseArtifacts(caseRef.caseName),
   };
+}
+
+export function validateWien2kInitializationSettings(settings: Wien2kInitializationSettings): string | null {
+  if (!Number.isFinite(settings.rkmax) || settings.rkmax <= 0) return "RKMAX must be positive.";
+  if (!Number.isFinite(settings.gmax) || settings.gmax <= 0) return "GMAX must be positive.";
+  if (!Number.isInteger(settings.lmax) || settings.lmax <= 0) return "LMAX must be a positive integer.";
+  if (settings.kMesh.some((value) => !Number.isInteger(value) || value <= 0)) {
+    return "All k-mesh dimensions must be positive integers.";
+  }
+  if (!WIEN2K_EXCHANGE_CORRELATION_OPTIONS.some((option) => option.value === settings.exchangeCorrelation)) {
+    return "XC functional must be one of WIEN2k's native initialization options: LDA, PBE, WC, or PBEsol.";
+  }
+  if (!Number.isFinite(settings.lstartEnergyCutoffRy)) return "The LSTART energy cutoff must be finite.";
+  return null;
+}
+
+export function validateWien2kScfRunSettings(settings: Wien2kScfRunSettings): string | null {
+  if (!Number.isInteger(settings.maxIterations) || settings.maxIterations <= 0) {
+    return "Maximum SCF iterations must be a positive integer.";
+  }
+  if (!Number.isFinite(settings.energyConvergenceRy) || settings.energyConvergenceRy <= 0) {
+    return "Energy convergence must be positive.";
+  }
+  if (!Number.isFinite(settings.chargeConvergence) || settings.chargeConvergence <= 0) {
+    return "Charge convergence must be positive.";
+  }
+  if (settings.forceConvergenceMryBohr != null
+    && (!Number.isFinite(settings.forceConvergenceMryBohr) || settings.forceConvergenceMryBohr <= 0)) {
+    return "Force convergence must be positive when set.";
+  }
+  return null;
 }
 
 function artifact(

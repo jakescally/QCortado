@@ -27,6 +27,7 @@ use crate::engines::qe::{
     add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
     read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
+use crate::engines::types::NormalizedScfSummary;
 use crate::engines::EngineId;
 use crate::AppState;
 
@@ -75,6 +76,9 @@ pub struct CalculationRun {
     pub calc_type: String,
     pub parameters: serde_json::Value,
     pub result: Option<QEResult>,
+    /// Engine-neutral summary used by native SCF engines such as WIEN2k.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scf_summary: Option<NormalizedScfSummary>,
     pub started_at: String,
     pub completed_at: Option<String>,
     /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
@@ -154,6 +158,22 @@ pub struct SaveEngineSetupArtifactData {
 pub struct EngineSetupTextArtifact {
     pub filename: String,
     pub contents: String,
+}
+
+/// Data needed to save an engine-native calculation without fabricating QE files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveEngineCalculationArtifactData {
+    pub engine_id: EngineId,
+    pub calc_type: String,
+    pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scf_summary: Option<NormalizedScfSummary>,
+    pub started_at: String,
+    pub completed_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<EngineSetupTextArtifact>,
 }
 
 /// A text log/input file saved under a calculation directory.
@@ -1483,6 +1503,9 @@ fn merge_summary_into_full_calculation(full: &mut CalculationRun, summary: &Calc
     full.completed_at = summary.completed_at.clone();
     full.tags = summary.tags.clone();
     full.storage_bytes = summary.storage_bytes;
+    if summary.scf_summary.is_some() {
+        full.scf_summary = summary.scf_summary.clone();
+    }
 
     if let Some(summary_result) = summary.result.as_ref() {
         match full.result.as_mut() {
@@ -1549,6 +1572,14 @@ fn is_calculation_input_file(path: &Path) -> bool {
     if file_name == "run.sbatch" || file_name.ends_with(".win") || file_name.ends_with(".struct") {
         return true;
     }
+    if [
+        ".in0", ".in1", ".in1c", ".in2", ".in2c", ".inc", ".inm", ".inst", ".klist",
+    ]
+    .iter()
+    .any(|suffix| file_name.ends_with(suffix))
+    {
+        return true;
+    }
 
     matches!(
         path.extension()
@@ -1578,6 +1609,11 @@ fn is_calculation_log_file(path: &Path) -> bool {
     ) || file_name.ends_with(".outputnn")
         || file_name.ends_with(".outputsgroup")
         || file_name.ends_with(".outputs")
+        || file_name.ends_with(".outputst")
+        || file_name.ends_with(".outputkgen")
+        || file_name.ends_with(".outputd")
+        || file_name.ends_with(".scf")
+        || file_name.ends_with(".dayfile")
 }
 
 fn collect_calculation_text_files(
@@ -4709,6 +4745,7 @@ pub fn save_calculation(
         calc_type: calc_data.calc_type,
         parameters: calculation_parameters,
         result: Some(calc_data.result),
+        scf_summary: None,
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
         tags: calc_data.tags,
@@ -4786,6 +4823,7 @@ pub fn save_engine_setup_artifact(
         calc_type: "engine_setup".to_string(),
         parameters: setup_data.parameters,
         result: None,
+        scf_summary: None,
         started_at: setup_data.started_at,
         completed_at: Some(setup_data.completed_at),
         tags: setup_data.tags,
@@ -4796,6 +4834,107 @@ pub fn save_engine_setup_artifact(
     write_project_json_summary(&project_json_path, &project)?;
     queue_viewer_library_publish(app);
     Ok(calc_run)
+}
+
+/// Saves engine-owned calculation artifacts, including normalized output
+/// summaries, without assuming a Quantum ESPRESSO file layout.
+pub fn save_engine_calculation_artifact(
+    app: &AppHandle,
+    project_id: &str,
+    cif_id: &str,
+    calc_data: SaveEngineCalculationArtifactData,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    if calc_data.calc_type.trim().is_empty() {
+        return Err("Engine calculation type is required.".to_string());
+    }
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calc_id = generate_id();
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    fs::create_dir_all(&calc_dir)
+        .map_err(|err| format!("Failed to create engine calculation directory: {}", err))?;
+
+    for artifact in &calc_data.artifacts {
+        write_safe_engine_artifact(&calc_dir, artifact)?;
+    }
+
+    let calc_run = CalculationRun {
+        id: calc_id,
+        engine_id: calc_data.engine_id,
+        name: None,
+        calc_type: calc_data.calc_type,
+        parameters: calc_data.parameters,
+        result: None,
+        scf_summary: calc_data.scf_summary,
+        started_at: calc_data.started_at,
+        completed_at: Some(calc_data.completed_at),
+        tags: calc_data.tags,
+        storage_bytes: Some(calculate_directory_size(&calc_dir)?),
+    };
+    persist_full_calculation(&project_dir, &calc_run)?;
+    variant
+        .calculations
+        .push(summarize_calculation_for_project(&calc_run));
+    write_project_json_summary(&project_json_path, &project)?;
+    queue_viewer_library_publish(app);
+    Ok(calc_run)
+}
+
+/// Reads one trusted engine artifact from a saved calculation for native staging.
+pub fn read_engine_text_artifact(
+    app: &AppHandle,
+    project_id: &str,
+    calc_id: &str,
+    filename: &str,
+) -> Result<String, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+    let safe = safe_engine_artifact_filename(filename)?;
+    let path = project_dir.join("calculations").join(calc_id).join(safe);
+    fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read engine artifact {}: {}", filename, err))
+}
+
+fn write_safe_engine_artifact(
+    calc_dir: &Path,
+    artifact: &EngineSetupTextArtifact,
+) -> Result<(), String> {
+    let filename = safe_engine_artifact_filename(&artifact.filename)?;
+    fs::write(calc_dir.join(filename), &artifact.contents).map_err(|err| {
+        format!(
+            "Failed to write engine artifact {}: {}",
+            artifact.filename, err
+        )
+    })
+}
+
+fn safe_engine_artifact_filename(filename: &str) -> Result<&str, String> {
+    let filename = filename.trim();
+    let safe = !filename.is_empty()
+        && Path::new(filename)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && !filename.contains('/')
+        && !filename.contains('\\');
+    if !safe {
+        return Err(format!("Unsafe engine artifact filename: {}", filename));
+    }
+    Ok(filename)
 }
 
 /// Recursively copies a directory
@@ -6538,11 +6677,46 @@ mod tests {
     #[test]
     fn wien2k_structure_sources_are_discoverable_as_saved_text_artifacts() {
         assert!(is_calculation_input_file(std::path::Path::new("Si.struct")));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.in0")));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.klist")));
         assert!(is_calculation_log_file(std::path::Path::new("Si.outputnn")));
         assert!(is_calculation_log_file(std::path::Path::new(
             "Si.outputsgroup"
         )));
         assert!(is_calculation_log_file(std::path::Path::new("Si.outputs")));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.scf")));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.dayfile")));
+    }
+
+    #[test]
+    fn wien2k_scf_summary_deserializes_without_a_qe_result() {
+        let raw = serde_json::json!({
+            "id": "w2k-scf",
+            "engine_id": "wien2k",
+            "calc_type": "scf",
+            "parameters": {},
+            "result": null,
+            "scf_summary": {
+                "schema": "cortado.scf_summary.v1",
+                "provenance": {
+                    "engineId": "wien2k",
+                    "taskKind": "scf",
+                    "calculationKind": "scf"
+                },
+                "convergence": "converged",
+                "totalEnergy": { "value": -10.5, "unit": "Ry" }
+            },
+            "started_at": "2026-05-25T00:00:00Z",
+            "completed_at": "2026-05-25T00:01:00Z"
+        });
+
+        let calculation: CalculationRun =
+            serde_json::from_value(raw).expect("native WIEN2k summary should deserialize");
+        assert!(calculation.result.is_none());
+        assert_eq!(
+            calculation.scf_summary.expect("summary").convergence,
+            crate::engines::types::ScfConvergenceState::Converged
+        );
     }
 
     #[test]
@@ -6692,6 +6866,7 @@ mod tests {
                 epw_data: None,
                 hubbard_lrt_data: None,
             }),
+            scf_summary: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: Some("2026-01-01T00:01:00Z".to_string()),
             tags: Vec::new(),

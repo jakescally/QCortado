@@ -20,6 +20,10 @@ import {
   defaultResourcesForProfile,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeRuntimeSetupLines,
+  resolveProfileRemoteQeAuxiliaryExecutable,
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { TransportPlot } from "./TransportPlot";
 import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/engines/qe/wannierQuality";
@@ -342,10 +346,18 @@ export function TransportWizard({
   );
 
   const hpcCommandLines = useMemo(
-    () => [
-      "cd \"$SLURM_SUBMIT_DIR\"",
-      `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${deriveRemotePostw90Path(activeHpcProfile)} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
-    ],
+    () => {
+      const remotePostw90 = resolveProfileRemoteQeAuxiliaryExecutable(
+        activeHpcProfile,
+        deriveRemotePostw90Path(activeHpcProfile),
+        "postw90.x",
+      );
+      return [
+        "cd \"$SLURM_SUBMIT_DIR\"",
+        ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
+        `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${remotePostw90} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
+      ];
+    },
     [activeHpcProfile, hpcResources.resource_type, seedname],
   );
 

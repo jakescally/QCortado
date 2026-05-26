@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { addEngineInstallation, type EngineInstallation } from "../lib/engines";
-import { normalizeCliDashText, saveHpcProfile } from "../lib/hpcConfig";
+import { defaultUtilityResources, normalizeCliDashText, saveHpcProfile } from "../lib/hpcConfig";
 import type { EngineId } from "../lib/engines/types";
-import type { HpcProfile, SlurmResourceRequest } from "../lib/types";
+import type { HpcEnginePathMode, HpcProfile, SlurmResourceRequest } from "../lib/types";
 
 interface HpcProfileEditorProps {
   profile: HpcProfile;
   installations: EngineInstallation[];
   onSaved: (profile: HpcProfile, message: string) => void;
+  onDirtyChange?: (isDirty: boolean) => void;
 }
 
 function normalizedOptional(value: string | null | undefined): string | null {
@@ -53,8 +54,31 @@ function resourceText(resources: SlurmResourceRequest, key: "module_preamble"): 
   return resources[key] ?? "";
 }
 
-export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfileEditorProps) {
-  const [draft, setDraft] = useState<HpcProfile>(() => withInstallationFallback(profile, installations));
+function enginePathMode(profile: HpcProfile, engineId: EngineId): HpcEnginePathMode {
+  return (engineId === "qe" ? profile.qe_path_mode : profile.wien2k_path_mode) === "module"
+    ? "module"
+    : "path";
+}
+
+function utilityResourcesForProfile(profile: HpcProfile): SlurmResourceRequest {
+  if (profile.utility_resources) {
+    return profile.utility_resources;
+  }
+  return {
+    ...defaultUtilityResources(),
+    partition: profile.default_cpu_resources.partition,
+    qos: profile.default_cpu_resources.qos,
+    account: profile.default_cpu_resources.account,
+    constraint: profile.default_cpu_resources.constraint,
+    module_preamble: profile.default_cpu_resources.module_preamble,
+    additional_sbatch: [...(profile.default_cpu_resources.additional_sbatch ?? [])],
+  };
+}
+
+export function HpcProfileEditor({ profile, installations, onSaved, onDirtyChange }: HpcProfileEditorProps) {
+  const initialProfile = withInstallationFallback(profile, installations);
+  const [draft, setDraft] = useState<HpcProfile>(() => initialProfile);
+  const [savedDraft, setSavedDraft] = useState<HpcProfile>(() => initialProfile);
   const [credential, setCredential] = useState("");
   const [persistCredential, setPersistCredential] = useState(profile.credential_persisted);
   const [selectedEngine, setSelectedEngine] = useState<EngineId>("qe");
@@ -67,17 +91,38 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
   const hasWien2k = installations.some(
     (installation) => installation.engineId === "wien2k" && installation.hpcProfileId === profile.id,
   );
+  const selectedPathMode = enginePathMode(draft, selectedEngine);
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(savedDraft)
+    || credential.trim().length > 0
+    || persistCredential !== savedDraft.credential_persisted;
 
   useEffect(() => {
-    setDraft(withInstallationFallback(profile, installations));
+    const nextDraft = withInstallationFallback(profile, installations);
+    setDraft(nextDraft);
+    setSavedDraft(nextDraft);
     setCredential("");
     setPersistCredential(profile.credential_persisted);
   }, [installations, profile]);
 
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
   function updateResource(
-    resourceType: "cpu" | "gpu",
+    resourceType: "cpu" | "gpu" | "utility",
     patch: Partial<SlurmResourceRequest>,
   ) {
+    if (resourceType === "utility") {
+      setDraft((current) => ({
+        ...current,
+        utility_resources: {
+          ...utilityResourcesForProfile(current),
+          ...patch,
+          resource_type: "cpu",
+        },
+      }));
+      return;
+    }
     setDraft((current) => ({
       ...current,
       [resourceType === "cpu" ? "default_cpu_resources" : "default_gpu_resources"]: {
@@ -92,10 +137,14 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
     if (isSaving) return;
 
     const desiredWien2kRoot = normalizedOptional(draft.remote_wien2k_install_root);
-    if (hasWien2k && !desiredWien2kRoot) {
+    const wien2kUsesPaths = enginePathMode(draft, "wien2k") === "path";
+    if (hasWien2k && wien2kUsesPaths && !desiredWien2kRoot) {
       setStatus("A configured WIEN2k engine must retain a remote WIENROOT.");
       return;
     }
+    const shouldVerifyWien2kRoot = hasWien2k
+      && desiredWien2kRoot !== null
+      && desiredWien2kRoot !== savedWien2kRoot;
 
     setIsSaving(true);
     setStatus(null);
@@ -104,12 +153,17 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
       // Keep the last verified WIEN2k root until a changed root has been
       // successfully checked on the remote host.
       savedBase = await saveHpcProfile(
-        { ...draft, remote_wien2k_install_root: savedWien2kRoot },
+        {
+          ...draft,
+          remote_wien2k_install_root: shouldVerifyWien2kRoot
+            ? savedWien2kRoot
+            : desiredWien2kRoot ?? savedWien2kRoot,
+        },
         credential.trim().length > 0 ? credential : null,
         persistCredential,
       );
 
-      if (hasWien2k && desiredWien2kRoot !== savedWien2kRoot) {
+      if (shouldVerifyWien2kRoot) {
         setStatus("Verifying updated WIEN2k installation...");
         await addEngineInstallation({
           engineId: "wien2k",
@@ -118,12 +172,18 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
         });
         const verified = { ...savedBase, remote_wien2k_install_root: desiredWien2kRoot };
         setDraft(verified);
+        setSavedDraft(verified);
+        setCredential("");
+        setPersistCredential(verified.credential_persisted);
         onSaved(verified, "Profile saved and WIEN2k installation verified.");
         setStatus("Saved. Updated WIEN2k installation verified.");
         return;
       }
 
       setDraft(savedBase);
+      setSavedDraft(savedBase);
+      setCredential("");
+      setPersistCredential(savedBase.credential_persisted);
       onSaved(savedBase, "HPC profile saved.");
       setStatus("Saved.");
     } catch (reason) {
@@ -136,12 +196,16 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
     }
   }
 
-  function renderResourceCard(resourceType: "cpu" | "gpu") {
-    const resources = resourceType === "cpu" ? draft.default_cpu_resources : draft.default_gpu_resources;
-    const label = resourceType.toUpperCase();
+  function renderResourceCard(resourceType: "cpu" | "gpu" | "utility") {
+    const resources = resourceType === "cpu"
+      ? draft.default_cpu_resources
+      : resourceType === "gpu"
+        ? draft.default_gpu_resources
+        : utilityResourcesForProfile(draft);
+    const label = resourceType === "utility" ? "Utility Jobs" : `${resourceType.toUpperCase()} Defaults`;
     return (
       <div className="settings-hpc-default-card">
-        <h4>{label} Defaults</h4>
+        <h4>{label}</h4>
         <div className="hpc-grid">
           <label>
             Partition
@@ -290,18 +354,69 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
           </div>
         </div>
 
+        <div className="engine-switcher settings-engine-path-mode" role="group" aria-label={`${selectedEngine === "qe" ? "Quantum ESPRESSO" : "WIEN2k"} executable resolution`}>
+          <button
+            type="button"
+            className={selectedPathMode === "path" ? "active" : ""}
+            aria-pressed={selectedPathMode === "path"}
+            onClick={() => setDraft((current) => selectedEngine === "qe"
+              ? { ...current, qe_path_mode: "path" }
+              : { ...current, wien2k_path_mode: "path" })}
+          >
+            Paths
+          </button>
+          <button
+            type="button"
+            className={selectedPathMode === "module" ? "active" : ""}
+            aria-pressed={selectedPathMode === "module"}
+            onClick={() => setDraft((current) => selectedEngine === "qe"
+              ? { ...current, qe_path_mode: "module" }
+              : { ...current, wien2k_path_mode: "module" })}
+          >
+            Modules
+          </button>
+        </div>
+
         {selectedEngine === "qe" && (
           <>
             <p className="settings-menu-hint">Quantum ESPRESSO is the default engine. Pseudopotentials apply only to this engine.</p>
             <div className="hpc-profile-editor-grid">
-              <label>
-                CPU Bin Directory
-                <input className="settings-menu-input" value={draft.remote_qe_cpu_bin_dir ?? draft.remote_qe_bin_dir} onChange={(event) => setDraft((current) => ({ ...current, remote_qe_bin_dir: event.target.value, remote_qe_cpu_bin_dir: optionalText(event.target.value) }))} />
-              </label>
-              <label>
-                GPU Bin Directory
-                <input className="settings-menu-input" value={draft.remote_qe_gpu_bin_dir ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_qe_gpu_bin_dir: optionalText(event.target.value) }))} />
-              </label>
+              {selectedPathMode === "path" ? (
+                <>
+                  <label>
+                    CPU Bin Directory
+                    <input className="settings-menu-input" value={draft.remote_qe_cpu_bin_dir ?? draft.remote_qe_bin_dir} onChange={(event) => setDraft((current) => ({ ...current, remote_qe_bin_dir: event.target.value, remote_qe_cpu_bin_dir: optionalText(event.target.value) }))} />
+                  </label>
+                  <label>
+                    GPU Bin Directory
+                    <input className="settings-menu-input" value={draft.remote_qe_gpu_bin_dir ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_qe_gpu_bin_dir: optionalText(event.target.value) }))} />
+                  </label>
+                  <label>
+                    EPW Executable Override
+                    <input className="settings-menu-input" value={draft.remote_epw_path ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_epw_path: optionalText(event.target.value) }))} />
+                  </label>
+                  <label>
+                    Wannier90 Executable
+                    <input className="settings-menu-input" value={draft.remote_wannier90_path ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_wannier90_path: optionalText(event.target.value) }))} />
+                  </label>
+                  <label>
+                    Postw90 Executable (derived)
+                    <input className="settings-menu-input" value={deriveRemotePostw90Path(draft.remote_wannier90_path)} readOnly />
+                  </label>
+                </>
+              ) : (
+                <div className="settings-module-command-list">
+                  <label className="settings-module-command">
+                    <span className="settings-module-keyword">module use</span>
+                    <input className="settings-menu-input" value={draft.qe_module_use ?? ""} onChange={(event) => setDraft((current) => ({ ...current, qe_module_use: optionalText(event.target.value) }))} placeholder="/cluster/modulefiles" />
+                    <span className="field-note">(optional)</span>
+                  </label>
+                  <label className="settings-module-command">
+                    <span className="settings-module-keyword">module load</span>
+                    <input className="settings-menu-input" value={draft.qe_module_load ?? ""} onChange={(event) => setDraft((current) => ({ ...current, qe_module_load: optionalText(event.target.value) }))} placeholder="quantum-espresso" required />
+                  </label>
+                </div>
+              )}
               <label>
                 CPU Pseudopotential Directory
                 <input className="settings-menu-input" value={draft.remote_cpu_pseudo_dir ?? draft.remote_pseudo_dir} onChange={(event) => setDraft((current) => ({ ...current, remote_pseudo_dir: event.target.value, remote_cpu_pseudo_dir: optionalText(event.target.value) }))} />
@@ -310,35 +425,37 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
                 GPU Pseudopotential Directory
                 <input className="settings-menu-input" value={draft.remote_gpu_pseudo_dir ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_gpu_pseudo_dir: optionalText(event.target.value) }))} />
               </label>
-              <label>
-                EPW Executable Override
-                <input className="settings-menu-input" value={draft.remote_epw_path ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_epw_path: optionalText(event.target.value) }))} />
-              </label>
-              <label>
-                Wannier90 Executable
-                <input className="settings-menu-input" value={draft.remote_wannier90_path ?? ""} onChange={(event) => setDraft((current) => ({ ...current, remote_wannier90_path: optionalText(event.target.value) }))} />
-              </label>
-              <label>
-                Postw90 Executable (derived)
-                <input className="settings-menu-input" value={deriveRemotePostw90Path(draft.remote_wannier90_path)} readOnly />
-              </label>
             </div>
           </>
         )}
         {selectedEngine === "wien2k" && (
           <>
             <p className="settings-menu-hint">
-              WIEN2k uses a remote WIENROOT installation and does not use Quantum ESPRESSO pseudopotential paths. Changing this directory is verified when saved.
+              WIEN2k does not use Quantum ESPRESSO pseudopotential paths. A changed explicit WIENROOT is verified when saved.
             </p>
-            <label>
-              Remote WIENROOT
-              <input
-                className="settings-menu-input"
-                value={draft.remote_wien2k_install_root ?? ""}
-                onChange={(event) => setDraft((current) => ({ ...current, remote_wien2k_install_root: optionalText(event.target.value) }))}
-                placeholder="/opt/WIEN2k"
-              />
-            </label>
+            {selectedPathMode === "path" ? (
+              <label>
+                Remote WIENROOT
+                <input
+                  className="settings-menu-input"
+                  value={draft.remote_wien2k_install_root ?? ""}
+                  onChange={(event) => setDraft((current) => ({ ...current, remote_wien2k_install_root: optionalText(event.target.value) }))}
+                  placeholder="/opt/WIEN2k"
+                />
+              </label>
+            ) : (
+              <div className="settings-module-command-list">
+                <label className="settings-module-command">
+                  <span className="settings-module-keyword">module use</span>
+                  <input className="settings-menu-input" value={draft.wien2k_module_use ?? ""} onChange={(event) => setDraft((current) => ({ ...current, wien2k_module_use: optionalText(event.target.value) }))} placeholder="/cluster/modulefiles" />
+                  <span className="field-note">(optional)</span>
+                </label>
+                <label className="settings-module-command">
+                  <span className="settings-module-keyword">module load</span>
+                  <input className="settings-menu-input" value={draft.wien2k_module_load ?? ""} onChange={(event) => setDraft((current) => ({ ...current, wien2k_module_load: optionalText(event.target.value) }))} placeholder="wien2k" required />
+                </label>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -369,6 +486,12 @@ export function HpcProfileEditor({ profile, installations, onSaved }: HpcProfile
             GPU Launcher Extra Args
             <input value={draft.launcher_gpu_extra_args ?? draft.launcher_extra_args ?? ""} onChange={(event) => setDraft((current) => ({ ...current, launcher_gpu_extra_args: optionalText(normalizeCliDashText(event.target.value)), launcher_extra_args: null }))} />
           </label>
+        </div>
+        <p className="settings-menu-hint">
+          Utility jobs run short engine setup and module validation commands on an allocated compute node.
+        </p>
+        <div className="settings-hpc-utility-defaults">
+          {renderResourceCard("utility")}
         </div>
         <div className="settings-hpc-defaults-grid">
           {renderResourceCard("cpu")}

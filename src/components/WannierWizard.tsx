@@ -49,6 +49,8 @@ import {
 } from "../lib/hpcConfig";
 import {
   buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+  resolveProfileRemoteQeAuxiliaryExecutable,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
@@ -1500,9 +1502,14 @@ export function WannierWizard({
   ]);
 
   const hpcCommandLines = useMemo(() => {
-    const remoteWannier = (activeHpcProfile?.remote_wannier90_path || "wannier90.x").trim() || "wannier90.x";
+    const remoteWannier = resolveProfileRemoteQeAuxiliaryExecutable(
+      activeHpcProfile,
+      activeHpcProfile?.remote_wannier90_path,
+      "wannier90.x",
+    );
     const seedname = sanitizeSeedname(seednameInput);
     return [
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       `"${remoteWannier}" -pp ${seedname} > wannier90_pre.out 2>&1`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw2wannier90.x", "pw2wan.in", "pw2wan.out", undefined, hpcResources.resource_type),

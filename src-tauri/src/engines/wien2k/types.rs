@@ -1,8 +1,7 @@
-//! Wien2k-native skeleton types.
+//! WIEN2k-native calculation types.
 //!
-//! These types intentionally model WIEN2k's case-directory workflow instead of
-//! trying to reuse QE input concepts. They are hidden and not wired to commands
-//! yet; they document the future backend boundary for remote case management.
+//! These model WIEN2k's case-directory workflow instead of reusing QE input
+//! concepts such as pseudopotentials or plane-wave cutoffs.
 
 use serde::{Deserialize, Serialize};
 
@@ -95,9 +94,6 @@ pub struct Wien2kCaseArtifact {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Wien2kInitializationSettings {
-    /// WIEN2k `init_lapw -red` / setRMT reduction percentage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rmt_reduction_percent: Option<f64>,
     /// WIEN2k `init_lapw -rkmax`.
     pub rkmax: f64,
     /// WIEN2k `init_lapw -gmax`.
@@ -116,7 +112,6 @@ pub struct Wien2kInitializationSettings {
 impl Default for Wien2kInitializationSettings {
     fn default() -> Self {
         Self {
-            rmt_reduction_percent: None,
             rkmax: 7.0,
             gmax: 12.0,
             lmax: 10,
@@ -139,8 +134,6 @@ pub struct Wien2kScfRunSettings {
     pub charge_convergence: f64,
     #[serde(default)]
     pub force_convergence_mry_bohr: Option<f64>,
-    #[serde(default)]
-    pub parallel: bool,
 }
 
 impl Default for Wien2kScfRunSettings {
@@ -151,7 +144,6 @@ impl Default for Wien2kScfRunSettings {
             energy_convergence_ry: 0.0001,
             charge_convergence: 0.0001,
             force_convergence_mry_bohr: None,
-            parallel: false,
         }
     }
 }

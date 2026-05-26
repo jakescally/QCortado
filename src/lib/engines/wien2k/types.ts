@@ -1,12 +1,18 @@
-/**
- * Hidden WIEN2k skeleton types.
- *
- * These model WIEN2k's remote case-directory workflow. They are not wired to
- * UI routes or Tauri commands, and they deliberately do not reuse QE input
- * concepts such as pseudopotentials or ecutwfc/ecutrho.
- */
+/** WIEN2k-native remote case-directory workflow types. */
 
 export type Wien2kSpinMode = "non_spin_polarized" | "spin_polarized";
+
+export interface Wien2kExchangeCorrelationOption {
+  value: number;
+  label: string;
+}
+
+export const WIEN2K_EXCHANGE_CORRELATION_OPTIONS: readonly Wien2kExchangeCorrelationOption[] = [
+  { value: 13, label: "PBE (vxc=13)" },
+  { value: 5, label: "LDA (vxc=5)" },
+  { value: 11, label: "WC (vxc=11)" },
+  { value: 19, label: "PBEsol (vxc=19)" },
+];
 
 export type Wien2kCasePhase =
   | "unstaged"
@@ -56,7 +62,6 @@ export interface Wien2kCaseState {
 }
 
 export interface Wien2kInitializationSettings {
-  rmtReductionPercent?: number | null;
   rkmax: number;
   gmax: number;
   lmax: number;
@@ -72,7 +77,6 @@ export interface Wien2kScfRunSettings {
   energyConvergenceRy: number;
   chargeConvergence: number;
   forceConvergenceMryBohr?: number | null;
-  parallel: boolean;
 }
 
 export interface Wien2kRemoteRuntimeProfile {
@@ -93,7 +97,6 @@ export interface Wien2kCommandPlan {
 }
 
 export const DEFAULT_WIEN2K_INITIALIZATION_SETTINGS: Wien2kInitializationSettings = {
-  rmtReductionPercent: null,
   rkmax: 7,
   gmax: 12,
   lmax: 10,
@@ -109,5 +112,4 @@ export const DEFAULT_WIEN2K_SCF_RUN_SETTINGS: Wien2kScfRunSettings = {
   energyConvergenceRy: 0.0001,
   chargeConvergence: 0.0001,
   forceConvergenceMryBohr: null,
-  parallel: false,
 };
