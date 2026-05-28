@@ -20,6 +20,7 @@ import { defaultProgressState, ProgressState } from "../lib/qeProgress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { ElectronicDOSData } from "./ElectronicDOSPlot";
+import { getScfHubbardUDisplayValues } from "../lib/hubbard";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
@@ -79,6 +80,14 @@ function getScfProfileId(calc: CalculationRun): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatHubbardUDisplay(calc: CalculationRun): string | null {
+  const values = getScfHubbardUDisplayValues(calc);
+  if (values.length === 0) return null;
+  return values
+    .map((entry) => `${entry.target} = ${entry.value_ev.toFixed(3)} eV`)
+    .join(", ");
 }
 
 interface ElectronicDOSWizardProps {
@@ -902,6 +911,7 @@ export function ElectronicDOSWizard({
 
         <div className="scf-list">
           {sortedScfs.map((scf) => {
+            const hubbardUDisplay = formatHubbardUDisplay(scf);
             const scfName = getCalculationName(scf);
             return (
               <div
@@ -936,6 +946,9 @@ export function ElectronicDOSWizard({
                   <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
                   {scf.result?.fermi_energy != null && (
                     <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
+                  )}
+                  {hubbardUDisplay && (
+                    <span>Hubbard U: {hubbardUDisplay}</span>
                   )}
                 </div>
                 <div className="calc-tags">
