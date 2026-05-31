@@ -1185,6 +1185,11 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   max-width: 100%;
 }
 
+.wien2k-field-label-row .tooltip-container {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
 .wien2k-control-grid input,
 .wien2k-control-grid select,
 .wien2k-summary select,

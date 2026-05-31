@@ -132,7 +132,7 @@ pub struct ResolvedEngineInstallationRequest {
 pub fn required_engine_executables(engine_id: EngineId) -> &'static [&'static str] {
     match engine_id {
         EngineId::Qe => &["pw.x", "bands.x", "dos.x", "projwfc.x"],
-        EngineId::Wien2k => &["init_lapw", "run_lapw", "runsp_lapw"],
+        EngineId::Wien2k => &["setrmt_lapw", "x", "init_lapw", "run_lapw", "runsp_lapw"],
     }
 }
 
@@ -425,6 +425,7 @@ mod tests {
         };
         let command = build_remote_verification_command(&request);
 
+        assert!(command.contains("$bin/setrmt_lapw"));
         assert!(command.contains("$bin/x"));
         assert!(command.contains("$bin/init_lapw"));
         assert!(command.contains("$bin/run_lapw"));
@@ -455,10 +456,11 @@ mod tests {
                 || command.contains("lmod/lmod/init/bash")
                 || command.contains("Modules/init/bash")
         );
+        assert!(command.contains("command -v 'setrmt_lapw'"));
+        assert!(command.contains("command -v 'x'"));
         assert!(command.contains("command -v 'init_lapw'"));
         assert!(command.contains("command -v 'run_lapw'"));
         assert!(command.contains("command -v 'runsp_lapw'"));
-        assert!(!command.contains("command -v 'x'"));
         assert!(!command.contains("install directory not found"));
         assert!(!command.contains("root="));
     }

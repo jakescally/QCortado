@@ -641,6 +641,9 @@ pub fn stage_command(
             "x".to_string(),
         )
     } else {
+        if session.remote_install_root.trim().is_empty() {
+            return Err("WIEN2k WIENROOT is required in path mode.".to_string());
+        }
         (
             format!("cd {dir} && export WIENROOT={root} && export PATH=\"$WIENROOT:$PATH\" && "),
             "\"$WIENROOT/setrmt_lapw\"".to_string(),
@@ -941,6 +944,23 @@ mod tests {
         assert!(command.contains("module load 'WIEN2k/24.1'"));
         assert!(command.contains("&& x symmetry -f 'Si'"));
         assert!(!command.contains("WIENROOT"));
+    }
+
+    #[test]
+    fn path_stage_commands_require_wienroot() {
+        let mut session = staged_session();
+        session.remote_install_root = String::new();
+        let error = stage_command(
+            &session,
+            Wien2kStructureStage::Rmt,
+            &Wien2kStructureControls::default(),
+            false,
+            None,
+            None,
+        )
+        .expect_err("empty path-mode WIENROOT should fail");
+
+        assert!(error.contains("WIENROOT is required"));
     }
 
     #[test]

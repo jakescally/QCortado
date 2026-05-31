@@ -368,6 +368,30 @@ fn build_engine_module_setup_commands(
     commands
 }
 
+fn apply_wien2k_installation_to_profile(
+    profile: &mut hpc::profile::HpcProfile,
+    installation: &engines::installations::EngineInstallation,
+    path_mode: hpc::profile::EnginePathMode,
+    module_use: Option<String>,
+    module_load: Option<String>,
+) {
+    profile.wien2k_path_mode = path_mode;
+    match path_mode {
+        hpc::profile::EnginePathMode::Module => {
+            profile.wien2k_module_use = module_use;
+            profile.wien2k_module_load = module_load;
+            if installation.remote_install_root.trim().is_empty() {
+                profile.remote_wien2k_install_root = None;
+            } else {
+                profile.remote_wien2k_install_root = Some(installation.remote_install_root.clone());
+            }
+        }
+        hpc::profile::EnginePathMode::Path => {
+            profile.remote_wien2k_install_root = Some(installation.remote_install_root.clone());
+        }
+    }
+}
+
 fn append_hpc_qe_runtime_setup(
     commands: &mut Vec<String>,
     profile: &hpc::profile::HpcProfile,
@@ -1397,15 +1421,131 @@ mod hpc_headless_recovery_tests {
             "pw.out",
         );
 
-        assert_eq!(
-            setup,
-            vec![
-                "module use '/cluster/modulefiles'".to_string(),
-                "module load 'quantum-espresso/7.5'".to_string()
-            ]
-        );
+        assert!(setup
+            .first()
+            .is_some_and(|command| command.contains("modules.sh")));
+        assert!(setup.contains(&"module use '/cluster/modulefiles'".to_string()));
+        assert!(setup.contains(&"module load 'quantum-espresso/7.5'".to_string()));
         assert_eq!(command, "srun pw.x -pd .true. -in pw.in > pw.out 2>&1");
         assert!(!command.contains("QE_BIN"));
+    }
+
+    fn wien2k_test_profile(path_mode: hpc::profile::EnginePathMode) -> hpc::profile::HpcProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "name": "test",
+            "host": "cluster.example",
+            "username": "user",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/scratch/qcortado/projects",
+            "wien2k_path_mode": path_mode,
+            "wien2k_module_use": "/cluster/modulefiles",
+            "wien2k_module_load": "WIEN2k/24.1"
+        }))
+        .unwrap()
+    }
+
+    fn wien2k_test_scf_session(remote_install_root: &str) -> engines::wien2k::Wien2kScfSession {
+        engines::wien2k::Wien2kScfSession {
+            session_id: "session".to_string(),
+            project_id: "project".to_string(),
+            cif_id: "cif".to_string(),
+            source_structure_calculation_id: "structure".to_string(),
+            case_name: "Si".to_string(),
+            remote_case_dir: "/scratch/qcortado/project/wien2k/session/Si".to_string(),
+            remote_install_root: remote_install_root.to_string(),
+            hpc_profile_id: "test".to_string(),
+            phase: engines::wien2k::Wien2kScfSessionPhase::Staged,
+            initialization: None,
+            latest_run: None,
+            latest_calculation_id: None,
+            artifacts: std::collections::BTreeMap::new(),
+            transcript: Vec::new(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn wien2k_module_installation_updates_profile_runtime_mode() {
+        let mut profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        profile.remote_wien2k_install_root = Some("/stale/WIEN2k".to_string());
+        let installation = engines::installations::EngineInstallation {
+            engine_id: engines::EngineId::Wien2k,
+            hpc_profile_id: "test".to_string(),
+            remote_install_root: String::new(),
+            remote_workspace_root: "/scratch/qcortado".to_string(),
+            remote_project_root: "/scratch/qcortado/projects".to_string(),
+            verified_executables: vec!["init_lapw".to_string(), "run_lapw".to_string()],
+            version_hint: None,
+            verified_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        apply_wien2k_installation_to_profile(
+            &mut profile,
+            &installation,
+            hpc::profile::EnginePathMode::Module,
+            Some("/cluster/modulefiles".to_string()),
+            Some("WIEN2k/24.1".to_string()),
+        );
+
+        assert_eq!(
+            profile.wien2k_path_mode,
+            hpc::profile::EnginePathMode::Module
+        );
+        assert_eq!(profile.remote_wien2k_install_root, None);
+        assert_eq!(
+            profile.wien2k_module_use.as_deref(),
+            Some("/cluster/modulefiles")
+        );
+        assert_eq!(profile.wien2k_module_load.as_deref(), Some("WIEN2k/24.1"));
+    }
+
+    #[test]
+    fn wien2k_module_native_command_loads_modules_and_uses_path_tool() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Module);
+        let command = build_wien2k_native_command(
+            &wien2k_test_scf_session(""),
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::InitLapw,
+            &["-b".to_string()],
+        )
+        .expect("module command");
+
+        assert!(command.contains("module use '/cluster/modulefiles'"));
+        assert!(command.contains("module load 'WIEN2k/24.1'"));
+        assert!(command.contains("&& init_lapw '-b'"));
+        assert!(!command.contains("WIENROOT"));
+    }
+
+    #[test]
+    fn wien2k_path_native_command_requires_wienroot() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let error = build_wien2k_native_command(
+            &wien2k_test_scf_session(""),
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::RunLapw,
+            &[],
+        )
+        .expect_err("empty path-mode WIENROOT should fail");
+
+        assert!(error.contains("WIENROOT is required"));
+    }
+
+    #[test]
+    fn wien2k_path_native_command_uses_explicit_wienroot() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let command = build_wien2k_native_command(
+            &wien2k_test_scf_session("/opt/WIEN2k"),
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::RunLapw,
+            &["-i".to_string(), "40".to_string()],
+        )
+        .expect("path command");
+
+        assert!(command.contains("export WIENROOT='/opt/WIEN2k'"));
+        assert!(command.contains("\"$WIENROOT/run_lapw\" '-i' '40'"));
     }
 
     #[test]
@@ -3134,21 +3274,24 @@ async fn add_engine_installation(
 
     let installation = engines::installations::EngineInstallation {
         engine_id: request.engine_id,
-        hpc_profile_id: request.hpc_profile_id,
-        remote_install_root: request.remote_install_root,
-        remote_workspace_root: request.remote_workspace_root,
-        remote_project_root: request.remote_project_root,
+        hpc_profile_id: request.hpc_profile_id.clone(),
+        remote_install_root: request.remote_install_root.clone(),
+        remote_workspace_root: request.remote_workspace_root.clone(),
+        remote_project_root: request.remote_project_root.clone(),
         verified_executables: verification.checked_executables.clone(),
         version_hint: verification.version_hint.clone(),
         verified_at: now_iso(),
     };
+    let path_mode = request.path_mode;
+    let module_use = request.module_use.clone();
+    let module_load = request.module_load.clone();
 
     let updated_installations = {
         let mut installations = state.engine_installations.lock().unwrap();
-        if let Some(existing) = installations
-            .iter_mut()
-            .find(|entry| entry.engine_id == installation.engine_id)
-        {
+        if let Some(existing) = installations.iter_mut().find(|entry| {
+            entry.engine_id == installation.engine_id
+                && entry.hpc_profile_id == installation.hpc_profile_id
+        }) {
             *existing = installation.clone();
         } else {
             installations.push(installation.clone());
@@ -3164,10 +3307,13 @@ async fn add_engine_installation(
                 .iter_mut()
                 .find(|profile| profile.id == installation.hpc_profile_id)
             {
-                if !installation.remote_install_root.trim().is_empty() {
-                    profile.remote_wien2k_install_root =
-                        Some(installation.remote_install_root.clone());
-                }
+                apply_wien2k_installation_to_profile(
+                    profile,
+                    &installation,
+                    path_mode,
+                    module_use,
+                    module_load,
+                );
                 profile.updated_at = now_iso();
             }
             profiles.clone()
@@ -3591,12 +3737,21 @@ fn build_wien2k_native_command(
         shell_single_quote_local(&session.remote_case_dir)
     )];
     let executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
+        if profile
+            .engine_module_load(engines::EngineId::Wien2k)
+            .is_none()
+        {
+            return Err("WIEN2k module load value is required in module mode.".to_string());
+        }
         commands.extend(build_engine_module_setup_commands(
             profile,
             engines::EngineId::Wien2k,
         ));
         program.script_name().to_string()
     } else {
+        if session.remote_install_root.trim().is_empty() {
+            return Err("WIEN2k WIENROOT is required in path mode.".to_string());
+        }
         commands.push(format!(
             "export WIENROOT={}",
             shell_single_quote_local(&session.remote_install_root)

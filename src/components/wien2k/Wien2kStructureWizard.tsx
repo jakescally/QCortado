@@ -19,8 +19,8 @@ import type {
   Wien2kStructureStageResult,
   Wien2kStructureSite,
 } from "../../lib/engines/wien2k";
-import { InfoTooltip } from "../InfoTooltip";
 import { LiveOutputPanel } from "../LiveOutputPanel";
+import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
 
 interface Wien2kStructureWizardProps {
   projectId: string;
@@ -265,8 +265,9 @@ export function Wien2kStructureWizard({
         <section className="wien2k-structure-controls">
           <div className="wien2k-control-grid">
             <label>
-              Case name
-              <InfoTooltip text="Defines the WIEN2k case prefix used for every native input and output file. Recommended choice: a short filesystem-safe material label using letters, numbers, underscore, hyphen, or period." />
+              <Wien2kFieldLabel tooltip="Defines the WIEN2k case prefix used for every native input and output file. Recommended choice: a short filesystem-safe material label using letters, numbers, underscore, hyphen, or period.">
+                Case name
+              </Wien2kFieldLabel>
               <input
                 value={caseName}
                 disabled={Boolean(session)}
@@ -277,8 +278,9 @@ export function Wien2kStructureWizard({
               />
             </label>
             <label>
-              RMT reduction (%)
-              <InfoTooltip text="Uniformly reduces muffin-tin sphere radii before native overlap validation; smaller spheres avoid overlap but make a fixed RKMAX basis more expensive. Typical range: 0 to 10%, increasing only when overlap requires it." />
+              <Wien2kFieldLabel tooltip="Uniformly reduces muffin-tin sphere radii before native overlap validation; smaller spheres avoid overlap but make a fixed RKMAX basis more expensive. Typical range: 0 to 10%, increasing only when overlap requires it.">
+                RMT reduction (%)
+              </Wien2kFieldLabel>
               <input
                 type="number"
                 min="0"
@@ -315,8 +317,9 @@ export function Wien2kStructureWizard({
                     <th>Site</th>
                     <th>Multiplicity</th>
                     <th>
-                      RMT
-                      <InfoTooltip text="Muffin-tin sphere radius in bohr for each inequivalent site; larger non-overlapping spheres generally reduce LAPW basis cost. Typical starting range: about 1.5 to 2.5 bohr, then accept native overlap checks." />
+                      <Wien2kFieldLabel tooltip="Muffin-tin sphere radius in bohr for each inequivalent site; larger non-overlapping spheres generally reduce LAPW basis cost. Typical starting range: about 1.5 to 2.5 bohr, then accept native overlap checks.">
+                        RMT
+                      </Wien2kFieldLabel>
                     </th>
                   </tr>
                 </thead>
@@ -343,8 +346,9 @@ export function Wien2kStructureWizard({
               <details className="wien2k-advanced">
                 <summary>Advanced structure settings</summary>
                 <label>
-                  NN bond-length factor
-                  <InfoTooltip text="Controls the distance window used by WIEN2k NN to inspect nearest neighbors and sphere overlap. Recommended starting value: 2.0; values near 1 to 3 usually bracket relevant neighbors." />
+                  <Wien2kFieldLabel tooltip="Controls the distance window used by WIEN2k NN to inspect nearest neighbors and sphere overlap. Recommended starting value: 2.0; values near 1 to 3 usually bracket relevant neighbors.">
+                    NN bond-length factor
+                  </Wien2kFieldLabel>
                   <input
                     type="number"
                     min="0.000001"
@@ -358,8 +362,9 @@ export function Wien2kStructureWizard({
                   />
                 </label>
                 <label>
-                  SGROUP tolerance
-                  <InfoTooltip text="Numerical tolerance used while identifying space-group symmetry; too loose can merge distinct sites and too tight can miss intended symmetry. Typical range: 1e-6 to 1e-4." />
+                  <Wien2kFieldLabel tooltip="Numerical tolerance used while identifying space-group symmetry; too loose can merge distinct sites and too tight can miss intended symmetry. Typical range: 1e-6 to 1e-4.">
+                    SGROUP tolerance
+                  </Wien2kFieldLabel>
                   <input
                     type="number"
                     min="0.0000001"
@@ -377,12 +382,14 @@ export function Wien2kStructureWizard({
                     <tr>
                       <th>Site</th>
                       <th>
-                        NPT
-                        <InfoTooltip text="Number of radial mesh points inside the atomic sphere; more points resolve radial functions with modest added cost. Recommended generic value: the WIEN2k default of 781; use a positive odd value." />
+                        <Wien2kFieldLabel tooltip="Number of radial mesh points inside the atomic sphere; more points resolve radial functions with modest added cost. Recommended generic value: the WIEN2k default of 781; use a positive odd value.">
+                          NPT
+                        </Wien2kFieldLabel>
                       </th>
                       <th>
-                        R0
-                        <InfoTooltip text="First radial-mesh radius in bohr near the nucleus; it must resolve the core region and remain below RMT. WIEN2k defaults are element-dependent, typically 5e-6 to 1e-4 bohr." />
+                        <Wien2kFieldLabel tooltip="First radial-mesh radius in bohr near the nucleus; it must resolve the core region and remain below RMT. WIEN2k defaults are element-dependent, typically 5e-6 to 1e-4 bohr.">
+                          R0
+                        </Wien2kFieldLabel>
                       </th>
                     </tr>
                   </thead>

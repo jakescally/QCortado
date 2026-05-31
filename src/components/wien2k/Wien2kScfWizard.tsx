@@ -20,8 +20,8 @@ import type {
   Wien2kScfSession,
   Wien2kStructureSourceRecord,
 } from "../../lib/engines/wien2k";
-import { InfoTooltip } from "../InfoTooltip";
 import { LiveOutputPanel } from "../LiveOutputPanel";
+import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
 
 interface Wien2kScfWizardProps {
   projectId: string;
@@ -222,10 +222,9 @@ export function Wien2kScfWizard({
           <div className="wien2k-summary">
             <h3>Accepted Structure Source</h3>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Selects the accepted WIEN2k structure, symmetry, and muffin-tin radii used as the SCF basis. Recommended choice: the latest reviewed structure for the intended material; change geometry or RMT in the Structure workflow.">
                 Saved case.struct
-                <InfoTooltip text="Selects the accepted WIEN2k structure, symmetry, and muffin-tin radii used as the SCF basis. Recommended choice: the latest reviewed structure for the intended material; change geometry or RMT in the Structure workflow." />
-              </span>
+              </Wien2kFieldLabel>
               <select value={sourceId} disabled={Boolean(session)} onChange={(event) => setSourceId(event.target.value)}>
                 {sources.map((source) => (
                   <option key={source.id} value={source.id}>
@@ -269,31 +268,27 @@ export function Wien2kScfWizard({
           <h3 className="wien2k-site-heading">Initialization</h3>
           <div className="wien2k-control-grid">
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="RMT(min) times KMAX controls the LAPW plane-wave basis size; larger values improve basis accuracy while increasing memory and runtime. Typical starting range: 6 to 9, followed by convergence testing.">
                 RKMAX
-                <InfoTooltip text="RMT(min) times KMAX controls the LAPW plane-wave basis size; larger values improve basis accuracy while increasing memory and runtime. Typical starting range: 6 to 9, followed by convergence testing." />
-              </span>
+              </Wien2kFieldLabel>
               <input type="number" min="0.1" step="0.1" disabled={initialized} value={initialization.rkmax} onChange={(event) => setInitialization((current) => ({ ...current, rkmax: numberField(event.target.value, current.rkmax) }))} />
             </label>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Sets the reciprocal-space cutoff for representing density and potential components; raising it resolves sharper density features at higher cost. Typical starting range: 10 to 16.">
                 GMAX
-                <InfoTooltip text="Sets the reciprocal-space cutoff for representing density and potential components; raising it resolves sharper density features at higher cost. Typical starting range: 10 to 16." />
-              </span>
+              </Wien2kFieldLabel>
               <input type="number" min="0.1" step="0.1" disabled={initialized} value={initialization.gmax} onChange={(event) => setInitialization((current) => ({ ...current, gmax: numberField(event.target.value, current.gmax) }))} />
             </label>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Maximum angular momentum in the muffin-tin expansion; higher values capture more aspherical character but add work. Typical starting range: 8 to 12.">
                 LMAX
-                <InfoTooltip text="Maximum angular momentum in the muffin-tin expansion; higher values capture more aspherical character but add work. Typical starting range: 8 to 12." />
-              </span>
+              </Wien2kFieldLabel>
               <input type="number" min="1" step="1" disabled={initialized} value={initialization.lmax} onChange={(event) => setInitialization((current) => ({ ...current, lmax: numberField(event.target.value, current.lmax) }))} />
             </label>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Chooses the exchange-correlation approximation used to initialize and run the density. WIEN2k initialization provides LDA, PBE, WC, and PBEsol; PBE is a common general-purpose default, and comparisons should keep XC fixed.">
                 XC functional
-                <InfoTooltip text="Chooses the exchange-correlation approximation used to initialize and run the density. WIEN2k initialization provides LDA, PBE, WC, and PBEsol; PBE is a common general-purpose default, and comparisons should keep XC fixed." />
-              </span>
+              </Wien2kFieldLabel>
               <select disabled={initialized} value={initialization.exchangeCorrelation} onChange={(event) => setInitialization((current) => ({ ...current, exchangeCorrelation: Number(event.target.value) }))}>
                 {WIEN2K_EXCHANGE_CORRELATION_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>{option.label}</option>
@@ -301,17 +296,15 @@ export function Wien2kScfWizard({
               </select>
             </label>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Separates core and valence states during LSTART, affecting which electrons participate in the variational SCF basis. Typical starting range: -8 to -4 Ry; check for core leakage warnings.">
                 LSTART cutoff (Ry)
-                <InfoTooltip text="Separates core and valence states during LSTART, affecting which electrons participate in the variational SCF basis. Typical starting range: -8 to -4 Ry; check for core leakage warnings." />
-              </span>
+              </Wien2kFieldLabel>
               <input type="number" step="0.1" disabled={initialized} value={initialization.lstartEnergyCutoffRy} onChange={(event) => setInitialization((current) => ({ ...current, lstartEnergyCutoffRy: numberField(event.target.value, current.lstartEnergyCutoffRy) }))} />
             </label>
             <label>
-              <span className="wien2k-field-label-row">
+              <Wien2kFieldLabel tooltip="Enables collinear spin-resolved densities for magnetic calculations, adding separate spin channels and computational work. Recommended choice: non-spin-polarized unless magnetism is physically expected.">
                 Spin mode
-                <InfoTooltip text="Enables collinear spin-resolved densities for magnetic calculations, adding separate spin channels and computational work. Recommended choice: non-spin-polarized unless magnetism is physically expected." />
-              </span>
+              </Wien2kFieldLabel>
               <select disabled={initialized} value={initialization.spinMode} onChange={(event) => setInitialization((current) => ({ ...current, spinMode: event.target.value as Wien2kInitializationSettings["spinMode"] }))}>
                 <option value="non_spin_polarized">Non-spin-polarized</option>
                 <option value="spin_polarized">Spin-polarized</option>
@@ -321,10 +314,9 @@ export function Wien2kScfWizard({
           <div className="wien2k-control-grid wien2k-kmesh-grid">
             {initialization.kMesh.map((value, index) => (
               <label key={index}>
-                <span className="wien2k-field-label-row">
+                <Wien2kFieldLabel tooltip={`Number of reciprocal-space sampling divisions along lattice direction ${index + 1}; denser meshes improve Brillouin-zone integration while multiplying runtime. Typical starting range: 4 to 12 per direction, scaled for cell shape.`}>
                   k{index + 1}
-                  <InfoTooltip text={`Number of reciprocal-space sampling divisions along lattice direction ${index + 1}; denser meshes improve Brillouin-zone integration while multiplying runtime. Typical starting range: 4 to 12 per direction, scaled for cell shape.`} />
-                </span>
+                </Wien2kFieldLabel>
                 <input type="number" min="1" step="1" disabled={initialized} value={value} onChange={(event) => setInitialization((current) => {
                   const next = [...current.kMesh] as [number, number, number];
                   next[index] = numberField(event.target.value, value);
@@ -340,31 +332,27 @@ export function Wien2kScfWizard({
               <h3 className="wien2k-site-heading">SCF Cycle</h3>
               <div className="wien2k-control-grid">
                 <label>
-                  <span className="wien2k-field-label-row">
+                  <Wien2kFieldLabel tooltip="Stops SCF when successive total-energy changes are sufficiently small; tighter tolerances improve reproducibility but may require more iterations. Typical range: 1e-5 to 1e-4 Ry.">
                     Energy convergence (Ry)
-                    <InfoTooltip text="Stops SCF when successive total-energy changes are sufficiently small; tighter tolerances improve reproducibility but may require more iterations. Typical range: 1e-5 to 1e-4 Ry." />
-                  </span>
+                  </Wien2kFieldLabel>
                   <input type="number" min="0" step="0.00001" value={runSettings.energyConvergenceRy} onChange={(event) => setRunSettings((current) => ({ ...current, energyConvergenceRy: numberField(event.target.value, current.energyConvergenceRy) }))} />
                 </label>
                 <label>
-                  <span className="wien2k-field-label-row">
+                  <Wien2kFieldLabel tooltip="Stops SCF when the charge-density residual is small, directly measuring density self-consistency. Typical range: 1e-4 to 1e-3 electrons.">
                     Charge convergence
-                    <InfoTooltip text="Stops SCF when the charge-density residual is small, directly measuring density self-consistency. Typical range: 1e-4 to 1e-3 electrons." />
-                  </span>
+                  </Wien2kFieldLabel>
                   <input type="number" min="0" step="0.00001" value={runSettings.chargeConvergence} onChange={(event) => setRunSettings((current) => ({ ...current, chargeConvergence: numberField(event.target.value, current.chargeConvergence) }))} />
                 </label>
                 <label>
-                  <span className="wien2k-field-label-row">
+                  <Wien2kFieldLabel tooltip="Caps SCF update cycles before the retained case is reported as unconverged and may be continued. Typical range: 30 to 100 iterations.">
                     Maximum iterations
-                    <InfoTooltip text="Caps SCF update cycles before the retained case is reported as unconverged and may be continued. Typical range: 30 to 100 iterations." />
-                  </span>
+                  </Wien2kFieldLabel>
                   <input type="number" min="1" step="1" value={runSettings.maxIterations} onChange={(event) => setRunSettings((current) => ({ ...current, maxIterations: numberField(event.target.value, current.maxIterations) }))} />
                 </label>
                 <label>
-                  <span className="wien2k-field-label-row">
+                  <Wien2kFieldLabel tooltip="Optionally requires Hellmann-Feynman forces to fall below a threshold in addition to electronic convergence. Typical range when used: 1 to 5 mRy/Bohr.">
                     Force convergence (mRy/Bohr)
-                    <InfoTooltip text="Optionally requires Hellmann-Feynman forces to fall below a threshold in addition to electronic convergence. Typical range when used: 1 to 5 mRy/Bohr." />
-                  </span>
+                  </Wien2kFieldLabel>
                   <input type="number" min="0" step="0.1" placeholder="Optional" value={runSettings.forceConvergenceMryBohr ?? ""} onChange={(event) => setRunSettings((current) => ({ ...current, forceConvergenceMryBohr: event.target.value.trim() ? numberField(event.target.value, 0) : null }))} />
                 </label>
               </div>
