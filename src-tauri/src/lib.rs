@@ -352,7 +352,7 @@ fn build_engine_module_setup_commands(
     if profile.engine_path_mode(engine_id) != hpc::profile::EnginePathMode::Module {
         return Vec::new();
     }
-    let mut commands = Vec::new();
+    let mut commands = vec![hpc::utility::module_environment_bootstrap_command()];
     if let Some(module_use) = profile.engine_module_use(engine_id) {
         commands.push(format!(
             "module use {}",
@@ -3089,15 +3089,32 @@ async fn add_engine_installation(
         profile.credential_persisted,
     )?;
     let remote_command = engines::installations::build_remote_verification_command(&request);
-    let verification = match hpc::ssh::run_ssh_command_with_timeout(
+    let verifier_workdir = format!("{}/.qcortado_engine_verify", request.remote_workspace_root);
+    let prepare_verifier_workdir =
+        format!("mkdir -p {}", shell_single_quote_local(&verifier_workdir));
+    hpc::ssh::run_ssh_command_with_timeout(
         &profile,
         secret.as_deref(),
-        &remote_command,
+        &prepare_verifier_workdir,
         30,
     )
     .await
+    .map_err(|err| format!("Failed to prepare remote engine verifier workspace: {err}"))?;
+    let verification = match hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        None,
+        &profile,
+        secret.as_deref(),
+        &verifier_workdir,
+        "qc-engine-verify",
+        &[remote_command],
+        300,
+    )
+    .await
     {
-        Ok(output) => engines::installations::parse_verification_output(request.engine_id, &output),
+        Ok(result) => {
+            engines::installations::parse_verification_output(request.engine_id, &result.output)
+        }
         Err(err) => engines::installations::EngineInstallationVerification {
             success: false,
             message: err,
@@ -3147,7 +3164,10 @@ async fn add_engine_installation(
                 .iter_mut()
                 .find(|profile| profile.id == installation.hpc_profile_id)
             {
-                profile.remote_wien2k_install_root = Some(installation.remote_install_root.clone());
+                if !installation.remote_install_root.trim().is_empty() {
+                    profile.remote_wien2k_install_root =
+                        Some(installation.remote_install_root.clone());
+                }
                 profile.updated_at = now_iso();
             }
             profiles.clone()
@@ -15620,7 +15640,9 @@ pub fn run() {
                     .iter_mut()
                     .find(|profile| profile.id == installation.hpc_profile_id)
                 {
-                    if profile.remote_wien2k_install_root.is_none() {
+                    if profile.remote_wien2k_install_root.is_none()
+                        && !installation.remote_install_root.trim().is_empty()
+                    {
                         profile.remote_wien2k_install_root =
                             Some(installation.remote_install_root.clone());
                     }

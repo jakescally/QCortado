@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { QE_ENGINE_DESCRIPTOR } from "./registry";
 import type { EngineDescriptor, EngineId, EngineImplementationStatus } from "./types";
 import { WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST } from "./wien2k";
-import type { HpcProfile } from "../types";
+import type { HpcEnginePathMode, HpcProfile } from "../types";
 
 export interface EngineInstallation {
   engineId: EngineId;
@@ -20,6 +20,9 @@ export interface EngineInstallationRequest {
   engineId: EngineId;
   hpcProfileId: string;
   remoteInstallRoot: string;
+  pathMode?: HpcEnginePathMode;
+  moduleUse?: string | null;
+  moduleLoad?: string | null;
 }
 
 export interface EngineInstallationVerification {
@@ -37,6 +40,9 @@ export interface AddEngineInstallationResult {
 export interface EngineInstallFormDefaults {
   hpcProfileId: string;
   remoteInstallRoot: string;
+  wien2kPathMode: HpcEnginePathMode;
+  wien2kModuleUse: string;
+  wien2kModuleLoad: string;
 }
 
 export const INSTALLABLE_ENGINE_DESCRIPTORS: readonly EngineDescriptor[] = [
@@ -66,6 +72,9 @@ export function buildDefaultEngineInstallForm(
   return {
     hpcProfileId: profile?.id ?? "",
     remoteInstallRoot: "",
+    wien2kPathMode: profile?.wien2k_path_mode ?? "path",
+    wien2kModuleUse: profile?.wien2k_module_use ?? "",
+    wien2kModuleLoad: profile?.wien2k_module_load ?? "",
   };
 }
 

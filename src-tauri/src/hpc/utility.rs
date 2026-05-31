@@ -27,6 +27,12 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Shell fragment that bootstraps a typical environment-modules or Lmod
+/// installation in non-interactive batch shells.
+pub fn module_environment_bootstrap_command() -> String {
+    "for module_init in /etc/profile.d/modules.sh /etc/profile.d/lmod.sh /usr/share/lmod/lmod/init/bash /usr/share/Modules/init/bash; do if [ -f \"$module_init\" ]; then . \"$module_init\"; break; fi; done".to_string()
+}
+
 fn emit_line(app: Option<&AppHandle>, event_name: Option<&str>, line: &str) {
     if let (Some(app), Some(event_name)) = (app, event_name) {
         let _ = app.emit(event_name, line);

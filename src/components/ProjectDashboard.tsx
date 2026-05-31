@@ -1532,11 +1532,18 @@ export function ProjectDashboard({
     () => INSTALLABLE_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === selectedEngineToAdd) ?? null,
     [selectedEngineToAdd],
   );
-  const canSubmitEngineSetup = Boolean(
-    selectedEngineToAdd
-    && engineInstallForm.hpcProfileId.trim()
-    && engineInstallForm.remoteInstallRoot.trim(),
-  );
+  const selectedEngineNeedsWien2kModuleLoad =
+    selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module";
+  const canSubmitEngineSetup = Boolean(selectedEngineToAdd && engineInstallForm.hpcProfileId.trim());
+  const canSubmitEngineInstallRoot =
+    selectedEngineToAdd !== "wien2k"
+    || engineInstallForm.wien2kPathMode !== "path"
+    || engineInstallForm.remoteInstallRoot.trim().length > 0;
+  const canSubmitWien2kModuleSetup =
+    !selectedEngineNeedsWien2kModuleLoad || engineInstallForm.wien2kModuleLoad.trim().length > 0;
+  const canSubmitSelectedEngineSetup = canSubmitEngineSetup
+    && canSubmitEngineInstallRoot
+    && canSubmitWien2kModuleSetup;
 
   useEffect(() => {
     loadProject();
@@ -1696,6 +1703,12 @@ export function ProjectDashboard({
       return;
     }
     setSelectedEngineToAdd(engineId);
+    if (engineId === "wien2k") {
+      setEngineInstallForm((current) => ({
+        ...current,
+        ...wien2kInstallDefaults(selectedHpcProfile),
+      }));
+    }
     setEngineSetupError(null);
   }
 
@@ -1703,10 +1716,22 @@ export function ProjectDashboard({
     setEngineInstallForm((current) => ({ ...current, ...patch }));
   }
 
+  function wien2kInstallDefaults(profile: HpcProfile | null) {
+    const pathMode = profile?.wien2k_path_mode ?? "path";
+    return {
+      remoteInstallRoot: pathMode === "path" ? profile?.remote_wien2k_install_root ?? "" : "",
+      wien2kPathMode: pathMode,
+      wien2kModuleUse: profile?.wien2k_module_use ?? "",
+      wien2kModuleLoad: profile?.wien2k_module_load ?? "",
+    };
+  }
+
   function handleEngineSetupProfileChange(profileId: string) {
+    const profile = availableHpcProfiles.find((candidate) => candidate.id === profileId) ?? null;
     setEngineInstallForm((current) => ({
       ...current,
       hpcProfileId: profileId,
+      ...(selectedEngineToAdd === "wien2k" ? wien2kInstallDefaults(profile) : {}),
     }));
   }
 
@@ -1721,7 +1746,13 @@ export function ProjectDashboard({
       const result = await addEngineInstallation({
         engineId: selectedEngineToAdd,
         hpcProfileId: engineInstallForm.hpcProfileId.trim(),
-        remoteInstallRoot: engineInstallForm.remoteInstallRoot.trim(),
+        remoteInstallRoot:
+          selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module"
+            ? ""
+            : engineInstallForm.remoteInstallRoot.trim(),
+        pathMode: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kPathMode : undefined,
+        moduleUse: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kModuleUse.trim() || null : undefined,
+        moduleLoad: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kModuleLoad.trim() || null : undefined,
       });
       await refreshEngineRegistry();
       setShowAddEngineDialog(false);
@@ -1769,14 +1800,12 @@ export function ProjectDashboard({
     const selectedEngineAvailable = selectedEngineToAdd
       ? isEngineAlreadyAvailable(selectedEngineToAdd, displayedEngineDescriptors, engineInstallations)
       : false;
+    const wien2kModuleMode = selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module";
     const installRootPlaceholder =
       selectedEngineToAdd === "wien2k"
         ? "/opt/WIEN2k"
         : "/opt/qe-7.5";
-    const installRootHint =
-      selectedEngineToAdd === "wien2k"
-        ? "Remote WIENROOT containing x, init_lapw, run_lapw, and runsp_lapw."
-        : "Remote QE root or bin directory containing pw.x and post-processing executables.";
+    const installRootHint = "Remote QE root or bin directory containing pw.x and post-processing executables.";
 
     return (
       <div className="dialog-overlay" onClick={closeAddEngineDialog}>
@@ -1821,7 +1850,7 @@ export function ProjectDashboard({
                           aria-pressed={selected}
                         >
                           <span>{descriptor.label}</span>
-                          <small>{alreadyAvailable ? "Already added" : descriptor.id === "wien2k" ? "Remote only" : "Remote setup"}</small>
+                          <small>{alreadyAvailable ? "Already added" : descriptor.id === "wien2k" ? "Path or module" : "Remote setup"}</small>
                         </button>
                       );
                     })}
@@ -1847,17 +1876,77 @@ export function ProjectDashboard({
                           ))}
                         </select>
                       </div>
-                      <div className="form-group">
-                        <label>{selectedEngineDescriptor.label} Install Directory</label>
-                        <input
-                          type="text"
-                          value={engineInstallForm.remoteInstallRoot}
-                          onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
-                          placeholder={installRootPlaceholder}
-                          disabled={isAddingEngine || selectedEngineAvailable}
-                        />
-                        <span className="form-hint">{installRootHint}</span>
-                      </div>
+                      {selectedEngineToAdd === "wien2k" && (
+                        <>
+                          <div className="engine-switcher settings-engine-path-mode" role="group" aria-label="WIEN2k executable resolution">
+                            <button
+                              type="button"
+                              className={engineInstallForm.wien2kPathMode === "path" ? "active" : ""}
+                              aria-pressed={engineInstallForm.wien2kPathMode === "path"}
+                              onClick={() => updateEngineInstallForm({ wien2kPathMode: "path" })}
+                            >
+                              Paths
+                            </button>
+                            <button
+                              type="button"
+                              className={engineInstallForm.wien2kPathMode === "module" ? "active" : ""}
+                              aria-pressed={engineInstallForm.wien2kPathMode === "module"}
+                              onClick={() => updateEngineInstallForm({ wien2kPathMode: "module" })}
+                              >
+                                Modules
+                              </button>
+                          </div>
+                          {wien2kModuleMode ? (
+                            <div className="settings-module-command-list">
+                              <label className="settings-module-command">
+                                <span className="settings-module-keyword">module use</span>
+                                <input
+                                  className="settings-menu-input"
+                                  value={engineInstallForm.wien2kModuleUse}
+                                  onChange={(e) => updateEngineInstallForm({ wien2kModuleUse: e.target.value })}
+                                  placeholder="/cluster/modulefiles"
+                                />
+                                <span className="field-note">(optional)</span>
+                              </label>
+                              <label className="settings-module-command">
+                                <span className="settings-module-keyword">module load</span>
+                                <input
+                                  className="settings-menu-input"
+                                  value={engineInstallForm.wien2kModuleLoad}
+                                  onChange={(e) => updateEngineInstallForm({ wien2kModuleLoad: e.target.value })}
+                                  placeholder="WIEN2k/24.1"
+                                  required
+                                />
+                              </label>
+                            </div>
+                          ) : (
+                            <div className="form-group">
+                              <label>Remote WIENROOT</label>
+                              <input
+                                type="text"
+                                value={engineInstallForm.remoteInstallRoot}
+                                onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
+                                placeholder={installRootPlaceholder}
+                                disabled={isAddingEngine || selectedEngineAvailable}
+                              />
+                              <span className="form-hint">Remote WIENROOT containing x, init_lapw, run_lapw, and runsp_lapw.</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {selectedEngineToAdd !== "wien2k" && (
+                        <div className="form-group">
+                          <label>{`${selectedEngineDescriptor.label} Install Directory`}</label>
+                          <input
+                            type="text"
+                            value={engineInstallForm.remoteInstallRoot}
+                            onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
+                            placeholder={installRootPlaceholder}
+                            disabled={isAddingEngine || selectedEngineAvailable}
+                          />
+                          <span className="form-hint">{installRootHint}</span>
+                        </div>
+                      )}
                       {selectedHpcProfile && (
                         <div className="engine-profile-roots">
                           <div>
@@ -1892,7 +1981,7 @@ export function ProjectDashboard({
                 disabled={
                   isLoadingEngineSetup
                   || isAddingEngine
-                  || !canSubmitEngineSetup
+                  || !canSubmitSelectedEngineSetup
                   || selectedEngineAvailable
                   || availableHpcProfiles.length === 0
                 }

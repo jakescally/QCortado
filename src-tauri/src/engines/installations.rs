@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engines::plugin::{EnginePlugin, EnginePluginManifest};
 use crate::engines::types::{CalculationKind, EngineId, EngineImplementationStatus};
-use crate::hpc::profile::HpcProfile;
+use crate::hpc::profile::{EnginePathMode, HpcProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +36,12 @@ pub struct EngineInstallationRequest {
     pub engine_id: EngineId,
     pub hpc_profile_id: String,
     pub remote_install_root: String,
+    #[serde(default)]
+    pub path_mode: Option<EnginePathMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_load: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,14 +70,38 @@ impl EngineInstallationRequest {
         if hpc_profile_id != profile.id {
             return Err("Resolved HPC profile did not match the requested profile.".to_string());
         }
+        let path_mode = self
+            .path_mode
+            .unwrap_or_else(|| profile.engine_path_mode(self.engine_id));
+        let module_use = normalize_optional_text(
+            self.module_use
+                .as_deref()
+                .or(profile.engine_module_use(self.engine_id)),
+        );
+        let module_load = normalize_optional_text(
+            self.module_load
+                .as_deref()
+                .or(profile.engine_module_load(self.engine_id)),
+        );
+        if path_mode == EnginePathMode::Module && module_load.is_none() {
+            return Err(format!(
+                "{} module load value is required in module mode.",
+                match self.engine_id {
+                    EngineId::Qe => "Quantum ESPRESSO",
+                    EngineId::Wien2k => "WIEN2k",
+                }
+            ));
+        }
+        let remote_install_root = if path_mode == EnginePathMode::Module {
+            normalize_optional_text(Some(&self.remote_install_root)).unwrap_or_default()
+        } else {
+            normalize_remote_path(&self.remote_install_root, "Install directory")?
+        };
 
         Ok(ResolvedEngineInstallationRequest {
             engine_id: self.engine_id,
             hpc_profile_id,
-            remote_install_root: normalize_remote_path(
-                &self.remote_install_root,
-                "Install directory",
-            )?,
+            remote_install_root,
             remote_workspace_root: normalize_remote_path(
                 &profile.remote_workspace_root,
                 "Remote workspace root",
@@ -80,6 +110,9 @@ impl EngineInstallationRequest {
                 &profile.remote_project_root,
                 "Remote project root",
             )?,
+            path_mode,
+            module_use,
+            module_load,
         })
     }
 }
@@ -91,12 +124,15 @@ pub struct ResolvedEngineInstallationRequest {
     pub remote_install_root: String,
     pub remote_workspace_root: String,
     pub remote_project_root: String,
+    pub path_mode: EnginePathMode,
+    pub module_use: Option<String>,
+    pub module_load: Option<String>,
 }
 
 pub fn required_engine_executables(engine_id: EngineId) -> &'static [&'static str] {
     match engine_id {
         EngineId::Qe => &["pw.x", "bands.x", "dos.x", "projwfc.x"],
-        EngineId::Wien2k => &["x", "init_lapw", "run_lapw", "runsp_lapw"],
+        EngineId::Wien2k => &["init_lapw", "run_lapw", "runsp_lapw"],
     }
 }
 
@@ -180,6 +216,18 @@ pub fn parse_verification_output(
 }
 
 fn build_qe_verification_command(request: &ResolvedEngineInstallationRequest) -> String {
+    if request.path_mode == EnginePathMode::Module {
+        return build_module_verification_command(
+            Some(request.remote_install_root.as_str()),
+            &request.remote_workspace_root,
+            &request.remote_project_root,
+            required_engine_executables(EngineId::Qe),
+            request.module_use.as_deref(),
+            request.module_load.as_deref(),
+            "version=$(pw.x --version 2>/dev/null | head -n 1); [ -n \"$version\" ] || version=unknown",
+            "Quantum ESPRESSO",
+        );
+    }
     build_engine_verification_command(
         &request.remote_install_root,
         &request.remote_workspace_root,
@@ -192,6 +240,22 @@ fn build_qe_verification_command(request: &ResolvedEngineInstallationRequest) ->
 }
 
 fn build_wien2k_verification_command(request: &ResolvedEngineInstallationRequest) -> String {
+    if request.path_mode == EnginePathMode::Module {
+        return build_module_verification_command(
+            if request.remote_install_root.trim().is_empty() {
+                None
+            } else {
+                Some(request.remote_install_root.as_str())
+            },
+            &request.remote_workspace_root,
+            &request.remote_project_root,
+            required_engine_executables(EngineId::Wien2k),
+            request.module_use.as_deref(),
+            request.module_load.as_deref(),
+            "version=unknown",
+            "WIEN2k",
+        );
+    }
     build_engine_verification_command(
         &request.remote_install_root,
         &request.remote_workspace_root,
@@ -200,6 +264,76 @@ fn build_wien2k_verification_command(request: &ResolvedEngineInstallationRequest
         "bin=\"$root\"",
         "if [ -r \"$bin/WIEN2k_VERSION\" ]; then version=$(head -n 1 \"$bin/WIEN2k_VERSION\"); else version=unknown; fi",
         "WIEN2k",
+    )
+}
+
+fn build_module_setup_commands(module_use: Option<&str>, module_load: Option<&str>) -> String {
+    let mut commands = vec![crate::hpc::utility::module_environment_bootstrap_command()];
+    if let Some(module_use) = module_use.map(str::trim).filter(|value| !value.is_empty()) {
+        commands.push(format!("module use {}", shell_single_quote(module_use)));
+    }
+    if let Some(module_load) = module_load.map(str::trim).filter(|value| !value.is_empty()) {
+        commands.push(format!("module load {}", shell_single_quote(module_load)));
+    }
+    commands.join("; ")
+}
+
+fn build_module_verification_command(
+    install_root: Option<&str>,
+    workspace_root: &str,
+    project_root: &str,
+    executables: &[&str],
+    module_use: Option<&str>,
+    module_load: Option<&str>,
+    version_probe: &str,
+    label: &str,
+) -> String {
+    let module_setup = build_module_setup_commands(module_use, module_load);
+    let executable_checks = executables
+        .iter()
+        .map(|executable| {
+            format!(
+                "if ! command -v {quoted_executable} >/dev/null 2>&1; then missing=\"$missing {executable}\"; fi",
+                quoted_executable = shell_single_quote(executable),
+                executable = executable
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let root_setup = install_root
+        .map(|root| format!("root={}; ", shell_single_quote(root)))
+        .unwrap_or_default();
+    let root_check = install_root
+        .map(|_| format!(
+            "if [ ! -d \"$root\" ]; then ok=0; message=\"{} install directory not found: $root\"; fi; ",
+            label
+        ))
+        .unwrap_or_default();
+    let success_message = if install_root.is_some() {
+        format!("message={label} installation verified at $root")
+    } else {
+        format!("message={label} installation verified using loaded modules")
+    };
+
+    format!(
+        "{root_setup}workspace={workspace}; project={project}; ok=1; missing=''; message=''; \
+{root_check}if [ \"$ok\" = 1 ]; then {module_setup}{separator}{executable_checks}; if [ -n \"$missing\" ]; then ok=0; message=\"Missing executables:$missing\"; fi; fi; \
+if [ \"$ok\" = 1 ]; then mkdir -p \"$workspace\" \"$project\" 2>/dev/null || ok=0; if [ \"$ok\" = 0 ]; then message=\"Failed to create remote project directories\"; fi; fi; \
+if [ \"$ok\" = 1 ]; then if [ ! -w \"$workspace\" ] || [ ! -w \"$project\" ]; then ok=0; message=\"Remote workspace/project roots are not writable\"; fi; fi; \
+if [ \"$ok\" = 1 ]; then {version_probe}; echo QCORTADO_ENGINE_VERIFY_OK; echo \"{success_message}\"; echo \"version=$version\"; else echo QCORTADO_ENGINE_VERIFY_FAIL; echo \"message=$message\"; fi",
+        workspace = shell_single_quote(workspace_root),
+        project = shell_single_quote(project_root),
+        module_setup = module_setup,
+        separator = if module_setup.is_empty() {
+            ""
+        } else {
+            "; "
+        },
+        executable_checks = executable_checks,
+        version_probe = version_probe,
+        root_setup = root_setup,
+        root_check = root_check,
+        success_message = success_message,
     )
 }
 
@@ -249,6 +383,13 @@ fn normalize_required_text(input: &str, field: &str) -> Result<String, String> {
     }
 }
 
+fn normalize_optional_text(input: Option<&str>) -> Option<String> {
+    input
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn normalize_remote_path(input: &str, field: &str) -> Result<String, String> {
     let trimmed = normalize_required_text(input, field)?;
     let normalized = trimmed.trim_end_matches('/').to_string();
@@ -278,6 +419,9 @@ mod tests {
             remote_install_root: "/opt/WIEN2k".to_string(),
             remote_workspace_root: "/scratch/qcortado".to_string(),
             remote_project_root: "/project/qcortado".to_string(),
+            path_mode: EnginePathMode::Path,
+            module_use: None,
+            module_load: None,
         };
         let command = build_remote_verification_command(&request);
 
@@ -287,6 +431,36 @@ mod tests {
         assert!(command.contains("$bin/runsp_lapw"));
         assert!(command.contains("WIEN2k_VERSION"));
         assert!(!command.contains("pseudo"));
+    }
+
+    #[test]
+    fn wien2k_module_verifier_loads_modules_and_checks_path_tools() {
+        let request = ResolvedEngineInstallationRequest {
+            engine_id: EngineId::Wien2k,
+            hpc_profile_id: "andromeda".to_string(),
+            remote_install_root: String::new(),
+            remote_workspace_root: "/scratch/qcortado".to_string(),
+            remote_project_root: "/project/qcortado".to_string(),
+            path_mode: EnginePathMode::Module,
+            module_use: Some("/cluster/modules".to_string()),
+            module_load: Some("WIEN2k/24.1".to_string()),
+        };
+        let command = build_remote_verification_command(&request);
+
+        assert!(command.contains("module use '/cluster/modules'"));
+        assert!(command.contains("module load 'WIEN2k/24.1'"));
+        assert!(
+            command.contains("modules.sh")
+                || command.contains("lmod.sh")
+                || command.contains("lmod/lmod/init/bash")
+                || command.contains("Modules/init/bash")
+        );
+        assert!(command.contains("command -v 'init_lapw'"));
+        assert!(command.contains("command -v 'run_lapw'"));
+        assert!(command.contains("command -v 'runsp_lapw'"));
+        assert!(!command.contains("command -v 'x'"));
+        assert!(!command.contains("install directory not found"));
+        assert!(!command.contains("root="));
     }
 
     #[test]

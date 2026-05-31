@@ -623,7 +623,10 @@ pub fn stage_command(
     let dir = shell_quote(&session.remote_case_dir);
     let case_name = shell_quote(&session.draft.case_name);
     let (prefix, setrmt, x_command) = if use_module {
-        let mut setup = vec![format!("cd {dir}")];
+        let mut setup = vec![
+            format!("cd {dir}"),
+            crate::hpc::utility::module_environment_bootstrap_command(),
+        ];
         if let Some(module_use) = module_use.map(str::trim).filter(|value| !value.is_empty()) {
             setup.push(format!("module use {}", shell_quote(module_use)));
         }

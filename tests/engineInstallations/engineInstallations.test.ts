@@ -54,7 +54,7 @@ test("already selectable engines are not installable again", () => {
         remoteInstallRoot: "/opt/WIEN2k",
         remoteWorkspaceRoot: "/scratch/researcher/qcortado",
         remoteProjectRoot: "/project/researcher/qcortado",
-        verifiedExecutables: ["x", "init_lapw", "run_lapw", "runsp_lapw"],
+        verifiedExecutables: ["init_lapw", "run_lapw", "runsp_lapw"],
         verifiedAt: "2026-01-01T00:00:00Z",
       },
     ]),
@@ -73,6 +73,9 @@ test("engine install form defaults only choose the selected HPC profile", () => 
 
   assert.equal(defaults.hpcProfileId, "andromeda");
   assert.equal(defaults.remoteInstallRoot, "");
+  assert.equal(defaults.wien2kPathMode, "path");
+  assert.equal(defaults.wien2kModuleUse, "");
+  assert.equal(defaults.wien2kModuleLoad, "");
   assert.equal(Object.hasOwn(defaults, "remoteWorkspaceRoot"), false);
   assert.equal(Object.hasOwn(defaults, "remoteProjectRoot"), false);
 });
