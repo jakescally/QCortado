@@ -129,7 +129,7 @@ pub fn required_initialization_suffixes(spin_mode: Wien2kSpinMode) -> Vec<&'stat
 pub fn initialization_diagnostics(output: &str) -> Vec<String> {
     let upper = output.to_ascii_uppercase();
     let mut diagnostics = Vec::new();
-    if upper.contains("ERROR") || upper.contains("STOPPED") {
+    if initialization_has_error_marker(output) {
         diagnostics.push(
             "WIEN2k initialization reported an error; review the native output before retrying."
                 .to_string(),
@@ -139,6 +139,21 @@ pub fn initialization_diagnostics(output: &str) -> Vec<String> {
         diagnostics.push("WIEN2k reported sphere overlap during initialization; return to the Structure workflow to change RMT values.".to_string());
     }
     diagnostics
+}
+
+fn initialization_has_error_marker(output: &str) -> bool {
+    output.lines().any(|line| {
+        let upper = line.trim().to_ascii_uppercase();
+        if upper.is_empty() {
+            return false;
+        }
+        if upper.contains("STOPPED") {
+            return true;
+        }
+        upper
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == "ERROR")
+    })
 }
 
 pub fn parse_scf_summary(
@@ -286,6 +301,35 @@ mod tests {
             ..Wien2kInitializationSettings::default()
         };
         assert!(validate_initialization_settings(&invalid).is_err());
+    }
+
+    #[test]
+    fn initialization_diagnostics_ignore_benign_error_plural_warnings() {
+        let output = "\
+ atom 1 has a large sphere and is a heavy element, consider setting HDLOs and/or larger LVNS\n\
+ Atomic spheres .gt. 2.35 may lead to linearization errors\n\
+ For more accuracy rerun with -hdlo switch\n\
+  init_lapw finished ok\n";
+
+        assert!(initialization_diagnostics(output).is_empty());
+    }
+
+    #[test]
+    fn initialization_diagnostics_report_explicit_error_markers() {
+        let output = "[QCortado] ERROR: init_lapw did not generate case.in0\n";
+
+        assert!(initialization_diagnostics(output)
+            .iter()
+            .any(|diagnostic| diagnostic.contains("reported an error")));
+    }
+
+    #[test]
+    fn initialization_diagnostics_report_stopped_runs() {
+        let output = "LSTART STOPPED in case.outputst\n";
+
+        assert!(initialization_diagnostics(output)
+            .iter()
+            .any(|diagnostic| diagnostic.contains("reported an error")));
     }
 
     #[test]

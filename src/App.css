@@ -1214,6 +1214,54 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   margin-top: 0.75rem;
 }
 
+.wien2k-scf-section {
+  margin: 0;
+}
+
+.wien2k-scf-section .section-header {
+  color: #334155;
+  font-size: 0.9rem;
+  font-weight: 700;
+  margin: 0;
+  min-height: 1.7rem;
+}
+
+.wien2k-scf-section.is-locked {
+  opacity: 0.72;
+}
+
+.wien2k-scf-section.is-locked .section-header {
+  cursor: not-allowed;
+}
+
+.wien2k-scf-section.is-locked .collapse-icon {
+  color: #94a3b8;
+}
+
+.wien2k-section-status {
+  background: #edf2f7;
+  border: 1px solid #dbe4ee;
+  border-radius: 999px;
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  margin-left: auto;
+  padding: 0.25rem 0.45rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+html[data-theme="dark"] .wien2k-scf-section .section-header {
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .wien2k-section-status {
+  background: #313244;
+  border-color: #45475a;
+  color: #a6adc8;
+}
+
 .wien2k-scf-results {
   margin-top: 1rem;
 }

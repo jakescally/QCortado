@@ -11,6 +11,8 @@ interface HpcRunSettingsProps {
   resourceMode?: HpcResourceMode | null;
   defaultCpuResources?: SlurmResourceRequest | null;
   defaultGpuResources?: SlurmResourceRequest | null;
+  resourceModeMessage?: string | null;
+  lockResourceTypeWhenSingleMode?: boolean;
   maxTasks?: {
     value: number;
     reason: string;
@@ -51,6 +53,8 @@ export function HpcRunSettings({
   resourceMode = "both",
   defaultCpuResources = null,
   defaultGpuResources = null,
+  resourceModeMessage = null,
+  lockResourceTypeWhenSingleMode = true,
   maxTasks = null,
   onResourcesChange,
   disabled = false,
@@ -80,6 +84,9 @@ export function HpcRunSettings({
   const gpuOversubscriptionWarning = resources.resource_type === "gpu" && taskCount > gpuCount
     ? `Tasks (${taskCount}) exceed GPUs (${gpuCount}). This can oversubscribe GPUs and hurt QE performance.`
     : null;
+  const resourceTypeSelectDisabled = disabled
+    || (!allowCpu && !allowGpu)
+    || (lockResourceTypeWhenSingleMode && (!allowCpu || !allowGpu));
 
   const commandLinesKey = useMemo(() => commandLines.join("\n"), [commandLines]);
 
@@ -189,7 +196,7 @@ export function HpcRunSettings({
       </p>
       {resourceModeLabel && (
         <p className="hpc-run-settings-hint">
-          {resourceModeLabel}. Change this in HPC profile settings if needed.
+          {resourceModeMessage || `${resourceModeLabel}. Change this in HPC profile settings if needed.`}
         </p>
       )}
       {gpuOversubscriptionWarning && (
@@ -226,7 +233,7 @@ export function HpcRunSettings({
               }
               onResourcesChange(next);
             }}
-            disabled={disabled || !allowCpu || !allowGpu}
+            disabled={resourceTypeSelectDisabled}
           >
             <option value="cpu" disabled={!allowCpu}>CPU</option>
             <option value="gpu" disabled={!allowGpu}>GPU</option>

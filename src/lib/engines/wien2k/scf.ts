@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SlurmResourceRequest } from "../../types";
 import type { Wien2kInitializationSettings, Wien2kScfRunSettings } from "./types";
 
 export type Wien2kScfSessionPhase = "staged" | "initialized" | "scf_complete" | "failed";
@@ -71,12 +72,14 @@ export function runWien2kScfSession(
   settings: Wien2kScfRunSettings,
   continuation: boolean,
   parentCalculationId?: string | null,
+  resources?: SlurmResourceRequest | null,
 ): Promise<Wien2kScfExecutionResult> {
   return invoke("wien2k_run_scf_session", {
     sessionId,
     settings,
     continuation,
     parentCalculationId: parentCalculationId ?? null,
+    resources: resources ?? null,
   });
 }
 

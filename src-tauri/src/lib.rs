@@ -1549,6 +1549,87 @@ mod hpc_headless_recovery_tests {
     }
 
     #[test]
+    fn wien2k_scf_command_sets_parallel_environment_after_module_load() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Module);
+        let requested = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            ntasks: Some(2),
+            cpus_per_task: Some(4),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let resources =
+            resolve_wien2k_scf_resources(&profile, Some(requested)).expect("resolved resources");
+        let command = build_wien2k_scf_command(
+            &wien2k_test_scf_session(""),
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::RunLapw,
+            &["-i".to_string(), "40".to_string()],
+            &resources,
+        )
+        .expect("scf command");
+
+        let module_index = command
+            .find("module load 'WIEN2k/24.1'")
+            .expect("module load");
+        let omp_index = command.find("export OMP_NUM_THREADS").expect("omp export");
+        let run_index = command.find("run_lapw '-i'").expect("run_lapw");
+
+        assert!(module_index < omp_index);
+        assert!(omp_index < run_index);
+        assert!(!command.contains("> .machines"));
+        assert!(!command.contains(" '-p'"));
+    }
+
+    #[test]
+    fn wien2k_scf_resources_reject_gpu_requests() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let resources = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Gpu,
+            ..hpc::profile::default_gpu_resources()
+        };
+
+        let error = resolve_wien2k_scf_resources(&profile, Some(resources))
+            .expect_err("GPU resources should be rejected for WIEN2k SCF");
+
+        assert!(error.contains("CPU Slurm resources only"));
+    }
+
+    #[test]
+    fn wien2k_scf_resources_convert_tasks_to_openmp_threads() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let requested = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            ntasks: Some(4),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let resources = resolve_wien2k_scf_resources(&profile, Some(requested)).expect("resources");
+
+        assert_eq!(resources.nodes, Some(1));
+        assert_eq!(resources.ntasks, Some(1));
+        assert_eq!(resources.cpus_per_task, Some(8));
+        assert!(!wien2k_scf_uses_parallel(&resources));
+    }
+
+    #[test]
+    fn wien2k_parallel_setup_uses_openmp_without_machines() {
+        let resources = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            ntasks: Some(1),
+            cpus_per_task: Some(8),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let command = build_wien2k_parallel_setup_command(&resources);
+
+        assert!(!wien2k_scf_uses_parallel(&resources));
+        assert!(command.contains("export OMP_NUM_THREADS"));
+        assert!(command.contains("${SLURM_CPUS_PER_TASK:-8}"));
+        assert!(command.contains("rm -f .machines .processes"));
+        assert!(!command.contains("granularity:1"));
+        assert!(!command.contains("> .machines"));
+    }
+
+    #[test]
     fn rejects_unsupported_recovery_metadata_schema() {
         let raw = r#"{
           "schema_version": 999,
@@ -3732,6 +3813,29 @@ fn build_wien2k_native_command(
     program: engines::wien2k::Wien2kCommandProgram,
     argv: &[String],
 ) -> Result<String, String> {
+    let (mut commands, executable) = build_wien2k_command_parts(session, profile, program)?;
+    commands.push(build_wien2k_program_invocation(&executable, argv));
+    Ok(commands.join(" && "))
+}
+
+fn build_wien2k_scf_command(
+    session: &engines::wien2k::Wien2kScfSession,
+    profile: &hpc::profile::HpcProfile,
+    program: engines::wien2k::Wien2kCommandProgram,
+    argv: &[String],
+    resources: &hpc::profile::SlurmResourceRequest,
+) -> Result<String, String> {
+    let (mut commands, executable) = build_wien2k_command_parts(session, profile, program)?;
+    commands.push(build_wien2k_parallel_setup_command(resources));
+    commands.push(build_wien2k_program_invocation(&executable, argv));
+    Ok(commands.join(" && "))
+}
+
+fn build_wien2k_command_parts(
+    session: &engines::wien2k::Wien2kScfSession,
+    profile: &hpc::profile::HpcProfile,
+    program: engines::wien2k::Wien2kCommandProgram,
+) -> Result<(Vec<String>, String), String> {
     let mut commands = vec![format!(
         "cd {}",
         shell_single_quote_local(&session.remote_case_dir)
@@ -3759,17 +3863,51 @@ fn build_wien2k_native_command(
         commands.push("export PATH=\"$WIENROOT:$PATH\"".to_string());
         format!("\"$WIENROOT/{}\"", program.script_name())
     };
+    Ok((commands, executable))
+}
+
+fn build_wien2k_program_invocation(executable: &str, argv: &[String]) -> String {
     let arguments = argv
         .iter()
         .map(|argument| shell_single_quote_local(argument))
         .collect::<Vec<_>>()
         .join(" ");
-    commands.push(
-        format!("{} {}", executable, arguments)
-            .trim_end()
-            .to_string(),
-    );
-    Ok(commands.join(" && "))
+    format!("{} {}", executable, arguments)
+        .trim_end()
+        .to_string()
+}
+
+fn resolve_wien2k_scf_resources(
+    profile: &hpc::profile::HpcProfile,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+) -> Result<hpc::profile::SlurmResourceRequest, String> {
+    let mut resolved = resources.unwrap_or_else(|| profile.default_cpu_resources.clone());
+    if resolved.resource_type != hpc::profile::ResourceType::Cpu {
+        return Err("WIEN2k SCF currently supports CPU Slurm resources only.".to_string());
+    }
+    let openmp_threads = resolved
+        .ntasks
+        .unwrap_or(1)
+        .max(1)
+        .saturating_mul(resolved.cpus_per_task.unwrap_or(1).max(1));
+    resolved.resource_type = hpc::profile::ResourceType::Cpu;
+    resolved.nodes = Some(1);
+    resolved.ntasks = Some(1);
+    resolved.cpus_per_task = Some(openmp_threads.max(1));
+    resolved.gpus = Some(0);
+    Ok(resolved)
+}
+
+fn wien2k_scf_uses_parallel(resources: &hpc::profile::SlurmResourceRequest) -> bool {
+    resources.ntasks.unwrap_or(1).max(1) > 1
+}
+
+fn build_wien2k_parallel_setup_command(resources: &hpc::profile::SlurmResourceRequest) -> String {
+    let cpus_per_task = resources.cpus_per_task.unwrap_or(1).max(1);
+    format!(
+        "rm -f .machines .processes && export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\" && echo \"[QCortado] WIEN2k OpenMP threads: $OMP_NUM_THREADS\"",
+        cpus_per_task
+    )
 }
 
 async fn collect_remote_wien2k_text_artifacts(
@@ -4065,6 +4203,7 @@ async fn wien2k_run_scf_session(
     settings: engines::wien2k::Wien2kScfRunSettings,
     continuation: bool,
     parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kScfExecutionResult, String> {
     engines::wien2k::validate_run_settings(&settings)?;
@@ -4104,10 +4243,23 @@ async fn wien2k_run_scf_session(
         project_id: Some(session.project_id.clone()),
         cif_id: Some(session.cif_id.clone()),
     };
+    let resources = resolve_wien2k_scf_resources(&profile, resources)?;
+    let parallel = wien2k_scf_uses_parallel(&resources);
     let plan = engines::wien2k::build_scf_run_plan(&case_ref, &settings, continuation);
-    let command = build_wien2k_native_command(&session, &profile, plan.program, &plan.argv)?;
+    let mut argv = plan.argv.clone();
+    if parallel {
+        argv.insert(0, "-p".to_string());
+    }
+    let command = build_wien2k_scf_command(&session, &profile, plan.program, &argv, &resources)?;
     let event_name = format!("wien2k-scf-output:{}", session_id);
-    let operation = hpc::utility::run_scheduled_utility_operation(
+    let timeout_secs = resources
+        .walltime
+        .as_deref()
+        .and_then(hpc::profile::walltime_seconds)
+        .map(|seconds| seconds.saturating_add(600))
+        .unwrap_or(86_400)
+        .max(3_600);
+    let operation = hpc::utility::run_scheduled_profile_operation(
         Some(&app),
         Some(&event_name),
         &profile,
@@ -4115,7 +4267,8 @@ async fn wien2k_run_scf_session(
         &session.remote_case_dir,
         "qc-w2k-scf",
         &[command],
-        86400,
+        resources,
+        timeout_secs,
     )
     .await;
     let (native_output, command_failed) = match operation {

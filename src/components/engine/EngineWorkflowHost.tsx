@@ -211,6 +211,7 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           projectId={context.projectId}
           cifId={context.cifId}
           calculations={context.calculations ?? []}
+          activeHpcProfile={runtime.activeHpcProfile}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onWien2kScfSaved}
         />

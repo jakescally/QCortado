@@ -88,6 +88,22 @@ pub fn build_scheduled_utility_script(
     Ok(script)
 }
 
+pub fn build_scheduled_operation_script(
+    profile: &HpcProfile,
+    job_name: &str,
+    commands: &[String],
+    resources: super::profile::SlurmResourceRequest,
+) -> Result<SlurmScript, String> {
+    let script = build_slurm_script(profile, job_name, commands, Some(resources));
+    if !script.validation.errors.is_empty() {
+        return Err(format!(
+            "Scheduled-operation resource settings are invalid: {}",
+            script.validation.errors.join(" ")
+        ));
+    }
+    Ok(script)
+}
+
 /// Run a short non-calculation command sequence through Slurm without
 /// registering it with the task queue.
 pub async fn run_scheduled_utility_operation(
@@ -101,7 +117,54 @@ pub async fn run_scheduled_utility_operation(
     timeout_secs: u64,
 ) -> Result<ScheduledUtilityResult, String> {
     let script = build_scheduled_utility_script(profile, job_name, commands)?;
+    run_scheduled_operation_with_script(
+        app,
+        event_name,
+        profile,
+        secret,
+        remote_workdir,
+        script,
+        timeout_secs,
+        "lightweight scheduled operation",
+    )
+    .await
+}
 
+pub async fn run_scheduled_profile_operation(
+    app: Option<&AppHandle>,
+    event_name: Option<&str>,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    job_name: &str,
+    commands: &[String],
+    resources: super::profile::SlurmResourceRequest,
+    timeout_secs: u64,
+) -> Result<ScheduledUtilityResult, String> {
+    let script = build_scheduled_operation_script(profile, job_name, commands, resources)?;
+    run_scheduled_operation_with_script(
+        app,
+        event_name,
+        profile,
+        secret,
+        remote_workdir,
+        script,
+        timeout_secs,
+        "scheduled operation",
+    )
+    .await
+}
+
+async fn run_scheduled_operation_with_script(
+    app: Option<&AppHandle>,
+    event_name: Option<&str>,
+    profile: &HpcProfile,
+    secret: Option<&str>,
+    remote_workdir: &str,
+    script: SlurmScript,
+    timeout_secs: u64,
+    operation_label: &str,
+) -> Result<ScheduledUtilityResult, String> {
     let token = uuid::Uuid::new_v4().to_string();
     let local_script = std::env::temp_dir().join(format!("qcortado_utility_{token}.sbatch"));
     std::fs::write(&local_script, &script.script)
@@ -122,21 +185,26 @@ pub async fn run_scheduled_utility_operation(
         app,
         event_name,
         &format!(
-            "[QCortado] Submitting lightweight scheduled operation: {}",
-            script.sbatch_preview
+            "[QCortado] Submitting {}: {}",
+            operation_label, script.sbatch_preview
         ),
     );
     let submit_output = run_ssh_command_with_timeout(profile, secret, &clear_outputs, 30).await?;
     let job_id = parse_sbatch_job_id(&submit_output).ok_or_else(|| {
         format!(
-            "Failed to parse scheduled utility job ID from sbatch output: {}",
+            "Failed to parse scheduled operation job ID from sbatch output: {}",
             submit_output.trim()
         )
     })?;
+    let scheduled_job_label = if operation_label == "lightweight scheduled operation" {
+        "Scheduled utility job"
+    } else {
+        "Scheduled job"
+    };
     emit_line(
         app,
         event_name,
-        &format!("[QCortado] Scheduled utility job submitted: {}", job_id),
+        &format!("[QCortado] {} submitted: {}", scheduled_job_label, job_id),
     );
 
     let started = Instant::now();
@@ -172,7 +240,7 @@ pub async fn run_scheduled_utility_operation(
                 emit_line(
                     app,
                     event_name,
-                    &format!("[QCortado] Utility job state: {}", state),
+                    &format!("[QCortado] {} state: {}", scheduled_job_label, state),
                 );
                 last_state = state.clone();
             }
@@ -203,7 +271,7 @@ pub async fn run_scheduled_utility_operation(
     };
     if terminal_state != "COMPLETED" {
         return Err(format!(
-            "Scheduled utility job ended with state {}. {}",
+            "Scheduled operation job ended with state {}. {}",
             terminal_state,
             output.trim()
         ));
