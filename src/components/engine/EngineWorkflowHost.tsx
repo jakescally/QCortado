@@ -145,8 +145,8 @@ export function canRenderEngineWorkflowHost({
 }: Pick<EngineWorkflowHostProps, "route" | "runtime" | "contexts" | "reconnectTaskId">): boolean {
   if (route.engineId === "wien2k") {
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
-    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
-    if (route.view === "bands-wizard") return Boolean(contexts.bands);
+    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf || reconnectTaskId);
+    if (route.view === "bands-wizard") return Boolean(contexts.bands || reconnectTaskId);
     return false;
   }
   if (route.engineId !== "qe") {
@@ -214,6 +214,7 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           cifId={context.cifId}
           calculations={context.calculations ?? []}
           activeHpcProfile={runtime.activeHpcProfile}
+          reconnectTaskId={reconnectTaskIdValue}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onWien2kScfSaved}
         />
@@ -230,6 +231,7 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
             crystalData={context.crystalData}
             scfCalculations={context.scfCalculations}
             activeHpcProfile={runtime.activeHpcProfile}
+            reconnectTaskId={reconnectTaskIdValue}
             onBack={() => onBack(route.view, "project-dashboard")}
             onViewBands={props.onViewBands}
           />

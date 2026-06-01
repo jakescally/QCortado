@@ -11,7 +11,6 @@ import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
 import {
   discardWien2kBandsSession,
   prepareWien2kBandsSession,
-  runWien2kBandsSession,
   startWien2kBandsSession,
   type Wien2kBandsExecutionResult,
   type Wien2kBandsRunSettings,
@@ -22,6 +21,7 @@ import { defaultCpuResources } from "../../lib/hpcConfig";
 import type { CrystalData, HpcProfile, SlurmResourceRequest } from "../../lib/types";
 import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
 import { formatCalculationSourceLabel, getCalculationName } from "../../lib/calculationNames";
+import { useTaskContext } from "../../lib/TaskContext";
 
 interface CalculationRun {
   id: string;
@@ -52,6 +52,7 @@ interface Wien2kBandsWizardProps {
   crystalData: CrystalData;
   scfCalculations: CalculationRun[];
   activeHpcProfile?: HpcProfile | null;
+  reconnectTaskId?: string;
   onBack: () => void;
   onViewBands: (
     bandData: BandData,
@@ -150,9 +151,11 @@ export function Wien2kBandsWizard({
   crystalData,
   scfCalculations,
   activeHpcProfile = null,
+  reconnectTaskId,
   onBack,
   onViewBands,
 }: Wien2kBandsWizardProps) {
+  const taskContext = useTaskContext();
   const sources = useMemo(
     () => scfCalculations.filter(isConvergedWien2kScf),
     [scfCalculations],
@@ -187,14 +190,50 @@ export function Wien2kBandsWizard({
   const [calcStartTime, setCalcStartTime] = useState<string | null>(null);
   const [remoteJobId, setRemoteJobId] = useState<string | null>(null);
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
+  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const taskResult = activeTask?.result as Wien2kBandsExecutionResult | null | undefined;
+  const displayedResult = result ?? taskResult ?? null;
+  const taskOutputLines = activeTask ? activeTask.output : outputLines;
+  const taskOutputText = activeTask ? activeTask.outputText : outputLines.join("\n");
+  const taskOutputLineCount = activeTask ? activeTask.outputLineCount : outputLines.length;
+  const runIsActive = activeTask?.status === "running" || isRunning;
+  const runHasFailed = activeTask?.status === "failed" || activeTask?.status === "cancelled" || Boolean(error);
+  const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
+  const runRemoteNode = activeTask?.hpc.remote_node ?? remoteNode;
   const fermiEnergy = sourceFermi(selectedScf);
   const selectedSpinMode = session?.spinMode ?? sourceSpinMode(selectedScf);
   const currentStepIndex = STEPS.findIndex((entry) => entry.id === step);
-  const runStepActive = step === "run" && isRunning;
+  const runStepActive = step === "run" && runIsActive;
   useViewportScrollLock(runStepActive);
 
   useEffect(() => () => outputUnlistenRef.current?.(), []);
+
+  useEffect(() => {
+    if (!reconnectTaskId) return;
+    setActiveTaskId(reconnectTaskId);
+    setStep("run");
+    void taskContext.reconnectToTask(reconnectTaskId);
+  }, [reconnectTaskId, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTaskId || activeTask) return;
+    void taskContext.reconnectToTask(activeTaskId);
+  }, [activeTaskId, activeTask, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTask) return;
+    if (activeTask.status === "failed" || activeTask.status === "cancelled") {
+      setError(activeTask.error ?? (activeTask.status === "cancelled" ? "Cancelled by user" : "WIEN2k bands failed."));
+      setIsRunning(false);
+      return;
+    }
+    if (activeTask.status !== "completed" || !taskResult) return;
+    setResult(taskResult);
+    setSession((current) => current ? { ...current, phase: taskResult.phase } : current);
+    setIsRunning(false);
+  }, [activeTask, taskResult]);
 
   useEffect(() => {
     setHpcResources(cloneWien2kBandsResources(activeHpcProfile));
@@ -297,22 +336,24 @@ export function Wien2kBandsWizard({
         spinOrbit,
         diagnosticLog,
       };
-      const next = await runWien2kBandsSession(session.sessionId, runSettings, hpcResources);
-      setResult(next);
-      setSession((current) => current ? { ...current, phase: next.phase } : current);
-      setOutputLines((current) => [
-        ...current,
-        `[saved bands calculation ${next.calculationId}: ${next.bandData.n_bands} bands, ${next.bandData.n_kpoints} k-points]`,
-      ].slice(-1500));
+      const taskId = await taskContext.startTask(
+        "wien2k_bands",
+        {
+          sessionId: session.sessionId,
+          settings: runSettings,
+          resources: hpcResources,
+        },
+        `WIEN2k Bands - ${session.caseName}`,
+      );
+      setActiveTaskId(taskId);
     } catch (reason) {
       setError(String(reason));
-    } finally {
       setIsRunning(false);
     }
   }
 
   function startPreparedRun() {
-    if (!session || isRunning) return;
+    if (!session || runIsActive) return;
     setStep("run");
     void runBands();
   }
@@ -320,17 +361,17 @@ export function Wien2kBandsWizard({
   async function leaveWizard(destination: "back" | "view" = "back") {
     setError(null);
     try {
-      if (session && !result) {
+      if (session && !displayedResult && !runIsActive) {
         await discardWien2kBandsSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
       outputUnlistenRef.current = null;
-      if (destination === "view" && result) {
+      if (destination === "view" && displayedResult) {
         onViewBands(
-          result.bandData,
+          displayedResult.bandData,
           fermiEnergy,
           { engine_id: "wien2k", source_scf_id: selectedScf?.id ?? null },
-          { projectId, cifId, calcId: result.calculationId },
+          { projectId, cifId, calcId: displayedResult.calculationId },
         );
       } else {
         onBack();
@@ -368,8 +409,8 @@ export function Wien2kBandsWizard({
   function renderHeader() {
     return (
       <div className="wizard-header">
-        <button className="back-btn" type="button" disabled={isPreparing || isRunning} onClick={() => void leaveWizard("back")}>
-          Back
+        <button className="back-btn" type="button" disabled={isPreparing} onClick={() => void leaveWizard("back")}>
+          ← Exit
         </button>
         <h2>WIEN2k Bands</h2>
         <div className="step-indicator">
@@ -470,7 +511,7 @@ export function Wien2kBandsWizard({
     const totalKPoints = kPath.reduce((sum, point) => sum + point.npoints, 0) + (kPath.length > 0 ? 1 : 0);
     const prepared = session?.phase === "prepared" || session?.phase === "bands_complete";
     const canPrepare = kPath.length >= 2 && energyMinEv < energyMaxEv && characterScale >= 0 && !isPreparing;
-    const canRun = prepared && Boolean(session) && !isRunning && (selectedSpinMode !== "spin_polarized" || spinChannel !== "none");
+    const canRun = prepared && Boolean(session) && !runIsActive && (selectedSpinMode !== "spin_polarized" || spinChannel !== "none");
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
         {renderHeader()}
@@ -584,14 +625,14 @@ export function Wien2kBandsWizard({
                 defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
                 defaultGpuResources={null}
                 onResourcesChange={setHpcResources}
-                disabled={!prepared || isPreparing || isRunning}
+                disabled={!prepared || isPreparing || runIsActive}
               />
             ), {
               locked: !prepared,
               status: prepared ? "Ready" : "Locked - prepare files first",
             })}
             <div className="run-actions">
-              <button type="button" disabled={isPreparing} onClick={() => setStep("kpath")}>Back to K-path</button>
+              <button type="button" disabled={isPreparing} onClick={() => setStep("kpath")}>Back</button>
               <button
                 type="button"
                 className="primary-button"
@@ -621,7 +662,7 @@ export function Wien2kBandsWizard({
 
   function renderRunStep() {
     const progressStatus: "idle" | "running" | "error" | "complete" =
-      error ? "error" : result ? "complete" : isRunning ? "running" : "idle";
+      runHasFailed ? "error" : displayedResult ? "complete" : runIsActive ? "running" : "idle";
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard wizard-step-run">
         {renderHeader()}
@@ -629,61 +670,61 @@ export function Wien2kBandsWizard({
         <div className="wizard-content">
           <div className="wizard-step run-step run-step-focused scf-run-step">
             <div className="run-step-headline">
-              <h3>{isRunning ? "Running WIEN2k Bands" : "WIEN2k Bands Output"}</h3>
-              <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
-                {isRunning ? "Live output" : error ? "Run failed" : "Ready"}
+              <h3>{runIsActive ? "Running WIEN2k Bands" : "WIEN2k Bands Output"}</h3>
+              <span className={`run-step-status-pill ${runIsActive ? "running" : runHasFailed ? "error" : "idle"}`}>
+                {runIsActive ? "Live output" : runHasFailed ? "Run failed" : "Ready"}
               </span>
             </div>
             <div className="run-status-rail scf-run-status">
               <ProgressBar
                 status={progressStatus}
                 percent={null}
-                phase={isRunning ? "lapw1/spaghetti" : result ? "Complete" : "Ready"}
-                detail={remoteJobId ? `Slurm job ${remoteJobId}` : "Waiting for remote allocation"}
+                phase={runIsActive ? "lapw1/spaghetti" : displayedResult ? "Complete" : "Ready"}
+                detail={runRemoteJobId ? `Slurm job ${runRemoteJobId}` : "Waiting for remote allocation"}
                 compact
               />
               <div className="run-status-meta">
-                <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+                <ElapsedTimer startedAt={activeTask?.startedAt ?? calcStartTime} isRunning={runIsActive} />
               </div>
             </div>
             <div className="run-layout run-layout-hpc-telemetry">
               <LiveOutputPanel
-                title={isRunning ? "Running..." : "Output"}
-                output={outputLines.join("\n")}
+                title={runIsActive ? "Running..." : "Output"}
+                output={taskOutputText}
                 placeholder="Start the WIEN2k bands run to see output."
-                totalLineCount={outputLines.length}
-                visibleLineCount={outputLines.length}
+                totalLineCount={taskOutputLineCount}
+                visibleLineCount={taskOutputLines.length}
               />
               <RemoteUtilizationPanel
-                enabled={isRunning}
+                enabled={runIsActive}
                 profileId={activeHpcProfile?.id ?? null}
-                remoteJobId={remoteJobId}
-                remoteNode={remoteNode}
+                remoteJobId={runRemoteJobId}
+                remoteNode={runRemoteNode}
                 resourceType="cpu"
               />
             </div>
-            {result && (
+            {displayedResult && (
               <div className="wien2k-summary wien2k-scf-results">
                 <h3>Band Result: Complete</h3>
-                <p>Parsed {result.bandData.n_bands} bands across {result.bandData.n_kpoints} k-points.</p>
-                {result.diagnostics.map((diagnostic) => (
+                <p>Parsed {displayedResult.bandData.n_bands} bands across {displayedResult.bandData.n_kpoints} k-points.</p>
+                {displayedResult.diagnostics.map((diagnostic) => (
                   <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>
                 ))}
               </div>
             )}
             <div className="run-actions">
-              <button type="button" disabled={isRunning} onClick={() => setStep("prepare")}>Back to Setup</button>
-              {!result && !isRunning && (
+              <button type="button" disabled={runIsActive} onClick={() => setStep("prepare")}>Back</button>
+              {!displayedResult && !runIsActive && (
                 <button type="button" className="primary-button" disabled={!session} onClick={() => void runBands()}>
                   Run Band Calculation
                 </button>
               )}
-              {result && (
+              {displayedResult && (
                 <>
-                  <button type="button" className="secondary-button" disabled={isRunning} onClick={() => void leaveWizard("back")}>
+                  <button type="button" className="secondary-button" disabled={runIsActive} onClick={() => void leaveWizard("back")}>
                     Return to Project
                   </button>
-                  <button type="button" className="primary-button" disabled={isRunning} onClick={() => void leaveWizard("view")}>
+                  <button type="button" className="primary-button" disabled={runIsActive} onClick={() => void leaveWizard("view")}>
                     View Bands
                   </button>
                 </>
@@ -699,24 +740,24 @@ export function Wien2kBandsWizard({
     return (
       <div className="wizard-step results-step">
         <h3>WIEN2k Bands Complete</h3>
-        {result ? (
+        {displayedResult ? (
           <div className="results-summary">
-            <p>Parsed {result.bandData.n_bands} bands across {result.bandData.n_kpoints} k-points.</p>
-            {result.diagnostics.map((diagnostic) => <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>)}
+            <p>Parsed {displayedResult.bandData.n_bands} bands across {displayedResult.bandData.n_kpoints} k-points.</p>
+            {displayedResult.diagnostics.map((diagnostic) => <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>)}
           </div>
         ) : (
           <p>No result is available.</p>
         )}
         <LiveOutputPanel
           title="Output"
-          output={outputLines.join("\n")}
+          output={taskOutputText}
           placeholder="No output captured."
-          totalLineCount={outputLines.length}
-          visibleLineCount={outputLines.length}
+          totalLineCount={taskOutputLineCount}
+          visibleLineCount={taskOutputLines.length}
         />
         <div className="step-actions">
           <button className="secondary-button" type="button" onClick={() => void leaveWizard("back")}>Return to Project</button>
-          <button className="primary-button" type="button" disabled={!result} onClick={() => void leaveWizard("view")}>
+          <button className="primary-button" type="button" disabled={!displayedResult} onClick={() => void leaveWizard("view")}>
             View Bands
           </button>
         </div>

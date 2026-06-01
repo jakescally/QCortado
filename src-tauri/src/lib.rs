@@ -4339,6 +4339,30 @@ async fn wien2k_run_scf_session(
     resources: Option<hpc::profile::SlurmResourceRequest>,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kScfExecutionResult, String> {
+    let event_name = format!("wien2k-scf-output:{}", session_id);
+    wien2k_run_scf_session_impl(
+        app,
+        session_id,
+        settings,
+        continuation,
+        parent_calculation_id,
+        resources,
+        &state,
+        event_name,
+    )
+    .await
+}
+
+async fn wien2k_run_scf_session_impl(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kScfRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kScfExecutionResult, String> {
     engines::wien2k::validate_run_settings(&settings)?;
     let session = state
         .wien2k_scf_sessions
@@ -4384,7 +4408,6 @@ async fn wien2k_run_scf_session(
         argv.insert(0, "-p".to_string());
     }
     let command = build_wien2k_scf_command(&session, &profile, plan.program, &argv, &resources)?;
-    let event_name = format!("wien2k-scf-output:{}", session_id);
     let timeout_secs = resources
         .walltime
         .as_deref()
@@ -5066,6 +5089,18 @@ async fn wien2k_run_bands_session(
     resources: Option<hpc::profile::SlurmResourceRequest>,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kBandsExecutionResult, String> {
+    let event_name = format!("wien2k-bands-output:{}", session_id);
+    wien2k_run_bands_session_impl(app, session_id, settings, resources, &state, event_name).await
+}
+
+async fn wien2k_run_bands_session_impl(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsRunSettings,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kBandsExecutionResult, String> {
     let session = state
         .wien2k_bands_sessions
         .lock()
@@ -5097,7 +5132,6 @@ async fn wien2k_run_bands_session(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let event_name = format!("wien2k-bands-output:{}", session_id);
     let timeout_secs = resources
         .walltime
         .as_deref()
@@ -11244,6 +11278,176 @@ fn build_epw_input_preview(config: EpwCalculationConfig) -> Result<EpwInputPrevi
 // Background Task Commands (Process Manager)
 // ============================================================================
 
+/// Starts a WIEN2k SCF session run as a background task. Initialization stays a
+/// wizard utility operation; only the heavy SCF cycle is registered here.
+#[tauri::command]
+async fn start_wien2k_scf_calculation(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kScfRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm.register("wien2k_scf".to_string(), label).await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_run_scf_session_impl(
+                app_handle.clone(),
+                session_id,
+                settings,
+                continuation,
+                parent_calculation_id,
+                resources,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(wien2k_result) => {
+                for line in wien2k_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let saved_line = format!(
+                    "[saved calculation {}: {:?}]",
+                    wien2k_result.calculation_id, wien2k_result.summary.convergence
+                );
+                pm.append_output(&tid, saved_line.clone()).await;
+                let _ = app_handle.emit(&format!("task-output:{}", tid), &saved_line);
+                let json = serde_json::to_value(&wien2k_result).unwrap_or(serde_json::Value::Null);
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+/// Starts a WIEN2k bands session run as a background task. File preparation
+/// stays a wizard utility operation; only lapw1/spaghetti execution is tracked.
+#[tauri::command]
+async fn start_wien2k_bands_calculation(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsRunSettings,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm.register("wien2k_bands".to_string(), label).await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_run_bands_session_impl(
+                app_handle.clone(),
+                session_id,
+                settings,
+                resources,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(wien2k_result) => {
+                for line in wien2k_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let saved_line = format!(
+                    "[saved bands calculation {}: {} bands, {} k-points]",
+                    wien2k_result.calculation_id,
+                    wien2k_result.band_data.n_bands,
+                    wien2k_result.band_data.n_kpoints
+                );
+                pm.append_output(&tid, saved_line.clone()).await;
+                let _ = app_handle.emit(&format!("task-output:{}", tid), &saved_line);
+                let json = serde_json::to_value(&wien2k_result).unwrap_or(serde_json::Value::Null);
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
 /// Starts an SCF calculation as a background task. Returns the task_id immediately.
 #[tauri::command]
 async fn start_scf_calculation(
@@ -16938,6 +17142,8 @@ pub fn run() {
         wien2k_prepare_bands_session,
         wien2k_run_bands_session,
         wien2k_discard_bands_session,
+        start_wien2k_scf_calculation,
+        start_wien2k_bands_calculation,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -17010,6 +17216,8 @@ pub fn run() {
         wien2k_prepare_bands_session,
         wien2k_run_bands_session,
         wien2k_discard_bands_session,
+        start_wien2k_scf_calculation,
+        start_wien2k_bands_calculation,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,

@@ -1661,6 +1661,8 @@ function AppInner() {
     const kindMap: Record<string, CalculationKind> = {
       scf: "scf",
       bands: "bands",
+      wien2k_scf: "scf",
+      wien2k_bands: "bands",
       dos: "dos",
       wannier: "wannier",
       transport: "transport",
@@ -1672,6 +1674,8 @@ function AppInner() {
     const fallbackViewMap: Record<string, EngineWorkflowView> = {
       scf: "scf-wizard",
       bands: "bands-wizard",
+      wien2k_scf: "wien2k-scf-wizard",
+      wien2k_bands: "bands-wizard",
       dos: "dos-wizard",
       wannier: "wannier-wizard",
       transport: "transport-wizard",
@@ -1683,7 +1687,7 @@ function AppInner() {
     const kind = kindMap[taskType];
     const fallbackView = fallbackViewMap[taskType];
     if (kind && fallbackView) {
-      openEngineWorkflow("qe", kind, fallbackView);
+      openEngineWorkflow(taskType.startsWith("wien2k_") ? "wien2k" : "qe", kind, fallbackView);
     }
   }
 
@@ -1726,7 +1730,9 @@ function AppInner() {
   }
 
   function handleWorkflowBack(view: EngineWorkflowView, destination: EngineWorkflowBackDestination) {
-    clearWorkflowContext(view);
+    if (activeWorkflowRoute?.engineId !== "wien2k") {
+      clearWorkflowContext(view);
+    }
     setReconnectTaskId(null);
     setActiveWorkflowRoute(null);
     setCurrentView(destination);

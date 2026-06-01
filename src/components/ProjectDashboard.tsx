@@ -574,10 +574,31 @@ function isWannierReadyScf(calc: CalculationRun): boolean {
   return !vdw || vdw === "none";
 }
 
+function getWien2kScfParameters(calc: CalculationRun): Record<string, any> {
+  if (calc.engine_id !== "wien2k" || calc.calc_type !== "scf") {
+    return {};
+  }
+  return {
+    ...(calc.parameters?.initialization ?? {}),
+    ...(calc.parameters?.run ?? {}),
+    ...calc.parameters,
+  };
+}
+
+function formatWien2kMeshTag(mesh: unknown): string | null {
+  if (!Array.isArray(mesh) || mesh.length !== 3) return null;
+  const [k1, k2, k3] = mesh.map((value) => Number(value));
+  if (![k1, k2, k3].every((value) => Number.isInteger(value) && value > 0)) {
+    return null;
+  }
+  return `${k1}×${k2}×${k3}`;
+}
+
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
+  const wien2kParams = getWien2kScfParameters(calc);
   const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
   const wannierReady = isWannierReadyScf(calc);
   let hasGeometryTag = false;
@@ -649,6 +670,26 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
 
   if (params.vdw_corr && params.vdw_corr !== "none") {
     pushTag("vdW", "feature");
+  }
+
+  if (calc.engine_id === "wien2k" && calc.calc_type === "scf") {
+    const meshTag = formatWien2kMeshTag(wien2kParams.k_mesh ?? wien2kParams.kMesh);
+    if (meshTag) {
+      pushTag(meshTag, "info");
+    }
+    const rkmax = Number(wien2kParams.rkmax ?? wien2kParams.rkMax);
+    if (Number.isFinite(rkmax) && rkmax > 0) {
+      const rkmaxLabel = rkmax >= 10 || Number.isInteger(rkmax) ? rkmax.toFixed(0) : rkmax.toFixed(1);
+      pushTag(`RKMax ${rkmaxLabel}`, "info");
+    }
+    const spinMode = String(
+      wien2kParams.spin_mode
+      ?? wien2kParams.spinMode
+      ?? "",
+    ).trim().toLowerCase();
+    if (spinMode === "spin_polarized") {
+      pushTag("Spin-polarized", "feature");
+    }
   }
 
   if (isHpcCalculation(calc)) {
@@ -2894,6 +2935,7 @@ export function ProjectDashboard({
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
+    if (activeEngineId === "wien2k" && !hasCompletedWien2kScf()) return;
     // Pass all calculations for this CIF - the wizard will filter for SCF
     onRunBands(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
@@ -3399,6 +3441,19 @@ export function ProjectDashboard({
       }
       return Boolean(calc.result?.converged);
     });
+  }
+
+  function hasCompletedWien2kScf(): boolean {
+    const variant = project?.cif_variants.find((v) => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(
+      (calc) =>
+        calc.engine_id === "wien2k"
+        && calc.calc_type === "scf"
+        && calc.scf_summary?.convergence === "converged"
+        && typeof calc.parameters?.remote_case_dir === "string"
+        && calc.parameters.remote_case_dir.trim().length > 0,
+    );
   }
 
   function hasWannierReadyScf(): boolean {
@@ -4176,12 +4231,12 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                   <button
                     className="calc-action-btn"
                     onClick={handleRunBands}
-                    disabled={!hasConvergedSCF()}
+                    disabled={!hasCompletedWien2kScf()}
                   >
                     <span className="calc-action-icon">Band</span>
                     <span className="calc-action-label">WIEN2k Bands</span>
                     <span className="calc-action-hint">
-                      {hasConvergedSCF() ? "lapw1 + spaghetti" : "Requires converged SCF"}
+                      {hasCompletedWien2kScf() ? "lapw1 + spaghetti" : "Requires completed WIEN2k SCF"}
                     </span>
                   </button>
                 </>

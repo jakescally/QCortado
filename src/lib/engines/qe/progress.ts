@@ -380,6 +380,8 @@ function updateHpcProgress(line: string, state: ProgressState): ProgressState | 
 type ProgressKind =
   | "scf"
   | "bands"
+  | "wien2k_scf"
+  | "wien2k_bands"
   | "dos"
   | "fermi_surface"
   | "hubbard_lrt"
@@ -403,6 +405,25 @@ export function progressReducer(
       return updateScfProgress(line, state);
     case "bands":
       return updateBandsProgress(line, state);
+    case "wien2k_scf":
+      if (line.includes("[saved calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("run_lapw") || line.includes("runsp_lapw")) {
+        return { ...state, status: "running", percent: null, phase: "SCF cycle" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "SCF cycle" };
+    case "wien2k_bands":
+      if (line.includes("[saved bands calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("spaghetti")) {
+        return { ...state, status: "running", percent: null, phase: "spaghetti" };
+      }
+      if (line.includes("lapw1")) {
+        return { ...state, status: "running", percent: null, phase: "lapw1" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k bands" };
     case "dos":
       return updateDosProgress(line, state);
     case "fermi_surface":

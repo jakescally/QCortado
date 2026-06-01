@@ -9,7 +9,7 @@ import { HpcTaskMeta } from "./types";
 import type { BandDataset } from "./viewers/bands";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
+export type TaskType = "scf" | "bands" | "wien2k_scf" | "wien2k_bands" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -141,6 +141,8 @@ const TaskContext = createContext<TaskContextValue | null>(null);
 const COMMAND_MAP: Record<TaskType, string> = {
   scf: "start_scf_calculation",
   bands: "start_bands_calculation",
+  wien2k_scf: "start_wien2k_scf_calculation",
+  wien2k_bands: "start_wien2k_bands_calculation",
   dos: "start_dos_calculation",
   fermi_surface: "start_fermi_surface_calculation",
   hubbard_lrt: "start_hubbard_lrt_calculation",
@@ -172,10 +174,33 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "wien2k_scf" || taskType === "wien2k_bands" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
+}
+
+function updateTaskHpcMetaFromOutput(hpc: HpcTaskMeta, line: string): HpcTaskMeta {
+  let next = hpc;
+  const jobMatch = line.match(/Scheduled (?:utility )?job submitted:\s*(\S+)/);
+  if (jobMatch?.[1] && jobMatch[1] !== hpc.remote_job_id) {
+    next = { ...next, remote_job_id: jobMatch[1] };
+  }
+
+  const stateMatch = line.match(/\[QCortado\]\s+Scheduled (?:utility )?job state:\s*(\S+)/);
+  if (stateMatch?.[1] && stateMatch[1] !== next.scheduler_state) {
+    next = { ...next, scheduler_state: stateMatch[1] };
+  }
+
+  const nodeMatch = line.match(/^\[QCortado\]\s+Host:\s*(.+)$/);
+  if (nodeMatch?.[1]) {
+    const node = nodeMatch[1].trim();
+    if (node && node !== next.remote_node) {
+      next = { ...next, remote_node: node };
+    }
+  }
+
+  return next;
 }
 
 function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcTaskMeta {
@@ -338,6 +363,7 @@ function appendVisibleTaskOutput(task: TaskState, taskType: TaskType, line: stri
     output: visibleOutput.lines,
     outputText: visibleOutput.text,
     outputLineCount: task.outputLineCount + 1,
+    hpc: updateTaskHpcMetaFromOutput(task.hpc, line),
   };
 }
 
@@ -1483,7 +1509,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       label: string,
       saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
-      if (isHpcStartParams(params)) {
+      if (isHpcStartParams(params) || type === "wien2k_scf" || type === "wien2k_bands") {
         return startTaskInternal(type, params, label, saveSpec ?? null);
       }
       const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);

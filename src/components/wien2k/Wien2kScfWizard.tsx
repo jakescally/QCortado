@@ -7,7 +7,6 @@ import {
   discardWien2kScfSession,
   initializeWien2kScfSession,
   listWien2kStructureSources,
-  runWien2kScfSession,
   startWien2kScfSession,
   validateWien2kInitializationSettings,
   validateWien2kScfRunSettings,
@@ -22,6 +21,7 @@ import type {
 } from "../../lib/engines/wien2k";
 import { defaultCpuResources } from "../../lib/hpcConfig";
 import type { HpcProfile, SlurmResourceRequest } from "../../lib/types";
+import { useTaskContext } from "../../lib/TaskContext";
 import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
 import { ElapsedTimer } from "../ElapsedTimer";
 import { HpcRunSettings } from "../HpcRunSettings";
@@ -35,6 +35,7 @@ interface Wien2kScfWizardProps {
   cifId: string;
   calculations: Wien2kStructureSourceRecord[];
   activeHpcProfile?: HpcProfile | null;
+  reconnectTaskId?: string;
   onBack: () => void;
   onSaved: () => void;
 }
@@ -128,9 +129,11 @@ export function Wien2kScfWizard({
   cifId,
   calculations,
   activeHpcProfile = null,
+  reconnectTaskId,
   onBack,
   onSaved,
 }: Wien2kScfWizardProps) {
+  const taskContext = useTaskContext();
   const sources = useMemo(() => listWien2kStructureSources(calculations), [calculations]);
   const [sourceId, setSourceId] = useState(() => sources[0]?.id ?? "");
   const [initialization, setInitialization] = useState<Wien2kInitializationSettings>(
@@ -157,10 +160,15 @@ export function Wien2kScfWizard({
   const [calcStartTime, setCalcStartTime] = useState<string | null>(null);
   const [remoteJobId, setRemoteJobId] = useState<string | null>(null);
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
+  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const selectedSource = sources.find((source) => source.id === sourceId) ?? sources[0] ?? null;
   const initError = validateWien2kInitializationSettings(initialization);
-  const effectiveRunSettings = { ...runSettings, spinMode: initialization.spinMode };
+  const effectiveRunSettings = useMemo(
+    () => ({ ...runSettings, spinMode: initialization.spinMode }),
+    [runSettings, initialization.spinMode],
+  );
   const runError = validateWien2kScfRunSettings(effectiveRunSettings);
   const initialized = session?.phase === "initialized" || session?.phase === "scf_complete" || session?.phase === "failed";
   const currentStep: ScfWizardStep = !session
@@ -190,9 +198,49 @@ export function Wien2kScfWizard({
     [activeHpcProfile, effectiveRunSettings, hpcResources],
   );
 
-  useViewportScrollLock(scfRunStarted);
+  const taskResult = activeTask?.result as Wien2kScfExecutionResult | null | undefined;
+  const displayedResult = result ?? taskResult ?? null;
+  const taskOutputLines = activeTask ? activeTask.output : outputLines;
+  const taskOutputText = activeTask ? activeTask.outputText : outputLines.join("\n");
+  const taskOutputLineCount = activeTask ? activeTask.outputLineCount : outputLines.length;
+  const runIsActive = activeTask?.status === "running" || isRunning;
+  const runHasFailed = activeTask?.status === "failed" || activeTask?.status === "cancelled" || Boolean(error);
+  const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
+  const runRemoteNode = activeTask?.hpc.remote_node ?? remoteNode;
+
+  useViewportScrollLock(scfRunStarted && runIsActive);
 
   useEffect(() => () => outputUnlistenRef.current?.(), []);
+
+  useEffect(() => {
+    if (!reconnectTaskId) return;
+    setActiveTaskId(reconnectTaskId);
+    setScfRunStarted(true);
+    void taskContext.reconnectToTask(reconnectTaskId);
+  }, [reconnectTaskId, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTaskId || activeTask) return;
+    void taskContext.reconnectToTask(activeTaskId);
+  }, [activeTaskId, activeTask, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTask) return;
+    if (activeTask.status === "failed" || activeTask.status === "cancelled") {
+      setError(activeTask.error ?? (activeTask.status === "cancelled" ? "Cancelled by user" : "WIEN2k SCF failed."));
+      setIsRunning(false);
+      return;
+    }
+    if (activeTask.status !== "completed" || !taskResult) return;
+    setResult(taskResult);
+    setSession((current) => current ? {
+      ...current,
+      phase: taskResult.phase,
+      latestRun: effectiveRunSettings,
+      latestCalculationId: taskResult.calculationId,
+    } : current);
+    setIsRunning(false);
+  }, [activeTask, taskResult, effectiveRunSettings]);
 
   useEffect(() => {
     setHpcResources(cloneWien2kCpuResources(activeHpcProfile));
@@ -261,27 +309,20 @@ export function Wien2kScfWizard({
     setRemoteJobId(null);
     setRemoteNode(null);
     try {
-      const next = await runWien2kScfSession(
-        session.sessionId,
-        effectiveRunSettings,
-        continuation,
-        continuation ? result?.calculationId ?? null : null,
-        hpcResources,
+      const taskId = await taskContext.startTask(
+        "wien2k_scf",
+        {
+          sessionId: session.sessionId,
+          settings: effectiveRunSettings,
+          continuation,
+          parentCalculationId: continuation ? result?.calculationId ?? null : null,
+          resources: hpcResources,
+        },
+        `WIEN2k SCF - ${caseName}`,
       );
-      setResult(next);
-      setSession((current) => current ? {
-        ...current,
-        phase: next.phase,
-        latestRun: effectiveRunSettings,
-        latestCalculationId: next.calculationId,
-      } : current);
-      setOutputLines((current) => [
-        ...current,
-        `[saved calculation ${next.calculationId}: ${convergenceLabel(next.summary)}]`,
-      ].slice(-1500));
+      setActiveTaskId(taskId);
     } catch (reason) {
       setError(String(reason));
-    } finally {
       setIsRunning(false);
     }
   }
@@ -300,6 +341,7 @@ export function Wien2kScfWizard({
       setCalcStartTime(null);
       setRemoteJobId(null);
       setRemoteNode(null);
+      setActiveTaskId(null);
       setExpandedSections({
         source: true,
         radii: true,
@@ -315,7 +357,7 @@ export function Wien2kScfWizard({
   async function leaveWizard(destination: "back" | "saved") {
     setError(null);
     try {
-      if (session) {
+      if (session && !runIsActive) {
         await discardWien2kScfSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
@@ -351,29 +393,29 @@ export function Wien2kScfWizard({
   }
 
   function renderResultSummary() {
-    if (!result) return null;
+    if (!displayedResult) return null;
     return (
       <div className="wien2k-summary wien2k-scf-results">
-        <h3>SCF Result: {convergenceLabel(result.summary)}</h3>
+        <h3>SCF Result: {convergenceLabel(displayedResult.summary)}</h3>
         <p>
-          {result.summary.totalEnergy ? `E = ${result.summary.totalEnergy.value.toFixed(8)} ${result.summary.totalEnergy.unit}; ` : ""}
-          {result.summary.scfSteps != null ? `${result.summary.scfSteps} iterations` : "Iterations unavailable"}
+          {displayedResult.summary.totalEnergy ? `E = ${displayedResult.summary.totalEnergy.value.toFixed(8)} ${displayedResult.summary.totalEnergy.unit}; ` : ""}
+          {displayedResult.summary.scfSteps != null ? `${displayedResult.summary.scfSteps} iterations` : "Iterations unavailable"}
         </p>
-        {result.summary.fermiEnergyEv != null && <p>Fermi energy: {result.summary.fermiEnergyEv.toFixed(6)} eV</p>}
-        {result.summary.totalMagnetization != null && <p>Total magnetization: {result.summary.totalMagnetization.toFixed(6)}</p>}
-        {result.diagnostics.map((diagnostic) => <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>)}
+        {displayedResult.summary.fermiEnergyEv != null && <p>Fermi energy: {displayedResult.summary.fermiEnergyEv.toFixed(6)} eV</p>}
+        {displayedResult.summary.totalMagnetization != null && <p>Total magnetization: {displayedResult.summary.totalMagnetization.toFixed(6)}</p>}
+        {displayedResult.diagnostics.map((diagnostic) => <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>)}
       </div>
     );
   }
 
   function renderRunStep() {
     const progressStatus: "idle" | "running" | "error" | "complete" =
-      error ? "error" : result ? "complete" : isRunning ? "running" : "idle";
+      runHasFailed ? "error" : displayedResult ? "complete" : runIsActive ? "running" : "idle";
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard wizard-step-run">
         <div className="wizard-header">
-          <button className="back-btn" type="button" disabled={isRunning} onClick={() => void leaveWizard("back")}>
-            Back
+          <button className="back-btn" type="button" onClick={() => void leaveWizard("back")}>
+            ← Exit
           </button>
           <h2>WIEN2k SCF</h2>
           <div className="step-indicator">
@@ -391,9 +433,9 @@ export function Wien2kScfWizard({
         <div className="wizard-content">
           <div className="wizard-step run-step run-step-focused scf-run-step">
             <div className="run-step-headline">
-              <h3>{isRunning ? "Running WIEN2k SCF" : "WIEN2k SCF Output"}</h3>
-              <span className={`run-step-status-pill ${isRunning ? "running" : error ? "error" : "idle"}`}>
-                {isRunning ? "Live output" : error ? "Run failed" : "Output"}
+              <h3>{runIsActive ? "Running WIEN2k SCF" : "WIEN2k SCF Output"}</h3>
+              <span className={`run-step-status-pill ${runIsActive ? "running" : runHasFailed ? "error" : "idle"}`}>
+                {runIsActive ? "Live output" : runHasFailed ? "Run failed" : "Output"}
               </span>
             </div>
 
@@ -401,43 +443,43 @@ export function Wien2kScfWizard({
               <ProgressBar
                 status={progressStatus}
                 percent={null}
-                phase={isRunning ? "SCF cycle" : result ? convergenceLabel(result.summary) : "SCF output"}
-                detail={remoteJobId ? `Slurm job ${remoteJobId}` : "Waiting for remote allocation"}
+                phase={runIsActive ? "SCF cycle" : displayedResult ? convergenceLabel(displayedResult.summary) : "SCF output"}
+                detail={runRemoteJobId ? `Slurm job ${runRemoteJobId}` : "Waiting for remote allocation"}
                 compact
               />
               <div className="run-status-meta">
-                <ElapsedTimer startedAt={calcStartTime} isRunning={isRunning} />
+                <ElapsedTimer startedAt={activeTask?.startedAt ?? calcStartTime} isRunning={runIsActive} />
               </div>
             </div>
 
             <div className="run-layout run-layout-hpc-telemetry">
               <LiveOutputPanel
-                title={isRunning ? "Running..." : "Output"}
-                output={outputLines.join("\n")}
+                title={runIsActive ? "Running..." : "Output"}
+                output={taskOutputText}
                 placeholder="Starting WIEN2k SCF..."
-                totalLineCount={outputLines.length}
-                visibleLineCount={outputLines.length}
+                totalLineCount={taskOutputLineCount}
+                visibleLineCount={taskOutputLines.length}
               />
               <RemoteUtilizationPanel
-                enabled={isRunning}
+                enabled={runIsActive}
                 profileId={activeHpcProfile?.id ?? null}
-                remoteJobId={remoteJobId}
-                remoteNode={remoteNode}
+                remoteJobId={runRemoteJobId}
+                remoteNode={runRemoteNode}
                 resourceType="cpu"
               />
             </div>
             {renderResultSummary()}
             <div className="run-actions">
-              <button type="button" disabled={isRunning} onClick={() => setScfRunStarted(false)}>
-                Back to SCF Setup
+              <button type="button" disabled={runIsActive} onClick={() => setScfRunStarted(false)}>
+                Back
               </button>
-              {result?.summary.convergence === "not_converged" && (
-                <button type="button" className="primary-button" disabled={Boolean(runError) || isRunning} onClick={() => void submitScf(true)}>
-                  {isRunning ? "Continuing..." : "Continue SCF"}
+              {displayedResult?.summary.convergence === "not_converged" && (
+                <button type="button" className="primary-button" disabled={Boolean(runError) || runIsActive} onClick={() => void submitScf(true)}>
+                  {runIsActive ? "Continuing..." : "Continue SCF"}
                 </button>
               )}
-              {result && (
-                <button type="button" className="secondary-button" disabled={isRunning} onClick={() => void leaveWizard("saved")}>
+              {displayedResult && (
+                <button type="button" className="secondary-button" disabled={runIsActive} onClick={() => void leaveWizard("saved")}>
                   Return to Project
                 </button>
               )}
@@ -456,7 +498,7 @@ export function Wien2kScfWizard({
     <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
       <div className="wizard-header">
         <button className="back-btn" type="button" disabled={isInitializing || isRunning} onClick={() => void leaveWizard("back")}>
-          Back
+          ← Exit
         </button>
         <h2>WIEN2k SCF</h2>
         <div className="step-indicator">

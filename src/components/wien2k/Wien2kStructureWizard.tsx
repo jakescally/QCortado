@@ -226,6 +226,23 @@ export function Wien2kStructureWizard({
     }
   }
 
+  async function discardSessionAndGoBack() {
+    setError(null);
+    try {
+      if (session) {
+        await discardWien2kStructureSession(session.sessionId);
+      }
+      outputUnlistenRef.current?.();
+      outputUnlistenRef.current = null;
+      setSession(null);
+      setLastResult(null);
+      setOutputLines([]);
+      setDraftStale(false);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function saveSource() {
     if (!session || !lastResult?.saveAllowed) return;
     setIsSaving(true);
@@ -246,7 +263,7 @@ export function Wien2kStructureWizard({
     <div className="wizard-container wien2k-structure-wizard">
       <div className="wizard-header">
         <button className="back-btn" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
-          Back
+          ← Exit
         </button>
         <h2>WIEN2k Structure</h2>
         <div className="step-indicator">
@@ -446,8 +463,8 @@ export function Wien2kStructureWizard({
       </div>
       <div className="step-actions">
         {session && (
-          <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
-            Discard Session
+          <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndGoBack()}>
+            Back
           </button>
         )}
         {draft && !session && (
