@@ -113,6 +113,8 @@ pub struct AppState {
     pub wien2k_structure_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kStructureSession>>,
     /// WIEN2k SCF sessions retaining a remote native case for initialization and continuation.
     pub wien2k_scf_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kScfSession>>,
+    /// WIEN2k band sessions staged from a saved converged native SCF case.
+    pub wien2k_bands_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kBandsSession>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -146,6 +148,7 @@ impl Default for AppState {
             engine_installations: Mutex::new(Vec::new()),
             wien2k_structure_sessions: Mutex::new(HashMap::new()),
             wien2k_scf_sessions: Mutex::new(HashMap::new()),
+            wien2k_bands_sessions: Mutex::new(HashMap::new()),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
@@ -1467,6 +1470,27 @@ mod hpc_headless_recovery_tests {
         }
     }
 
+    fn wien2k_test_bands_session(remote_install_root: &str) -> engines::wien2k::Wien2kBandsSession {
+        engines::wien2k::Wien2kBandsSession {
+            session_id: "session".to_string(),
+            project_id: "project".to_string(),
+            cif_id: "cif".to_string(),
+            source_scf_calculation_id: "scf".to_string(),
+            case_name: "Si".to_string(),
+            remote_case_dir: "/scratch/qcortado/project/wien2k/bands/session/Si".to_string(),
+            source_remote_case_dir: "/scratch/qcortado/project/wien2k/scf/session/Si".to_string(),
+            remote_install_root: remote_install_root.to_string(),
+            hpc_profile_id: "test".to_string(),
+            spin_mode: engines::wien2k::Wien2kSpinMode::NonSpinPolarized,
+            fermi_energy_ev: Some(5.0),
+            phase: engines::wien2k::Wien2kBandsSessionPhase::Prepared,
+            latest_prepare: None,
+            artifacts: std::collections::BTreeMap::new(),
+            transcript: Vec::new(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn wien2k_module_installation_updates_profile_runtime_mode() {
         let mut profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
@@ -1627,6 +1651,115 @@ mod hpc_headless_recovery_tests {
         assert!(command.contains("rm -f .machines .processes"));
         assert!(!command.contains("granularity:1"));
         assert!(!command.contains("> .machines"));
+    }
+
+    #[test]
+    fn wien2k_bands_resources_convert_tasks_to_openmp_threads() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let requested = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            ntasks: Some(4),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let resources =
+            resolve_wien2k_bands_resources(&profile, Some(requested)).expect("resources");
+
+        assert_eq!(resources.nodes, Some(1));
+        assert_eq!(resources.ntasks, Some(1));
+        assert_eq!(resources.cpus_per_task, Some(8));
+    }
+
+    #[test]
+    fn wien2k_bands_command_uses_openmp_without_machines_or_parallel_switch() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Module);
+        let requested = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            ntasks: Some(3),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let resources =
+            resolve_wien2k_bands_resources(&profile, Some(requested)).expect("resources");
+        let argv = wien2k_bands_command_sequence(
+            &engines::wien2k::Wien2kBandsRunSettings {
+                spin_channel: engines::wien2k::Wien2kBandsSpinChannel::None,
+                run_lapw2_qtl: true,
+                run_irrep: true,
+                spin_orbit: false,
+                diagnostic_log: false,
+            },
+            false,
+        )
+        .into_iter()
+        .next()
+        .expect("lapw1 argv");
+        let command = build_wien2k_bands_command(
+            &wien2k_test_bands_session(""),
+            &profile,
+            &argv,
+            Some(&resources),
+            false,
+        )
+        .expect("bands command");
+
+        assert!(command.contains("export OMP_NUM_THREADS"));
+        assert!(command.contains("${SLURM_CPUS_PER_TASK:-6}"));
+        assert!(command.contains("rm -f .machines .processes"));
+        assert!(!command.contains("> .machines"));
+        assert!(!command.contains("granularity:1"));
+        assert!(!command.contains(" '-p'"));
+        assert!(!command.contains("[QCortado] --- tail:"));
+        assert!(command.contains("Native WIEN2k error marker detected"));
+    }
+
+    #[test]
+    fn wien2k_bands_diagnostic_logging_is_opt_in() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Module);
+        let resources = resolve_wien2k_bands_resources(&profile, None).expect("resources");
+        let argv = vec!["lapw1".to_string(), "-band".to_string(), "-up".to_string()];
+
+        let normal = build_wien2k_bands_command(
+            &wien2k_test_bands_session(""),
+            &profile,
+            &argv,
+            Some(&resources),
+            false,
+        )
+        .expect("normal command");
+        let diagnostic = build_wien2k_bands_command(
+            &wien2k_test_bands_session(""),
+            &profile,
+            &argv,
+            Some(&resources),
+            true,
+        )
+        .expect("diagnostic command");
+
+        assert!(normal.contains("[QCortado] Starting x lapw1 -band -up"));
+        assert!(!normal.contains("[QCortado] --- tail:"));
+        assert!(!normal.contains("; ;"));
+        assert!(!normal.contains("exit $status"));
+        assert!(normal.contains("[ $status -eq 0 ]"));
+        assert!(diagnostic.contains("[QCortado] --- tail:"));
+        assert!(diagnostic.contains("${case_name}.output1up"));
+    }
+
+    #[test]
+    fn wien2k_spin_mode_parsing_accepts_snake_case_saved_settings() {
+        let parameters = serde_json::json!({
+            "run": {
+                "spin_mode": "spin_polarized"
+            },
+            "initialization": {
+                "spinMode": "non_spin_polarized"
+            }
+        });
+
+        assert_eq!(
+            wien2k_spin_mode_from_parameters(&parameters),
+            engines::wien2k::Wien2kSpinMode::SpinPolarized
+        );
     }
 
     #[test]
@@ -4346,6 +4479,7 @@ async fn wien2k_run_scf_session(
             engine_id: engines::EngineId::Wien2k,
             calc_type: "scf".to_string(),
             parameters,
+            result: None,
             scf_summary: Some(summary.clone()),
             started_at: session.started_at.clone(),
             completed_at: now_iso(),
@@ -4400,6 +4534,750 @@ async fn wien2k_discard_scf_session(
         .remove(&session_id);
     if let Some(session) = session {
         if session.latest_calculation_id.is_none() {
+            if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
+                let remote_session_dir = session
+                    .remote_case_dir
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .unwrap_or(session.remote_case_dir.as_str());
+                let cleanup_command =
+                    format!("rm -rf -- {}", shell_single_quote_local(remote_session_dir));
+                let _ = hpc::ssh::run_ssh_command_with_timeout(
+                    &profile,
+                    secret.as_deref(),
+                    &cleanup_command,
+                    20,
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_wien2k_bands_command(
+    session: &engines::wien2k::Wien2kBandsSession,
+    profile: &hpc::profile::HpcProfile,
+    argv: &[String],
+    resources: Option<&hpc::profile::SlurmResourceRequest>,
+    diagnostic_log: bool,
+) -> Result<String, String> {
+    let mut commands = vec![format!(
+        "cd {}",
+        shell_single_quote_local(&session.remote_case_dir)
+    )];
+    let executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
+        if profile
+            .engine_module_load(engines::EngineId::Wien2k)
+            .is_none()
+        {
+            return Err("WIEN2k module load value is required in module mode.".to_string());
+        }
+        commands.extend(build_engine_module_setup_commands(
+            profile,
+            engines::EngineId::Wien2k,
+        ));
+        "x".to_string()
+    } else {
+        if session.remote_install_root.trim().is_empty() {
+            return Err("WIEN2k WIENROOT is required in path mode.".to_string());
+        }
+        commands.push(format!(
+            "export WIENROOT={}",
+            shell_single_quote_local(&session.remote_install_root)
+        ));
+        commands.push("export PATH=\"$WIENROOT:$PATH\"".to_string());
+        "\"$WIENROOT/x\"".to_string()
+    };
+    if let Some(resources) = resources {
+        commands.push(build_wien2k_bands_parallel_setup_command(resources));
+    }
+    commands.push(build_wien2k_bands_invocation(
+        &executable,
+        argv,
+        &session.case_name,
+        diagnostic_log,
+    ));
+    Ok(commands.join(" && "))
+}
+
+fn build_wien2k_bands_step_label(argv: &[String]) -> String {
+    if argv.is_empty() {
+        return "x".to_string();
+    }
+    format!("x {}", argv.join(" "))
+}
+
+fn build_wien2k_bands_invocation(
+    executable: &str,
+    argv: &[String],
+    case_name: &str,
+    diagnostic_log: bool,
+) -> String {
+    let invocation = build_wien2k_program_invocation(executable, argv);
+    let label = build_wien2k_bands_step_label(argv);
+    let step_log = if let Some(program) = argv.first() {
+        let safe_program = program
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        format!(".qcortado-{}.log", safe_program)
+    } else {
+        ".qcortado-x.log".to_string()
+    };
+    let quoted_step_log = shell_single_quote_local(&step_log);
+    let diagnostic_dump = if diagnostic_log {
+        format!(
+            "; {}",
+            build_wien2k_bands_log_dump_command(case_name, &label)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "echo {} && rm -f {step_log} && set +e; {invocation} 2>&1 | tee {step_log}; status=${{PIPESTATUS[0]}}; set -e; {}; echo \"[QCortado] {} finished with status $status\"{}; [ $status -eq 0 ]",
+        shell_single_quote_local(&format!("[QCortado] Starting {label}")),
+        build_wien2k_bands_failure_probe_command(&label, &step_log),
+        label,
+        diagnostic_dump,
+        step_log = quoted_step_log,
+    )
+}
+
+fn build_wien2k_bands_failure_probe_command(label: &str, step_log: &str) -> String {
+    let quoted_label = shell_single_quote_local(label);
+    let quoted_step_log = shell_single_quote_local(step_log);
+    format!(
+        "step_label={quoted_label}; step_log={quoted_step_log}; \
+         if [ -s \"$step_log\" ] && grep -Eq '(LAPW[0-9]?|IRREP|SPAGH)[[:space:]]*-[[:space:]]*Error|STOP[[:space:]]+ERROR|error:' \"$step_log\"; then \
+           echo \"[QCortado] Native WIEN2k error marker detected in $step_label output.\"; \
+           status=1; \
+         fi; \
+         for f in lapw1.error lapw2.error irrep.error spaghetti.error *.error; do \
+           if [ -s \"$f\" ]; then \
+             echo \"[QCortado] --- error: $f ---\"; \
+             cat \"$f\"; \
+             status=1; \
+           fi; \
+         done"
+    )
+}
+
+fn build_wien2k_bands_log_dump_command(case_name: &str, label: &str) -> String {
+    let quoted_case = shell_single_quote_local(case_name);
+    let quoted_label = shell_single_quote_local(label);
+    format!(
+        "case_name={quoted_case}; step_label={quoted_label}; \
+         for f in \
+           \"${{case_name}}.dayfile\" \
+           \"${{case_name}}.output1\" \"${{case_name}}.output1up\" \"${{case_name}}.output1dn\" \
+           \"${{case_name}}.output2\" \"${{case_name}}.output2up\" \"${{case_name}}.output2dn\" \
+           \"${{case_name}}.qtl\" \"${{case_name}}.qtlup\" \"${{case_name}}.qtldn\" \
+           \"${{case_name}}.irrep\" \"${{case_name}}.spaghetti\" \"${{case_name}}.spaghetti_ene\" \
+           \"${{case_name}}.bands.agr\" \
+           lapw1.error lapw2.error irrep.error spaghetti.error *.error; do \
+           if [ -s \"$f\" ]; then \
+             echo \"[QCortado] --- tail: $f ---\"; \
+             tail -n 220 \"$f\"; \
+           fi; \
+         done"
+    )
+}
+
+fn build_wien2k_bands_parallel_setup_command(
+    resources: &hpc::profile::SlurmResourceRequest,
+) -> String {
+    let cpus_per_task = resources.cpus_per_task.unwrap_or(1).max(1);
+    format!(
+        "rm -f .machines .processes && export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\" && echo \"[QCortado] WIEN2k band OpenMP threads: $OMP_NUM_THREADS\"",
+        cpus_per_task
+    )
+}
+
+fn resolve_wien2k_bands_resources(
+    profile: &hpc::profile::HpcProfile,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+) -> Result<hpc::profile::SlurmResourceRequest, String> {
+    let mut resolved = resources.unwrap_or_else(|| profile.default_cpu_resources.clone());
+    if resolved.resource_type != hpc::profile::ResourceType::Cpu {
+        return Err("WIEN2k bands currently supports CPU Slurm resources only.".to_string());
+    }
+    let openmp_threads = resolved
+        .ntasks
+        .unwrap_or(1)
+        .max(1)
+        .saturating_mul(resolved.cpus_per_task.unwrap_or(1).max(1));
+    resolved.resource_type = hpc::profile::ResourceType::Cpu;
+    resolved.nodes = Some(1);
+    resolved.ntasks = Some(1);
+    resolved.cpus_per_task = Some(openmp_threads.max(1));
+    resolved.gpus = Some(0);
+    Ok(resolved)
+}
+
+async fn collect_remote_wien2k_bands_artifacts(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kBandsSession,
+    suffixes: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut artifacts = std::collections::BTreeMap::new();
+    for suffix in suffixes {
+        let filename = format!("{}.{}", session.case_name, suffix);
+        let path = format!("{}/{}", session.remote_case_dir, filename);
+        if let Ok(contents) = read_remote_wien2k_text(profile, secret, &path).await {
+            if !contents.trim().is_empty() {
+                artifacts.insert(filename, contents);
+            }
+        }
+    }
+    artifacts
+}
+
+async fn upload_wien2k_text(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    contents: &str,
+    remote_path: &str,
+    label: &str,
+) -> Result<(), String> {
+    let temp_path = std::env::temp_dir().join(format!(
+        "qcortado_wien2k_{}_{}_{}.txt",
+        label,
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&temp_path, contents)
+        .map_err(|err| format!("Failed to write temporary WIEN2k {} file: {}", label, err))?;
+    let result = hpc::ssh::upload_file(profile, secret, &temp_path, remote_path).await;
+    let _ = std::fs::remove_file(&temp_path);
+    result
+}
+
+fn wien2k_bands_command_sequence(
+    settings: &engines::wien2k::Wien2kBandsRunSettings,
+    parallel: bool,
+) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut lapw1 = vec!["lapw1".to_string(), "-band".to_string()];
+    if let Some(spin) = settings.spin_channel.x_arg() {
+        lapw1.push(spin.to_string());
+    }
+    if settings.spin_orbit {
+        lapw1.push("-so".to_string());
+    }
+    if parallel {
+        lapw1.push("-p".to_string());
+    }
+    commands.push(lapw1);
+
+    if settings.run_lapw2_qtl {
+        let mut lapw2 = vec!["lapw2".to_string(), "-qtl".to_string(), "-band".to_string()];
+        if let Some(spin) = settings.spin_channel.x_arg() {
+            lapw2.push(spin.to_string());
+        }
+        if settings.spin_orbit {
+            lapw2.push("-so".to_string());
+        }
+        if parallel {
+            lapw2.push("-p".to_string());
+        }
+        commands.push(lapw2);
+    }
+
+    if settings.run_irrep {
+        let mut irrep = vec!["irrep".to_string(), "-band".to_string()];
+        if let Some(spin) = settings.spin_channel.x_arg() {
+            irrep.push(spin.to_string());
+        }
+        commands.push(irrep);
+    }
+
+    let mut spaghetti = vec!["spaghetti".to_string()];
+    if let Some(spin) = settings.spin_channel.x_arg() {
+        spaghetti.push(spin.to_string());
+    }
+    if settings.spin_orbit {
+        spaghetti.push("-so".to_string());
+    }
+    if parallel {
+        spaghetti.push("-p".to_string());
+    }
+    commands.push(spaghetti);
+    commands
+}
+
+fn find_wien2k_spaghetti_artifact<'a>(
+    case_name: &str,
+    artifacts: &'a std::collections::BTreeMap<String, String>,
+) -> Option<(&'a String, &'a String)> {
+    let candidates = [
+        format!("{}.bands.agr", case_name),
+        format!("{}.spaghetti_ene", case_name),
+        format!("{}.spaghetti", case_name),
+    ];
+    for candidate in candidates {
+        if let Some(contents) = artifacts.get_key_value(&candidate) {
+            return Some(contents);
+        }
+    }
+    artifacts
+        .iter()
+        .find(|(name, _)| name.ends_with(".agr") || name.contains("spaghetti_ene"))
+}
+
+fn parse_wien2k_spin_mode_value(
+    value: &serde_json::Value,
+) -> Option<engines::wien2k::Wien2kSpinMode> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn wien2k_spin_mode_from_parameters(
+    parameters: &serde_json::Value,
+) -> engines::wien2k::Wien2kSpinMode {
+    for section_name in ["run", "initialization"] {
+        if let Some(section) = parameters.get(section_name) {
+            for key in ["spinMode", "spin_mode"] {
+                if let Some(spin_mode) = section.get(key).and_then(parse_wien2k_spin_mode_value) {
+                    return spin_mode;
+                }
+            }
+        }
+    }
+    engines::wien2k::Wien2kSpinMode::NonSpinPolarized
+}
+
+#[tauri::command]
+async fn wien2k_start_bands_session(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    source_scf_calculation_id: String,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kBandsSession, String> {
+    let source = projects::get_project_calculation(
+        app.clone(),
+        project_id.clone(),
+        source_scf_calculation_id.clone(),
+    )?;
+    if source.engine_id != engines::EngineId::Wien2k || source.calc_type != "scf" {
+        return Err("Select a completed WIEN2k SCF calculation.".to_string());
+    }
+    if source
+        .scf_summary
+        .as_ref()
+        .map(|summary| summary.convergence)
+        != Some(engines::ScfConvergenceState::Converged)
+    {
+        return Err("The selected WIEN2k SCF is not converged.".to_string());
+    }
+    let case_name = source
+        .parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .and_then(engines::wien2k::normalize_case_name)
+        .ok_or_else(|| "The selected WIEN2k SCF has no valid case name.".to_string())?;
+    let source_remote_case_dir = source
+        .parameters
+        .get("remote_case_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "The selected WIEN2k SCF has no retained remote case directory.".to_string()
+        })?
+        .to_string();
+    let hpc_profile_id = source
+        .parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
+        return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
+    }
+    let root = expand_remote_structure_root(
+        &profile,
+        secret.as_deref(),
+        source
+            .parameters
+            .get("remote_project_path")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&profile.remote_project_root),
+    )
+    .await
+    .unwrap_or_else(|_| profile.remote_project_root.clone());
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let remote_session_dir = format!(
+        "{}/qcortado/{}/wien2k/bands/{}",
+        root.trim_end_matches('/'),
+        project_id,
+        session_id
+    );
+    let remote_case_dir = format!("{}/{}", remote_session_dir, case_name);
+    let copy_command = format!(
+        "mkdir -p {} && cp -a {}/. {}",
+        shell_single_quote_local(&remote_case_dir),
+        shell_single_quote_local(&source_remote_case_dir),
+        shell_single_quote_local(&remote_case_dir)
+    );
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &copy_command, 300).await?;
+    let fermi_energy_ev = source
+        .scf_summary
+        .as_ref()
+        .and_then(|summary| summary.fermi_energy_ev)
+        .or(source
+            .result
+            .as_ref()
+            .and_then(|result| result.fermi_energy));
+    let session = engines::wien2k::Wien2kBandsSession {
+        session_id: session_id.clone(),
+        project_id,
+        cif_id,
+        source_scf_calculation_id,
+        case_name,
+        remote_case_dir,
+        source_remote_case_dir,
+        remote_install_root: source
+            .parameters
+            .get("remote_wienroot")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        hpc_profile_id: profile.id.clone(),
+        spin_mode,
+        fermi_energy_ev,
+        phase: engines::wien2k::Wien2kBandsSessionPhase::Staged,
+        latest_prepare: None,
+        artifacts: std::collections::BTreeMap::new(),
+        transcript: vec!["Converged WIEN2k SCF case copied for bands.".to_string()],
+        started_at: now_iso(),
+    };
+    state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session.clone());
+    let _ = app.emit(
+        &format!("wien2k-bands-output:{}", session_id),
+        "Converged WIEN2k SCF case copied for bands.",
+    );
+    Ok(session)
+}
+
+#[tauri::command]
+async fn wien2k_prepare_bands_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsPrepareSettings,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kBandsPrepareResult, String> {
+    engines::wien2k::validate_prepare_settings(&settings)?;
+    let session = state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let klist = engines::wien2k::build_klist_band(&session.case_name, &settings.k_path);
+    let insp = engines::wien2k::build_insp(&session.case_name, &settings, session.fermi_energy_ev);
+    upload_wien2k_text(
+        &profile,
+        secret.as_deref(),
+        &klist,
+        &format!(
+            "{}/{}.klist_band",
+            session.remote_case_dir, session.case_name
+        ),
+        "klist_band",
+    )
+    .await?;
+    upload_wien2k_text(
+        &profile,
+        secret.as_deref(),
+        &insp,
+        &format!("{}/{}.insp", session.remote_case_dir, session.case_name),
+        "insp",
+    )
+    .await?;
+    let quoted_case = shell_single_quote_local(&session.case_name);
+    let cleanup_command = format!(
+        "cd {} && rm -f .qcortado-*.log *.error \
+         {case}.irrep {case}.qtl {case}.qtlup {case}.qtldn \
+         {case}.output1 {case}.output1up {case}.output1dn \
+         {case}.output2 {case}.output2up {case}.output2dn \
+         {case}.spaghetti {case}.spaghetti_ene {case}.bands.agr && \
+         echo '[QCortado] Prepared case.klist_band and case.insp'",
+        shell_single_quote_local(&session.remote_case_dir),
+        case = quoted_case,
+    );
+    let event_name = format!("wien2k-bands-output:{}", session_id);
+    let output = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&event_name),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-bandprep",
+        &[cleanup_command],
+        600,
+    )
+    .await?
+    .output;
+    let mut artifacts = session.artifacts.clone();
+    artifacts.extend(
+        collect_remote_wien2k_bands_artifacts(
+            &profile,
+            secret.as_deref(),
+            &session,
+            &["klist_band", "insp"],
+        )
+        .await,
+    );
+    let mut updated = session;
+    updated.phase = engines::wien2k::Wien2kBandsSessionPhase::Prepared;
+    updated.latest_prepare = Some(settings);
+    updated.artifacts = artifacts.clone();
+    updated
+        .transcript
+        .push(format!("Bands preparation\n{}", output));
+    state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kBandsPrepareResult {
+        session_id,
+        phase: engines::wien2k::Wien2kBandsSessionPhase::Prepared,
+        native_output: output,
+        artifacts,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_run_bands_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsRunSettings,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kBandsExecutionResult, String> {
+    let session = state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
+    if session.phase != engines::wien2k::Wien2kBandsSessionPhase::Prepared {
+        return Err("Prepare the WIEN2k band-path files before running bands.".to_string());
+    }
+    if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+        && settings.spin_channel == engines::wien2k::Wien2kBandsSpinChannel::None
+    {
+        return Err(
+            "Spin-polarized WIEN2k band runs require an up or down spin channel.".to_string(),
+        );
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let resources = resolve_wien2k_bands_resources(&profile, resources)?;
+    let commands = wien2k_bands_command_sequence(&settings, false)
+        .into_iter()
+        .map(|argv| {
+            build_wien2k_bands_command(
+                &session,
+                &profile,
+                &argv,
+                Some(&resources),
+                settings.diagnostic_log,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let event_name = format!("wien2k-bands-output:{}", session_id);
+    let timeout_secs = resources
+        .walltime
+        .as_deref()
+        .and_then(hpc::profile::walltime_seconds)
+        .map(|seconds| seconds.saturating_add(600))
+        .unwrap_or(86_400)
+        .max(3_600);
+    let operation = hpc::utility::run_scheduled_profile_operation(
+        Some(&app),
+        Some(&event_name),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-bands",
+        &commands,
+        resources,
+        timeout_secs,
+    )
+    .await;
+    let (native_output, command_failed) = match operation {
+        Ok(result) => (result.output, false),
+        Err(error) => (error, true),
+    };
+    let mut artifacts = session.artifacts.clone();
+    artifacts.extend(
+        collect_remote_wien2k_bands_artifacts(
+            &profile,
+            secret.as_deref(),
+            &session,
+            &[
+                "klist_band",
+                "insp",
+                "output1",
+                "output1up",
+                "output1dn",
+                "output2",
+                "output2up",
+                "output2dn",
+                "qtl",
+                "qtlup",
+                "qtldn",
+                "irrep",
+                "spaghetti",
+                "spaghetti_ene",
+                "bands.agr",
+                "dayfile",
+            ],
+        )
+        .await,
+    );
+    artifacts.insert("bands_execution.log".to_string(), native_output.clone());
+    let (source_name, source_text) = find_wien2k_spaghetti_artifact(&session.case_name, &artifacts)
+        .ok_or_else(|| {
+            "WIEN2k spaghetti did not produce a parseable band output artifact.".to_string()
+        })?;
+    let mut band_data =
+        engines::wien2k::parse_spaghetti_xy(source_text, session.fermi_energy_ev.unwrap_or(0.0))?;
+    if let Some(prepare) = &session.latest_prepare {
+        engines::wien2k::add_symmetry_markers(&mut band_data, &prepare.k_path);
+    }
+    let completed_at = now_iso();
+    let placeholder_dataset = engines::wien2k::band_dataset_json(
+        &band_data,
+        None,
+        &session.project_id,
+        &session.cif_id,
+        &session.source_scf_calculation_id,
+        &completed_at,
+    );
+    let mut diagnostics = Vec::new();
+    if command_failed {
+        diagnostics.push(
+            "WIEN2k bands command returned a non-zero status; parsed artifacts were still found."
+                .to_string(),
+        );
+    }
+    let parameters = serde_json::json!({
+        "case_name": session.case_name,
+        "source_scf_id": session.source_scf_calculation_id,
+        "source_scf_calculation_id": session.source_scf_calculation_id,
+        "prepare": session.latest_prepare,
+        "run": settings,
+        "hpc_profile_id": session.hpc_profile_id,
+        "remote_case_dir": session.remote_case_dir,
+        "execution_backend": "hpc",
+        "native_artifacts_retained_remote": true,
+        "parsed_band_artifact": source_name,
+        "total_k_points": band_data.n_kpoints,
+        "n_bands": band_data.n_bands,
+    });
+    let result = engines::qe::QEResult {
+        converged: !command_failed,
+        total_energy: None,
+        fermi_energy: session.fermi_energy_ev,
+        total_magnetization: None,
+        atomic_magnetic_moments: None,
+        forces: None,
+        stress: None,
+        n_scf_steps: None,
+        wall_time_seconds: None,
+        eigenvalues: None,
+        raw_output: native_output.clone(),
+        band_data: Some(serde_json::to_value(&band_data).map_err(|err| err.to_string())?),
+        band_dataset: Some(placeholder_dataset.clone()),
+        dos_data: None,
+        phonon_data: None,
+        wannier_data: None,
+        transport_data: None,
+        epw_data: None,
+        hubbard_lrt_data: None,
+    };
+    let saved = projects::save_engine_calculation_artifact(
+        &app,
+        &session.project_id,
+        &session.cif_id,
+        projects::SaveEngineCalculationArtifactData {
+            engine_id: engines::EngineId::Wien2k,
+            calc_type: "bands".to_string(),
+            parameters,
+            result: Some(result),
+            scf_summary: None,
+            started_at: session.started_at.clone(),
+            completed_at: completed_at.clone(),
+            tags: vec!["wien2k-native".to_string()],
+            artifacts: artifacts
+                .iter()
+                .map(|(filename, contents)| projects::EngineSetupTextArtifact {
+                    filename: filename.clone(),
+                    contents: contents.clone(),
+                })
+                .collect(),
+        },
+    )?;
+    let band_dataset = engines::wien2k::band_dataset_json(
+        &band_data,
+        Some(&saved.id),
+        &session.project_id,
+        &session.cif_id,
+        &session.source_scf_calculation_id,
+        &completed_at,
+    );
+    let phase = if command_failed {
+        engines::wien2k::Wien2kBandsSessionPhase::Failed
+    } else {
+        engines::wien2k::Wien2kBandsSessionPhase::BandsComplete
+    };
+    let mut updated = session;
+    updated.phase = phase;
+    updated.artifacts = artifacts;
+    updated
+        .transcript
+        .push(format!("Bands run\n{}", native_output));
+    state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kBandsExecutionResult {
+        session_id,
+        phase,
+        native_output,
+        diagnostics,
+        band_data,
+        band_dataset,
+        calculation_id: saved.id,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_discard_bands_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .remove(&session_id);
+    if let Some(session) = session {
+        if session.phase != engines::wien2k::Wien2kBandsSessionPhase::BandsComplete {
             if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
                 let remote_session_dir = session
                     .remote_case_dir
@@ -15973,6 +16851,7 @@ pub fn run() {
                 engine_installations: Mutex::new(engine_installations),
                 wien2k_structure_sessions: Mutex::new(HashMap::new()),
                 wien2k_scf_sessions: Mutex::new(HashMap::new()),
+                wien2k_bands_sessions: Mutex::new(HashMap::new()),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
@@ -16055,6 +16934,10 @@ pub fn run() {
         wien2k_initialize_scf_session,
         wien2k_run_scf_session,
         wien2k_discard_scf_session,
+        wien2k_start_bands_session,
+        wien2k_prepare_bands_session,
+        wien2k_run_bands_session,
+        wien2k_discard_bands_session,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -16123,6 +17006,10 @@ pub fn run() {
         wien2k_initialize_scf_session,
         wien2k_run_scf_session,
         wien2k_discard_scf_session,
+        wien2k_start_bands_session,
+        wien2k_prepare_bands_session,
+        wien2k_run_bands_session,
+        wien2k_discard_bands_session,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,

@@ -163,9 +163,9 @@ export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
     ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
     status: "configured",
-    calculationKinds: ["engine_setup", "scf"],
+    calculationKinds: ["engine_setup", "scf", "bands"],
   },
   workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
-    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf",
+    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "bands",
   ),
 };

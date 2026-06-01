@@ -3392,7 +3392,13 @@ export function ProjectDashboard({
   function hasConvergedSCF(): boolean {
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return false;
-    return variant.calculations.some(c => c.calc_type === "scf" && c.result?.converged);
+    return variant.calculations.some((calc) => {
+      if (calc.calc_type !== "scf") return false;
+      if (calc.engine_id === "wien2k") {
+        return calc.scf_summary?.convergence === "converged";
+      }
+      return Boolean(calc.result?.converged);
+    });
   }
 
   function hasWannierReadyScf(): boolean {
@@ -4165,6 +4171,17 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                     <span className="calc-action-label">WIEN2k SCF</span>
                     <span className="calc-action-hint">
                       {wien2kStructureCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                    </span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={handleRunBands}
+                    disabled={!hasConvergedSCF()}
+                  >
+                    <span className="calc-action-icon">Band</span>
+                    <span className="calc-action-label">WIEN2k Bands</span>
+                    <span className="calc-action-hint">
+                      {hasConvergedSCF() ? "lapw1 + spaghetti" : "Requires converged SCF"}
                     </span>
                   </button>
                 </>

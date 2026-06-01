@@ -30,6 +30,7 @@ import type { EngineWorkflowView } from "../../lib/engines/plugin";
 import type { EpwViewerPayload } from "../qe";
 import { Wien2kStructureWizard } from "../wien2k/Wien2kStructureWizard";
 import { Wien2kScfWizard } from "../wien2k/Wien2kScfWizard";
+import { Wien2kBandsWizard } from "../wien2k/Wien2kBandsWizard";
 
 export interface ScfWorkflowContext {
   cifId: string;
@@ -145,6 +146,7 @@ export function canRenderEngineWorkflowHost({
   if (route.engineId === "wien2k") {
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
     if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
+    if (route.view === "bands-wizard") return Boolean(contexts.bands);
     return false;
   }
   if (route.engineId !== "qe") {
@@ -218,6 +220,21 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
       );
     }
     case "bands-wizard": {
+      if (route.engineId === "wien2k") {
+        const context = contexts.bands;
+        if (!context) return null;
+        return (
+          <Wien2kBandsWizard
+            projectId={context.projectId}
+            cifId={context.cifId}
+            crystalData={context.crystalData}
+            scfCalculations={context.scfCalculations}
+            activeHpcProfile={runtime.activeHpcProfile}
+            onBack={() => onBack(route.view, "project-dashboard")}
+            onViewBands={props.onViewBands}
+          />
+        );
+      }
       const context = contexts.bands;
       return (
         <BandStructureWizard

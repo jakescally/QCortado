@@ -167,6 +167,8 @@ pub struct SaveEngineCalculationArtifactData {
     pub calc_type: String,
     pub parameters: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<QEResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scf_summary: Option<NormalizedScfSummary>,
     pub started_at: String,
     pub completed_at: String,
@@ -4870,13 +4872,28 @@ pub fn save_engine_calculation_artifact(
         write_safe_engine_artifact(&calc_dir, artifact)?;
     }
 
+    let mut result = calc_data.result;
+    if let Some(result) = result.as_mut() {
+        if let Some(dataset) = result.band_dataset.as_mut() {
+            if let Some(provenance) = dataset
+                .get_mut("provenance")
+                .and_then(|value| value.as_object_mut())
+            {
+                provenance.insert(
+                    "calculationId".to_string(),
+                    serde_json::Value::String(calc_id.clone()),
+                );
+            }
+        }
+    }
+
     let calc_run = CalculationRun {
         id: calc_id,
         engine_id: calc_data.engine_id,
         name: None,
         calc_type: calc_data.calc_type,
         parameters: calc_data.parameters,
-        result: None,
+        result,
         scf_summary: calc_data.scf_summary,
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
