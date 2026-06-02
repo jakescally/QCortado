@@ -253,6 +253,8 @@ pub struct BandsMultiviewCalculation {
     pub cif_filename: String,
     pub cif_formula: String,
     pub calc_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -1414,6 +1416,62 @@ fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
         || result.hubbard_lrt_data.is_some()
 }
 
+fn wien2k_band_path_label_from_points(points: &serde_json::Value) -> Option<String> {
+    let points = points.as_array()?;
+    let labels = points
+        .iter()
+        .filter_map(|point| {
+            point
+                .get("label")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if labels.len() < 2 {
+        return None;
+    }
+    Some(labels.join(" → "))
+}
+
+fn repair_wien2k_band_path_parameters(calculation: &mut CalculationRun) -> bool {
+    if calculation.engine_id != EngineId::Wien2k
+        || normalize_summary_calc_type(&calculation.calc_type) != Some("bands")
+    {
+        return false;
+    }
+
+    let Some(parameters) = calculation.parameters.as_object_mut() else {
+        return false;
+    };
+
+    if parameters
+        .get("k_path")
+        .and_then(|value| value.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let repaired = parameters
+        .get("prepare")
+        .and_then(|value| value.get("k_path"))
+        .and_then(wien2k_band_path_label_from_points);
+    let repaired = repaired.or_else(|| {
+        parameters
+            .get("k_path_points")
+            .and_then(wien2k_band_path_label_from_points)
+    });
+
+    if let Some(k_path) = repaired {
+        parameters.insert("k_path".to_string(), serde_json::Value::String(k_path));
+        return true;
+    }
+
+    false
+}
+
 fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
     QEResult {
         converged: result.converged,
@@ -1575,7 +1633,17 @@ fn is_calculation_input_file(path: &Path) -> bool {
         return true;
     }
     if [
-        ".in0", ".in1", ".in1c", ".in2", ".in2c", ".inc", ".inm", ".inst", ".klist",
+        ".in0",
+        ".in1",
+        ".in1c",
+        ".in2",
+        ".in2c",
+        ".inc",
+        ".inm",
+        ".inst",
+        ".klist",
+        ".klist_band",
+        ".insp",
     ]
     .iter()
     .any(|suffix| file_name.ends_with(suffix))
@@ -3975,7 +4043,17 @@ pub async fn list_multiview_band_calculations(
                 .iter()
                 .flat_map(|variant| variant.calculations.iter())
                 .any(calculation_has_embedded_project_detail);
-            if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail
+            let mut repaired_wien2k_bands_entries = false;
+            for variant in &mut project.cif_variants {
+                for summary_calc in &mut variant.calculations {
+                    if repair_wien2k_band_path_parameters(summary_calc) {
+                        repaired_wien2k_bands_entries = true;
+                    }
+                }
+            }
+            if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
+                || has_embedded_detail
+                || repaired_wien2k_bands_entries
             {
                 write_project_json_summary(&project_json, &project)?;
             }
@@ -4028,6 +4106,7 @@ pub async fn list_multiview_band_calculations(
                         cif_filename: variant.filename.clone(),
                         cif_formula: variant.formula.clone(),
                         calc_id: full_calc.id.clone(),
+                        name: full_calc.name.clone(),
                         parameters: full_calc.parameters.clone(),
                         tags: full_calc.tags.clone(),
                         started_at: full_calc.started_at.clone(),
@@ -4135,8 +4214,12 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let project_json = project_dir.join("project.json");
     let mut project = read_project_json(&project_json)?;
     let mut repaired_phonon_entries = false;
+    let mut repaired_wien2k_bands_entries = false;
     for variant in &mut project.cif_variants {
         for summary_calc in &mut variant.calculations {
+            if repair_wien2k_band_path_parameters(summary_calc) {
+                repaired_wien2k_bands_entries = true;
+            }
             if normalize_summary_calc_type(&summary_calc.calc_type) != Some("phonon") {
                 continue;
             }
@@ -4183,6 +4266,7 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
         || has_embedded_detail
         || repaired_phonon_entries
+        || repaired_wien2k_bands_entries
     {
         write_project_json_summary(&project_json, &project)?;
     }
@@ -6633,7 +6717,8 @@ mod tests {
         calculation_can_lighten, is_calculation_input_file, is_calculation_log_file,
         is_wavefunction_archive_file, looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
         path_contains_wavefunction_archives, remove_wavefunction_archives,
-        repair_phonon_calculation_with_workdir, summarize_qe_result_for_project, CalculationRun,
+        repair_phonon_calculation_with_workdir, repair_wien2k_band_path_parameters,
+        summarize_qe_result_for_project, CalculationRun,
     };
     use crate::engines::qe::QEResult;
     use crate::engines::EngineId;
@@ -6696,6 +6781,10 @@ mod tests {
         assert!(is_calculation_input_file(std::path::Path::new("Si.struct")));
         assert!(is_calculation_input_file(std::path::Path::new("Si.in0")));
         assert!(is_calculation_input_file(std::path::Path::new("Si.klist")));
+        assert!(is_calculation_input_file(std::path::Path::new(
+            "Si.klist_band"
+        )));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.insp")));
         assert!(is_calculation_log_file(std::path::Path::new("Si.outputnn")));
         assert!(is_calculation_log_file(std::path::Path::new(
             "Si.outputsgroup"
@@ -6913,6 +7002,42 @@ mod tests {
         assert_eq!(markers[2].get("label"), Some(&serde_json::json!("Q3")));
 
         let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn repair_wien2k_band_parameters_backfills_k_path_string() {
+        let mut calculation = CalculationRun {
+            id: "test_band_calc".to_string(),
+            engine_id: EngineId::Wien2k,
+            name: None,
+            calc_type: "bands".to_string(),
+            parameters: serde_json::json!({
+                "case_name": "Si",
+                "prepare": {
+                    "k_path": [
+                        { "label": "Γ", "coords": [0.0, 0.0, 0.0], "npoints": 20 },
+                        { "label": "X", "coords": [0.5, 0.0, 0.0], "npoints": 0 },
+                        { "label": "L", "coords": [0.5, 0.5, 0.5], "npoints": 0 }
+                    ]
+                }
+            }),
+            result: None,
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:05:00Z".to_string()),
+            tags: Vec::new(),
+            storage_bytes: None,
+        };
+
+        let changed = repair_wien2k_band_path_parameters(&mut calculation);
+        assert!(
+            changed,
+            "expected WIEN2k band metadata repair to add k_path"
+        );
+        assert_eq!(
+            calculation.parameters.get("k_path"),
+            Some(&serde_json::json!("Γ → X → L"))
+        );
     }
 
     #[test]

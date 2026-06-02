@@ -23,6 +23,7 @@ const testEntries = [
   "tests/magnetism/magnetism.test.ts",
   "tests/pseudopotentialCutoffs/ssspPresetCutoffs.test.ts",
   "tests/tooltip/tooltipTiming.test.ts",
+  "tests/tooltip/infoTooltipAccessibility.test.ts",
 ];
 
 const tempDir = mkdtempSync(join(tmpdir(), "qcortado-unit-tests-"));

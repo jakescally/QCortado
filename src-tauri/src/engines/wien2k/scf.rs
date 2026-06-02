@@ -11,7 +11,11 @@ use crate::engines::types::{
     NormalizedScfSummary, ScfConvergenceState,
 };
 
-use super::{Wien2kInitializationSettings, Wien2kScfRunSettings, Wien2kSpinMode};
+use super::structure::Wien2kStructureSite;
+use super::{
+    Wien2kDftUDoubleCounting, Wien2kFermiMethod, Wien2kInitializationSettings, Wien2kMixerTrust,
+    Wien2kScfRunSettings, Wien2kSpinMode,
+};
 
 const RY_TO_EV: f64 = 13.605_693_122_994;
 const SUPPORTED_INITIALIZATION_VXC: [u16; 4] = [5, 11, 13, 19];
@@ -32,6 +36,8 @@ pub struct Wien2kScfSession {
     pub project_id: String,
     pub cif_id: String,
     pub source_structure_calculation_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_structure_sites: Vec<Wien2kStructureSite>,
     pub case_name: String,
     pub remote_case_dir: String,
     pub remote_install_root: String,
@@ -96,6 +102,21 @@ pub fn validate_initialization_settings(
     if !settings.lstart_energy_cutoff_ry.is_finite() {
         return Err("The LSTART energy cutoff must be finite.".to_string());
     }
+    if settings.fermi_method != Wien2kFermiMethod::Tetra
+        && settings
+            .fermi_smearing_ry
+            .is_none_or(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err("Fermi smearing must be positive when TEMP or TEMPS is selected.".to_string());
+    }
+    for entry in &settings.starting_magnetization {
+        if entry.site_index == 0 {
+            return Err("Starting magnetization site indices must be positive.".to_string());
+        }
+        if !entry.moment_bohr_magneton.is_finite() || entry.moment_bohr_magneton < 0.0 {
+            return Err("Starting magnetization moments must be non-negative.".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -115,7 +136,129 @@ pub fn validate_run_settings(settings: &Wien2kScfRunSettings) -> Result<(), Stri
     {
         return Err("Force convergence must be positive when set.".to_string());
     }
+    if settings.dft_u.enabled {
+        if settings.spin_mode != Wien2kSpinMode::SpinPolarized {
+            return Err("WIEN2k DFT+U requires spin-polarized SCF.".to_string());
+        }
+        if settings.dft_u.targets.is_empty() {
+            return Err("Enable at least one DFT+U target.".to_string());
+        }
+        for target in &settings.dft_u.targets {
+            if target.site_index == 0 {
+                return Err("DFT+U site indices must be positive.".to_string());
+            }
+            if target.orbital_l > 3 {
+                return Err("DFT+U orbital l must be 0, 1, 2, or 3.".to_string());
+            }
+            if !is_valid_manifold(&target.manifold) {
+                return Err("DFT+U manifolds must look like 3d, 4f, etc.".to_string());
+            }
+            if !target.u_ev.is_finite() || target.u_ev <= 0.0 {
+                return Err("DFT+U U values must be positive eV values.".to_string());
+            }
+            if !target.j_ev.is_finite() || target.j_ev < 0.0 {
+                return Err("DFT+U J values must be non-negative eV values.".to_string());
+            }
+        }
+    }
+    if !settings.mixer.greed.is_finite()
+        || settings.mixer.greed <= 0.0
+        || settings.mixer.greed > 1.0
+    {
+        return Err("Mixer greed must be in the range (0, 1].".to_string());
+    }
+    if settings.mixer.history == 0 {
+        return Err("Mixer history must be positive.".to_string());
+    }
     Ok(())
+}
+
+pub fn build_dft_u_input_files(
+    settings: &Wien2kScfRunSettings,
+) -> Option<BTreeMap<String, String>> {
+    if !settings.dft_u.enabled || settings.dft_u.targets.is_empty() {
+        return None;
+    }
+
+    let mut files = BTreeMap::new();
+    files.insert("inorb".to_string(), build_case_inorb(settings));
+    files.insert("indm".to_string(), build_case_indm(settings));
+    Some(files)
+}
+
+pub fn build_case_inm(settings: &Wien2kScfRunSettings) -> String {
+    let trust = match settings.mixer.trust {
+        Wien2kMixerTrust::Default => "#",
+        Wien2kMixerTrust::STIFF => "STIFF",
+        Wien2kMixerTrust::STIFFER => "STIFFER",
+        Wien2kMixerTrust::FAST => "FAST",
+    };
+    format!(
+        "{} 0.d0 YES\n{:.8}\n1.0 1.0\n999 {}\n{}\n",
+        serde_plain_mixer_mode(settings),
+        settings.mixer.greed,
+        settings.mixer.history,
+        trust,
+    )
+}
+
+fn build_case_inorb(settings: &Wien2kScfRunSettings) -> String {
+    let targets = &settings.dft_u.targets;
+    let double_counting = match settings.dft_u.double_counting {
+        Wien2kDftUDoubleCounting::Amf => 0,
+        Wien2kDftUDoubleCounting::Sic => 1,
+        Wien2kDftUDoubleCounting::Hmf => 2,
+    };
+    let mut lines = vec![format!("1 {} 0", targets.len()), "PRATT,1.0".to_string()];
+    for target in targets {
+        lines.push(format!("{} 1 {}", target.site_index, target.orbital_l));
+    }
+    lines.push(double_counting.to_string());
+    for target in targets {
+        lines.push(format!(
+            "{:.8} {:.8}",
+            ev_to_ry(target.u_ev),
+            ev_to_ry(target.j_ev)
+        ));
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn build_case_indm(settings: &Wien2kScfRunSettings) -> String {
+    let targets = &settings.dft_u.targets;
+    let mut lines = vec!["-9.0".to_string(), targets.len().to_string()];
+    for target in targets {
+        lines.push(format!("{} 1 {}", target.site_index, target.orbital_l));
+    }
+    lines.push("0 0".to_string());
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn ev_to_ry(value: f64) -> f64 {
+    value / RY_TO_EV
+}
+
+fn is_valid_manifold(value: &str) -> bool {
+    let mut chars = value.chars().peekable();
+    let mut digits = 0;
+    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        digits += 1;
+        chars.next();
+    }
+    digits > 0 && matches!(chars.next(), Some('s' | 'p' | 'd' | 'f')) && chars.next().is_none()
+}
+
+fn serde_plain_mixer_mode(settings: &Wien2kScfRunSettings) -> &'static str {
+    match settings.mixer.mode {
+        super::types::Wien2kMixerMode::MSR1 => "MSR1",
+        super::types::Wien2kMixerMode::MSEC3 => "MSEC3",
+        super::types::Wien2kMixerMode::MSEC4 => "MSEC4",
+        super::types::Wien2kMixerMode::MSR2 => "MSR2",
+        super::types::Wien2kMixerMode::PRATT => "PRATT",
+        super::types::Wien2kMixerMode::PRAT0 => "PRAT0",
+    }
 }
 
 pub fn required_initialization_suffixes(spin_mode: Wien2kSpinMode) -> Vec<&'static str> {
@@ -330,6 +473,35 @@ mod tests {
         assert!(initialization_diagnostics(output)
             .iter()
             .any(|diagnostic| diagnostic.contains("reported an error")));
+    }
+
+    #[test]
+    fn dft_u_inputs_are_rendered_in_wien2k_native_units() {
+        let settings = Wien2kScfRunSettings {
+            spin_mode: Wien2kSpinMode::SpinPolarized,
+            dft_u: crate::engines::wien2k::Wien2kDftUSettings {
+                enabled: true,
+                double_counting: crate::engines::wien2k::Wien2kDftUDoubleCounting::Sic,
+                targets: vec![crate::engines::wien2k::Wien2kHubbardTarget {
+                    site_index: 1,
+                    element: "Ni".to_string(),
+                    manifold: "3d".to_string(),
+                    orbital_l: 2,
+                    u_ev: 6.0,
+                    j_ev: 0.0,
+                    recommended: true,
+                    reason: None,
+                }],
+            },
+            ..Wien2kScfRunSettings::default()
+        };
+
+        let files = build_dft_u_input_files(&settings).expect("DFT+U files");
+        assert!(validate_run_settings(&settings).is_ok());
+        assert!(files["inorb"].contains("1 1 0"));
+        assert!(files["inorb"].contains("1 1 2"));
+        assert!(files["inorb"].contains("0.440991"));
+        assert!(files["indm"].contains("1 1 2"));
     }
 
     #[test]

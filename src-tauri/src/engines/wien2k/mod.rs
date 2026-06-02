@@ -9,6 +9,7 @@ use super::types::EngineId;
 pub mod bands;
 pub mod case_state;
 pub mod commands;
+pub mod fermi_surface;
 pub mod plugin;
 pub mod scf;
 pub mod structure;
@@ -22,6 +23,7 @@ pub use case_state::{
     Wien2kCaseState,
 };
 pub use commands::{build_init_lapw_plan, build_scf_run_plan};
+pub use fermi_surface::*;
 pub use plugin::{Wien2kReservedEnginePlugin, WIEN2K_RESERVED_ENGINE_PLUGIN};
 pub use scf::*;
 pub use structure::*;

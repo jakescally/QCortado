@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { BandData } from "../BandPlot";
 import { BrillouinZoneViewer, type KPathPoint } from "../BrillouinZoneViewer";
@@ -17,6 +17,14 @@ import {
   type Wien2kBandsSession,
   type Wien2kBandsSpinChannel,
 } from "../../lib/engines/wien2k";
+import {
+  applyWien2kBandsTotalKPoints,
+  getWien2kBandProjectionOptions,
+  getWien2kBandProjectionOptionsFromSites,
+  transformWien2kKPathForKlistBand,
+  type Wien2kBandProjectionOption,
+  type Wien2kBandProjectionSite,
+} from "../../lib/wien2kBandsWizard";
 import { defaultCpuResources } from "../../lib/hpcConfig";
 import type { CrystalData, HpcProfile, SlurmResourceRequest } from "../../lib/types";
 import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
@@ -63,7 +71,7 @@ interface Wien2kBandsWizardProps {
 }
 
 type BandsWizardStep = "source" | "kpath" | "prepare" | "run" | "results";
-type SectionKey = "source" | "files" | "spaghetti" | "logging" | "hpc";
+type SectionKey = "source" | "files" | "projections" | "spaghetti" | "logging" | "hpc";
 
 const STEPS: Array<{ id: BandsWizardStep; label: string }> = [
   { id: "source", label: "Source" },
@@ -72,6 +80,8 @@ const STEPS: Array<{ id: BandsWizardStep; label: string }> = [
   { id: "run", label: "Run" },
   { id: "results", label: "Results" },
 ];
+const MAX_VIEWER_POINTS_PER_SEGMENT = 400;
+const MAX_TOTAL_K_POINTS = 5000;
 
 function cloneWien2kBandsResources(profile: HpcProfile | null | undefined): SlurmResourceRequest {
   const source = profile?.default_cpu_resources ?? defaultCpuResources();
@@ -145,6 +155,20 @@ function sourceSpinMode(calc: CalculationRun | null): "non_spin_polarized" | "sp
   return value === "spin_polarized" ? "spin_polarized" : "non_spin_polarized";
 }
 
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function sourceStructureSites(calc: CalculationRun | null): Wien2kBandProjectionSite[] {
+  const sourceSites = calc?.parameters?.source_structure_sites;
+  if (Array.isArray(sourceSites)) {
+    return sourceSites as Wien2kBandProjectionSite[];
+  }
+  const legacySites = calc?.parameters?.sites;
+  return Array.isArray(legacySites) ? legacySites as Wien2kBandProjectionSite[] : [];
+}
+
 export function Wien2kBandsWizard({
   projectId,
   cifId,
@@ -169,6 +193,8 @@ export function Wien2kBandsWizard({
   const [error, setError] = useState<string | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [totalKPointsTarget, setTotalKPointsTarget] = useState(120);
+  const [totalKPointsInput, setTotalKPointsInput] = useState("120");
   const [energyMinEv, setEnergyMinEv] = useState(-8);
   const [energyMaxEv, setEnergyMaxEv] = useState(6);
   const [characterAtom, setCharacterAtom] = useState(0);
@@ -183,6 +209,7 @@ export function Wien2kBandsWizard({
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
     source: true,
     files: true,
+    projections: true,
     spaghetti: true,
     logging: true,
     hpc: false,
@@ -206,6 +233,55 @@ export function Wien2kBandsWizard({
   const selectedSpinMode = session?.spinMode ?? sourceSpinMode(selectedScf);
   const currentStepIndex = STEPS.findIndex((entry) => entry.id === step);
   const runStepActive = step === "run" && runIsActive;
+  const projectionOptions = useMemo(
+    () => {
+      const sites = sourceStructureSites(selectedScf);
+      return sites.length > 0
+        ? getWien2kBandProjectionOptionsFromSites(sites, crystalData)
+        : getWien2kBandProjectionOptions(crystalData);
+    },
+    [crystalData, selectedScf],
+  );
+  const projectionGroups = useMemo(() => {
+    const groups = new Map<number, { atomIndex: number; label: string; orbitals: Wien2kBandProjectionOption[] }>();
+    for (const option of projectionOptions) {
+      if (option.kind === "atom") {
+        groups.set(option.atomIndex, {
+          atomIndex: option.atomIndex,
+          label: option.label,
+          orbitals: [],
+        });
+      }
+    }
+    for (const option of projectionOptions) {
+      if (option.kind !== "orbital") continue;
+      const group = groups.get(option.atomIndex) ?? {
+        atomIndex: option.atomIndex,
+        label: `Atom ${option.atomIndex}`,
+        orbitals: [],
+      };
+      group.orbitals.push(option);
+      groups.set(option.atomIndex, group);
+    }
+    return Array.from(groups.values());
+  }, [projectionOptions]);
+  const projectionSummary = characterAtom > 0
+    ? `atom ${characterAtom} / L=${characterL}`
+    : "plain bands";
+  const kPathSegmentCount = useMemo(
+    () => kPath.filter((point, index) => index < kPath.length - 1 && point.npoints > 0).length,
+    [kPath],
+  );
+  const totalKPoints = useMemo(
+    () => kPath.reduce((sum, point) => sum + point.npoints, 0),
+    [kPath],
+  );
+  const minimumTotalKPoints = Math.max(1, kPathSegmentCount);
+  const viewerPointsPerSegment = clampInt(
+    totalKPointsTarget / minimumTotalKPoints,
+    1,
+    MAX_VIEWER_POINTS_PER_SEGMENT,
+  );
   useViewportScrollLock(runStepActive);
 
   useEffect(() => () => outputUnlistenRef.current?.(), []);
@@ -245,6 +321,28 @@ export function Wien2kBandsWizard({
     }
   }, [selectedSpinMode, spinChannel]);
 
+  useEffect(() => {
+    setKPath((prevPath) => applyWien2kBandsTotalKPoints(prevPath, totalKPointsTarget));
+  }, [totalKPointsTarget]);
+
+  useEffect(() => {
+    setTotalKPointsInput(String(totalKPointsTarget));
+  }, [totalKPointsTarget]);
+
+  const handleKPathChange = useCallback((newPath: KPathPoint[]) => {
+    setKPath(applyWien2kBandsTotalKPoints(newPath, totalKPointsTarget));
+  }, [totalKPointsTarget]);
+
+  const commitTotalKPointsInput = useCallback(() => {
+    const parsed = Number.parseInt(totalKPointsInput.trim(), 10);
+    const fallback = Number.isFinite(totalKPointsTarget) ? totalKPointsTarget : 120;
+    const committed = Number.isFinite(parsed)
+      ? clampInt(parsed, minimumTotalKPoints, MAX_TOTAL_K_POINTS)
+      : clampInt(fallback, minimumTotalKPoints, MAX_TOTAL_K_POINTS);
+    setTotalKPointsTarget(committed);
+    setTotalKPointsInput(String(committed));
+  }, [minimumTotalKPoints, totalKPointsInput, totalKPointsTarget]);
+
   async function attachOutputListener(sessionId: string) {
     outputUnlistenRef.current?.();
     outputUnlistenRef.current = await listen<string>(`wien2k-bands-output:${sessionId}`, (event) => {
@@ -258,6 +356,11 @@ export function Wien2kBandsWizard({
 
   function toggleSection(section: SectionKey) {
     setExpandedSections((current) => ({ ...current, [section]: !current[section] }));
+  }
+
+  function selectProjection(option: Wien2kBandProjectionOption) {
+    setCharacterAtom(option.characterAtom);
+    setCharacterL(option.characterL);
   }
 
   function bandsCommandLines(): string[] {
@@ -293,8 +396,9 @@ export function Wien2kBandsWizard({
     setError(null);
     try {
       const activeSession = await ensureSession();
+      const klistPath = transformWien2kKPathForKlistBand(kPath, crystalData);
       const prepared = await prepareWien2kBandsSession(activeSession.sessionId, {
-        kPath: kPath.map((point) => ({
+        kPath: klistPath.map((point) => ({
           label: point.label,
           coords: point.coords,
           npoints: point.npoints,
@@ -492,10 +596,47 @@ export function Wien2kBandsWizard({
         </div>
         <BrillouinZoneViewer
           crystalData={crystalData}
-          onPathChange={setKPath}
+          onPathChange={handleKPathChange}
           initialPath={kPath}
-          pointsPerSegment={20}
+          pointsPerSegment={viewerPointsPerSegment}
         />
+        <div className="kpath-sampling-panel">
+          <div className="kpath-sampling-header">
+            <div>
+              <h4>K-Path Sampling</h4>
+              <p>K-points are distributed along the full path by segment length.</p>
+            </div>
+            <span className="kpath-sampling-summary">
+              {totalKPoints} total k-points
+            </span>
+          </div>
+
+          <label className="kpath-sampling-input">
+            <span>Total k-points</span>
+            <input
+              type="number"
+              min={minimumTotalKPoints}
+              max={MAX_TOTAL_K_POINTS}
+              value={totalKPointsInput}
+              onChange={(event) => {
+                setTotalKPointsInput(event.target.value);
+              }}
+              onBlur={commitTotalKPointsInput}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitTotalKPointsInput();
+                }
+              }}
+            />
+          </label>
+
+          <p className="kpath-sampling-note">
+            {kPathSegmentCount > 0
+              ? `Evenly distributed by segment length across ${kPathSegmentCount} path segment${kPathSegmentCount === 1 ? "" : "s"}.`
+              : "Add at least 2 points to distribute k-points along the path."}
+          </p>
+        </div>
         <div className="step-actions">
           <button className="secondary-button" type="button" onClick={() => setStep("source")}>Back</button>
           <button className="primary-button" type="button" disabled={kPath.length < 2} onClick={() => setStep("prepare")}>
@@ -524,6 +665,7 @@ export function Wien2kBandsWizard({
                 {fermiEnergy != null && <p>Fermi energy: {fermiEnergy.toFixed(6)} eV</p>}
                 <p>Spin mode: {selectedSpinMode === "spin_polarized" ? "spin-polarized" : "non-spin-polarized"}</p>
                 <p>K-path: {pathString}; {totalKPoints} points written to `case.klist_band`.</p>
+                <p>Projection: {projectionSummary}.</p>
               </div>
             ))}
             {renderSection("files", "Band Preparation Files", (
@@ -542,24 +684,6 @@ export function Wien2kBandsWizard({
                     <input type="number" step="0.5" value={energyMaxEv} onChange={(event) => setEnergyMaxEv(numberField(event.target.value, energyMaxEv))} />
                   </label>
                   <label>
-                    <Wien2kFieldLabel tooltip="Atom index used by spaghetti character plotting. Keep 0 for plain line bands. Set with L below when preparing character/fat-band output.">
-                      Character atom
-                    </Wien2kFieldLabel>
-                    <input type="number" min="0" step="1" value={characterAtom} onChange={(event) => setCharacterAtom(Math.max(0, Math.round(numberField(event.target.value, characterAtom))))} />
-                  </label>
-                  <label>
-                    <Wien2kFieldLabel tooltip="Angular momentum channel for spaghetti character plotting: 0=s, 1=p, 2=d, 3=f. Only used when Character atom is nonzero.">
-                      Character L
-                    </Wien2kFieldLabel>
-                    <input type="number" min="0" step="1" value={characterL} onChange={(event) => setCharacterL(Math.max(0, Math.round(numberField(event.target.value, characterL))))} />
-                  </label>
-                  <label>
-                    <Wien2kFieldLabel tooltip="Symbol-size scale for spaghetti character plotting. Set 0 for plain lines.">
-                      Character scale
-                    </Wien2kFieldLabel>
-                    <input type="number" min="0" step="0.05" value={characterScale} onChange={(event) => setCharacterScale(Math.max(0, numberField(event.target.value, characterScale)))} />
-                  </label>
-                  <label>
                     <Wien2kFieldLabel tooltip="Spin channel passed to `x lapw1`, `x lapw2`, `x irrep`, and `x spaghetti`. Spin-polarized SCFs usually need separate up/down band runs.">
                       Spin channel
                     </Wien2kFieldLabel>
@@ -576,27 +700,115 @@ export function Wien2kBandsWizard({
                 )}
               </>
             ), { status: prepared ? "Prepared" : undefined })}
+            {renderSection("projections", "Projections", (
+              <div className="wien2k-projection-dropdown">
+                <div className="wien2k-projection-exact-grid">
+                  <label>
+                    <Wien2kFieldLabel tooltip="Atom index used by spaghetti character plotting. Keep 0 for plain line bands. Set with L below when preparing character/fat-band output.">
+                      Character atom
+                    </Wien2kFieldLabel>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={characterAtom}
+                      onChange={(event) => setCharacterAtom(Math.max(0, Math.round(numberField(event.target.value, characterAtom))))}
+                    />
+                  </label>
+                  <label>
+                    <Wien2kFieldLabel tooltip="Angular momentum channel for spaghetti character plotting: 0=s, 1=p, 2=d, 3=f. Only used when Character atom is nonzero.">
+                      Character L
+                    </Wien2kFieldLabel>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={characterL}
+                      onChange={(event) => setCharacterL(Math.max(0, Math.round(numberField(event.target.value, characterL))))}
+                    />
+                  </label>
+                  <label>
+                    <Wien2kFieldLabel tooltip="Symbol-size scale for spaghetti character plotting. Set 0 for plain lines.">
+                      Character scale
+                    </Wien2kFieldLabel>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.05"
+                      value={characterScale}
+                      onChange={(event) => setCharacterScale(Math.max(0, numberField(event.target.value, characterScale)))}
+                    />
+                  </label>
+                </div>
+                <div className="wien2k-projection-choice-row">
+                  <label className="wien2k-projection-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={characterAtom === 0}
+                      onChange={() => {
+                        setCharacterAtom(0);
+                        setCharacterL(0);
+                      }}
+                    />
+                    <span>Plain bands</span>
+                  </label>
+                  <span className="wien2k-projection-summary">{projectionSummary}</span>
+                </div>
+                <div className="wien2k-projection-groups">
+                  {projectionGroups.map((group) => (
+                    <div className="wien2k-projection-group" key={group.atomIndex}>
+                      <h5>{group.atomIndex}. {group.label}</h5>
+                      <div className="wien2k-projection-checkbox-grid">
+                        {group.orbitals.map((option) => {
+                          const orbitalLabel = option.label.startsWith(group.label)
+                            ? option.label.slice(group.label.length).trim()
+                            : option.label;
+                          const checked = characterAtom === option.characterAtom && characterL === option.characterL;
+                          return (
+                            <label className="wien2k-projection-checkbox" key={option.value}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(event) => {
+                                  if (event.target.checked) {
+                                    selectProjection(option);
+                                  } else if (checked) {
+                                    setCharacterAtom(0);
+                                    setCharacterL(0);
+                                  }
+                                }}
+                              />
+                              <span>{orbitalLabel || option.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ), { status: projectionSummary })}
             {renderSection("spaghetti", "Optional Setup Scripts", (
               <>
                 <label className="option-checkbox">
                   <input type="checkbox" checked={runLapw2Qtl} onChange={(event) => setRunLapw2Qtl(event.target.checked)} />
                   <span>
-                    Run `x lapw2 -qtl -band`
-                    <Wien2kFieldLabel tooltip="Generates QTL/character data for spaghetti. Enable this before using character/fat-band style output."> </Wien2kFieldLabel>
+                    Generate character data
+                    <Wien2kFieldLabel tooltip="Runs `x lapw2 -qtl -band` to generate QTL/character data for spaghetti. Enable this before using character/fat-band style output."> </Wien2kFieldLabel>
                   </span>
                 </label>
                 <label className="option-checkbox">
                   <input type="checkbox" checked={runIrrep} onChange={(event) => setRunIrrep(event.target.checked)} />
                   <span>
-                    Run `x irrep -band`
-                    <Wien2kFieldLabel tooltip="Computes irreducible-representation data along the band path when WIEN2k can classify states by symmetry."> </Wien2kFieldLabel>
+                    Compute symmetry labels
+                    <Wien2kFieldLabel tooltip="Runs `x irrep -band` to compute irreducible-representation data along the band path when WIEN2k can classify states by symmetry."> </Wien2kFieldLabel>
                   </span>
                 </label>
                 <label className="option-checkbox">
                   <input type="checkbox" checked={spinOrbit} onChange={(event) => setSpinOrbit(event.target.checked)} />
                   <span>
-                    Pass `-so` to band commands
-                    <Wien2kFieldLabel tooltip="Use only when the source case was prepared for spin-orbit coupling and contains the required SO files."> </Wien2kFieldLabel>
+                    Enable spin-orbit coupling
+                    <Wien2kFieldLabel tooltip="Passes `-so` to the band commands. Use only when the source case was prepared for spin-orbit coupling and contains the required SO files."> </Wien2kFieldLabel>
                   </span>
                 </label>
               </>

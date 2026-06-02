@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SlurmResourceRequest } from "../../types";
 import type { Wien2kInitializationSettings, Wien2kScfRunSettings } from "./types";
+import type { Wien2kStructureSite } from "./structure";
 
 export type Wien2kScfSessionPhase = "staged" | "initialized" | "scf_complete" | "failed";
 export type ScfConvergenceState = "converged" | "not_converged" | "failed" | "cancelled" | "unknown";
@@ -21,6 +22,7 @@ export interface Wien2kScfSession {
   projectId: string;
   cifId: string;
   sourceStructureCalculationId: string;
+  sourceStructureSites: Wien2kStructureSite[];
   caseName: string;
   remoteCaseDir: string;
   remoteInstallRoot: string;

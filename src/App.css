@@ -1167,7 +1167,16 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   gap: 0.75rem;
 }
 
+.wien2k-dftu-header-grid {
+  align-items: end;
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(140px, 0.65fr);
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
 .wien2k-control-grid label,
+.wien2k-dftu-header-grid label:not(.wien2k-inline-toggle),
 .wien2k-advanced label {
   color: #475569;
   display: flex;
@@ -1175,6 +1184,27 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   font-size: 0.8rem;
   font-weight: 600;
   gap: 0.35rem;
+}
+
+.wien2k-control-grid label.checkbox-label {
+  align-items: center;
+  flex-direction: row;
+}
+
+.wien2k-inline-toggle {
+  align-items: center;
+  color: #475569;
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: 600;
+  gap: 0.45rem;
+  justify-content: flex-start;
+  width: fit-content;
+}
+
+.wien2k-inline-toggle input {
+  flex: 0 0 auto;
+  margin: 0;
 }
 
 .wien2k-field-label-row {
@@ -1201,6 +1231,144 @@ html[data-theme="dark"] .pseudo-querying-spinner {
   padding: 0.45rem 0.5rem;
   width: 100%;
   box-sizing: border-box;
+}
+
+.wien2k-projection-dropdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.wien2k-projection-exact-grid {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.wien2k-projection-exact-grid label {
+  color: #475569;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8rem;
+  font-weight: 600;
+  gap: 0.35rem;
+}
+
+.wien2k-projection-exact-grid input {
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  box-sizing: border-box;
+  font-size: 0.86rem;
+  padding: 0.45rem 0.5rem;
+  width: 100%;
+}
+
+.wien2k-projection-choice-row {
+  align-items: center;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+  padding-top: 0.65rem;
+}
+
+.wien2k-projection-summary {
+  background: #edf2f7;
+  border: 1px solid #dbe4ee;
+  border-radius: 999px;
+  color: #64748b;
+  flex: 0 0 auto;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.25rem 0.45rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.wien2k-projection-groups {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.wien2k-projection-group {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 0.6rem;
+}
+
+.wien2k-projection-group h5 {
+  color: #334155;
+  font-size: 0.8rem;
+  margin: 0 0 0.45rem;
+}
+
+.wien2k-projection-checkbox-grid {
+  display: grid;
+  gap: 0.35rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wien2k-projection-checkbox {
+  align-items: center;
+  color: #475569;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: 600;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.wien2k-projection-checkbox input[type="checkbox"] {
+  accent-color: #4299e1;
+  flex: 0 0 auto;
+  height: 15px;
+  width: 15px;
+}
+
+.wien2k-projection-checkbox span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-theme="dark"] .wien2k-projection-exact-grid label,
+html[data-theme="dark"] .wien2k-projection-checkbox {
+  color: #a6adc8;
+}
+
+html[data-theme="dark"] .wien2k-projection-exact-grid input {
+  background: #313244;
+  border-color: #45475a;
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .wien2k-projection-choice-row {
+  border-top-color: #45475a;
+}
+
+html[data-theme="dark"] .wien2k-projection-summary {
+  background: #313244;
+  border-color: #45475a;
+  color: #a6adc8;
+}
+
+html[data-theme="dark"] .wien2k-projection-group {
+  background: #252637;
+  border-color: #45475a;
+}
+
+html[data-theme="dark"] .wien2k-projection-group h5 {
+  color: #cdd6f4;
+}
+
+html[data-theme="dark"] .wien2k-projection-checkbox input[type="checkbox"] {
+  accent-color: #89b4fa;
 }
 
 .wien2k-summary select {
@@ -5372,6 +5540,13 @@ html[data-theme="dark"] .node-activity-empty-cell {
   color: #4a5568;
 }
 
+.calc-tag-engine {
+  background: #e5e7eb;
+  border: 1px solid #111827;
+  color: #111827;
+  font-weight: 600;
+}
+
 .calc-tag-feature {
   background: #bee3f8;
   color: #2b6cb0;
@@ -5931,6 +6106,12 @@ html[data-theme="dark"] {
   .calc-tag-info {
     background: #4a5568;
     color: #e2e8f0;
+  }
+
+  .calc-tag-engine {
+    background: #d1d5db;
+    border: 1px solid #111827;
+    color: #111827;
   }
 
   .calc-tag-feature {

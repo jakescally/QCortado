@@ -163,8 +163,6 @@ export function InfoTooltip({ text, className, children }: InfoTooltipProps) {
       <span
         ref={triggerRef}
         className={children ? "tooltip-trigger-wrap" : "tooltip-container"}
-        tabIndex={children ? undefined : 0}
-        role={children ? undefined : "button"}
         onMouseEnter={showTooltipOnHover}
         onMouseLeave={hideTooltip}
         onFocus={showTooltip}

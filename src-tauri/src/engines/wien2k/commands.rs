@@ -5,8 +5,8 @@
 
 use super::case_state::{core_case_artifacts, initialized_case_artifacts};
 use super::types::{
-    Wien2kCaseReference, Wien2kCommandPlan, Wien2kCommandProgram, Wien2kInitializationSettings,
-    Wien2kScfRunSettings, Wien2kSpinMode,
+    Wien2kCaseReference, Wien2kCommandPlan, Wien2kCommandProgram, Wien2kDispersionCorrection,
+    Wien2kInitializationSettings, Wien2kScfRunSettings, Wien2kSpinMode,
 };
 use super::Wien2kCasePhase;
 
@@ -66,6 +66,20 @@ pub fn build_scf_run_plan(
     if let Some(force_cutoff) = settings.force_convergence_mry_bohr {
         argv.push("-fc".to_string());
         argv.push(format_float(force_cutoff));
+    }
+    if settings.iterative_diagonalization {
+        argv.push("-it".to_string());
+    }
+    if settings.force_minimization {
+        argv.push("-min".to_string());
+    }
+    match settings.dispersion_correction {
+        Wien2kDispersionCorrection::None => {}
+        Wien2kDispersionCorrection::Dftd3 => argv.push("-dftd3".to_string()),
+        Wien2kDispersionCorrection::Dftd4 => argv.push("-dftd4".to_string()),
+    }
+    if settings.dft_u.enabled {
+        argv.push("-orb".to_string());
     }
     if continuation {
         argv.push("-NI".to_string());

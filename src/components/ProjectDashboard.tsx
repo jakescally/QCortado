@@ -9,6 +9,10 @@ import { parseCIF } from "../lib/cifParser";
 import { CrystalData, HpcProfile, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
+import {
+  getStoredProjectDashboardEngineFilter,
+  setStoredProjectDashboardEngineFilter,
+} from "../lib/projectDashboardSettings";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
@@ -166,7 +170,7 @@ interface ProjectDashboardProps {
   onViewEPW: (epwData: any, rawOutput?: string | null) => void;
 }
 
-type CalcTagType = "info" | "feature" | "special" | "geometry";
+type CalcTagType = "info" | "feature" | "special" | "geometry" | "engine";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
 type CalculationEngineFilter = EngineId | "all";
@@ -261,6 +265,7 @@ interface EngineSwitcherProps {
   onChange: (engineId: CalculationEngineFilter) => void;
   ariaLabel: string;
   includeAll?: boolean;
+  allLabel?: string;
   isEngineDisabled?: (engine: EngineDescriptor) => boolean;
 }
 
@@ -270,6 +275,7 @@ function EngineSwitcher({
   onChange,
   ariaLabel,
   includeAll = false,
+  allLabel = "All",
   isEngineDisabled,
 }: EngineSwitcherProps) {
   return (
@@ -281,7 +287,7 @@ function EngineSwitcher({
           aria-pressed={value === "all"}
           onClick={() => onChange("all")}
         >
-          All
+          {allLabel}
         </button>
       )}
       {engines.map((engine) => {
@@ -509,6 +515,20 @@ function getCalcTagClass(tag: { label: string; type: string }): string {
   const isDownloadedTag = normalizedLabel === "DOWNLOADED";
   const isFailedTag = normalizedLabel === "FAILED";
   return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}${isDownloadedTag ? " calc-tag-downloaded" : ""}${isFailedTag ? " calc-tag-failed" : ""}`;
+}
+
+function getCalculationEngineTag(calc: CalculationRun): { label: string; type: CalcTagType } {
+  return {
+    label: (calc.engine_id ?? DEFAULT_ENGINE_ID) === "wien2k" ? "W2k" : "QE",
+    type: "engine",
+  };
+}
+
+function getTagsWithEngine<T extends { label: string; type: CalcTagType }>(
+  calc: CalculationRun,
+  tags: T[],
+): Array<{ label: string; type: CalcTagType } | T> {
+  return [getCalculationEngineTag(calc), ...tags];
 }
 
 function asNonNegativeInteger(value: unknown): number | null {
@@ -1475,7 +1495,9 @@ export function ProjectDashboard({
   const [isLoadingEngineSetup, setIsLoadingEngineSetup] = useState(false);
   const [isAddingEngine, setIsAddingEngine] = useState(false);
   const [engineSetupError, setEngineSetupError] = useState<string | null>(null);
-  const [calculationEngineFilter, setCalculationEngineFilter] = useState<CalculationEngineFilter>("all");
+  const [calculationEngineFilter, setCalculationEngineFilter] = useState<CalculationEngineFilter>(
+    () => getStoredProjectDashboardEngineFilter() as CalculationEngineFilter,
+  );
   const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1558,12 +1580,8 @@ export function ProjectDashboard({
   }, [activeEngineId, engineDescriptors]);
 
   useEffect(() => {
-    setCalculationEngineFilter((current) => (
-      current === "all" || displayedEngineDescriptors.some((descriptor) => descriptor.id === current)
-        ? current
-        : "all"
-    ));
-  }, [displayedEngineDescriptors]);
+    setStoredProjectDashboardEngineFilter(calculationEngineFilter);
+  }, [calculationEngineFilter]);
 
   const selectedHpcProfile = useMemo(
     () => availableHpcProfiles.find((profile) => profile.id === engineInstallForm.hpcProfileId) ?? null,
@@ -4239,6 +4257,17 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                       {hasCompletedWien2kScf() ? "lapw1 + spaghetti" : "Requires completed WIEN2k SCF"}
                     </span>
                   </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={handleRunFermiSurface}
+                    disabled={!hasCompletedWien2kScf()}
+                  >
+                    <span className="calc-action-icon">FS</span>
+                    <span className="calc-action-label">WIEN2k Fermi Surface</span>
+                    <span className="calc-action-hint">
+                      {hasCompletedWien2kScf() ? "XCrySDen BXSF" : "Requires completed WIEN2k SCF"}
+                    </span>
+                  </button>
                 </>
               ) : (
                 <>
@@ -4498,7 +4527,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           </span>
                         )}
                         <div className="calc-tags">
-                          {getCalculationTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getCalculationTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4629,7 +4658,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getBandsTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getBandsTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4767,7 +4796,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">DOS</span>
                         <div className="calc-tags">
-                          {getDosTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getDosTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4924,7 +4953,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getWannierTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getWannierTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5115,7 +5144,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">BOLTZWANN</span>
                         <div className="calc-tags">
-                          {getTransportTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getTransportTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5281,7 +5310,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">FERMI</span>
                         <div className="calc-tags">
-                          {getFermiSurfaceTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getFermiSurfaceTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5553,7 +5582,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           <span className="calc-kpath">{calc.parameters.q_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getPhononTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getPhononTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5733,7 +5762,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">EPW</span>
                         <div className="calc-tags">
-                          {getEpwTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getEpwTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5978,7 +6007,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           </span>
                         )}
                         <div className="calc-tags">
-                          {getOptimizationTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getOptimizationTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>

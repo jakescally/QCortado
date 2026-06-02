@@ -382,6 +382,7 @@ type ProgressKind =
   | "bands"
   | "wien2k_scf"
   | "wien2k_bands"
+  | "wien2k_fermi_surface"
   | "dos"
   | "fermi_surface"
   | "hubbard_lrt"
@@ -424,6 +425,20 @@ export function progressReducer(
         return { ...state, status: "running", percent: null, phase: "lapw1" };
       }
       return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k bands" };
+    case "wien2k_fermi_surface":
+      if (line.includes("[saved WIEN2k Fermi-surface calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("xcrysden")) {
+        return { ...state, status: "running", percent: null, phase: "XCrySDen BXSF" };
+      }
+      if (line.includes("lapw2")) {
+        return { ...state, status: "running", percent: null, phase: "lapw2 -fermi" };
+      }
+      if (line.includes("lapw1")) {
+        return { ...state, status: "running", percent: null, phase: "lapw1" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k Fermi surface" };
     case "dos":
       return updateDosProgress(line, state);
     case "fermi_surface":

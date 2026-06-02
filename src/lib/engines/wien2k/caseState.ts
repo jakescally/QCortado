@@ -106,6 +106,18 @@ export function buildWien2kScfCommandPlan(
   if (settings.forceConvergenceMryBohr != null) {
     argv.push("-fc", formatNumber(settings.forceConvergenceMryBohr));
   }
+  if (settings.iterativeDiagonalization) {
+    argv.push("-it");
+  }
+  if (settings.forceMinimization) {
+    argv.push("-min");
+  }
+  if (settings.dispersionCorrection !== "none") {
+    argv.push(`-${settings.dispersionCorrection}`);
+  }
+  if (settings.dftU.enabled) {
+    argv.push("-orb");
+  }
   if (continuation) {
     argv.push("-NI");
   }
@@ -131,6 +143,16 @@ export function validateWien2kInitializationSettings(settings: Wien2kInitializat
     return "XC functional must be one of WIEN2k's native initialization options: LDA, PBE, WC, or PBEsol.";
   }
   if (!Number.isFinite(settings.lstartEnergyCutoffRy)) return "The LSTART energy cutoff must be finite.";
+  if (!["tetra", "temp", "temps"].includes(settings.fermiMethod)) return "Fermi integration method is not supported.";
+  if (settings.fermiMethod !== "tetra"
+    && (settings.fermiSmearingRy == null || !Number.isFinite(settings.fermiSmearingRy) || settings.fermiSmearingRy <= 0)) {
+    return "Fermi smearing must be positive when TEMP or TEMPS is selected.";
+  }
+  for (const entry of settings.startingMagnetization ?? []) {
+    if (!Number.isInteger(entry.siteIndex) || entry.siteIndex <= 0) return "Starting magnetization site indices must be positive integers.";
+    if (!["up", "down", "non_magnetic"].includes(entry.configuration)) return "Starting spin configuration is not supported.";
+    if (!Number.isFinite(entry.momentBohrMagneton) || entry.momentBohrMagneton < 0) return "Starting magnetization moments must be non-negative.";
+  }
   return null;
 }
 
@@ -147,6 +169,33 @@ export function validateWien2kScfRunSettings(settings: Wien2kScfRunSettings): st
   if (settings.forceConvergenceMryBohr != null
     && (!Number.isFinite(settings.forceConvergenceMryBohr) || settings.forceConvergenceMryBohr <= 0)) {
     return "Force convergence must be positive when set.";
+  }
+  if (settings.dftU.enabled) {
+    if (settings.spinMode !== "spin_polarized") return "WIEN2k DFT+U requires spin-polarized SCF.";
+    if (!["amf", "sic", "hmf"].includes(settings.dftU.doubleCounting)) return "DFT+U double-counting mode is not supported.";
+    if (settings.dftU.targets.length === 0) return "Enable at least one DFT+U target.";
+    for (const target of settings.dftU.targets) {
+      if (!Number.isInteger(target.siteIndex) || target.siteIndex <= 0) return "DFT+U site indices must be positive integers.";
+      if (!/^\d+[spdf]$/.test(target.manifold)) return "DFT+U manifolds must look like 3d, 4f, etc.";
+      if (!Number.isInteger(target.orbitalL) || target.orbitalL < 0 || target.orbitalL > 3) return "DFT+U orbital l must be 0, 1, 2, or 3.";
+      if (!Number.isFinite(target.uEv) || target.uEv <= 0) return "DFT+U U values must be positive eV values.";
+      if (!Number.isFinite(target.jEv) || target.jEv < 0) return "DFT+U J values must be non-negative eV values.";
+    }
+  }
+  if (!["none", "dftd3", "dftd4"].includes(settings.dispersionCorrection)) {
+    return "Dispersion correction is not supported.";
+  }
+  if (!["MSR1", "MSEC3", "MSEC4", "MSR2", "PRATT", "PRAT0"].includes(settings.mixer.mode)) {
+    return "Mixer mode is not supported.";
+  }
+  if (!Number.isFinite(settings.mixer.greed) || settings.mixer.greed <= 0 || settings.mixer.greed > 1) {
+    return "Mixer greed must be in the range (0, 1].";
+  }
+  if (!Number.isInteger(settings.mixer.history) || settings.mixer.history <= 0) {
+    return "Mixer history must be a positive integer.";
+  }
+  if (!["default", "STIFF", "STIFFER", "FAST"].includes(settings.mixer.trust)) {
+    return "Mixer trust setting is not supported.";
   }
   return null;
 }

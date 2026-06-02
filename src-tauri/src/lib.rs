@@ -1456,6 +1456,7 @@ mod hpc_headless_recovery_tests {
             project_id: "project".to_string(),
             cif_id: "cif".to_string(),
             source_structure_calculation_id: "structure".to_string(),
+            source_structure_sites: Vec::new(),
             case_name: "Si".to_string(),
             remote_case_dir: "/scratch/qcortado/project/wien2k/session/Si".to_string(),
             remote_install_root: remote_install_root.to_string(),
@@ -4149,6 +4150,12 @@ async fn wien2k_start_scf_session(
         &structure_calculation_id,
         &format!("{}.struct", case_name),
     )?;
+    let source_structure_sites: Vec<engines::wien2k::Wien2kStructureSite> = source
+        .parameters
+        .get("sites")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     let root = expand_remote_structure_root(
         &profile,
@@ -4201,6 +4208,7 @@ async fn wien2k_start_scf_session(
         project_id,
         cif_id,
         source_structure_calculation_id: structure_calculation_id,
+        source_structure_sites,
         case_name,
         remote_case_dir,
         remote_install_root: installation.remote_install_root,
@@ -4403,6 +4411,14 @@ async fn wien2k_run_scf_session_impl(
     let resources = resolve_wien2k_scf_resources(&profile, resources)?;
     let parallel = wien2k_scf_uses_parallel(&resources);
     let plan = engines::wien2k::build_scf_run_plan(&case_ref, &settings, continuation);
+    prepare_wien2k_scf_input_files(
+        &profile,
+        secret.as_deref(),
+        &session,
+        &initialization,
+        &settings,
+    )
+    .await?;
     let mut argv = plan.argv.clone();
     if parallel {
         argv.insert(0, "-p".to_string());
@@ -4447,6 +4463,8 @@ async fn wien2k_run_scf_session_impl(
                 "inc",
                 "inm",
                 "inst",
+                "inorb",
+                "indm",
                 "klist",
                 "outputnn",
                 "outputs",
@@ -4485,6 +4503,7 @@ async fn wien2k_run_scf_session_impl(
     let parameters = serde_json::json!({
         "case_name": session.case_name.clone(),
         "source_structure_calculation_id": session.source_structure_calculation_id.clone(),
+        "source_structure_sites": session.source_structure_sites.clone(),
         "parent_calculation_id": parent_calculation_id.or_else(|| if continuation { session.latest_calculation_id.clone() } else { None }),
         "initialization": initialization.clone(),
         "run": settings.clone(),
@@ -4775,6 +4794,78 @@ async fn upload_wien2k_text(
     let result = hpc::ssh::upload_file(profile, secret, &temp_path, remote_path).await;
     let _ = std::fs::remove_file(&temp_path);
     result
+}
+
+async fn prepare_wien2k_scf_input_files(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kScfSession,
+    initialization: &engines::wien2k::Wien2kInitializationSettings,
+    settings: &engines::wien2k::Wien2kScfRunSettings,
+) -> Result<(), String> {
+    let in_m_path = format!("{}/{}.inm", session.remote_case_dir, session.case_name);
+    upload_wien2k_text(
+        profile,
+        secret,
+        &engines::wien2k::build_case_inm(settings),
+        &in_m_path,
+        "inm",
+    )
+    .await?;
+
+    if let Some(files) = engines::wien2k::build_dft_u_input_files(settings) {
+        for (suffix, contents) in files {
+            let remote_path = format!(
+                "{}/{}.{}",
+                session.remote_case_dir, session.case_name, suffix
+            );
+            upload_wien2k_text(profile, secret, &contents, &remote_path, &suffix).await?;
+        }
+    }
+
+    if initialization.fermi_method != engines::wien2k::Wien2kFermiMethod::Tetra {
+        let method = match initialization.fermi_method {
+            engines::wien2k::Wien2kFermiMethod::Tetra => "TETRA",
+            engines::wien2k::Wien2kFermiMethod::Temp => "TEMP",
+            engines::wien2k::Wien2kFermiMethod::Temps => "TEMPS",
+        };
+        let value = initialization.fermi_smearing_ry.unwrap_or(0.002);
+        let patch_command = format!(
+            "cd {dir} && python3 -c {script}",
+            dir = shell_single_quote_local(&session.remote_case_dir),
+            script = shell_single_quote_local(&build_wien2k_in2_fermi_patch_script(
+                &session.case_name,
+                method,
+                value,
+            )),
+        );
+        hpc::ssh::run_ssh_command_with_timeout(profile, secret, &patch_command, 30).await?;
+    }
+
+    Ok(())
+}
+
+fn build_wien2k_in2_fermi_patch_script(case_name: &str, method: &str, value: f64) -> String {
+    format!(
+        "from pathlib import Path\n\
+         case_name={case_name:?}\n\
+         method={method:?}\n\
+         value={value:.8}\n\
+         for suffix in ('in2','in2c'):\n\
+             path=Path(f'{{case_name}}.{{suffix}}')\n\
+             if not path.exists():\n\
+                 continue\n\
+             lines=path.read_text().splitlines()\n\
+             changed=False\n\
+             for index,line in enumerate(lines):\n\
+                 token=line.strip().split()\n\
+                 if token and token[0].upper() in ('TETRA','TEMP','TEMPS','GAUSS','ROOT','ALL'):\n\
+                     lines[index]=f'{{method}} {{value:.8f}}'\n\
+                     changed=True\n\
+                     break\n\
+             if changed:\n\
+                 path.write_text('\\n'.join(lines)+'\\n')\n"
+    )
 }
 
 fn wien2k_bands_command_sequence(
@@ -5201,6 +5292,19 @@ async fn wien2k_run_bands_session_impl(
         &session.source_scf_calculation_id,
         &completed_at,
     );
+    let k_path = session.latest_prepare.as_ref().and_then(|prepare| {
+        let labels = prepare
+            .k_path
+            .iter()
+            .map(|point| point.label.trim())
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        if labels.len() >= 2 {
+            Some(labels.join(" → "))
+        } else {
+            None
+        }
+    });
     let mut diagnostics = Vec::new();
     if command_failed {
         diagnostics.push(
@@ -5212,6 +5316,7 @@ async fn wien2k_run_bands_session_impl(
         "case_name": session.case_name,
         "source_scf_id": session.source_scf_calculation_id,
         "source_scf_calculation_id": session.source_scf_calculation_id,
+        "k_path": k_path,
         "prepare": session.latest_prepare,
         "run": settings,
         "hpc_profile_id": session.hpc_profile_id,
@@ -5331,6 +5436,473 @@ async fn wien2k_discard_bands_session(
         }
     }
     Ok(())
+}
+
+fn build_wien2k_fermi_command(
+    case_name: &str,
+    remote_case_dir: &str,
+    remote_install_root: &str,
+    profile: &hpc::profile::HpcProfile,
+    resources: &hpc::profile::SlurmResourceRequest,
+    settings: &engines::wien2k::Wien2kFermiSurfaceSettings,
+) -> Result<String, String> {
+    let mut commands = vec![format!("cd {}", shell_single_quote_local(remote_case_dir))];
+    let x_executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
+        if profile
+            .engine_module_load(engines::EngineId::Wien2k)
+            .is_none()
+        {
+            return Err("WIEN2k module load value is required in module mode.".to_string());
+        }
+        commands.extend(build_engine_module_setup_commands(
+            profile,
+            engines::EngineId::Wien2k,
+        ));
+        "x".to_string()
+    } else {
+        if remote_install_root.trim().is_empty() {
+            return Err("WIEN2k WIENROOT is required in path mode.".to_string());
+        }
+        commands.push(format!(
+            "export WIENROOT={}",
+            shell_single_quote_local(remote_install_root)
+        ));
+        commands.push("export PATH=\"$WIENROOT:$PATH\"".to_string());
+        "\"$WIENROOT/x\"".to_string()
+    };
+    commands.push(build_wien2k_bands_parallel_setup_command(resources));
+    commands.push("command -v xcrysden >/dev/null || { echo '[QCortado] ERROR: xcrysden is not in the remote PATH'; exit 42; }".to_string());
+    commands.push(format!(
+        "echo {}",
+        shell_single_quote_local(&format!(
+            "[QCortado] Fermi surface k mesh: {} {} {}",
+            settings.k_mesh[0], settings.k_mesh[1], settings.k_mesh[2]
+        ))
+    ));
+
+    let spin_arg = settings.spin_channel.x_arg().unwrap_or("");
+    let spin_orbit_arg = if settings.spin_orbit { " -so" } else { "" };
+    let lapw1_args = ["lapw1", spin_arg, spin_orbit_arg]
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| arg.trim().to_string())
+        .collect::<Vec<_>>();
+    let lapw2_args = ["lapw2", "-fermi", spin_arg, spin_orbit_arg]
+        .iter()
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| arg.trim().to_string())
+        .collect::<Vec<_>>();
+    commands.push(build_wien2k_bands_invocation(
+        &x_executable,
+        &lapw1_args,
+        case_name,
+        settings.diagnostic_log,
+    ));
+    commands.push(build_wien2k_bands_invocation(
+        &x_executable,
+        &lapw2_args,
+        case_name,
+        settings.diagnostic_log,
+    ));
+    commands.push(
+        "echo '[QCortado] Starting xcrysden WIEN2k Fermi-surface BXSF conversion' && \
+         rm -f .qcortado-xcrysden-fermi.log && \
+         if command -v xvfb-run >/dev/null 2>&1; then XC_CMD='xvfb-run -a xcrysden'; else XC_CMD='xcrysden'; fi && \
+         set +e; timeout 1800 sh -lc \"$XC_CMD --wien_fermisurface .\" 2>&1 | tee .qcortado-xcrysden-fermi.log; status=${PIPESTATUS[0]}; set -e; \
+         echo \"[QCortado] xcrysden finished with status $status\"; \
+         find . -maxdepth 3 -type f \\( -iname '*.bxsf' -o -iname '*.BXSF' \\) -print"
+            .to_string(),
+    );
+    Ok(commands.join(" && "))
+}
+
+fn parse_remote_surface_manifest(manifest: &str) -> Vec<engines::wien2k::Wien2kSurfaceFileData> {
+    let mut files = Vec::new();
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        let size = parts
+            .next()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let file_name = path.trim_start_matches("./").to_string();
+        if file_name.is_empty() {
+            continue;
+        }
+        let safe = Path::new(&file_name)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+        if safe {
+            files.push(engines::wien2k::Wien2kSurfaceFileData {
+                file_name,
+                size_bytes: size,
+            });
+        }
+    }
+    files.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    files
+}
+
+async fn download_wien2k_bxsf_files(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    remote_case_dir: &str,
+    local_dir: &Path,
+) -> Result<Vec<engines::wien2k::Wien2kSurfaceFileData>, String> {
+    let manifest_command = format!(
+        "cd {} && find . -maxdepth 3 -type f \\( -iname '*.bxsf' -o -iname '*.BXSF' \\) -printf '%P\\t%s\\n'",
+        shell_single_quote_local(remote_case_dir),
+    );
+    let manifest =
+        hpc::ssh::run_ssh_command_with_timeout(profile, secret, &manifest_command, 120).await?;
+    let files = parse_remote_surface_manifest(&manifest);
+    for file in &files {
+        let remote_path = format!("{}/{}", remote_case_dir.trim_end_matches('/'), file.file_name);
+        let local_path = local_dir.join(&file.file_name);
+        hpc::ssh::download_file(profile, secret, &remote_path, &local_path).await?;
+    }
+    Ok(files)
+}
+
+fn preferred_bxsf_file(files: &[engines::wien2k::Wien2kSurfaceFileData], case_name: &str) -> String {
+    files
+        .iter()
+        .find(|file| {
+            let lower = file.file_name.to_ascii_lowercase();
+            lower == format!("{}.bxsf", case_name.to_ascii_lowercase())
+                || lower.ends_with(&format!("/{}.bxsf", case_name.to_ascii_lowercase()))
+        })
+        .or_else(|| {
+            files.iter().find(|file| {
+                file.file_name
+                    .to_ascii_lowercase()
+                    .contains(&case_name.to_ascii_lowercase())
+            })
+        })
+        .unwrap_or(&files[0])
+        .file_name
+        .clone()
+}
+
+async fn run_wien2k_fermi_surface_task(
+    app: AppHandle,
+    task_id: &str,
+    project_id: String,
+    cif_id: String,
+    source_scf_calculation_id: String,
+    settings: engines::wien2k::Wien2kFermiSurfaceSettings,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: &AppState,
+) -> Result<engines::wien2k::Wien2kFermiSurfaceResult, String> {
+    engines::wien2k::validate_fermi_surface_settings(&settings)?;
+    let project = projects::get_project(app.clone(), project_id.clone())?;
+    let source = project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .find(|calc| calc.id == source_scf_calculation_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Source WIEN2k SCF calculation {} not found.",
+                source_scf_calculation_id
+            )
+        })?;
+    if source.engine_id != engines::EngineId::Wien2k || source.calc_type != "scf" {
+        return Err("Source calculation must be a WIEN2k SCF.".to_string());
+    }
+    let case_name = source
+        .parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("case")
+        .to_string();
+    let source_remote_case_dir = source
+        .parameters
+        .get("remote_case_dir")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "The selected WIEN2k SCF has no retained remote case directory.".to_string()
+        })?
+        .to_string();
+    let hpc_profile_id = source
+        .parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let source_spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
+    if source_spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+        && settings.spin_channel == engines::wien2k::Wien2kBandsSpinChannel::None
+    {
+        return Err("Spin-polarized WIEN2k Fermi surfaces require an up or down spin channel.".to_string());
+    }
+
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
+    if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
+        return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
+    }
+    let root = expand_remote_structure_root(
+        &profile,
+        secret.as_deref(),
+        source
+            .parameters
+            .get("remote_project_path")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&profile.remote_project_root),
+    )
+    .await
+    .unwrap_or_else(|_| profile.remote_project_root.clone());
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let remote_session_dir = format!(
+        "{}/qcortado/{}/wien2k/fermi_surface/{}",
+        root.trim_end_matches('/'),
+        project_id,
+        run_id
+    );
+    let remote_case_dir = format!("{}/{}", remote_session_dir, case_name);
+    let copy_command = format!(
+        "mkdir -p {} && cp -a {}/. {}",
+        shell_single_quote_local(&remote_case_dir),
+        shell_single_quote_local(&source_remote_case_dir),
+        shell_single_quote_local(&remote_case_dir)
+    );
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &copy_command, 300).await?;
+
+    let klist = engines::wien2k::build_regular_klist(&case_name, settings.k_mesh);
+    upload_wien2k_text(
+        &profile,
+        secret.as_deref(),
+        &klist,
+        &format!("{}/{}.klist", remote_case_dir, case_name),
+        "fermi-klist",
+    )
+    .await?;
+
+    let resolved_resources = resolve_wien2k_bands_resources(&profile, resources)?;
+    let remote_install_root = source
+        .parameters
+        .get("remote_wienroot")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let command = build_wien2k_fermi_command(
+        &case_name,
+        &remote_case_dir,
+        &remote_install_root,
+        &profile,
+        &resolved_resources,
+        &settings,
+    )?;
+    let timeout_secs = resolved_resources
+        .walltime
+        .as_deref()
+        .and_then(hpc::profile::walltime_seconds)
+        .map(|seconds| seconds.saturating_add(900))
+        .unwrap_or(86_400)
+        .max(3_600);
+    let operation = hpc::utility::run_scheduled_profile_operation(
+        Some(&app),
+        Some(&format!("task-output:{}", task_id)),
+        &profile,
+        secret.as_deref(),
+        &remote_case_dir,
+        "qc-w2k-fermi",
+        &[command],
+        resolved_resources.clone(),
+        timeout_secs,
+    )
+    .await;
+    let (native_output, command_failed) = match operation {
+        Ok(result) => (result.output, false),
+        Err(error) => (error, true),
+    };
+
+    let staging_dir =
+        std::env::temp_dir().join(format!("qcortado_wien2k_fermi_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&staging_dir).map_err(|err| {
+        format!(
+            "Failed to create WIEN2k Fermi-surface staging directory {}: {}",
+            staging_dir.display(),
+            err
+        )
+    })?;
+    std::fs::write(staging_dir.join(format!("{}.klist", case_name)), &klist)
+        .map_err(|err| format!("Failed to write local klist artifact: {}", err))?;
+    std::fs::write(staging_dir.join("wien2k_fermi_surface.out"), &native_output)
+        .map_err(|err| format!("Failed to write local Fermi-surface log: {}", err))?;
+
+    let bxsf_files = download_wien2k_bxsf_files(
+        &profile,
+        secret.as_deref(),
+        &remote_case_dir,
+        &staging_dir,
+    )
+    .await?;
+    if bxsf_files.is_empty() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err("XCrySDen did not produce any BXSF files for the WIEN2k Fermi surface.".to_string());
+    }
+    let primary_file = preferred_bxsf_file(&bxsf_files, &case_name);
+    let fermi_energy = extract_fermi_energy_from_text(&native_output)
+        .or(source.scf_summary.as_ref().and_then(|summary| summary.fermi_energy_ev))
+        .or(source.result.as_ref().and_then(|result| result.fermi_energy));
+    let started_at = now_iso();
+    let completed_at = now_iso();
+    let source_scf_id_for_parameters = source_scf_calculation_id.clone();
+    let parameters = serde_json::json!({
+        "engine_id": "wien2k",
+        "case_name": case_name,
+        "source_scf_id": source_scf_id_for_parameters,
+        "source_scf_calculation_id": source_scf_calculation_id,
+        "fermi_k_grid": settings.k_mesh,
+        "fermi_surface_tool": "xcrysden",
+        "file_format": "BXSF",
+        "n_bxsf_files": bxsf_files.len(),
+        "bxsf_files": bxsf_files.iter().map(|file| file.file_name.clone()).collect::<Vec<_>>(),
+        "primary_bxsf_file": primary_file,
+        "total_bxsf_bytes": bxsf_files.iter().fold(0_u64, |sum, file| sum.saturating_add(file.size_bytes)),
+        "spin_channel": settings.spin_channel,
+        "spin_orbit": settings.spin_orbit,
+        "diagnostic_log": settings.diagnostic_log,
+        "hpc_profile_id": profile.id,
+        "execution_backend": "hpc",
+        "remote_case_dir": remote_case_dir,
+        "remote_project_path": remote_session_dir,
+        "native_artifacts_retained_remote": true,
+        "scf_fermi_energy": fermi_energy,
+    });
+    let result = QEResult {
+        converged: !command_failed,
+        total_energy: None,
+        fermi_energy,
+        total_magnetization: None,
+        atomic_magnetic_moments: None,
+        forces: None,
+        stress: None,
+        n_scf_steps: None,
+        wall_time_seconds: None,
+        eigenvalues: None,
+        raw_output: native_output.clone(),
+        band_data: None,
+        band_dataset: None,
+        dos_data: None,
+        phonon_data: None,
+        wannier_data: None,
+        transport_data: None,
+        epw_data: None,
+        hubbard_lrt_data: None,
+    };
+    let saved = projects::save_calculation(
+        app,
+        project_id,
+        cif_id,
+        projects::SaveCalculationData {
+            engine_id: engines::EngineId::Wien2k,
+            calc_type: "fermi_surface".to_string(),
+            parameters,
+            result,
+            started_at,
+            completed_at,
+            input_content: klist,
+            output_content: native_output.clone(),
+            tags: vec!["wien2k-native".to_string()],
+        },
+        Some(staging_dir.to_string_lossy().to_string()),
+    )?;
+    let _ = std::fs::remove_dir_all(&staging_dir);
+
+    let mut diagnostics = Vec::new();
+    if command_failed {
+        diagnostics.push(
+            "WIEN2k Fermi-surface command returned a non-zero status; BXSF files were still found."
+                .to_string(),
+        );
+    }
+    Ok(engines::wien2k::Wien2kFermiSurfaceResult {
+        calculation_id: saved.id,
+        k_grid: settings.k_mesh,
+        fermi_energy,
+        primary_file,
+        bxsf_files,
+        native_output,
+        diagnostics,
+    })
+}
+
+#[tauri::command]
+async fn start_wien2k_fermi_surface_calculation(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    source_scf_calculation_id: String,
+    settings: engines::wien2k::Wien2kFermiSurfaceSettings,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm.register("wien2k_fermi_surface".to_string(), label).await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string())).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            run_wien2k_fermi_surface_task(
+                app_handle.clone(),
+                &tid,
+                project_id,
+                cif_id,
+                source_scf_calculation_id,
+                settings,
+                resources,
+                &app_state,
+            )
+            .await
+        };
+
+        match result {
+            Ok(fermi_result) => {
+                let saved_line = format!(
+                    "[saved WIEN2k Fermi-surface calculation {}: {} BXSF file(s)]",
+                    fermi_result.calculation_id,
+                    fermi_result.bxsf_files.len()
+                );
+                pm.append_output(&tid, saved_line.clone()).await;
+                let _ = app_handle.emit(&format!("task-output:{}", tid), &saved_line);
+                let json = serde_json::to_value(&fermi_result).unwrap_or(serde_json::Value::Null);
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
 }
 
 async fn run_scheduled_engine_module_probe(
@@ -17144,6 +17716,7 @@ pub fn run() {
         wien2k_discard_bands_session,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
+        start_wien2k_fermi_surface_calculation,
         hpc_test_connection,
         hpc_validate_environment,
         viewer_sync_remote_library,
@@ -17218,6 +17791,7 @@ pub fn run() {
         wien2k_discard_bands_session,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
+        start_wien2k_fermi_surface_calculation,
         hpc_test_connection,
         hpc_validate_environment,
         hpc_get_cluster_snapshot,

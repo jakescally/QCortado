@@ -291,6 +291,7 @@ export const WIEN2K_WORKFLOW_VIEWS: Partial<Record<CalculationKind, EngineWorkfl
   engine_setup: "wien2k-structure-wizard",
   scf: "wien2k-scf-wizard",
   bands: "bands-wizard",
+  fermi_surface: "fermi-surface-wizard",
 };
 
 export const WIEN2K_FRONTEND_ENGINE_PLUGIN: FrontendEnginePlugin = {

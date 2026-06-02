@@ -2,6 +2,44 @@
 
 export type Wien2kSpinMode = "non_spin_polarized" | "spin_polarized";
 
+export type Wien2kInitialSpinConfiguration = "up" | "down" | "non_magnetic";
+export type Wien2kDftUDoubleCounting = "amf" | "sic" | "hmf";
+export type Wien2kFermiMethod = "tetra" | "temp" | "temps";
+export type Wien2kMixerMode = "MSR1" | "MSEC3" | "MSEC4" | "MSR2" | "PRATT" | "PRAT0";
+export type Wien2kMixerTrust = "default" | "STIFF" | "STIFFER" | "FAST";
+export type Wien2kDispersionCorrection = "none" | "dftd3" | "dftd4";
+
+export interface Wien2kStartingMagnetization {
+  siteIndex: number;
+  element: string;
+  configuration: Wien2kInitialSpinConfiguration;
+  momentBohrMagneton: number;
+}
+
+export interface Wien2kHubbardTarget {
+  siteIndex: number;
+  element: string;
+  manifold: string;
+  orbitalL: number;
+  uEv: number;
+  jEv: number;
+  recommended?: boolean;
+  reason?: string | null;
+}
+
+export interface Wien2kDftUSettings {
+  enabled: boolean;
+  doubleCounting: Wien2kDftUDoubleCounting;
+  targets: Wien2kHubbardTarget[];
+}
+
+export interface Wien2kMixerSettings {
+  mode: Wien2kMixerMode;
+  greed: number;
+  history: number;
+  trust: Wien2kMixerTrust;
+}
+
 export interface Wien2kExchangeCorrelationOption {
   value: number;
   label: string;
@@ -69,6 +107,9 @@ export interface Wien2kInitializationSettings {
   exchangeCorrelation: number;
   lstartEnergyCutoffRy: number;
   spinMode: Wien2kSpinMode;
+  fermiMethod: Wien2kFermiMethod;
+  fermiSmearingRy?: number | null;
+  startingMagnetization: Wien2kStartingMagnetization[];
 }
 
 export interface Wien2kScfRunSettings {
@@ -77,6 +118,11 @@ export interface Wien2kScfRunSettings {
   energyConvergenceRy: number;
   chargeConvergence: number;
   forceConvergenceMryBohr?: number | null;
+  dftU: Wien2kDftUSettings;
+  dispersionCorrection: Wien2kDispersionCorrection;
+  iterativeDiagonalization: boolean;
+  forceMinimization: boolean;
+  mixer: Wien2kMixerSettings;
 }
 
 export interface Wien2kRemoteRuntimeProfile {
@@ -104,6 +150,9 @@ export const DEFAULT_WIEN2K_INITIALIZATION_SETTINGS: Wien2kInitializationSetting
   exchangeCorrelation: 13,
   lstartEnergyCutoffRy: -6,
   spinMode: "non_spin_polarized",
+  fermiMethod: "tetra",
+  fermiSmearingRy: null,
+  startingMagnetization: [],
 };
 
 export const DEFAULT_WIEN2K_SCF_RUN_SETTINGS: Wien2kScfRunSettings = {
@@ -112,4 +161,18 @@ export const DEFAULT_WIEN2K_SCF_RUN_SETTINGS: Wien2kScfRunSettings = {
   energyConvergenceRy: 0.0001,
   chargeConvergence: 0.0001,
   forceConvergenceMryBohr: null,
+  dftU: {
+    enabled: false,
+    doubleCounting: "sic",
+    targets: [],
+  },
+  dispersionCorrection: "none",
+  iterativeDiagonalization: false,
+  forceMinimization: false,
+  mixer: {
+    mode: "MSR1",
+    greed: 0.2,
+    history: 8,
+    trust: "default",
+  },
 };

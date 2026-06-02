@@ -73,7 +73,7 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
     label: "WIEN2k",
     status: "reserved",
     executionModes: ["remote"],
-    calculationKinds: ["engine_setup", "scf", "bands", "dos"],
+    calculationKinds: ["engine_setup", "scf", "bands", "fermi_surface", "dos"],
   },
   hpc: {
     supportsLocal: false,
@@ -140,6 +140,27 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
       produces: ["band_dataset", "native_artifacts"],
     },
     {
+      kind: "fermi_surface",
+      label: "Wien2k Fermi surface",
+      routeKey: "wien2k.fermiSurface",
+      executionModes: ["remote"],
+      sharedPanels: [
+        sourceScfPanels[0],
+        sharedPanel("hpc_run_settings", "Remote execution settings", 90),
+        sharedPanel("live_output", "Live output", 100),
+        sharedPanel("viewer", "FermiSurfer", 120),
+      ],
+      enginePanels: [
+        enginePanel("wien2k-fermi-xcrysden", "XCrySDen BXSF", "wien2k.fermi.xcrysden", 30, true, "WIEN2k dense k mesh, lapw1/lapw2 -fermi, and XCrySDen BXSF conversion for FermiSurfer."),
+      ],
+      inputRequirements: [
+        requirement("source_scf_calculation", "Source Wien2k SCF calculation"),
+        requirement("engine_case_state", "Converged Wien2k case state"),
+        requirement("engine_runtime_profile", "Wien2k remote runtime profile"),
+      ],
+      produces: ["native_artifacts"],
+    },
+    {
       kind: "dos",
       label: "Wien2k DOS",
       routeKey: "wien2k.dos",
@@ -163,9 +184,9 @@ export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
     ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
     status: "configured",
-    calculationKinds: ["engine_setup", "scf", "bands"],
+    calculationKinds: ["engine_setup", "scf", "bands", "fermi_surface"],
   },
   workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
-    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "bands",
+    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "bands" || workflow.kind === "fermi_surface",
   ),
 };

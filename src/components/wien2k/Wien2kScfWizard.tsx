@@ -13,6 +13,7 @@ import {
 } from "../../lib/engines/wien2k";
 import type {
   NormalizedScfSummary,
+  Wien2kHubbardTarget,
   Wien2kInitializationSettings,
   Wien2kScfExecutionResult,
   Wien2kScfRunSettings,
@@ -21,10 +22,12 @@ import type {
 } from "../../lib/engines/wien2k";
 import { defaultCpuResources } from "../../lib/hpcConfig";
 import type { HpcProfile, SlurmResourceRequest } from "../../lib/types";
+import { getHubbardRecommendations, resolveHubbardUDefault } from "../../lib/engines/qe/hubbard";
 import { useTaskContext } from "../../lib/TaskContext";
 import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
 import { ElapsedTimer } from "../ElapsedTimer";
 import { HpcRunSettings } from "../HpcRunSettings";
+import { InfoTooltip } from "../InfoTooltip";
 import { LiveOutputPanel } from "../LiveOutputPanel";
 import { ProgressBar } from "../ProgressBar";
 import { RemoteUtilizationPanel } from "../RemoteUtilizationPanel";
@@ -63,7 +66,19 @@ function numberField(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-type SectionKey = "source" | "radii" | "initialization" | "scf" | "hpc";
+type SectionKey = "source" | "radii" | "initialization" | "magnetism" | "dftu" | "scf" | "advanced" | "hpc";
+
+const ORBITAL_L_BY_MANIFOLD: Record<string, number> = { s: 0, p: 1, d: 2, f: 3 };
+
+function normalizeElementSymbol(symbol: string): string {
+  const trimmed = String(symbol || "").trim().replace(/[\d+-]+$/, "");
+  if (!trimmed) return "";
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase();
+}
+
+function orbitalLFromManifold(manifold: string): number {
+  return ORBITAL_L_BY_MANIFOLD[manifold.trim().slice(-1)] ?? 2;
+}
 
 function cloneWien2kCpuResources(profile: HpcProfile | null | undefined): SlurmResourceRequest {
   const source = profile?.default_cpu_resources ?? defaultCpuResources();
@@ -110,6 +125,10 @@ function buildRunPreviewCommand(profile: HpcProfile | null | undefined, settings
     "-cc", String(settings.chargeConvergence),
     "-i", String(settings.maxIterations),
     ...(settings.forceConvergenceMryBohr != null ? ["-fc", String(settings.forceConvergenceMryBohr)] : []),
+    ...(settings.iterativeDiagonalization ? ["-it"] : []),
+    ...(settings.forceMinimization ? ["-min"] : []),
+    ...(settings.dispersionCorrection !== "none" ? [`-${settings.dispersionCorrection}`] : []),
+    ...(settings.dftU.enabled ? ["-orb"] : []),
   ];
   return `${executable} ${args.map(shellQuote).join(" ")}`;
 }
@@ -152,7 +171,10 @@ export function Wien2kScfWizard({
     source: true,
     radii: true,
     initialization: true,
+    magnetism: false,
+    dftu: false,
     scf: false,
+    advanced: false,
     hpc: false,
   });
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(() => cloneWien2kCpuResources(activeHpcProfile));
@@ -171,6 +193,7 @@ export function Wien2kScfWizard({
   );
   const runError = validateWien2kScfRunSettings(effectiveRunSettings);
   const initialized = session?.phase === "initialized" || session?.phase === "scf_complete" || session?.phase === "failed";
+  const initializationLocked = initialized || isInitializing;
   const currentStep: ScfWizardStep = !session
     ? "source"
     : !initialized
@@ -188,6 +211,30 @@ export function Wien2kScfWizard({
   const sites = Array.isArray(sourceParameters.sites)
     ? sourceParameters.sites as Array<{ symbol?: string; rmt?: number; positions?: unknown[] }>
     : [];
+  const hubbardRecommendations = useMemo(() => {
+    const recommendations = getHubbardRecommendations(sites.map((site) => site.symbol ?? ""));
+    return new Map(recommendations.map((entry) => [entry.element, entry]));
+  }, [sites]);
+  const recommendedHubbardTargets = useMemo<Wien2kHubbardTarget[]>(() => {
+    const targets: Wien2kHubbardTarget[] = [];
+    sites.forEach((site, index) => {
+      const element = normalizeElementSymbol(site.symbol ?? "");
+      const recommendation = hubbardRecommendations.get(element);
+      if (!element || !recommendation) return;
+      const defaultU = resolveHubbardUDefault(element, recommendation.manifold, []);
+      targets.push({
+        siteIndex: index + 1,
+        element,
+        manifold: recommendation.manifold,
+        orbitalL: orbitalLFromManifold(recommendation.manifold),
+        uEv: defaultU.value,
+        jEv: 0,
+        recommended: true,
+        reason: recommendation.reason,
+      });
+    });
+    return targets;
+  }, [sites, hubbardRecommendations]);
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
@@ -246,8 +293,24 @@ export function Wien2kScfWizard({
     setHpcResources(cloneWien2kCpuResources(activeHpcProfile));
   }, [activeHpcProfile?.id, activeHpcProfile?.updated_at]);
 
+  useEffect(() => {
+    if (sites.length === 0) return;
+    setInitialization((current) => {
+      if (current.startingMagnetization.length > 0) return current;
+      return {
+        ...current,
+        startingMagnetization: sites.map((site, index) => ({
+          siteIndex: index + 1,
+          element: normalizeElementSymbol(site.symbol ?? `Site ${index + 1}`),
+          configuration: "up",
+          momentBohrMagneton: 1,
+        })),
+      };
+    });
+  }, [sites]);
+
   function toggleSection(section: SectionKey) {
-    if ((section === "scf" || section === "hpc") && !initialized) return;
+    if ((section === "scf" || section === "advanced" || section === "hpc") && !initialized) return;
     setExpandedSections((current) => ({ ...current, [section]: !current[section] }));
   }
 
@@ -290,7 +353,10 @@ export function Wien2kScfWizard({
         source: false,
         radii: false,
         initialization: false,
+        magnetism: false,
+        dftu: runSettings.dftU.enabled,
         scf: true,
+        advanced: false,
         hpc: true,
       });
     } catch (reason) {
@@ -346,7 +412,10 @@ export function Wien2kScfWizard({
         source: true,
         radii: true,
         initialization: true,
+        magnetism: false,
+        dftu: false,
         scf: false,
+        advanced: false,
         hpc: false,
       });
     } catch (reason) {
@@ -367,6 +436,55 @@ export function Wien2kScfWizard({
     } catch (reason) {
       setError(String(reason));
     }
+  }
+
+  function setSpinMode(spinMode: Wien2kInitializationSettings["spinMode"]) {
+    setInitialization((current) => ({ ...current, spinMode }));
+    setRunSettings((current) => ({
+      ...current,
+      spinMode,
+      dftU: spinMode === "spin_polarized" ? current.dftU : { ...current.dftU, enabled: false },
+    }));
+  }
+
+  function enableRecommendedDftU(enabled: boolean) {
+    setRunSettings((current) => ({
+      ...current,
+      spinMode: enabled ? "spin_polarized" : current.spinMode,
+      dftU: {
+        ...current.dftU,
+        enabled,
+        targets: enabled && current.dftU.targets.length === 0 ? recommendedHubbardTargets : current.dftU.targets,
+      },
+    }));
+    if (enabled) {
+      setInitialization((current) => ({ ...current, spinMode: "spin_polarized" }));
+      setExpandedSections((current) => ({ ...current, magnetism: true, dftu: true }));
+    }
+  }
+
+  function toggleHubbardTarget(target: Wien2kScfRunSettings["dftU"]["targets"][number], enabled: boolean) {
+    setRunSettings((current) => {
+      const targets = enabled
+        ? [...current.dftU.targets.filter((entry) => entry.siteIndex !== target.siteIndex || entry.manifold !== target.manifold), target]
+        : current.dftU.targets.filter((entry) => entry.siteIndex !== target.siteIndex || entry.manifold !== target.manifold);
+      return { ...current, dftU: { ...current.dftU, targets } };
+    });
+  }
+
+  function updateHubbardTarget(
+    siteIndex: number,
+    changes: Partial<Wien2kScfRunSettings["dftU"]["targets"][number]>,
+  ) {
+    setRunSettings((current) => ({
+      ...current,
+      dftU: {
+        ...current.dftU,
+        targets: current.dftU.targets.map((target) => (
+          target.siteIndex === siteIndex ? { ...target, ...changes } : target
+        )),
+      },
+    }));
   }
 
   function renderSection(
@@ -521,7 +639,7 @@ export function Wien2kScfWizard({
                 <Wien2kFieldLabel tooltip="Selects the accepted WIEN2k structure, symmetry, and muffin-tin radii used as the SCF basis. Recommended choice: the latest reviewed structure for the intended material; change geometry or RMT in the Structure workflow.">
                   Saved case.struct
                 </Wien2kFieldLabel>
-                <select value={sourceId} disabled={Boolean(session)} onChange={(event) => setSourceId(event.target.value)}>
+                <select value={sourceId} disabled={Boolean(session) || isInitializing} onChange={(event) => setSourceId(event.target.value)}>
                   {sources.map((source) => (
                     <option key={source.id} value={source.id}>
                       {String(source.parameters?.case_name ?? "case")}.struct
@@ -542,7 +660,7 @@ export function Wien2kScfWizard({
                 <p className="wien2k-validation">No accepted WIEN2k Structure source is available.</p>
               )}
             </div>
-          ), { status: session ? "Locked" : undefined })}
+          ), { status: session || isInitializing ? "Locked" : undefined })}
 
           {renderSection("radii", "Accepted Muffin-Tin Radii", sites.length > 0 ? (
             <table className="wien2k-site-table">
@@ -559,7 +677,7 @@ export function Wien2kScfWizard({
             </table>
           ) : (
             <p className="wien2k-validation">No accepted muffin-tin radii were saved with this structure source.</p>
-          ), { status: initialized ? "Locked" : undefined })}
+          ), { status: initializationLocked ? "Locked" : undefined })}
 
           {renderSection("initialization", "Initialization", (
             <>
@@ -568,25 +686,25 @@ export function Wien2kScfWizard({
                   <Wien2kFieldLabel tooltip="RMT(min) times KMAX controls the LAPW plane-wave basis size; larger values improve basis accuracy while increasing memory and runtime. Typical starting range: 6 to 9, followed by convergence testing.">
                     RKMAX
                   </Wien2kFieldLabel>
-                  <input type="number" min="0.1" step="0.1" disabled={initialized} value={initialization.rkmax} onChange={(event) => setInitialization((current) => ({ ...current, rkmax: numberField(event.target.value, current.rkmax) }))} />
+                  <input type="number" min="0.1" step="0.1" disabled={initializationLocked} value={initialization.rkmax} onChange={(event) => setInitialization((current) => ({ ...current, rkmax: numberField(event.target.value, current.rkmax) }))} />
                 </label>
                 <label>
                   <Wien2kFieldLabel tooltip="Sets the reciprocal-space cutoff for representing density and potential components; raising it resolves sharper density features at higher cost. Typical starting range: 10 to 16.">
                     GMAX
                   </Wien2kFieldLabel>
-                  <input type="number" min="0.1" step="0.1" disabled={initialized} value={initialization.gmax} onChange={(event) => setInitialization((current) => ({ ...current, gmax: numberField(event.target.value, current.gmax) }))} />
+                  <input type="number" min="0.1" step="0.1" disabled={initializationLocked} value={initialization.gmax} onChange={(event) => setInitialization((current) => ({ ...current, gmax: numberField(event.target.value, current.gmax) }))} />
                 </label>
                 <label>
                   <Wien2kFieldLabel tooltip="Maximum angular momentum in the muffin-tin expansion; higher values capture more aspherical character but add work. Typical starting range: 8 to 12.">
                     LMAX
                   </Wien2kFieldLabel>
-                  <input type="number" min="1" step="1" disabled={initialized} value={initialization.lmax} onChange={(event) => setInitialization((current) => ({ ...current, lmax: numberField(event.target.value, current.lmax) }))} />
+                  <input type="number" min="1" step="1" disabled={initializationLocked} value={initialization.lmax} onChange={(event) => setInitialization((current) => ({ ...current, lmax: numberField(event.target.value, current.lmax) }))} />
                 </label>
                 <label>
                   <Wien2kFieldLabel tooltip="Chooses the exchange-correlation approximation used to initialize and run the density. WIEN2k initialization provides LDA, PBE, WC, and PBEsol; PBE is a common general-purpose default, and comparisons should keep XC fixed.">
                     XC functional
                   </Wien2kFieldLabel>
-                  <select disabled={initialized} value={initialization.exchangeCorrelation} onChange={(event) => setInitialization((current) => ({ ...current, exchangeCorrelation: Number(event.target.value) }))}>
+                  <select disabled={initializationLocked} value={initialization.exchangeCorrelation} onChange={(event) => setInitialization((current) => ({ ...current, exchangeCorrelation: Number(event.target.value) }))}>
                     {WIEN2K_EXCHANGE_CORRELATION_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>{option.label}</option>
                     ))}
@@ -596,16 +714,23 @@ export function Wien2kScfWizard({
                   <Wien2kFieldLabel tooltip="Separates core and valence states during LSTART, affecting which electrons participate in the variational SCF basis. Typical starting range: -8 to -4 Ry; check for core leakage warnings.">
                     LSTART cutoff (Ry)
                   </Wien2kFieldLabel>
-                  <input type="number" step="0.1" disabled={initialized} value={initialization.lstartEnergyCutoffRy} onChange={(event) => setInitialization((current) => ({ ...current, lstartEnergyCutoffRy: numberField(event.target.value, current.lstartEnergyCutoffRy) }))} />
+                  <input type="number" step="0.1" disabled={initializationLocked} value={initialization.lstartEnergyCutoffRy} onChange={(event) => setInitialization((current) => ({ ...current, lstartEnergyCutoffRy: numberField(event.target.value, current.lstartEnergyCutoffRy) }))} />
                 </label>
                 <label>
-                  <Wien2kFieldLabel tooltip="Enables collinear spin-resolved densities for magnetic calculations, adding separate spin channels and computational work. Recommended choice: non-spin-polarized unless magnetism is physically expected.">
-                    Spin mode
+                  <Wien2kFieldLabel tooltip="Fermi integration method written to case.in2 after initialization. TETRA is the default for well-sampled solids; TEMP/TEMPS are useful for metallic or hard-to-converge occupations.">
+                    Fermi method
                   </Wien2kFieldLabel>
-                  <select disabled={initialized} value={initialization.spinMode} onChange={(event) => setInitialization((current) => ({ ...current, spinMode: event.target.value as Wien2kInitializationSettings["spinMode"] }))}>
-                    <option value="non_spin_polarized">Non-spin-polarized</option>
-                    <option value="spin_polarized">Spin-polarized</option>
+                  <select disabled={initializationLocked} value={initialization.fermiMethod} onChange={(event) => setInitialization((current) => ({ ...current, fermiMethod: event.target.value as Wien2kInitializationSettings["fermiMethod"] }))}>
+                    <option value="tetra">TETRA</option>
+                    <option value="temp">TEMP</option>
+                    <option value="temps">TEMPS</option>
                   </select>
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="Smearing value in Ry used with TEMP or TEMPS Fermi integration. Ignored for TETRA.">
+                    Smearing (Ry)
+                  </Wien2kFieldLabel>
+                  <input type="number" min="0" step="0.0001" disabled={initializationLocked || initialization.fermiMethod === "tetra"} placeholder="TETRA" value={initialization.fermiSmearingRy ?? ""} onChange={(event) => setInitialization((current) => ({ ...current, fermiSmearingRy: event.target.value.trim() ? numberField(event.target.value, 0.002) : null }))} />
                 </label>
               </div>
               <div className="wien2k-control-grid wien2k-kmesh-grid">
@@ -614,7 +739,7 @@ export function Wien2kScfWizard({
                     <Wien2kFieldLabel tooltip={`Number of reciprocal-space sampling divisions along lattice direction ${index + 1}; denser meshes improve Brillouin-zone integration while multiplying runtime. Typical starting range: 4 to 12 per direction, scaled for cell shape.`}>
                       k{index + 1}
                     </Wien2kFieldLabel>
-                    <input type="number" min="1" step="1" disabled={initialized} value={value} onChange={(event) => setInitialization((current) => {
+                    <input type="number" min="1" step="1" disabled={initializationLocked} value={value} onChange={(event) => setInitialization((current) => {
                       const next = [...current.kMesh] as [number, number, number];
                       next[index] = numberField(event.target.value, value);
                       return { ...current, kMesh: next };
@@ -624,7 +749,118 @@ export function Wien2kScfWizard({
               </div>
               {initError && <p className="wien2k-validation">{initError}</p>}
             </>
-          ), { status: initialized ? "Locked" : undefined })}
+          ), { status: initializationLocked ? "Locked" : undefined })}
+
+          {renderSection("magnetism", "Magnetism and Spin", (
+            <>
+              <div className="wien2k-control-grid">
+                <label>
+                  <Wien2kFieldLabel tooltip="Selects nonmagnetic run_lapw or collinear spin-polarized initialization plus runsp_lapw. DFT+U requires the spin-polarized path in WIEN2k.">
+                    Spin mode
+                  </Wien2kFieldLabel>
+                  <select disabled={initializationLocked || runSettings.dftU.enabled} value={initialization.spinMode} onChange={(event) => setSpinMode(event.target.value as Wien2kInitializationSettings["spinMode"])}>
+                    <option value="non_spin_polarized">Non-spin-polarized</option>
+                    <option value="spin_polarized">Spin-polarized</option>
+                  </select>
+                </label>
+              </div>
+              {initialization.spinMode === "spin_polarized" && (
+                <table className="wien2k-site-table">
+                  <thead><tr><th>Site</th><th>Start</th><th>Moment (uB)</th></tr></thead>
+                  <tbody>
+                    {initialization.startingMagnetization.map((entry, index) => (
+                      <tr key={`${entry.siteIndex}-${entry.element}`}>
+                        <td>{entry.siteIndex}. {entry.element || `Site ${entry.siteIndex}`}</td>
+                        <td>
+                          <select disabled={initializationLocked} value={entry.configuration} onChange={(event) => setInitialization((current) => {
+                            const next = [...current.startingMagnetization];
+                            next[index] = { ...entry, configuration: event.target.value as typeof entry.configuration };
+                            return { ...current, startingMagnetization: next };
+                          })}>
+                            <option value="up">Up</option>
+                            <option value="down">Down</option>
+                            <option value="non_magnetic">Non-magnetic</option>
+                          </select>
+                        </td>
+                        <td>
+                          <input type="number" min="0" step="0.1" disabled={initializationLocked} value={entry.momentBohrMagneton} onChange={(event) => setInitialization((current) => {
+                            const next = [...current.startingMagnetization];
+                            next[index] = { ...entry, momentBohrMagneton: numberField(event.target.value, entry.momentBohrMagneton) };
+                            return { ...current, startingMagnetization: next };
+                          })} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {initialization.spinMode === "spin_polarized" && (
+                <p className="wien2k-validation">
+                  Spin-polarized initialization is applied natively. Site-level AFM/down/non-magnetic occupation editing is saved with the run settings, but automatic case.inst rewriting is not enabled in this workflow yet.
+                </p>
+              )}
+            </>
+          ), { status: initializationLocked ? "Locked" : undefined })}
+
+          {renderSection("dftu", "DFT+U Hubbard Corrections", (
+            <>
+              <div className="wien2k-dftu-header-grid">
+                <label className="wien2k-inline-toggle">
+                  <input type="checkbox" disabled={initializationLocked} checked={runSettings.dftU.enabled} onChange={(event) => enableRecommendedDftU(event.target.checked)} />
+                  <span className="wien2k-field-label-row">
+                    Enable DFT+U
+                    <InfoTooltip text="WIEN2k applies DFT+U through ORB. QCortado uses the supported runsp_lapw -orb path, so enabling this switches the case to spin-polarized initialization." />
+                  </span>
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="WIEN2k ORB double-counting mode. SIC is the common fully localized choice; AMF may be more appropriate for itinerant metallic states.">
+                    Double counting
+                  </Wien2kFieldLabel>
+                  <select disabled={initializationLocked || !runSettings.dftU.enabled} value={runSettings.dftU.doubleCounting} onChange={(event) => setRunSettings((current) => ({ ...current, dftU: { ...current.dftU, doubleCounting: event.target.value as typeof current.dftU.doubleCounting } }))}>
+                    <option value="sic">SIC</option>
+                    <option value="amf">AMF</option>
+                    <option value="hmf">HMF</option>
+                  </select>
+                </label>
+              </div>
+              {runSettings.dftU.enabled && (
+                <table className="wien2k-site-table">
+                  <thead>
+                    <tr>
+                      <th>Use</th>
+                      <th>Site</th>
+                      <th>Manifold</th>
+                      <th>U (eV) <InfoTooltip text="On-site Hubbard U for this WIEN2k orbital channel." /></th>
+                      <th>J (eV) <InfoTooltip text="Hund exchange J; keep 0 for a U-only correction." /></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recommendedHubbardTargets.map((target) => {
+                      const active = runSettings.dftU.targets.find((entry) => entry.siteIndex === target.siteIndex && entry.manifold === target.manifold);
+                      return (
+                        <tr key={`${target.siteIndex}-${target.manifold}`}>
+                          <td><input type="checkbox" disabled={initializationLocked} checked={Boolean(active)} onChange={(event) => toggleHubbardTarget(target, event.target.checked)} /></td>
+                          <td title={target.reason ?? undefined}>{target.siteIndex}. {target.element}</td>
+                          <td>
+                            <input value={active?.manifold ?? target.manifold} disabled={initializationLocked || !active} onChange={(event) => updateHubbardTarget(target.siteIndex, {
+                              manifold: event.target.value,
+                              orbitalL: orbitalLFromManifold(event.target.value),
+                            })} />
+                          </td>
+                          <td><input type="number" min="0" step="0.1" disabled={initializationLocked || !active} value={active?.uEv ?? target.uEv} onChange={(event) => updateHubbardTarget(target.siteIndex, { uEv: numberField(event.target.value, target.uEv) })} /></td>
+                          <td><input type="number" min="0" step="0.1" disabled={initializationLocked || !active} value={active?.jEv ?? target.jEv} onChange={(event) => updateHubbardTarget(target.siteIndex, { jEv: numberField(event.target.value, target.jEv) })} /></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              {runSettings.dftU.enabled && recommendedHubbardTargets.length === 0 && (
+                <p className="wien2k-validation">No transition-metal d or lanthanide/actinide f manifolds were detected for this structure.</p>
+              )}
+              {runError && runSettings.dftU.enabled && <p className="wien2k-validation">{runError}</p>}
+            </>
+          ), { status: initializationLocked ? "Locked" : undefined })}
 
           {renderSection("scf", "SCF Cycle", (
             <>
@@ -655,6 +891,69 @@ export function Wien2kScfWizard({
                 </label>
               </div>
               {runError && <p className="wien2k-validation">{runError}</p>}
+            </>
+          ), { locked: !initialized, status: initialized ? undefined : "Locked - run initialization first" })}
+
+          {renderSection("advanced", "Advanced SCF Options", (
+            <>
+              <div className="wien2k-control-grid">
+                <label>
+                  <Wien2kFieldLabel tooltip="Selects a WIEN2k dispersion correction switch for run_lapw/runsp_lapw. DFT-D3/D4 require the corresponding WIEN2k-side executable to be installed.">
+                    Dispersion
+                  </Wien2kFieldLabel>
+                  <select value={runSettings.dispersionCorrection} onChange={(event) => setRunSettings((current) => ({ ...current, dispersionCorrection: event.target.value as typeof current.dispersionCorrection }))}>
+                    <option value="none">None</option>
+                    <option value="dftd3">DFT-D3</option>
+                    <option value="dftd4">DFT-D4</option>
+                  </select>
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="MIXER mode written to case.inm. MSR1 is the robust default; PRATT is mainly useful for difficult starts with small greed.">
+                    Mixer
+                  </Wien2kFieldLabel>
+                  <select value={runSettings.mixer.mode} onChange={(event) => setRunSettings((current) => ({ ...current, mixer: { ...current.mixer, mode: event.target.value as typeof current.mixer.mode } }))}>
+                    <option value="MSR1">MSR1</option>
+                    <option value="MSEC3">MSEC3</option>
+                    <option value="MSEC4">MSEC4</option>
+                    <option value="MSR2">MSR2</option>
+                    <option value="PRATT">PRATT</option>
+                    <option value="PRAT0">PRAT0</option>
+                  </select>
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="Mixing greed Q. Keep 0.2 for most MSR1/MSEC runs; lower values may help unstable magnetic or correlated starts.">
+                    Mixer greed
+                  </Wien2kFieldLabel>
+                  <input type="number" min="0.01" max="1" step="0.01" value={runSettings.mixer.greed} onChange={(event) => setRunSettings((current) => ({ ...current, mixer: { ...current.mixer, greed: numberField(event.target.value, current.mixer.greed) } }))} />
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="Number of previous iterations used by multisecant mixing. 6 to 10 is typical; larger cells sometimes benefit from more history.">
+                    Mixer history
+                  </Wien2kFieldLabel>
+                  <input type="number" min="1" step="1" value={runSettings.mixer.history} onChange={(event) => setRunSettings((current) => ({ ...current, mixer: { ...current.mixer, history: numberField(event.target.value, current.mixer.history) } }))} />
+                </label>
+                <label>
+                  <Wien2kFieldLabel tooltip="Optional MIXER trust hint. STIFF/STIFFER can help difficult oscillating cases; FAST can accelerate easy cases.">
+                    Trust
+                  </Wien2kFieldLabel>
+                  <select value={runSettings.mixer.trust} onChange={(event) => setRunSettings((current) => ({ ...current, mixer: { ...current.mixer, trust: event.target.value as typeof current.mixer.trust } }))}>
+                    <option value="default">Default</option>
+                    <option value="STIFF">STIFF</option>
+                    <option value="STIFFER">STIFFER</option>
+                    <option value="FAST">FAST</option>
+                  </select>
+                </label>
+              </div>
+              <div className="wien2k-control-grid">
+                <label className="checkbox-label">
+                  <input type="checkbox" checked={runSettings.iterativeDiagonalization} onChange={(event) => setRunSettings((current) => ({ ...current, iterativeDiagonalization: event.target.checked }))} />
+                  <span>Iterative diagonalization</span>
+                </label>
+                <label className="checkbox-label">
+                  <input type="checkbox" checked={runSettings.forceMinimization} onChange={(event) => setRunSettings((current) => ({ ...current, forceMinimization: event.target.checked }))} />
+                  <span>MSR1a force minimization</span>
+                </label>
+              </div>
             </>
           ), { locked: !initialized, status: initialized ? undefined : "Locked - run initialization first" })}
 

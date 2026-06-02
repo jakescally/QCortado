@@ -31,6 +31,7 @@ import type { EpwViewerPayload } from "../qe";
 import { Wien2kStructureWizard } from "../wien2k/Wien2kStructureWizard";
 import { Wien2kScfWizard } from "../wien2k/Wien2kScfWizard";
 import { Wien2kBandsWizard } from "../wien2k/Wien2kBandsWizard";
+import { Wien2kFermiSurfaceWizard } from "../wien2k/Wien2kFermiSurfaceWizard";
 
 export interface ScfWorkflowContext {
   cifId: string;
@@ -147,6 +148,7 @@ export function canRenderEngineWorkflowHost({
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
     if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf || reconnectTaskId);
     if (route.view === "bands-wizard") return Boolean(contexts.bands || reconnectTaskId);
+    if (route.view === "fermi-surface-wizard") return Boolean(contexts.fermiSurface || reconnectTaskId);
     return false;
   }
   if (route.engineId !== "qe") {
@@ -312,6 +314,21 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
       );
     }
     case "fermi-surface-wizard": {
+      if (route.engineId === "wien2k") {
+        const context = contexts.fermiSurface;
+        if (!context) return null;
+        return (
+          <Wien2kFermiSurfaceWizard
+            projectId={context.projectId}
+            cifId={context.cifId}
+            crystalData={context.crystalData}
+            scfCalculations={context.scfCalculations}
+            activeHpcProfile={runtime.activeHpcProfile}
+            reconnectTaskId={reconnectTaskIdValue}
+            onBack={() => onBack(route.view, "project-dashboard")}
+          />
+        );
+      }
       const context = contexts.fermiSurface;
       return (
         <FermiSurfaceWizard
