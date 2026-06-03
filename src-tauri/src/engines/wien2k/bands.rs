@@ -153,6 +153,12 @@ pub fn validate_prepare_settings(settings: &Wien2kBandsPrepareSettings) -> Resul
     if !settings.character_scale.is_finite() || settings.character_scale < 0.0 {
         return Err("Character scale must be non-negative.".to_string());
     }
+    if settings.character_l > 3 {
+        return Err("Character orbital column must be 0 (s), 1 (p), 2 (d), or 3 (f).".to_string());
+    }
+    if settings.character_atom > 0 && !settings.run_lapw2_qtl {
+        return Err("Character plotting requires `x lapw2 -qtl -band`.".to_string());
+    }
     Ok(())
 }
 
@@ -187,21 +193,21 @@ pub fn build_insp(
     };
     let color_switch = if settings.run_irrep { 4 } else { 0 };
     let character_column = if settings.character_atom > 0 {
-        settings.character_l.max(1)
+        settings.character_l.saturating_add(1)
     } else {
         1
     };
     format!(
         "### Figure configuration\n\
          5.0 3.0 # paper offset of plot\n\
-         10.0 15.0 # xsize,ysize [cm]\n\
+         10.0 15.0 3.0 # xsize, ysize [cm], line-break factor\n\
          1.0 4 # major ticks, minor ticks\n\
-         1.0 1 # character height, font switch\n\
+         1.0 1 1 # character height, font switch, header switch\n\
          1.1 {line_switch} {color_switch} # line width, line switch, color switch\n\
          ### Data configuration\n\
          {emin:.8} {emax:.8} 2 # energy range, energy switch (1:Ry, 2:eV)\n\
          1 {fermi:.10} # Fermi switch, Fermi-level (in Ry units)\n\
-         1 999 # lower and upper band index for heavier plotting\n\
+         1 999 # lower and upper band index parsed by spaghetti\n\
          {atom} {jcol} {scale:.6} # jatom, jtype, size of heavier plotting\n",
         emin = settings.energy_min_ev,
         emax = settings.energy_max_ev,
@@ -286,6 +292,84 @@ pub fn parse_spaghetti_xy(content: &str, fermi_energy_ev: f64) -> Result<BandDat
     if bands.is_empty() {
         return Err("No x/y band traces were parsed from WIEN2k spaghetti output.".to_string());
     }
+    band_data_from_relative_traces(bands, fermi_energy_ev)
+}
+
+pub fn parse_spaghetti_ene(content: &str, fermi_energy_ev: f64) -> Result<BandData, String> {
+    let mut bands: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current: Vec<(f64, f64)> = Vec::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line
+            .split_whitespace()
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("bandindex:"))
+        {
+            if !current.is_empty() {
+                bands.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if line.starts_with('#')
+            || line.starts_with('@')
+            || line.starts_with('*')
+            || line.starts_with('!')
+        {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 {
+            continue;
+        }
+        let Ok(x) = fields[3].replace('D', "E").replace('d', "E").parse::<f64>() else {
+            continue;
+        };
+        let Ok(y) = fields[4].replace('D', "E").replace('d', "E").parse::<f64>() else {
+            continue;
+        };
+        current.push((x, y));
+    }
+    if !current.is_empty() {
+        bands.push(current);
+    }
+    if bands.is_empty() {
+        return Err("No band traces were parsed from WIEN2k spaghetti_ene output.".to_string());
+    }
+    band_data_from_relative_traces(bands, fermi_energy_ev)
+}
+
+pub fn parse_spaghetti_artifact(
+    filename: &str,
+    content: &str,
+    fermi_energy_ev: f64,
+) -> Result<BandData, String> {
+    if filename.ends_with(".spaghetti_ene") {
+        parse_spaghetti_ene(content, fermi_energy_ev)
+    } else {
+        parse_spaghetti_xy(content, fermi_energy_ev)
+    }
+}
+
+pub fn apply_prepare_energy_window(
+    data: &mut BandData,
+    settings: &Wien2kBandsPrepareSettings,
+    fermi_energy_ev: f64,
+) {
+    if settings.energy_min_ev.is_finite() && settings.energy_max_ev.is_finite() {
+        data.energy_range = [
+            fermi_energy_ev + settings.energy_min_ev,
+            fermi_energy_ev + settings.energy_max_ev,
+        ];
+    }
+}
+
+fn band_data_from_relative_traces(
+    bands: Vec<Vec<(f64, f64)>>,
+    fermi_energy_ev: f64,
+) -> Result<BandData, String> {
     let n_kpoints = bands[0].len();
     if n_kpoints == 0 {
         return Err("WIEN2k spaghetti output contained no k-points.".to_string());
@@ -300,7 +384,11 @@ pub fn parse_spaghetti_xy(content: &str, fermi_energy_ev: f64) -> Result<BandDat
     let k_points = bands[0].iter().map(|(x, _)| *x).collect::<Vec<_>>();
     let energies = bands
         .iter()
-        .map(|band| band.iter().map(|(_, energy)| *energy).collect::<Vec<_>>())
+        .map(|band| {
+            band.iter()
+                .map(|(_, energy)| fermi_energy_ev + *energy)
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     let mut e_min = f64::INFINITY;
     let mut e_max = f64::NEG_INFINITY;
@@ -492,7 +580,7 @@ mod tests {
 
     #[test]
     fn insp_uses_modern_spaghetti_template() {
-        let settings = Wien2kBandsPrepareSettings {
+        let mut settings = Wien2kBandsPrepareSettings {
             k_path: vec![
                 Wien2kKPathPoint {
                     label: "G".to_string(),
@@ -521,10 +609,46 @@ mod tests {
         assert!(insp.contains("-8.00000000 6.00000000 2"));
         assert!(insp.contains("1 1.0000000000"));
         assert!(insp.contains("0 1 0.200000"));
+
+        settings.run_lapw2_qtl = true;
+        settings.character_atom = 1;
+        settings.character_l = 2;
+        let projected = build_insp("Si", &settings, Some(13.605_693_122_994));
+        assert!(projected.contains("1 3 0.200000"));
     }
 
     #[test]
-    fn spaghetti_xy_parser_accepts_agr_blocks() {
+    fn prepare_validation_rejects_character_plot_without_qtl_generation() {
+        let settings = Wien2kBandsPrepareSettings {
+            k_path: vec![
+                Wien2kKPathPoint {
+                    label: "G".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 2,
+                },
+                Wien2kKPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.0],
+                    npoints: 0,
+                },
+            ],
+            energy_min_ev: -8.0,
+            energy_max_ev: 6.0,
+            character_atom: 1,
+            character_l: 0,
+            character_scale: 0.2,
+            run_lapw2_qtl: false,
+            run_irrep: false,
+            spin_channel: None,
+        };
+
+        let error = validate_prepare_settings(&settings).expect_err("qtl should be required");
+
+        assert!(error.contains("lapw2 -qtl"));
+    }
+
+    #[test]
+    fn spaghetti_xy_parser_accepts_agr_blocks_and_restores_absolute_energies() {
         let content = "\
 @ title \"bands\"\n\
 0.0 -1.0\n\
@@ -532,9 +656,62 @@ mod tests {
 &\n\
 0.0 0.2\n\
 1.0 0.6\n";
-        let parsed = parse_spaghetti_xy(content, 0.0).expect("parse bands");
+        let parsed = parse_spaghetti_xy(content, 5.0).expect("parse bands");
         assert_eq!(parsed.n_bands, 2);
         assert_eq!(parsed.n_kpoints, 2);
-        assert_eq!(parsed.energies[0][1], -0.5);
+        assert_eq!(parsed.energies[0][1], 4.5);
+        assert_eq!(parsed.fermi_energy, 5.0);
+        assert_eq!(parsed.energy_range, [4.0, 5.6]);
+    }
+
+    #[test]
+    fn spaghetti_ene_parser_uses_wien2k_distance_and_energy_columns() {
+        let content = "\
+ bandindex:         1\n\
+   0.00000   0.00000   0.00000   0.00000  -1.25000\n\
+   0.50000   0.00000   0.00000   0.86603  -0.50000\n\
+ bandindex:         2\n\
+   0.00000   0.00000   0.00000   0.00000   0.10000\n\
+   0.50000   0.00000   0.00000   0.86603   0.75000\n";
+        let parsed = parse_spaghetti_ene(content, 4.0).expect("parse spaghetti_ene");
+
+        assert_eq!(parsed.k_points, vec![0.0, 0.86603]);
+        assert_eq!(parsed.energies[0], vec![2.75, 3.5]);
+        assert_eq!(parsed.energies[1], vec![4.1, 4.75]);
+        assert_eq!(parsed.fermi_energy, 4.0);
+    }
+
+    #[test]
+    fn prepare_energy_window_is_stored_as_absolute_view_range() {
+        let content = "\
+0.0 -1.0\n\
+1.0 1.0\n";
+        let settings = Wien2kBandsPrepareSettings {
+            k_path: vec![
+                Wien2kKPathPoint {
+                    label: "G".to_string(),
+                    coords: [0.0, 0.0, 0.0],
+                    npoints: 1,
+                },
+                Wien2kKPathPoint {
+                    label: "X".to_string(),
+                    coords: [0.5, 0.0, 0.0],
+                    npoints: 0,
+                },
+            ],
+            energy_min_ev: -8.0,
+            energy_max_ev: 6.0,
+            character_atom: 0,
+            character_l: 0,
+            character_scale: 0.2,
+            run_lapw2_qtl: false,
+            run_irrep: false,
+            spin_channel: None,
+        };
+        let mut parsed = parse_spaghetti_xy(content, 5.0).expect("parse bands");
+
+        apply_prepare_energy_window(&mut parsed, &settings, 5.0);
+
+        assert_eq!(parsed.energy_range, [-3.0, 11.0]);
     }
 }

@@ -1574,6 +1574,44 @@ mod hpc_headless_recovery_tests {
     }
 
     #[test]
+    fn wien2k_saved_scf_wienroot_is_preferred_for_derived_runs() {
+        let mut profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        profile.remote_wien2k_install_root = Some("/profile/WIEN2k".to_string());
+        let installation = engines::installations::EngineInstallation {
+            engine_id: engines::EngineId::Wien2k,
+            hpc_profile_id: "test".to_string(),
+            remote_install_root: "/install/WIEN2k".to_string(),
+            remote_workspace_root: "/scratch/qcortado".to_string(),
+            remote_project_root: "/scratch/qcortado/projects".to_string(),
+            verified_executables: vec!["x".to_string()],
+            version_hint: Some("24.1".to_string()),
+            verified_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let saved = serde_json::json!({ "remote_wienroot": "/saved/WIEN2k" });
+        let legacy = serde_json::json!({ "remote_install_root": "/legacy/WIEN2k" });
+        let missing = serde_json::json!({});
+        let blank = serde_json::json!({ "remote_wienroot": "   " });
+
+        assert_eq!(
+            wien2k_remote_install_root_from_parameters(&saved, &installation, &profile),
+            "/saved/WIEN2k"
+        );
+        assert_eq!(
+            wien2k_remote_install_root_from_parameters(&legacy, &installation, &profile),
+            "/legacy/WIEN2k"
+        );
+        assert_eq!(
+            wien2k_remote_install_root_from_parameters(&missing, &installation, &profile),
+            "/profile/WIEN2k"
+        );
+        assert_eq!(
+            wien2k_remote_install_root_from_parameters(&blank, &installation, &profile),
+            "/profile/WIEN2k"
+        );
+    }
+
+    #[test]
     fn wien2k_scf_command_sets_parallel_environment_after_module_load() {
         let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Module);
         let requested = hpc::profile::SlurmResourceRequest {
@@ -4510,6 +4548,8 @@ async fn wien2k_run_scf_session_impl(
         "continuation": continuation,
         "hpc_profile_id": session.hpc_profile_id.clone(),
         "remote_case_dir": session.remote_case_dir.clone(),
+        "remote_wienroot": session.remote_install_root.clone(),
+        "remote_install_root": session.remote_install_root.clone(),
         "execution_backend": "hpc",
         "native_artifacts_retained_remote": true,
     });
@@ -4714,6 +4754,7 @@ fn build_wien2k_bands_log_dump_command(case_name: &str, label: &str) -> String {
            \"${{case_name}}.dayfile\" \
            \"${{case_name}}.output1\" \"${{case_name}}.output1up\" \"${{case_name}}.output1dn\" \
            \"${{case_name}}.output2\" \"${{case_name}}.output2up\" \"${{case_name}}.output2dn\" \
+           \"${{case_name}}.outputso\" \"${{case_name}}.outputsoup\" \"${{case_name}}.outputsodn\" \
            \"${{case_name}}.qtl\" \"${{case_name}}.qtlup\" \"${{case_name}}.qtldn\" \
            \"${{case_name}}.irrep\" \"${{case_name}}.spaghetti\" \"${{case_name}}.spaghetti_ene\" \
            \"${{case_name}}.bands.agr\" \
@@ -4928,7 +4969,6 @@ fn find_wien2k_spaghetti_artifact<'a>(
     let candidates = [
         format!("{}.bands.agr", case_name),
         format!("{}.spaghetti_ene", case_name),
-        format!("{}.spaghetti", case_name),
     ];
     for candidate in candidates {
         if let Some(contents) = artifacts.get_key_value(&candidate) {
@@ -4937,7 +4977,31 @@ fn find_wien2k_spaghetti_artifact<'a>(
     }
     artifacts
         .iter()
-        .find(|(name, _)| name.ends_with(".agr") || name.contains("spaghetti_ene"))
+        .find(|(name, _)| name.ends_with(".agr") || name.ends_with(".spaghetti_ene"))
+}
+
+fn wien2k_remote_install_root_from_parameters(
+    parameters: &serde_json::Value,
+    installation: &engines::installations::EngineInstallation,
+    profile: &hpc::profile::HpcProfile,
+) -> String {
+    for key in ["remote_wienroot", "remote_install_root"] {
+        if let Some(value) = parameters
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return value.to_string();
+        }
+    }
+    profile
+        .remote_wien2k_install_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(installation.remote_install_root.trim())
+        .to_string()
 }
 
 fn parse_wien2k_spin_mode_value(
@@ -5008,7 +5072,7 @@ async fn wien2k_start_bands_session(
         .unwrap_or_default()
         .to_string();
     let spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
-    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
         return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
     }
@@ -5046,6 +5110,8 @@ async fn wien2k_start_bands_session(
             .result
             .as_ref()
             .and_then(|result| result.fermi_energy));
+    let remote_install_root =
+        wien2k_remote_install_root_from_parameters(&source.parameters, &installation, &profile);
     let session = engines::wien2k::Wien2kBandsSession {
         session_id: session_id.clone(),
         project_id,
@@ -5054,12 +5120,7 @@ async fn wien2k_start_bands_session(
         case_name,
         remote_case_dir,
         source_remote_case_dir,
-        remote_install_root: source
-            .parameters
-            .get("remote_wienroot")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        remote_install_root,
         hpc_profile_id: profile.id.clone(),
         spin_mode,
         fermi_energy_ev,
@@ -5124,6 +5185,7 @@ async fn wien2k_prepare_bands_session(
          {case}.irrep {case}.qtl {case}.qtlup {case}.qtldn \
          {case}.output1 {case}.output1up {case}.output1dn \
          {case}.output2 {case}.output2up {case}.output2dn \
+         {case}.outputso {case}.outputsoup {case}.outputsodn \
          {case}.spaghetti {case}.spaghetti_ene {case}.bands.agr && \
          echo '[QCortado] Prepared case.klist_band and case.insp'",
         shell_single_quote_local(&session.remote_case_dir),
@@ -5261,6 +5323,9 @@ async fn wien2k_run_bands_session_impl(
                 "output2",
                 "output2up",
                 "output2dn",
+                "outputso",
+                "outputsoup",
+                "outputsodn",
                 "qtl",
                 "qtlup",
                 "qtldn",
@@ -5278,10 +5343,12 @@ async fn wien2k_run_bands_session_impl(
         .ok_or_else(|| {
             "WIEN2k spaghetti did not produce a parseable band output artifact.".to_string()
         })?;
+    let fermi_energy_ev = session.fermi_energy_ev.unwrap_or(0.0);
     let mut band_data =
-        engines::wien2k::parse_spaghetti_xy(source_text, session.fermi_energy_ev.unwrap_or(0.0))?;
+        engines::wien2k::parse_spaghetti_artifact(source_name, source_text, fermi_energy_ev)?;
     if let Some(prepare) = &session.latest_prepare {
         engines::wien2k::add_symmetry_markers(&mut band_data, &prepare.k_path);
+        engines::wien2k::apply_prepare_energy_window(&mut band_data, prepare, fermi_energy_ev);
     }
     let completed_at = now_iso();
     let placeholder_dataset = engines::wien2k::band_dataset_json(
@@ -5645,7 +5712,7 @@ async fn run_wien2k_fermi_surface_task(
         return Err("Spin-polarized WIEN2k Fermi surfaces require an up or down spin channel.".to_string());
     }
 
-    let (_, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
+    let (installation, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
     if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
         return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
     }
@@ -5687,12 +5754,8 @@ async fn run_wien2k_fermi_surface_task(
     .await?;
 
     let resolved_resources = resolve_wien2k_bands_resources(&profile, resources)?;
-    let remote_install_root = source
-        .parameters
-        .get("remote_wienroot")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_string();
+    let remote_install_root =
+        wien2k_remote_install_root_from_parameters(&source.parameters, &installation, &profile);
     let command = build_wien2k_fermi_command(
         &case_name,
         &remote_case_dir,

@@ -273,7 +273,7 @@ export function Wien2kBandsWizard({
     [kPath],
   );
   const totalKPoints = useMemo(
-    () => kPath.reduce((sum, point) => sum + point.npoints, 0),
+    () => kPath.reduce((sum, point) => sum + point.npoints, 0) + (kPath.length > 0 ? 1 : 0),
     [kPath],
   );
   const minimumTotalKPoints = Math.max(1, kPathSegmentCount);
@@ -322,6 +322,12 @@ export function Wien2kBandsWizard({
   }, [selectedSpinMode, spinChannel]);
 
   useEffect(() => {
+    if (characterAtom > 0 && !runLapw2Qtl) {
+      setRunLapw2Qtl(true);
+    }
+  }, [characterAtom, runLapw2Qtl]);
+
+  useEffect(() => {
     setKPath((prevPath) => applyWien2kBandsTotalKPoints(prevPath, totalKPointsTarget));
   }, [totalKPointsTarget]);
 
@@ -361,6 +367,7 @@ export function Wien2kBandsWizard({
   function selectProjection(option: Wien2kBandProjectionOption) {
     setCharacterAtom(option.characterAtom);
     setCharacterL(option.characterL);
+    if (option.characterAtom > 0) setRunLapw2Qtl(true);
   }
 
   function bandsCommandLines(): string[] {
@@ -672,13 +679,13 @@ export function Wien2kBandsWizard({
               <>
                 <div className="wien2k-control-grid">
                   <label>
-                    <Wien2kFieldLabel tooltip="Lower energy bound in eV for WIEN2k `case.insp`. Use a window wide enough to include all valence and conduction bands of interest.">
+                    <Wien2kFieldLabel tooltip="Lower plotted-energy bound in eV for WIEN2k `case.insp`. This sets the spaghetti/viewer range relative to the Fermi level; it does not change how many eigenvalues lapw1 calculates.">
                       Energy min (eV)
                     </Wien2kFieldLabel>
                     <input type="number" step="0.5" value={energyMinEv} onChange={(event) => setEnergyMinEv(numberField(event.target.value, energyMinEv))} />
                   </label>
                   <label>
-                    <Wien2kFieldLabel tooltip="Upper energy bound in eV for WIEN2k `case.insp`. Increase this for higher conduction-band coverage.">
+                    <Wien2kFieldLabel tooltip="Upper plotted-energy bound in eV for WIEN2k `case.insp`. This controls the plotted window relative to the Fermi level, not the raw eigenvalue count.">
                       Energy max (eV)
                     </Wien2kFieldLabel>
                     <input type="number" step="0.5" value={energyMaxEv} onChange={(event) => setEnergyMaxEv(numberField(event.target.value, energyMaxEv))} />
@@ -722,9 +729,10 @@ export function Wien2kBandsWizard({
                     <input
                       type="number"
                       min="0"
+                      max="3"
                       step="1"
                       value={characterL}
-                      onChange={(event) => setCharacterL(Math.max(0, Math.round(numberField(event.target.value, characterL))))}
+                      onChange={(event) => setCharacterL(Math.min(3, Math.max(0, Math.round(numberField(event.target.value, characterL)))))}
                     />
                   </label>
                   <label>
@@ -791,7 +799,17 @@ export function Wien2kBandsWizard({
             {renderSection("spaghetti", "Optional Setup Scripts", (
               <>
                 <label className="option-checkbox">
-                  <input type="checkbox" checked={runLapw2Qtl} onChange={(event) => setRunLapw2Qtl(event.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={runLapw2Qtl}
+                    onChange={(event) => {
+                      setRunLapw2Qtl(event.target.checked);
+                      if (!event.target.checked) {
+                        setCharacterAtom(0);
+                        setCharacterL(0);
+                      }
+                    }}
+                  />
                   <span>
                     Generate character data
                     <Wien2kFieldLabel tooltip="Runs `x lapw2 -qtl -band` to generate QTL/character data for spaghetti. Enable this before using character/fat-band style output."> </Wien2kFieldLabel>
