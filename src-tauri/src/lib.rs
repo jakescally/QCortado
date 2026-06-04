@@ -5735,6 +5735,18 @@ async fn run_wien2k_fermi_surface_task(
         run_id
     );
     let remote_case_dir = format!("{}/{}", remote_session_dir, case_name);
+    state
+        .process_manager
+        .set_hpc_profile_id(task_id, Some(profile.id.clone()))
+        .await;
+    state
+        .process_manager
+        .set_remote_project_path(task_id, Some(remote_session_dir.clone()))
+        .await;
+    state
+        .process_manager
+        .set_remote_workdir(task_id, Some(remote_case_dir.clone()))
+        .await;
     let copy_command = format!(
         "mkdir -p {} && cp -a {}/. {}",
         shell_single_quote_local(&remote_case_dir),

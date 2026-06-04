@@ -927,10 +927,10 @@ export function Wien2kBandsWizard({
               />
               <RemoteUtilizationPanel
                 enabled={runIsActive}
-                profileId={activeHpcProfile?.id ?? null}
+                profileId={activeTask?.hpc.hpc_profile_id ?? activeHpcProfile?.id ?? null}
                 remoteJobId={runRemoteJobId}
                 remoteNode={runRemoteNode}
-                resourceType="cpu"
+                resourceType={activeTask?.hpc.hpc_resource_type ?? hpcResources.resource_type}
               />
             </div>
             {displayedResult && (

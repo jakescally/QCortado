@@ -221,6 +221,35 @@ function taskInfoToHpcMeta(info: Partial<TaskInfo> | Partial<TaskSummary>): HpcT
   };
 }
 
+function mergeHpcTaskMeta(primary: HpcTaskMeta, fallback?: HpcTaskMeta | null): HpcTaskMeta {
+  return {
+    backend: primary.backend ?? fallback?.backend ?? null,
+    hpc_resource_type: primary.hpc_resource_type ?? fallback?.hpc_resource_type ?? null,
+    remote_job_id: primary.remote_job_id ?? fallback?.remote_job_id ?? null,
+    scheduler_state: primary.scheduler_state ?? fallback?.scheduler_state ?? null,
+    remote_node: primary.remote_node ?? fallback?.remote_node ?? null,
+    remote_workdir: primary.remote_workdir ?? fallback?.remote_workdir ?? null,
+    remote_project_path: primary.remote_project_path ?? fallback?.remote_project_path ?? null,
+    remote_storage_bytes: primary.remote_storage_bytes ?? fallback?.remote_storage_bytes ?? null,
+    hpc_profile_id: primary.hpc_profile_id ?? fallback?.hpc_profile_id ?? null,
+    local_sync_dir: primary.local_sync_dir ?? fallback?.local_sync_dir ?? null,
+    recovery_save: primary.recovery_save ?? fallback?.recovery_save ?? null,
+    headless_attached: Boolean(primary.headless_attached || fallback?.headless_attached),
+  };
+}
+
+function buildHpcMetaFromSnapshot(
+  info: Partial<TaskInfo> | Partial<TaskSummary> | null | undefined,
+  output: string[] = [],
+  fallback?: HpcTaskMeta | null,
+): HpcTaskMeta {
+  let next = mergeHpcTaskMeta(info ? taskInfoToHpcMeta(info) : {}, fallback);
+  for (const line of output) {
+    next = updateTaskHpcMetaFromOutput(next, line);
+  }
+  return next;
+}
+
 function withHpcRecoverySave(
   params: Record<string, any>,
   saveSpec?: QueueSaveSpec | null,
@@ -827,7 +856,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             output,
             info?.result ?? task.result,
             info?.error ?? task.error,
-            info ? taskInfoToHpcMeta(info) : task.hpc,
+            buildHpcMetaFromSnapshot(info, output, task.hpc),
           );
           next.set(taskId, refreshedTask);
           return next;
@@ -861,7 +890,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             ...task,
             status: "completed",
             result: info.result,
-            hpc: taskInfoToHpcMeta(info),
+            hpc: buildHpcMetaFromSnapshot(info, task.output, task.hpc),
             progress: {
               status: "complete",
               percent: 100,
@@ -922,20 +951,21 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         ...effectiveParams,
         label,
       });
+      const initialInfo = await invoke<TaskInfo>("get_task_info", { taskId }).catch(() => null);
 
       const initialState: TaskState = {
         taskId,
-        taskType: type,
-        label,
-        startedAt: new Date().toISOString(),
-        status: "running",
+        taskType: initialInfo ? normalizeTaskType(initialInfo.task_type) : type,
+        label: initialInfo?.label ?? label,
+        startedAt: initialInfo?.started_at ?? new Date().toISOString(),
+        status: initialInfo?.status ?? "running",
         progress: defaultProgressState("Starting..."),
         output: [],
         outputText: "",
         outputLineCount: 0,
-        result: null,
-        error: null,
-        hpc: taskInfoToHpcMeta({ recovery_save: effectiveParams.executionTarget?.hpc?.recovery_save ?? null }),
+        result: initialInfo?.result ?? null,
+        error: initialInfo?.error ?? null,
+        hpc: buildHpcMetaFromSnapshot(initialInfo ?? { recovery_save: effectiveParams.executionTarget?.hpc?.recovery_save ?? null }),
       };
 
       setTasks((prev) => {
@@ -1075,7 +1105,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           output,
           info.result,
           info.error,
-          taskInfoToHpcMeta(info),
+          buildHpcMetaFromSnapshot(info, output, localTask?.hpc),
         );
         setTasks((prev) => {
           const next = new Map(prev);
@@ -1095,7 +1125,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             status: info.status,
             result: info.result ?? current.result,
             error: info.error ?? current.error,
-            hpc: taskInfoToHpcMeta(info),
+            hpc: buildHpcMetaFromSnapshot(info, current.output, current.hpc),
           });
           return next;
         });
@@ -1132,7 +1162,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               output,
               info.result,
               info.error,
-              taskInfoToHpcMeta(info),
+              buildHpcMetaFromSnapshot(info, output, tasksRef.current.get(summary.task_id)?.hpc),
             ));
             return next;
           });
@@ -1185,6 +1215,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             invoke<string[]>("get_task_output", { taskId }),
           ]);
           const taskType = normalizeTaskType(info.task_type);
+          const hpc = buildHpcMetaFromSnapshot(info, output, local.hpc);
           const fullTask = buildTaskState(
             taskId,
             taskType,
@@ -1194,7 +1225,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             output,
             info.result,
             info.error,
-            taskInfoToHpcMeta(info),
+            hpc,
             false,
           );
           setTasks((prev) => {
@@ -1208,7 +1239,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               output,
               info.result,
               info.error,
-              taskInfoToHpcMeta(info),
+              hpc,
             ));
             return next;
           });
@@ -1226,6 +1257,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         if (info.status !== "running") {
           const output = await invoke<string[]>("get_task_output", { taskId });
           const taskType = normalizeTaskType(info.task_type);
+          const hpc = buildHpcMetaFromSnapshot(info, output, tasksRef.current.get(taskId)?.hpc);
           const reconstructed = buildTaskState(
             taskId,
             taskType,
@@ -1235,7 +1267,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             output,
             info.result,
             info.error,
-            taskInfoToHpcMeta(info),
+            hpc,
             false,
           );
 
@@ -1250,7 +1282,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               output,
               info.result,
               info.error,
-              taskInfoToHpcMeta(info),
+              hpc,
             ));
             return next;
           });

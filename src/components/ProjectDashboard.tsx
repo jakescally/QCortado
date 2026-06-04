@@ -10,7 +10,9 @@ import { CrystalData, HpcProfile, SCFPreset, OptimizedStructureOption, SavedCell
 import { getPrimitiveCell } from "../lib/primitiveCell";
 import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import {
+  getStoredProjectDashboardActiveEngineId,
   getStoredProjectDashboardEngineFilter,
+  setStoredProjectDashboardActiveEngineId,
   setStoredProjectDashboardEngineFilter,
 } from "../lib/projectDashboardSettings";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
@@ -1495,10 +1497,12 @@ export function ProjectDashboard({
   const [isLoadingEngineSetup, setIsLoadingEngineSetup] = useState(false);
   const [isAddingEngine, setIsAddingEngine] = useState(false);
   const [engineSetupError, setEngineSetupError] = useState<string | null>(null);
+  const [preferredEngineId, setPreferredEngineId] = useState<EngineId | null>(
+    () => getStoredProjectDashboardActiveEngineId(),
+  );
   const [calculationEngineFilter, setCalculationEngineFilter] = useState<CalculationEngineFilter>(
     () => getStoredProjectDashboardEngineFilter() as CalculationEngineFilter,
   );
-  const [isSwitchingEngine, setIsSwitchingEngine] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -1566,7 +1570,7 @@ export function ProjectDashboard({
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
   const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>(() => getStoredSortMode());
-  const activeEngineId = project?.active_engine_id ?? DEFAULT_ENGINE_ID;
+  const activeEngineId = preferredEngineId ?? project?.active_engine_id ?? DEFAULT_ENGINE_ID;
   const engineDescriptors = useMemo<EngineDescriptor[]>(
     () => enginePluginManifests.map((manifest) => manifest.descriptor),
     [enginePluginManifests],
@@ -1582,6 +1586,18 @@ export function ProjectDashboard({
   useEffect(() => {
     setStoredProjectDashboardEngineFilter(calculationEngineFilter);
   }, [calculationEngineFilter]);
+
+  useEffect(() => {
+    if (preferredEngineId == null && project) {
+      setPreferredEngineId(project.active_engine_id ?? DEFAULT_ENGINE_ID);
+    }
+  }, [preferredEngineId, project]);
+
+  useEffect(() => {
+    if (preferredEngineId != null) {
+      setStoredProjectDashboardActiveEngineId(preferredEngineId);
+    }
+  }, [preferredEngineId]);
 
   const selectedHpcProfile = useMemo(
     () => availableHpcProfiles.find((profile) => profile.id === engineInstallForm.hpcProfileId) ?? null,
@@ -1685,8 +1701,8 @@ export function ProjectDashboard({
     );
   }
 
-  async function handleEngineChange(nextEngineId: EngineId) {
-    if (!project || nextEngineId === activeEngineId || isSwitchingEngine) {
+  function handleEngineChange(nextEngineId: EngineId) {
+    if (nextEngineId === activeEngineId) {
       return;
     }
     if (readOnly) {
@@ -1694,21 +1710,9 @@ export function ProjectDashboard({
       return;
     }
 
-    setIsSwitchingEngine(true);
     setError(null);
-    try {
-      const updatedProject = await invoke<Project>("set_project_active_engine", {
-        projectId,
-        engineId: nextEngineId,
-      });
-      setProject(updatedProject);
-      setInfoMessage(`Active engine set to ${getEngineLabel(displayedEngineDescriptors, nextEngineId)}.`);
-    } catch (e) {
-      console.error("Failed to switch project engine:", e);
-      setError(`Failed to switch project engine: ${e}`);
-    } finally {
-      setIsSwitchingEngine(false);
-    }
+    setPreferredEngineId(nextEngineId);
+    setInfoMessage(`Active engine set to ${getEngineLabel(displayedEngineDescriptors, nextEngineId)}.`);
   }
 
   async function refreshEngineRegistry() {
@@ -1836,7 +1840,7 @@ export function ProjectDashboard({
             void handleEngineChange(engineId);
           }}
           ariaLabel="Active computation engine"
-          isEngineDisabled={(engine) => readOnly || isSwitchingEngine || !isSelectableEngineStatus(engine.status)}
+          isEngineDisabled={(engine) => readOnly || !isSelectableEngineStatus(engine.status)}
         />
         {!readOnly && (
           <InfoTooltip text="Add computation engine">
@@ -3651,6 +3655,10 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
   );
   const selectedCalculationCount = selectedCalculationsForDeletion.length;
   const visibleCalculationCount = filteredVariantCalculations.length;
+  const allVariantCalculations = useMemo<CalculationRun[]>(
+    () => selectedVariant?.calculations ?? [],
+    [selectedVariant],
+  );
 
   useEffect(() => {
     setSelectedCalcIds((current) => {
@@ -3691,6 +3699,13 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
       pinnedCalcIds,
     ),
     [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
+  );
+  const wien2kStructureSourceCalculations = useMemo<CalculationRun[]>(
+    () => listWien2kStructureSources(allVariantCalculations)
+      .slice()
+      .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
+        - new Date(left.completed_at ?? left.started_at).getTime()),
+    [allVariantCalculations],
   );
   const wien2kStructureCalculations = useMemo<CalculationRun[]>(
     () => listWien2kStructureSources(filteredVariantCalculations)
@@ -4238,12 +4253,12 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                   <button
                     className="calc-action-btn"
                     onClick={() => void handleRunSCF()}
-                    disabled={wien2kStructureCalculations.length === 0}
+                    disabled={wien2kStructureSourceCalculations.length === 0}
                   >
                     <span className="calc-action-icon">SCF</span>
                     <span className="calc-action-label">WIEN2k SCF</span>
                     <span className="calc-action-hint">
-                      {wien2kStructureCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                      {wien2kStructureSourceCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
                     </span>
                   </button>
                   <button
