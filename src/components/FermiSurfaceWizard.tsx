@@ -8,16 +8,16 @@ import {
   SavedStructureData,
   SlurmResourceRequest,
 } from "../lib/types";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -27,20 +27,24 @@ import { formatCalculationSourceLabel, getCalculationName } from "../lib/calcula
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
-  listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
-  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+  listRemotePseudopotentials,
+  resolveProfileRemotePseudoDir,
+} from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -334,7 +338,7 @@ export function FermiSurfaceWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(
         activeHpcProfile,
         "fermi_velocity.x",

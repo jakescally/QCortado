@@ -19,7 +19,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -32,37 +32,42 @@ import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
 } from "../lib/brillouinZoneData";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { isPhononReadyScf } from "../lib/phononReady";
-import { getScfHubbardUDisplayValues } from "../lib/hubbard";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
+import { getScfHubbardUDisplayValues } from "../lib/engines/qe/hubbard";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import type { EngineId } from "../lib/engines/types";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
-  listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
-  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+  listRemotePseudopotentials,
+  resolveProfileRemotePseudoDir,
+} from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
+import { qeBandDataToBandDataset } from "../lib/engines/qe";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -951,10 +956,9 @@ export function BandStructureWizard({
     MAX_VIEWER_POINTS_PER_SEGMENT,
   );
   const hpcCommandLines = useMemo(() => {
-    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${qeBinDir}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "bands.in", "bands.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "bands.x", "bands_pp.in", "bands_pp.out", undefined, hpcResources.resource_type),
     ];
@@ -1440,6 +1444,15 @@ export function BandStructureWizard({
       const result = finalTask.result as BandData;
       const outputContent = finalTask.output.join("\n");
       const endTime = new Date().toISOString();
+      const bandDataset = qeBandDataToBandDataset(result, {
+        projectId,
+        cifId: _cifId,
+        sourceCalculationIds: selectedScf?.id ? [selectedScf.id] : undefined,
+        generatedAt: endTime,
+        metadata: {
+          sourceFormat: "legacy-band-data",
+        },
+      });
       await persistLogToConfiguredPath(outputContent);
       const hpcSaveParams = (isHpcMode || finalTask.hpc.backend === "hpc")
         ? {
@@ -1485,6 +1498,7 @@ export function BandStructureWizard({
               raw_output: outputContent,
               // Store band data for later viewing
               band_data: result,
+              band_dataset: bandDataset,
             },
             started_at: startTime,
             completed_at: endTime,

@@ -21,7 +21,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -33,29 +33,33 @@ import {
   RhombohedralConvention,
   defaultRhombohedralConventionForSetting,
 } from "../lib/brillouinZoneData";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
 import { useTaskContext } from "../lib/TaskContext";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   defaultResourcesForProfile,
-  resolveProfileRemotePseudoDir,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+  resolveProfileRemoteQeAuxiliaryExecutable,
+  resolveProfileRemotePseudoDir,
+} from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
 import { HpcRunSettings } from "./HpcRunSettings";
 import {
   formatWannierConvergenceFlag,
   getWannierQualityIssues,
   WannierQualityIssue,
-} from "../lib/wannierQuality";
+} from "../lib/engines/qe/wannierQuality";
 import {
   getNeutralElectronConfiguration,
   getOutermostOccupiedOrbital,
@@ -64,9 +68,11 @@ import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -1496,9 +1502,14 @@ export function WannierWizard({
   ]);
 
   const hpcCommandLines = useMemo(() => {
-    const remoteWannier = (activeHpcProfile?.remote_wannier90_path || "wannier90.x").trim() || "wannier90.x";
+    const remoteWannier = resolveProfileRemoteQeAuxiliaryExecutable(
+      activeHpcProfile,
+      activeHpcProfile?.remote_wannier90_path,
+      "wannier90.x",
+    );
     const seedname = sanitizeSeedname(seednameInput);
     return [
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       `"${remoteWannier}" -pp ${seedname} > wannier90_pre.out 2>&1`,
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw2wannier90.x", "pw2wan.in", "pw2wan.out", undefined, hpcResources.resource_type),

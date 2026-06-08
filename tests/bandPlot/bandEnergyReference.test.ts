@@ -4,8 +4,11 @@ import {
   BandData,
   calculateDisplayedBandGap,
   calculateDisplayedBandGapFromSelectedValenceBand,
+  getDefaultBandPlotEnergyRange,
+  normalizeBandPlotData,
   resolveBandPlotEnergyReference,
 } from "../../src/components/BandPlot";
+import { legacyBandDataToBandDataset } from "../../src/lib/engines/qe";
 
 function assertApprox(actual: number, expected: number, epsilon = 1e-9) {
   assert.ok(Math.abs(actual - expected) <= epsilon, `expected ${actual} to be within ${epsilon} of ${expected}`);
@@ -120,5 +123,21 @@ test("metallic systems still report no band gap", () => {
   assert.equal(
     calculateDisplayedBandGap(metallicBands.energies, metallicBands.k_points, 0.2, 0.2),
     null,
+  );
+});
+
+test("BandDataset inputs follow the same BandPlot reference and range path", () => {
+  const dataset = legacyBandDataToBandDataset(semiconductorBands);
+  const normalized = normalizeBandPlotData(dataset);
+
+  assert.deepEqual(normalized.k_points, semiconductorBands.k_points);
+  assert.deepEqual(normalized.energies, semiconductorBands.energies);
+  assert.deepEqual(
+    getDefaultBandPlotEnergyRange(dataset, 0.2, "scf"),
+    getDefaultBandPlotEnergyRange(semiconductorBands, 0.2, "scf"),
+  );
+  assert.deepEqual(
+    resolveBandPlotEnergyReference(dataset, 0.2, "scf", "vbm", -0.48),
+    resolveBandPlotEnergyReference(semiconductorBands, 0.2, "scf", "vbm", -0.48),
   );
 });

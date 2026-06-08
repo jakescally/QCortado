@@ -11,7 +11,7 @@ import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -20,14 +20,19 @@ import {
   buildExecutionTarget,
   buildHpcLauncherCommand,
   defaultResourcesForProfile,
-  resolveProfileRemoteQeBinDir,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeRuntimeSetupLines,
+  qeEngineUsesModuleMode,
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -403,10 +408,12 @@ export function EpwWizard({
   const hpcCommandLines = useMemo(
     () => {
       const remoteEpw = (activeHpcProfile?.remote_epw_path || "").trim();
-      const epwExecutable = remoteEpw.length > 0 ? `"${remoteEpw}"` : "\"$QE_BIN/epw.x\"";
+      const epwExecutable = qeEngineUsesModuleMode(activeHpcProfile)
+        ? "epw.x"
+        : remoteEpw.length > 0 ? `"${remoteEpw}"` : "\"$QE_BIN/epw.x\"";
       return [
         "cd \"$SLURM_SUBMIT_DIR\"",
-        `QE_BIN=\"${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}\"`,
+        ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
         `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${epwExecutable} -in epw.in > epw.out 2> epw.err`,
       ];
     },

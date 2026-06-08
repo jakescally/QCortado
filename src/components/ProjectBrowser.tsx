@@ -255,19 +255,13 @@ export function ProjectBrowser({
   );
 
   const projectsForActiveFolder = useMemo<ProjectWithCalculationTypes[]>(() => {
-    const isRootVisibleProject = (project: ProjectSummary) => (
-      !project.folder_id || !folderById.has(project.folder_id)
-    );
-
     if (!activeFolderId) {
-      return projectsWithCalculationTypes.filter(({ project }) => isRootVisibleProject(project));
+      return projectsWithCalculationTypes;
     }
     return projectsWithCalculationTypes.filter(
       ({ project }) => project.folder_id === activeFolderId,
     );
   }, [projectsWithCalculationTypes, activeFolderId, folderById]);
-
-  const hasActiveFilters = activeProjectFilters.length > 0;
 
   const calculationTypeProjectCounts = useMemo<Record<ProjectCalculationType, number>>(() => {
     const counts = createEmptyCalculationTypeCounts();
@@ -294,7 +288,8 @@ export function ProjectBrowser({
 
     return folders.map((folder) => {
       const folderProjects = [...(projectsByFolderId.get(folder.id) ?? [])].sort((a, b) => (
-        a.project.name.localeCompare(b.project.name, undefined, { sensitivity: "base" })
+        b.project.last_activity.localeCompare(a.project.last_activity)
+        || a.project.name.localeCompare(b.project.name, undefined, { sensitivity: "base" })
       ));
       const calculationTypeCounts = createEmptyCalculationTypeCounts();
       for (const entry of folderProjects) {
@@ -1247,11 +1242,6 @@ export function ProjectBrowser({
                     >
                       View All Projects
                     </button>
-                  </>
-                ) : projectsForActiveFolder.length === 0 && !activeFolder && !hasActiveFilters ? (
-                  <>
-                    <h3>No Root Projects</h3>
-                    <p>Projects moved into folders are hidden from root.</p>
                   </>
                 ) : projects.length === 0 ? (
                   <>

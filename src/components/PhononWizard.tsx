@@ -9,17 +9,17 @@ import {
   SlurmResourceRequest,
 } from "../lib/types";
 import { BrillouinZoneViewer, KPathPoint } from "./BrillouinZoneViewer";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { EstimatedRemainingTime } from "./EstimatedRemainingTime";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
-import { isPhononReadyScf } from "../lib/phononReady";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
@@ -36,12 +36,15 @@ import {
 } from "../lib/brillouinZoneData";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
-  resolveProfileRemoteQeBinDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+} from "../lib/engines/qe/hpc";
+import type { EngineId } from "../lib/engines/types";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 
@@ -153,6 +156,7 @@ function applyTotalQPoints(path: KPathPoint[], totalQPoints: number): KPathPoint
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -545,10 +549,9 @@ export function PhononWizard({
   const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
   useViewportScrollLock(step === "run");
   const hpcCommandLines = useMemo(() => {
-    const qeBinDir = resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type);
     const lines = [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${qeBinDir}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "ph.x", "ph.in", "ph.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "q2r.x", "q2r.in", "q2r.out", undefined, hpcResources.resource_type),
     ];

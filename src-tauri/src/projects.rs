@@ -22,10 +22,14 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::config::{self, SaveSizeMode};
-use crate::qe::{
+use crate::engines::common::LEGACY_PROJECT_ENGINE_ID;
+use crate::engines::qe::{
     add_phonon_symmetry_markers, collect_transport_artifacts, read_phonon_dispersion_file,
     read_phonon_dos_file, BandData, PhononDispersion, QEResult, QPathPoint,
 };
+use crate::engines::types::NormalizedScfSummary;
+use crate::engines::EngineId;
+use crate::AppState;
 
 // ============================================================================
 // Types
@@ -41,6 +45,9 @@ pub struct Project {
     /// Optional parent folder for organizing projects in the browser
     #[serde(default)]
     pub folder_id: Option<String>,
+    /// Currently selected computation engine for this project.
+    #[serde(default)]
+    pub active_engine_id: EngineId,
     pub cif_variants: Vec<CifVariant>,
     /// ID of the last opened CIF variant (for restoring view state)
     #[serde(default)]
@@ -61,12 +68,17 @@ pub struct CifVariant {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalculationRun {
     pub id: String,
+    #[serde(default)]
+    pub engine_id: EngineId,
     /// Optional user-facing label for the saved calculation entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub calc_type: String,
     pub parameters: serde_json::Value,
     pub result: Option<QEResult>,
+    /// Engine-neutral summary used by native SCF engines such as WIEN2k.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scf_summary: Option<NormalizedScfSummary>,
     pub started_at: String,
     pub completed_at: Option<String>,
     /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
@@ -111,6 +123,8 @@ pub struct DeleteProjectFolderResult {
 /// Data needed to save a calculation to a project
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveCalculationData {
+    #[serde(default)]
+    pub engine_id: EngineId,
     pub calc_type: String,
     pub parameters: serde_json::Value,
     pub result: QEResult,
@@ -121,6 +135,47 @@ pub struct SaveCalculationData {
     /// Tags for categorizing calculations (e.g., "phonon-ready", "structure-optimized")
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// Small accepted artifact entry produced by an engine-owned setup workflow.
+///
+/// This is distinct from `SaveCalculationData`: structure-source setup is not
+/// a QE calculation and must not fabricate a `QEResult` or `pw.in`/`pw.out`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveEngineSetupArtifactData {
+    pub engine_id: EngineId,
+    pub setup_kind: String,
+    pub parameters: serde_json::Value,
+    pub started_at: String,
+    pub completed_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<EngineSetupTextArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineSetupTextArtifact {
+    pub filename: String,
+    pub contents: String,
+}
+
+/// Data needed to save an engine-native calculation without fabricating QE files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveEngineCalculationArtifactData {
+    pub engine_id: EngineId,
+    pub calc_type: String,
+    pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<QEResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scf_summary: Option<NormalizedScfSummary>,
+    pub started_at: String,
+    pub completed_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<EngineSetupTextArtifact>,
 }
 
 /// A text log/input file saved under a calculation directory.
@@ -187,6 +242,8 @@ pub struct ProjectArchiveImportResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BandsMultiviewCalculation {
     #[serde(default)]
+    pub engine_id: EngineId,
+    #[serde(default)]
     pub folder_id: Option<String>,
     #[serde(default)]
     pub folder_name: Option<String>,
@@ -196,6 +253,8 @@ pub struct BandsMultiviewCalculation {
     pub cif_filename: String,
     pub cif_formula: String,
     pub calc_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -399,7 +458,8 @@ const GZIP_MAGIC_PREFIX: [u8; 2] = [0x1F, 0x8B];
 const PROJECT_FOLDERS_FILE_NAME: &str = "folders.json";
 const MULTIVIEW_BANDS_PROGRESS_EVENT: &str = "multiview-bands-progress";
 const STORAGE_MANAGER_PROGRESS_EVENT: &str = "storage-manager-progress";
-const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 10] = [
+const PROJECT_SUMMARY_CALC_TYPE_ORDER: [&str; 11] = [
+    "engine_setup",
     "scf",
     "bands",
     "dos",
@@ -1347,12 +1407,69 @@ fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
     !result.raw_output.is_empty()
         || result.eigenvalues.is_some()
         || result.band_data.is_some()
+        || result.band_dataset.is_some()
         || result.dos_data.is_some()
         || result.phonon_data.is_some()
         || result.wannier_data.is_some()
         || result.transport_data.is_some()
         || result.epw_data.is_some()
         || result.hubbard_lrt_data.is_some()
+}
+
+fn wien2k_band_path_label_from_points(points: &serde_json::Value) -> Option<String> {
+    let points = points.as_array()?;
+    let labels = points
+        .iter()
+        .filter_map(|point| {
+            point
+                .get("label")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if labels.len() < 2 {
+        return None;
+    }
+    Some(labels.join(" → "))
+}
+
+fn repair_wien2k_band_path_parameters(calculation: &mut CalculationRun) -> bool {
+    if calculation.engine_id != EngineId::Wien2k
+        || normalize_summary_calc_type(&calculation.calc_type) != Some("bands")
+    {
+        return false;
+    }
+
+    let Some(parameters) = calculation.parameters.as_object_mut() else {
+        return false;
+    };
+
+    if parameters
+        .get("k_path")
+        .and_then(|value| value.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let repaired = parameters
+        .get("prepare")
+        .and_then(|value| value.get("k_path"))
+        .and_then(wien2k_band_path_label_from_points);
+    let repaired = repaired.or_else(|| {
+        parameters
+            .get("k_path_points")
+            .and_then(wien2k_band_path_label_from_points)
+    });
+
+    if let Some(k_path) = repaired {
+        parameters.insert("k_path".to_string(), serde_json::Value::String(k_path));
+        return true;
+    }
+
+    false
 }
 
 fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
@@ -1369,6 +1486,7 @@ fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
         eigenvalues: None,
         raw_output: String::new(),
         band_data: None,
+        band_dataset: None,
         phonon_data: None,
         dos_data: None,
         wannier_data: None,
@@ -1445,6 +1563,9 @@ fn merge_summary_into_full_calculation(full: &mut CalculationRun, summary: &Calc
     full.completed_at = summary.completed_at.clone();
     full.tags = summary.tags.clone();
     full.storage_bytes = summary.storage_bytes;
+    if summary.scf_summary.is_some() {
+        full.scf_summary = summary.scf_summary.clone();
+    }
 
     if let Some(summary_result) = summary.result.as_ref() {
         match full.result.as_mut() {
@@ -1508,7 +1629,25 @@ fn is_calculation_input_file(path: &Path) -> bool {
     if file_name.is_empty() || file_name == "calc.json" {
         return false;
     }
-    if file_name == "run.sbatch" || file_name.ends_with(".win") {
+    if file_name == "run.sbatch" || file_name.ends_with(".win") || file_name.ends_with(".struct") {
+        return true;
+    }
+    if [
+        ".in0",
+        ".in1",
+        ".in1c",
+        ".in2",
+        ".in2c",
+        ".inc",
+        ".inm",
+        ".inst",
+        ".klist",
+        ".klist_band",
+        ".insp",
+    ]
+    .iter()
+    .any(|suffix| file_name.ends_with(suffix))
+    {
         return true;
     }
 
@@ -1537,7 +1676,14 @@ fn is_calculation_log_file(path: &Path) -> bool {
             .map(|value| value.to_ascii_lowercase())
             .as_deref(),
         Some("out" | "err" | "log" | "txt")
-    )
+    ) || file_name.ends_with(".outputnn")
+        || file_name.ends_with(".outputsgroup")
+        || file_name.ends_with(".outputs")
+        || file_name.ends_with(".outputst")
+        || file_name.ends_with(".outputkgen")
+        || file_name.ends_with(".outputd")
+        || file_name.ends_with(".scf")
+        || file_name.ends_with(".dayfile")
 }
 
 fn collect_calculation_text_files(
@@ -1966,6 +2112,60 @@ fn hydrate_missing_calculation_sizes(
     Ok(changed)
 }
 
+/// Restores missing compact Hubbard LRT data in project summaries from calc.json files.
+fn hydrate_missing_hubbard_lrt_data(
+    project: &mut Project,
+    project_dir: &Path,
+) -> Result<bool, String> {
+    let mut changed = false;
+
+    for variant in &mut project.cif_variants {
+        for calculation in &mut variant.calculations {
+            if normalize_summary_calc_type(&calculation.calc_type) != Some("hubbard_lrt") {
+                continue;
+            }
+
+            if calculation
+                .result
+                .as_ref()
+                .and_then(|result| result.hubbard_lrt_data.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+
+            let Some(full_calculation) =
+                load_full_calculation_from_disk(project_dir, &calculation.id)?
+            else {
+                continue;
+            };
+
+            let Some(full_result) = full_calculation.result.as_ref() else {
+                continue;
+            };
+            let Some(full_hubbard_lrt_data) = full_result.hubbard_lrt_data.as_ref() else {
+                continue;
+            };
+
+            let Some(compact_hubbard_lrt_data) =
+                summarize_hubbard_lrt_data_for_project(full_hubbard_lrt_data)
+            else {
+                continue;
+            };
+
+            if calculation.result.is_none() {
+                calculation.result = Some(summarize_qe_result_for_project(full_result));
+            } else if let Some(summary_result) = calculation.result.as_mut() {
+                summary_result.hubbard_lrt_data = Some(compact_hubbard_lrt_data);
+            }
+
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
 fn collect_saved_calculation_descriptors(
     app: &AppHandle,
 ) -> Result<Vec<SavedCalculationDescriptor>, String> {
@@ -2103,6 +2303,7 @@ fn is_leap_year(year: i32) -> bool {
 fn normalize_summary_calc_type(calc_type: &str) -> Option<&'static str> {
     let normalized = calc_type.trim().to_ascii_lowercase();
     match normalized.as_str() {
+        "engine_setup" => Some("engine_setup"),
         "scf" => Some("scf"),
         "bands" | "band" => Some("bands"),
         "dos" => Some("dos"),
@@ -3747,7 +3948,9 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         }
 
         let mut project = read_project_json(&project_json)?;
-        if project
+        let hydrated_hubbard_lrt_data = hydrate_missing_hubbard_lrt_data(&mut project, &path)?;
+        if hydrated_hubbard_lrt_data
+            || project
             .cif_variants
             .iter()
             .flat_map(|variant| variant.calculations.iter())
@@ -3760,6 +3963,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         // Calculate summary info
         let mut calculation_count = 0usize;
         let mut last_activity = project.created_at.clone();
+        let mut has_engine_setup = false;
         let mut has_scf = false;
         let mut has_bands = false;
         let mut has_dos = false;
@@ -3785,6 +3989,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
             }
 
             match normalize_summary_calc_type(&calc.calc_type) {
+                Some("engine_setup") => has_engine_setup = true,
                 Some("scf") => has_scf = true,
                 Some("bands") => has_bands = true,
                 Some("dos") => has_dos = true,
@@ -3802,6 +4007,7 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         let mut calculation_types = Vec::new();
         for calc_type in PROJECT_SUMMARY_CALC_TYPE_ORDER {
             let include = match calc_type {
+                "engine_setup" => has_engine_setup,
                 "scf" => has_scf,
                 "bands" => has_bands,
                 "dos" => has_dos,
@@ -3893,7 +4099,17 @@ pub async fn list_multiview_band_calculations(
                 .iter()
                 .flat_map(|variant| variant.calculations.iter())
                 .any(calculation_has_embedded_project_detail);
-            if hydrate_missing_calculation_sizes(&mut project, &project_dir)? || has_embedded_detail
+            let mut repaired_wien2k_bands_entries = false;
+            for variant in &mut project.cif_variants {
+                for summary_calc in &mut variant.calculations {
+                    if repair_wien2k_band_path_parameters(summary_calc) {
+                        repaired_wien2k_bands_entries = true;
+                    }
+                }
+            }
+            if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
+                || has_embedded_detail
+                || repaired_wien2k_bands_entries
             {
                 write_project_json_summary(&project_json, &project)?;
             }
@@ -3937,6 +4153,7 @@ pub async fn list_multiview_band_calculations(
                         })?;
 
                     calculations.push(BandsMultiviewCalculation {
+                        engine_id: full_calc.engine_id,
                         folder_id: folder_id.clone(),
                         folder_name: folder_name.clone(),
                         project_id: project_id.clone(),
@@ -3945,6 +4162,7 @@ pub async fn list_multiview_band_calculations(
                         cif_filename: variant.filename.clone(),
                         cif_formula: variant.formula.clone(),
                         calc_id: full_calc.id.clone(),
+                        name: full_calc.name.clone(),
                         parameters: full_calc.parameters.clone(),
                         tags: full_calc.tags.clone(),
                         started_at: full_calc.started_at.clone(),
@@ -4027,6 +4245,7 @@ pub fn create_project(
         description,
         created_at: now_iso(),
         folder_id: None,
+        active_engine_id: LEGACY_PROJECT_ENGINE_ID,
         cif_variants: Vec::new(),
         last_opened_cif_id: None,
     };
@@ -4051,8 +4270,12 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let project_json = project_dir.join("project.json");
     let mut project = read_project_json(&project_json)?;
     let mut repaired_phonon_entries = false;
+    let mut repaired_wien2k_bands_entries = false;
     for variant in &mut project.cif_variants {
         for summary_calc in &mut variant.calculations {
+            if repair_wien2k_band_path_parameters(summary_calc) {
+                repaired_wien2k_bands_entries = true;
+            }
             if normalize_summary_calc_type(&summary_calc.calc_type) != Some("phonon") {
                 continue;
             }
@@ -4097,8 +4320,10 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
         .any(calculation_has_embedded_project_detail);
 
     if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
+        || hydrate_missing_hubbard_lrt_data(&mut project, &project_dir)?
         || has_embedded_detail
         || repaired_phonon_entries
+        || repaired_wien2k_bands_entries
     {
         write_project_json_summary(&project_json, &project)?;
     }
@@ -4308,6 +4533,44 @@ pub fn update_project_metadata(
     project.description = normalized_description;
 
     // Save updated project
+    write_project_json_summary(&project_json_path, &project)?;
+
+    queue_viewer_library_publish(&app);
+    Ok(project)
+}
+
+/// Updates the active computation engine for a project.
+///
+/// QE is the always-available default. Additional engines must first be
+/// verified as remote installations before they can become active project
+/// metadata.
+#[tauri::command]
+pub fn set_project_active_engine(
+    app: AppHandle,
+    project_id: String,
+    engine_id: EngineId,
+    state: State<AppState>,
+) -> Result<Project, String> {
+    ensure_research_mode()?;
+    let installations = state.engine_installations.lock().unwrap().clone();
+    if !crate::engines::installations::is_engine_selectable(engine_id, &installations) {
+        return Err(format!(
+            "Engine '{}' has not been added yet",
+            engine_id.as_str()
+        ));
+    }
+
+    let projects_dir = ensure_projects_dir(&app)?;
+    let project_dir = projects_dir.join(&project_id);
+
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    project.active_engine_id = engine_id;
+
     write_project_json_summary(&project_json_path, &project)?;
 
     queue_viewer_library_publish(&app);
@@ -4620,10 +4883,12 @@ pub fn save_calculation(
     // Create calculation run record
     let calc_run = CalculationRun {
         id: calc_id,
+        engine_id: calc_data.engine_id,
         name: None,
         calc_type: calc_data.calc_type,
         parameters: calculation_parameters,
         result: Some(calc_data.result),
+        scf_summary: None,
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
         tags: calc_data.tags,
@@ -4644,6 +4909,190 @@ pub fn save_calculation(
 
     queue_viewer_library_publish(&app);
     Ok(calc_run)
+}
+
+/// Saves an accepted engine-owned setup artifact, such as a WIEN2k
+/// `case.struct` source, without routing it through QE calculation storage.
+pub fn save_engine_setup_artifact(
+    app: &AppHandle,
+    project_id: &str,
+    cif_id: &str,
+    setup_data: SaveEngineSetupArtifactData,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    if setup_data.setup_kind.trim().is_empty() {
+        return Err("Engine setup kind is required.".to_string());
+    }
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calc_id = generate_id();
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    fs::create_dir_all(&calc_dir)
+        .map_err(|err| format!("Failed to create engine setup directory: {}", err))?;
+
+    for artifact in &setup_data.artifacts {
+        let filename = artifact.filename.trim();
+        let safe = !filename.is_empty()
+            && Path::new(filename)
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            && !filename.contains('/')
+            && !filename.contains('\\');
+        if !safe {
+            return Err(format!(
+                "Unsafe engine setup artifact filename: {}",
+                filename
+            ));
+        }
+        fs::write(calc_dir.join(filename), &artifact.contents)
+            .map_err(|err| format!("Failed to write setup artifact {}: {}", filename, err))?;
+    }
+
+    let calc_run = CalculationRun {
+        id: calc_id,
+        engine_id: setup_data.engine_id,
+        name: None,
+        calc_type: "engine_setup".to_string(),
+        parameters: setup_data.parameters,
+        result: None,
+        scf_summary: None,
+        started_at: setup_data.started_at,
+        completed_at: Some(setup_data.completed_at),
+        tags: setup_data.tags,
+        storage_bytes: Some(calculate_directory_size(&calc_dir)?),
+    };
+    persist_full_calculation(&project_dir, &calc_run)?;
+    variant.calculations.push(calc_run.clone());
+    write_project_json_summary(&project_json_path, &project)?;
+    queue_viewer_library_publish(app);
+    Ok(calc_run)
+}
+
+/// Saves engine-owned calculation artifacts, including normalized output
+/// summaries, without assuming a Quantum ESPRESSO file layout.
+pub fn save_engine_calculation_artifact(
+    app: &AppHandle,
+    project_id: &str,
+    cif_id: &str,
+    calc_data: SaveEngineCalculationArtifactData,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    if calc_data.calc_type.trim().is_empty() {
+        return Err("Engine calculation type is required.".to_string());
+    }
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+    let calc_id = generate_id();
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    fs::create_dir_all(&calc_dir)
+        .map_err(|err| format!("Failed to create engine calculation directory: {}", err))?;
+
+    for artifact in &calc_data.artifacts {
+        write_safe_engine_artifact(&calc_dir, artifact)?;
+    }
+
+    let mut result = calc_data.result;
+    if let Some(result) = result.as_mut() {
+        if let Some(dataset) = result.band_dataset.as_mut() {
+            if let Some(provenance) = dataset
+                .get_mut("provenance")
+                .and_then(|value| value.as_object_mut())
+            {
+                provenance.insert(
+                    "calculationId".to_string(),
+                    serde_json::Value::String(calc_id.clone()),
+                );
+            }
+        }
+    }
+
+    let calc_run = CalculationRun {
+        id: calc_id,
+        engine_id: calc_data.engine_id,
+        name: None,
+        calc_type: calc_data.calc_type,
+        parameters: calc_data.parameters,
+        result,
+        scf_summary: calc_data.scf_summary,
+        started_at: calc_data.started_at,
+        completed_at: Some(calc_data.completed_at),
+        tags: calc_data.tags,
+        storage_bytes: Some(calculate_directory_size(&calc_dir)?),
+    };
+    persist_full_calculation(&project_dir, &calc_run)?;
+    variant
+        .calculations
+        .push(summarize_calculation_for_project(&calc_run));
+    write_project_json_summary(&project_json_path, &project)?;
+    queue_viewer_library_publish(app);
+    Ok(calc_run)
+}
+
+/// Reads one trusted engine artifact from a saved calculation for native staging.
+pub fn read_engine_text_artifact(
+    app: &AppHandle,
+    project_id: &str,
+    calc_id: &str,
+    filename: &str,
+) -> Result<String, String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    if !project_dir.exists() {
+        return Err(format!("Project not found: {}", project_id));
+    }
+    let safe = safe_engine_artifact_filename(filename)?;
+    let path = project_dir.join("calculations").join(calc_id).join(safe);
+    fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read engine artifact {}: {}", filename, err))
+}
+
+fn write_safe_engine_artifact(
+    calc_dir: &Path,
+    artifact: &EngineSetupTextArtifact,
+) -> Result<(), String> {
+    let filename = safe_engine_artifact_filename(&artifact.filename)?;
+    fs::write(calc_dir.join(filename), &artifact.contents).map_err(|err| {
+        format!(
+            "Failed to write engine artifact {}: {}",
+            artifact.filename, err
+        )
+    })
+}
+
+fn safe_engine_artifact_filename(filename: &str) -> Result<&str, String> {
+    let filename = filename.trim();
+    let safe = !filename.is_empty()
+        && Path::new(filename)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && !filename.contains('/')
+        && !filename.contains('\\');
+    if !safe {
+        return Err(format!("Unsafe engine artifact filename: {}", filename));
+    }
+    Ok(filename)
 }
 
 /// Recursively copies a directory
@@ -5286,6 +5735,7 @@ pub fn recover_phonon_calculation(
         eigenvalues: None,
         raw_output: raw_output.clone(),
         band_data: None,
+        band_dataset: None,
         dos_data: None,
         phonon_data: Some(serde_json::json!({
             "dos_data": dos_data,
@@ -5302,6 +5752,7 @@ pub fn recover_phonon_calculation(
     let started_at = completed_at.clone();
 
     let calc_data = SaveCalculationData {
+        engine_id: EngineId::Qe,
         calc_type: "phonon".to_string(),
         parameters,
         result,
@@ -6319,12 +6770,15 @@ pub fn get_saved_phonon_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        calculation_can_lighten, is_wavefunction_archive_file, looks_like_completed_phonon_run,
-        parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
-        remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
-        summarize_qe_result_for_project, CalculationRun,
+        calculation_can_lighten, hydrate_missing_hubbard_lrt_data,
+        is_calculation_input_file, is_calculation_log_file, is_wavefunction_archive_file,
+        looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
+        path_contains_wavefunction_archives, remove_wavefunction_archives,
+        repair_phonon_calculation_with_workdir, repair_wien2k_band_path_parameters,
+        summarize_qe_result_for_project, CalculationRun, CifVariant, Project,
     };
-    use crate::qe::QEResult;
+    use crate::engines::qe::QEResult;
+    use crate::engines::EngineId;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6342,6 +6796,90 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("failed to create temp test directory");
         dir
+    }
+
+    #[test]
+    fn calculation_run_without_engine_id_defaults_to_qe() {
+        let raw = serde_json::json!({
+            "id": "legacy-calc",
+            "calc_type": "scf",
+            "parameters": {},
+            "result": null,
+            "started_at": "2026-05-21T00:00:00.000Z",
+            "completed_at": null
+        });
+
+        let calc: CalculationRun =
+            serde_json::from_value(raw).expect("legacy calculation should deserialize");
+
+        assert_eq!(calc.engine_id, EngineId::Qe);
+        assert_eq!(calc.calc_type, "scf");
+    }
+
+    #[test]
+    fn project_without_active_engine_id_defaults_to_qe() {
+        let raw = serde_json::json!({
+            "id": "legacy-project",
+            "name": "Legacy Project",
+            "description": null,
+            "created_at": "2026-05-21T00:00:00.000Z",
+            "cif_variants": [],
+            "last_opened_cif_id": null
+        });
+
+        let project: Project =
+            serde_json::from_value(raw).expect("legacy project should deserialize");
+
+        assert_eq!(project.active_engine_id, EngineId::Qe);
+    }
+
+    #[test]
+    fn wien2k_structure_sources_are_discoverable_as_saved_text_artifacts() {
+        assert!(is_calculation_input_file(std::path::Path::new("Si.struct")));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.in0")));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.klist")));
+        assert!(is_calculation_input_file(std::path::Path::new(
+            "Si.klist_band"
+        )));
+        assert!(is_calculation_input_file(std::path::Path::new("Si.insp")));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.outputnn")));
+        assert!(is_calculation_log_file(std::path::Path::new(
+            "Si.outputsgroup"
+        )));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.outputs")));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.scf")));
+        assert!(is_calculation_log_file(std::path::Path::new("Si.dayfile")));
+    }
+
+    #[test]
+    fn wien2k_scf_summary_deserializes_without_a_qe_result() {
+        let raw = serde_json::json!({
+            "id": "w2k-scf",
+            "engine_id": "wien2k",
+            "calc_type": "scf",
+            "parameters": {},
+            "result": null,
+            "scf_summary": {
+                "schema": "cortado.scf_summary.v1",
+                "provenance": {
+                    "engineId": "wien2k",
+                    "taskKind": "scf",
+                    "calculationKind": "scf"
+                },
+                "convergence": "converged",
+                "totalEnergy": { "value": -10.5, "unit": "Ry" }
+            },
+            "started_at": "2026-05-25T00:00:00Z",
+            "completed_at": "2026-05-25T00:01:00Z"
+        });
+
+        let calculation: CalculationRun =
+            serde_json::from_value(raw).expect("native WIEN2k summary should deserialize");
+        assert!(calculation.result.is_none());
+        assert_eq!(
+            calculation.scf_summary.expect("summary").convergence,
+            crate::engines::types::ScfConvergenceState::Converged
+        );
     }
 
     #[test]
@@ -6380,6 +6918,99 @@ mod tests {
         );
         assert!(lrt.get("raw_output").is_none());
         assert!(lrt.get("parameters_output").is_none());
+    }
+
+    #[test]
+    fn hydrate_missing_hubbard_lrt_data_backfills_project_summary() {
+        let project_dir = make_temp_test_dir("hydrate_hubbard_lrt");
+        let calc_id = "test_hubbard_calc";
+        let project_json_path = project_dir.join("project.json");
+        let calc_dir = project_dir.join("calculations").join(calc_id);
+        fs::create_dir_all(&calc_dir).expect("failed to create calc directory");
+
+        let summary_calc = CalculationRun {
+            id: calc_id.to_string(),
+            engine_id: EngineId::Qe,
+            name: None,
+            calc_type: "hubbard_lrt".to_string(),
+            parameters: serde_json::json!({
+                "source_scf_id": "scf_123",
+                "q_mesh": [2, 2, 2]
+            }),
+            result: Some(QEResult {
+                converged: true,
+                raw_output: String::new(),
+                ..QEResult::default()
+            }),
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:10:00Z".to_string()),
+            tags: vec!["Hubbard-LRT".to_string()],
+            storage_bytes: Some(123),
+        };
+        let full_calc = CalculationRun {
+            result: Some(QEResult {
+                converged: true,
+                raw_output: "full hp output".to_string(),
+                hubbard_lrt_data: Some(serde_json::json!({
+                    "converged": true,
+                    "q_mesh": [2, 2, 2],
+                    "u_values": [
+                        {
+                            "element": "Er",
+                            "manifold": "4f",
+                            "target": "Er-4f",
+                            "value_ev": 6.52
+                        }
+                    ]
+                })),
+                ..QEResult::default()
+            }),
+            ..summary_calc.clone()
+        };
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "Project 1".to_string(),
+            description: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            folder_id: None,
+            active_engine_id: EngineId::Qe,
+            cif_variants: vec![CifVariant {
+                id: "cif-1".to_string(),
+                filename: "structure.cif".to_string(),
+                formula: "ErP".to_string(),
+                added_at: "2026-01-01T00:00:00Z".to_string(),
+                calculations: vec![summary_calc],
+            }],
+            last_opened_cif_id: Some("cif-1".to_string()),
+        };
+
+        fs::write(
+            &project_json_path,
+            serde_json::to_string_pretty(&project).expect("failed to serialize project"),
+        )
+        .expect("failed to write project.json");
+        fs::write(
+            calc_dir.join("calc.json"),
+            serde_json::to_string_pretty(&full_calc).expect("failed to serialize calc"),
+        )
+        .expect("failed to write calc.json");
+
+        let mut loaded_project = super::read_project_json(&project_json_path)
+            .expect("failed to read project.json");
+        let changed = hydrate_missing_hubbard_lrt_data(&mut loaded_project, &project_dir)
+            .expect("hydration should succeed");
+        assert!(changed);
+
+        let hydrated = loaded_project.cif_variants[0].calculations[0]
+            .result
+            .as_ref()
+            .and_then(|result| result.hubbard_lrt_data.as_ref())
+            .expect("summary should now contain Hubbard LRT data");
+        assert_eq!(hydrated.pointer("/u_values/0/target"), Some(&serde_json::json!("Er-4f")));
+
+        let _ = fs::remove_dir_all(&project_dir);
     }
 
     #[test]
@@ -6454,6 +7085,7 @@ mod tests {
 
         let mut calculation = CalculationRun {
             id: "test_calc".to_string(),
+            engine_id: EngineId::Qe,
             name: None,
             calc_type: "phonon".to_string(),
             parameters: serde_json::json!({
@@ -6472,6 +7104,7 @@ mod tests {
                 eigenvalues: None,
                 raw_output: String::new(),
                 band_data: None,
+                band_dataset: None,
                 dos_data: None,
                 phonon_data: Some(serde_json::json!({
                     "dos_data": null,
@@ -6489,6 +7122,7 @@ mod tests {
                 epw_data: None,
                 hubbard_lrt_data: None,
             }),
+            scf_summary: None,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: Some("2026-01-01T00:01:00Z".to_string()),
             tags: Vec::new(),
@@ -6518,6 +7152,42 @@ mod tests {
         assert_eq!(markers[2].get("label"), Some(&serde_json::json!("Q3")));
 
         let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn repair_wien2k_band_parameters_backfills_k_path_string() {
+        let mut calculation = CalculationRun {
+            id: "test_band_calc".to_string(),
+            engine_id: EngineId::Wien2k,
+            name: None,
+            calc_type: "bands".to_string(),
+            parameters: serde_json::json!({
+                "case_name": "Si",
+                "prepare": {
+                    "k_path": [
+                        { "label": "Γ", "coords": [0.0, 0.0, 0.0], "npoints": 20 },
+                        { "label": "X", "coords": [0.5, 0.0, 0.0], "npoints": 0 },
+                        { "label": "L", "coords": [0.5, 0.5, 0.5], "npoints": 0 }
+                    ]
+                }
+            }),
+            result: None,
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:05:00Z".to_string()),
+            tags: Vec::new(),
+            storage_bytes: None,
+        };
+
+        let changed = repair_wien2k_band_path_parameters(&mut calculation);
+        assert!(
+            changed,
+            "expected WIEN2k band metadata repair to add k_path"
+        );
+        assert_eq!(
+            calculation.parameters.get("k_path"),
+            Some(&serde_json::json!("Γ → X → L"))
+        );
     }
 
     #[test]

@@ -20,10 +20,12 @@ import {
   ZeroEnergyReferenceMode,
 } from "./BandPlot";
 import { InfoTooltip } from "./InfoTooltip";
+import type { EngineId } from "../lib/engines/types";
 
 export interface BandsMultiviewCalculation {
   folder_id?: string | null;
   folder_name?: string | null;
+  engine_id?: EngineId | null;
   project_id: string;
   project_name: string;
   cif_id: string;
@@ -37,6 +39,7 @@ export interface BandsMultiviewCalculation {
   storage_bytes?: number | null;
   band_data: BandData;
   scf_fermi_energy?: number | null;
+  name?: string | null;
 }
 
 interface BandsMultiviewProps {
@@ -91,6 +94,11 @@ const DEFAULT_SHARED_SETTINGS: BandPlotSharedSettings = {
 const DEFAULT_MULTIVIEW_PLOT_HEIGHT = 430;
 const DEFAULT_MULTIVIEW_PLOT_WIDTH = 520;
 const DEFAULT_PROJECTION_OPTIONS = [{ value: "none", label: "none" }];
+
+function getBandsMultiviewCalculationName(calc: BandsMultiviewCalculation): string | null {
+  const name = calc.name?.trim();
+  return name ? name : null;
+}
 
 function createProgressEventId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -804,6 +812,7 @@ export function BandsMultiview({
                         const tags = getBandsTags(calc);
                         const kPath = getParamText(calc.parameters, "k_path");
                         const bandCount = getParamText(calc.parameters, "n_bands");
+                        const calcName = getBandsMultiviewCalculationName(calc);
                         return (
                           <label
                             key={calc.calc_id}
@@ -819,8 +828,8 @@ export function BandsMultiview({
                             <div className="bands-multiview-select-content">
                               <div className="bands-multiview-select-header">
                                 <div>
-                                  <h5>{calc.cif_formula || calc.cif_filename}</h5>
-                                  <p>{calc.cif_filename}</p>
+                                  <h5>{calcName ?? (calc.cif_formula || calc.cif_filename)}</h5>
+                                  <p>{calcName ? `${calc.cif_formula || calc.cif_filename} · ${calc.cif_filename}` : calc.cif_filename}</p>
                                 </div>
                                 <span>{formatDate(calc.completed_at)}</span>
                               </div>
@@ -865,6 +874,7 @@ export function BandsMultiview({
                     projectionOptions,
                     projectionSelection,
                   } = card;
+                  const calcName = getBandsMultiviewCalculationName(calc);
                   return (
                     <article
                       key={calc.calc_id}
@@ -881,9 +891,9 @@ export function BandsMultiview({
                     >
                       <div className="bands-multiview-card-header">
                         <div>
-                          <h3>{calc.project_name}</h3>
+                          <h3>{calcName ?? calc.project_name}</h3>
                           <p>
-                            {calc.folder_name?.trim() || "Root"} · {calc.cif_formula || calc.cif_filename}
+                            {calc.project_name} · {calc.folder_name?.trim() || "Root"} · {calc.cif_formula || calc.cif_filename}
                           </p>
                         </div>
                         <div className="bands-multiview-card-header-side">

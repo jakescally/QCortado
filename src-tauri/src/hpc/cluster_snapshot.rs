@@ -639,8 +639,8 @@ mod tests {
         parse_gpu_count, QueueScope,
     };
     use crate::hpc::profile::{
-        default_cpu_resources, default_gpu_resources, HpcAuthMethod, HpcLauncher, HpcProfile,
-        HpcResourceMode,
+        default_cpu_resources, default_gpu_resources, EnginePathMode, HpcAuthMethod, HpcLauncher,
+        HpcProfile, HpcResourceMode,
     };
 
     fn test_profile(cluster: &str, host: &str) -> HpcProfile {
@@ -659,6 +659,13 @@ mod tests {
             remote_epw_path: None,
             remote_wannier90_path: Some("wannier90.x".to_string()),
             remote_postw90_path: Some("postw90.x".to_string()),
+            remote_wien2k_install_root: None,
+            qe_path_mode: EnginePathMode::Path,
+            qe_module_use: None,
+            qe_module_load: None,
+            wien2k_path_mode: EnginePathMode::Path,
+            wien2k_module_use: None,
+            wien2k_module_load: None,
             remote_pseudo_dir: "~/qe/pseudo".to_string(),
             remote_cpu_pseudo_dir: Some("~/qe/pseudo".to_string()),
             remote_gpu_pseudo_dir: Some("~/qe-gpu/pseudo".to_string()),
@@ -671,6 +678,7 @@ mod tests {
             launcher_extra_args: None,
             default_cpu_resources: default_cpu_resources(),
             default_gpu_resources: default_gpu_resources(),
+            utility_resources: None,
             credential_persisted: false,
             warning_acknowledged: false,
             created_at: String::new(),

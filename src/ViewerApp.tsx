@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
-import { BandData, BandPlot } from "./components/BandPlot";
+import { BandPlot } from "./components/BandPlot";
+import type { BandData, BandPlotData } from "./components/BandPlot";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
-import { EpwViewer } from "./components/EpwViewer";
-import type { EpwViewerPayload } from "./components/EpwViewer";
+import { EpwViewer } from "./components/qe";
+import type { EpwViewerPayload } from "./components/qe";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { ProjectBrowser } from "./components/ProjectBrowser";
@@ -22,7 +23,7 @@ import { HpcProfile } from "./lib/types";
 import { useWindowSize } from "./lib/useWindowSize";
 import { BandsMultiview } from "./components/BandsMultiview";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
-import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import type { TransportResult } from "./lib/transport";
 
 interface ViewerSyncStatus {
@@ -94,7 +95,7 @@ function ViewerAppInner() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
 
   const [viewBandsData, setViewBandsData] = useState<{
-    bandData: any;
+    bandData: BandPlotData;
     fermiEnergy: number | null;
     calculationParameters?: Record<string, unknown> | null;
     calculationContext?: SavedBandsCalculationContext | null;
@@ -189,6 +190,7 @@ function ViewerAppInner() {
   }
 
   const viewOnlyNoopScf = (
+    _engineId: any,
     _cifId: string,
     _crystalData: any,
     _cifContent: string,
@@ -197,8 +199,17 @@ function ViewerAppInner() {
     _presetLock?: boolean,
     _optimizedStructures?: any[],
   ) => undefined;
-  const viewOnlyNoopCalc = (_cifId: string, _crystalData: any, _scfCalculations: CalculationRun[]) => undefined;
-  const viewOnlyNoopTransport = (_cifId: string, _crystalData: any, _wannierCalculations: CalculationRun[]) => undefined;
+  const viewOnlyNoopWien2kContinue = (
+    _cifId: string,
+    _crystalData: any,
+    _cifContent: string,
+    _filename: string,
+    _calculations: CalculationRun[],
+    _calculationId: string,
+  ) => undefined;
+  const viewOnlyNoopEngineSetup = (_engineId: any, _cifId: string, _crystalData: any) => undefined;
+  const viewOnlyNoopCalc = (_engineId: any, _cifId: string, _crystalData: any, _scfCalculations: CalculationRun[]) => undefined;
+  const viewOnlyNoopTransport = (_engineId: any, _cifId: string, _crystalData: any, _wannierCalculations: CalculationRun[]) => undefined;
 
   const appChrome = (
     <HpcSetupWizard
@@ -269,6 +280,8 @@ function ViewerAppInner() {
             setSelectedProjectId(null);
           }}
           onRunSCF={viewOnlyNoopScf}
+          onContinueWien2kScf={viewOnlyNoopWien2kContinue}
+          onRunEngineSetup={viewOnlyNoopEngineSetup}
           onRunBands={viewOnlyNoopCalc}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({

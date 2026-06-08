@@ -1,5 +1,10 @@
 import { useState, useRef, useMemo, useCallback, useEffect, useId, useLayoutEffect } from "react";
 import { useTheme } from "../lib/ThemeContext";
+import type {
+  BandDataset,
+  BandProjectionDataset as NormalizedBandProjectionDataset,
+  BandProjectionGroup as NormalizedBandProjectionGroup,
+} from "../lib/viewers/bands/types";
 
 interface HighSymmetryMarker {
   k_distance: number;
@@ -41,8 +46,10 @@ export interface BandData {
   projections?: BandProjectionData | null;
 }
 
+export type BandPlotData = BandData | BandDataset;
+
 interface BandPlotProps {
-  data: BandData;
+  data: BandPlotData;
   width?: number;
   height?: number;
   energyRange?: [number, number];
@@ -124,7 +131,132 @@ export interface BandPlotProjectionOption {
 export interface BandPlotComparisonOption {
   id: string;
   label: string;
+  data: BandPlotData;
+}
+
+interface NormalizedBandPlotComparisonOption extends Omit<BandPlotComparisonOption, "data"> {
   data: BandData;
+}
+
+function isBandDataset(data: BandPlotData): data is BandDataset {
+  return Boolean(
+    data &&
+    typeof data === "object" &&
+    (data as BandDataset).schema === "cortado.band_path.v1" &&
+    Array.isArray((data as BandDataset).series),
+  );
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function finiteNumberOrFallback(value: unknown, fallback: number): number {
+  return finiteNumberOrNull(value) ?? fallback;
+}
+
+function numberArrayFromMetadata(value: unknown): [number, number] | null {
+  if (!Array.isArray(value) || value.length < 2) {
+    return null;
+  }
+  const min = finiteNumberOrNull(value[0]);
+  const max = finiteNumberOrNull(value[1]);
+  return min != null && max != null ? [min, max] : null;
+}
+
+function calculateEnergyRangeFromBands(energies: number[][]): [number, number] {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+
+  for (const band of energies) {
+    for (const value of band) {
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    }
+  }
+
+  return Number.isFinite(min) && Number.isFinite(max) ? [min, max] : [0, 0];
+}
+
+function mapBandDatasetProjections(
+  projections: NormalizedBandProjectionDataset | null | undefined,
+): BandProjectionData | null {
+  if (!projections) {
+    return null;
+  }
+
+  const toLegacyGroup = (group: NormalizedBandProjectionGroup): BandProjectionGroup => ({
+    id: group.id,
+    label: group.label,
+    kind: group.kind,
+    weights: group.weights,
+  });
+
+  const atomGroups: BandProjectionGroup[] = [];
+  const orbitalGroups: BandProjectionGroup[] = [];
+  const elementOrbitalGroups: BandProjectionGroup[] = [];
+
+  for (const group of projections.groups) {
+    if (group.kind === "atom") {
+      atomGroups.push(toLegacyGroup(group));
+    } else if (group.kind === "element_orbital") {
+      elementOrbitalGroups.push(toLegacyGroup(group));
+    } else {
+      orbitalGroups.push(toLegacyGroup(group));
+    }
+  }
+
+  return {
+    source: projections.source,
+    atom_groups: atomGroups,
+    orbital_groups: orbitalGroups,
+    element_orbital_groups: elementOrbitalGroups,
+  };
+}
+
+export function bandDatasetToBandData(dataset: BandDataset): BandData {
+  const energies = dataset.series.map((series) =>
+    series.values.map((value) => (typeof value === "number" && Number.isFinite(value) ? value : Number.NaN)),
+  );
+  const metadata = dataset.metadata ?? {};
+  const energyRange = numberArrayFromMetadata(metadata.energyRangeEv)
+    ?? calculateEnergyRangeFromBands(energies);
+  const bandGap = dataset.bandGap
+    ? {
+      value: dataset.bandGap.valueEv,
+      is_direct: dataset.bandGap.isDirect,
+      vbm_k: finiteNumberOrFallback(dataset.bandGap.vbmX, 0),
+      cbm_k: finiteNumberOrFallback(dataset.bandGap.cbmX, 0),
+      vbm_energy: finiteNumberOrFallback(dataset.bandGap.vbmEnergyEv, 0),
+      cbm_energy: finiteNumberOrFallback(dataset.bandGap.cbmEnergyEv, 0),
+    }
+    : null;
+
+  return {
+    k_points: dataset.x,
+    energies,
+    fermi_energy: finiteNumberOrFallback(
+      dataset.referenceEnergyEv,
+      finiteNumberOrFallback(metadata.legacyFermiEnergyEv, 0),
+    ),
+    high_symmetry_points: dataset.markers.map((marker) => ({
+      k_distance: marker.x,
+      label: marker.label,
+    })),
+    n_bands: finiteNumberOrFallback(metadata.nBands, dataset.series.length),
+    n_kpoints: finiteNumberOrFallback(metadata.nKpoints, dataset.x.length),
+    band_gap: bandGap,
+    energy_range: energyRange,
+    projections: mapBandDatasetProjections(dataset.projections),
+  };
+}
+
+export function normalizeBandPlotData(data: BandPlotData): BandData {
+  return isBandDataset(data) ? bandDatasetToBandData(data) : data;
 }
 
 export type BandPlotWindowOverlaySide = "left" | "right";
@@ -417,7 +549,7 @@ function remapComparisonKPoints(
 }
 
 export function resolveBandPlotFermiContext(
-  data: BandData,
+  inputData: BandPlotData,
   scfFermiEnergy?: number | null,
   requestedMode: FermiReferenceMode = "bands",
 ): {
@@ -426,6 +558,7 @@ export function resolveBandPlotFermiContext(
   hasScfFermi: boolean;
   hasBandsFermi: boolean;
 } {
+  const data = normalizeBandPlotData(inputData);
   const hasScfFermi = scfFermiEnergy != null && Number.isFinite(scfFermiEnergy);
   const hasBandsFermi = Number.isFinite(data.fermi_energy);
 
@@ -459,12 +592,13 @@ export function resolveBandPlotFermiContext(
 }
 
 export function getDefaultBandPlotEnergyRange(
-  data: BandData,
+  inputData: BandPlotData,
   scfFermiEnergy?: number | null,
   requestedMode: FermiReferenceMode = "bands",
   zeroEnergyReferenceMode: ZeroEnergyReferenceMode = "calculated-fermi",
   selectedValenceBandMaximum?: number | null,
 ): [number, number] {
+  const data = normalizeBandPlotData(inputData);
   const { zeroEnergy } = resolveBandPlotEnergyReference(
     data,
     scfFermiEnergy,
@@ -667,7 +801,7 @@ function findBandEdges(
 }
 
 export function resolveBandPlotEnergyReference(
-  data: BandData,
+  inputData: BandPlotData,
   scfFermiEnergy?: number | null,
   requestedFermiMode: FermiReferenceMode = "bands",
   requestedZeroMode: ZeroEnergyReferenceMode = "calculated-fermi",
@@ -681,6 +815,7 @@ export function resolveBandPlotEnergyReference(
   zeroEnergyReferenceMode: ZeroEnergyReferenceMode;
   valenceBandMaximum: number | null;
 } {
+  const data = normalizeBandPlotData(inputData);
   const {
     fermiEnergy,
     mode: fermiMode,
@@ -1006,7 +1141,8 @@ function buildProjectionSelectionEntries(data: BandData): ProjectionSelectionEnt
   ];
 }
 
-export function buildBandPlotProjectionOptions(data: BandData): BandPlotProjectionOption[] {
+export function buildBandPlotProjectionOptions(inputData: BandPlotData): BandPlotProjectionOption[] {
+  const data = normalizeBandPlotData(inputData);
   return [
     { value: "none", label: "none" },
     ...buildProjectionSelectionEntries(data).map(({ value, label }) => ({ value, label })),
@@ -1014,7 +1150,7 @@ export function buildBandPlotProjectionOptions(data: BandData): BandPlotProjecti
 }
 
 export function BandPlot({
-  data,
+  data: inputData,
   width = 700,
   height = 500,
   energyRange,
@@ -1046,6 +1182,7 @@ export function BandPlot({
   onPersistSelectedValenceBandIndex,
 }: BandPlotProps) {
   const { isDark } = useTheme();
+  const data = useMemo(() => normalizeBandPlotData(inputData), [inputData]);
   const colors = useMemo(() => isDark
     ? { bg: "#1e1e2e", axis: "#718096", grid: "#4a5568", text: "#e2e8f0", tooltip: "#2d3748", tooltipBorder: "#4a5568", tooltipText: "#e2e8f0" }
     : { bg: "#ffffff", axis: "#333", grid: "#999", text: "#000", tooltip: "#fff", tooltipBorder: "#ccc", tooltipText: "#333" },
@@ -1256,7 +1393,13 @@ export function BandPlot({
   const resolvedValueLabel = viewerType === "electronic" && valueLabel === "E − E_F"
     ? (resolvedZeroEnergyReferenceMode === "vbm" ? "E − E_VBM" : valueLabel)
     : valueLabel;
-  const availableComparisonOptions = comparisonOptions ?? [];
+  const availableComparisonOptions = useMemo<NormalizedBandPlotComparisonOption[]>(
+    () => (comparisonOptions ?? []).map((option) => ({
+      ...option,
+      data: normalizeBandPlotData(option.data),
+    })),
+    [comparisonOptions],
+  );
   const hasComparisonControls = comparisonOptions !== undefined;
   const editableWindowOverlays = useMemo(
     () =>

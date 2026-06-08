@@ -1,0 +1,472 @@
+import { defaultProgressState as buildDefaultProgressState } from "../../progress";
+import type { ProgressMeta, ProgressState } from "../../progress";
+export type { PhononProgressMeta, ProgressMeta, ProgressState, ProgressStatus } from "../../progress";
+
+const SCF_ITER_RE = /iteration\s+#\s*(\d+)/i;
+const SCF_ACCURACY_RE = /estimated\s+scf\s+accuracy\s*[=<]\s*([-\d.Ee+]+)\s*(\S+)?/i;
+
+const QPOINTS_TOTAL_RE = /\(\s*(\d+)\s*q-points?\s*\)/i;
+const CALC_Q_RE = /Calculation of q\s*=\s*([-\d.Ee+]+)\s+([-\d.Ee+]+)\s+([-\d.Ee+]+)/i;
+
+const SCF_DONE_MARKERS = [
+  "convergence has been achieved",
+  "End of self-consistent calculation",
+  "End of BFGS Geometry Optimization",
+];
+
+const HPC_TERMINAL_ERROR_STATES = new Set([
+  "FAILED",
+  "CANCELLED",
+  "TIMEOUT",
+  "OUT_OF_MEMORY",
+  "NODE_FAIL",
+  "PREEMPTED",
+  "BOOT_FAIL",
+  "DEADLINE",
+]);
+
+function updateWithDetail(state: ProgressState, detail?: string): ProgressState {
+  if (!detail) return state;
+  return { ...state, detail };
+}
+
+function normalizeQPoint(x: string, y: string, z: string): string {
+  const nums = [x, y, z].map((value) => Number.parseFloat(value));
+  if (nums.some((value) => Number.isNaN(value))) {
+    return `${x.trim()} ${y.trim()} ${z.trim()}`;
+  }
+  return nums.map((value) => value.toFixed(6)).join(" ");
+}
+
+export function updateScfProgress(line: string, state: ProgressState): ProgressState {
+  let next: ProgressState = { ...state, status: "running", phase: "SCF iterations", percent: null };
+
+  let iteration: string | null = null;
+  const iterMatch = line.match(SCF_ITER_RE);
+  if (iterMatch) {
+    iteration = iterMatch[1];
+  }
+
+  let accuracy: string | null = null;
+  const accMatch = line.match(SCF_ACCURACY_RE);
+  if (accMatch) {
+    const value = accMatch[1];
+    const unit = accMatch[2] ? ` ${accMatch[2]}` : "";
+    accuracy = `${value}${unit}`;
+  }
+
+  if (iteration || accuracy) {
+    const pieces: string[] = [];
+    if (iteration) pieces.push(`Iteration ${iteration}`);
+    if (accuracy) pieces.push(`accuracy = ${accuracy}`);
+    next = updateWithDetail(next, pieces.join(" • "));
+  }
+
+  for (const marker of SCF_DONE_MARKERS) {
+    if (line.includes(marker)) {
+      return {
+        ...next,
+        status: "complete",
+        percent: 100,
+        phase: "Complete",
+      };
+    }
+  }
+
+  return next;
+}
+
+export function updateBandsProgress(line: string, state: ProgressState): ProgressState {
+  let next: ProgressState = { ...state, status: "running" };
+
+  const bandsStepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (bandsStepMatch) {
+    const step = Number.parseInt(bandsStepMatch[1], 10);
+    const total = Number.parseInt(bandsStepMatch[2], 10);
+    if (step === 1) {
+      return { ...next, percent: 10, phase: "NSCF along k-path" };
+    }
+    if (step === 2) {
+      return {
+        ...next,
+        percent: total >= 3 ? 60 : 80,
+        phase: "bands.x post-processing",
+      };
+    }
+    if (step === 3) {
+      return { ...next, percent: 90, phase: "projwfc.x projections" };
+    }
+  }
+  if (line.includes("Parsing band structure data")) {
+    return { ...next, percent: 95, phase: "Parsing bands" };
+  }
+  if (line.includes("=== Band Structure Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+export function updateDosProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const dosStepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (dosStepMatch) {
+    const step = Number.parseInt(dosStepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 15, phase: "NSCF on dense k-grid" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 70, phase: "dos.x post-processing" };
+    }
+  }
+
+  if (line.includes("Parsing DOS data")) {
+    return { ...next, percent: 92, phase: "Parsing DOS" };
+  }
+  if (line.includes("=== Electronic DOS Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+export function updateFermiSurfaceProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 65, phase: "fermi_velocity.x" };
+    }
+  }
+
+  if (line.includes("Collecting FRMSF artifacts")) {
+    return { ...next, percent: 92, phase: "Collecting FRMSF files" };
+  }
+  if (line.includes("=== Fermi Surface Generation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+export function updatePhononProgress(line: string, state: ProgressState): ProgressState {
+  let next: ProgressState = { ...state, status: "running" };
+  const meta = { ...(state.meta?.phonon ?? {}) };
+  let metaUpdated = false;
+
+  const totalMatch = line.match(QPOINTS_TOTAL_RE);
+  if (totalMatch) {
+    const total = Number.parseInt(totalMatch[1], 10);
+    if (!Number.isNaN(total) && total > 0) {
+      meta.totalQPoints = total;
+      metaUpdated = true;
+    }
+  }
+
+  const calcMatch = line.match(CALC_Q_RE);
+  if (calcMatch) {
+    const key = normalizeQPoint(calcMatch[1], calcMatch[2], calcMatch[3]);
+    const completed = meta.completedQPoints ? [...meta.completedQPoints] : [];
+    if (meta.inProgressQ && meta.inProgressQ !== key && !completed.includes(meta.inProgressQ)) {
+      completed.push(meta.inProgressQ);
+    }
+    meta.inProgressQ = key;
+    meta.completedQPoints = completed;
+    metaUpdated = true;
+
+    const total = meta.totalQPoints ?? 0;
+    const completedCount = meta.completedQPoints?.length ?? 0;
+    if (total > 0) {
+      const phMax = meta.hasDos ? 95 : 99;
+      const ratio = Math.min(1, completedCount / total);
+      const percent = Math.max(next.percent ?? 0, ratio * phMax);
+      const runningIndex = Math.min(completedCount + 1, total);
+      next = updateWithDetail(
+        { ...next, percent, phase: "ph.x" },
+        `Q-point ${runningIndex}/${total}`
+      );
+    } else {
+      next = { ...next, phase: "ph.x" };
+    }
+  }
+
+  const attachMeta = (stateToReturn: ProgressState): ProgressState => {
+    if (metaUpdated || state.meta?.phonon) {
+      return { ...stateToReturn, meta: { ...(state.meta ?? {}), phonon: meta } };
+    }
+    return stateToReturn;
+  };
+
+  if (line.includes("=== Step 1/4")) {
+    return attachMeta({ ...next, percent: next.percent ?? 0, phase: "ph.x" });
+  }
+  if (line.includes("=== Step 2/4")) {
+    const phMax = meta.hasDos ? 95 : 99;
+    const completed = meta.completedQPoints ? [...meta.completedQPoints] : [];
+    if (meta.inProgressQ && !completed.includes(meta.inProgressQ)) {
+      completed.push(meta.inProgressQ);
+      meta.completedQPoints = completed;
+      meta.inProgressQ = undefined;
+      metaUpdated = true;
+    }
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, phMax), phase: "q2r.x" });
+  }
+  if (line.includes("=== Step 3/4")) {
+    const target = meta.hasDos ? 95 : 99;
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, target), phase: "matdyn.x (DOS)" });
+  }
+  if (line.includes("=== Step 4/4")) {
+    const target = 100;
+    return attachMeta({ ...next, percent: Math.max(next.percent ?? 0, target), phase: "matdyn.x (dispersion)" });
+  }
+  if (line.includes("=== Phonon Calculation Complete ===")) {
+    return attachMeta({ ...next, percent: 100, status: "complete", phase: "Complete" });
+  }
+
+  return attachMeta(next);
+}
+
+export function updateWannierProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 8, phase: "wannier90.x -pp" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 35, phase: "pw.x NSCF" };
+    }
+    if (step === 3) {
+      return { ...next, percent: 65, phase: "pw2wannier90.x" };
+    }
+    if (step === 4) {
+      return { ...next, percent: 88, phase: "wannier90.x" };
+    }
+  }
+
+  if (line.includes("Parsing Wannier artifacts")) {
+    return { ...next, percent: 95, phase: "Parsing Wannier results" };
+  }
+  if (line.includes("=== Wannier Calculation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+export function updateTransportProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  if (line.includes("Preparing transport input")) {
+    return { ...next, percent: 8, phase: "Preparing transport input" };
+  }
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 72, phase: "postw90.x / BoltzWann" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 94, phase: "Parsing BoltzWann output" };
+    }
+  }
+
+  if (line.includes("=== Transport Calculation Complete ===")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+export function updateEpwProgress(line: string, state: ProgressState): ProgressState {
+  const next: ProgressState = { ...state, status: "running" };
+
+  const stepMatch = line.match(/Step\s+(\d+)\/(\d+):\s*(.+)/i);
+  if (stepMatch) {
+    const step = Number.parseInt(stepMatch[1], 10);
+    if (step === 1) {
+      return { ...next, percent: 72, phase: "epw.x" };
+    }
+    if (step === 2) {
+      return { ...next, percent: 94, phase: "Parsing EPW outputs" };
+    }
+  }
+
+  if (line.includes("EPW local pipeline complete") || line.includes("EPW HPC pipeline complete")) {
+    return { ...next, percent: 100, status: "complete", phase: "Complete" };
+  }
+
+  return next;
+}
+
+function updateHpcProgress(line: string, state: ProgressState): ProgressState | null {
+  if (line.startsWith("HPC_STAGE|")) {
+    const [, stageRaw, infoRaw] = line.split("|", 3);
+    const stage = (stageRaw || "").trim();
+    const info = (infoRaw || "").trim();
+    const nextBase: ProgressState = {
+      ...state,
+      status: "running",
+      detail: info.length > 0 ? info : state.detail,
+    };
+
+    if (stage === "Connecting") {
+      return { ...nextBase, phase: "Connecting to cluster", percent: Math.max(state.percent ?? 0, 2) };
+    }
+    if (stage === "Uploading") {
+      return { ...nextBase, phase: "Uploading input bundle", percent: Math.max(state.percent ?? 0, 12) };
+    }
+    if (stage === "Submitting") {
+      return { ...nextBase, phase: "Submitting Slurm job", percent: Math.max(state.percent ?? 0, 22) };
+    }
+    if (stage === "Submitted") {
+      return { ...nextBase, phase: "Submitted to scheduler", percent: Math.max(state.percent ?? 0, 28) };
+    }
+    if (stage === "Collecting") {
+      return { ...nextBase, phase: "Collecting remote artifacts", percent: Math.max(state.percent ?? 0, 93) };
+    }
+    if (stage === "Saved") {
+      return { ...nextBase, phase: "Saved", percent: Math.max(state.percent ?? 0, 99) };
+    }
+    return nextBase;
+  }
+
+  if (line.startsWith("HPC_SCHED|")) {
+    const [, stateRaw, nodeRaw] = line.split("|", 3);
+    const schedulerState = (stateRaw || "UNKNOWN").trim().toUpperCase();
+    const node = (nodeRaw || "").trim();
+    const detail = node.length > 0 ? `Node ${node}` : undefined;
+    const nextBase: ProgressState = {
+      ...state,
+      status: "running",
+      detail: detail || state.detail,
+    };
+
+    if (schedulerState === "PENDING") {
+      return { ...nextBase, phase: "Scheduler: Pending", percent: Math.max(state.percent ?? 0, 35) };
+    }
+    if (schedulerState === "RUNNING") {
+      return { ...nextBase, phase: "Scheduler: Running", percent: Math.max(state.percent ?? 0, 72) };
+    }
+    if (schedulerState === "COMPLETING") {
+      return { ...nextBase, phase: "Scheduler: Completing", percent: Math.max(state.percent ?? 0, 90) };
+    }
+    if (schedulerState === "COMPLETED") {
+      return { ...nextBase, phase: "Scheduler: Completed", percent: Math.max(state.percent ?? 0, 92) };
+    }
+    if (HPC_TERMINAL_ERROR_STATES.has(schedulerState)) {
+      return { ...nextBase, phase: `Scheduler: ${schedulerState}`, status: "error" };
+    }
+    return { ...nextBase, phase: `Scheduler: ${schedulerState}` };
+  }
+
+  if (line.startsWith("HPC_WARNING|")) {
+    const [, message] = line.split("|", 2);
+    return {
+      ...state,
+      detail: message?.trim() || state.detail,
+    };
+  }
+
+  return null;
+}
+
+type ProgressKind =
+  | "scf"
+  | "bands"
+  | "wien2k_scf"
+  | "wien2k_bands"
+  | "wien2k_fermi_surface"
+  | "dos"
+  | "fermi_surface"
+  | "hubbard_lrt"
+  | "phonon"
+  | "epw"
+  | "wannier"
+  | "transport";
+
+export function progressReducer(
+  kind: ProgressKind,
+  line: string,
+  state: ProgressState,
+): ProgressState {
+  const hpcProgress = updateHpcProgress(line, state);
+  if (hpcProgress) {
+    return hpcProgress;
+  }
+
+  switch (kind) {
+    case "scf":
+      return updateScfProgress(line, state);
+    case "bands":
+      return updateBandsProgress(line, state);
+    case "wien2k_scf":
+      if (line.includes("[saved calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("run_lapw") || line.includes("runsp_lapw")) {
+        return { ...state, status: "running", percent: null, phase: "SCF cycle" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "SCF cycle" };
+    case "wien2k_bands":
+      if (line.includes("[saved bands calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("spaghetti")) {
+        return { ...state, status: "running", percent: null, phase: "spaghetti" };
+      }
+      if (line.includes("lapw1")) {
+        return { ...state, status: "running", percent: null, phase: "lapw1" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k bands" };
+    case "wien2k_fermi_surface":
+      if (line.includes("[saved WIEN2k Fermi-surface calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("xcrysden")) {
+        return { ...state, status: "running", percent: null, phase: "XCrySDen BXSF" };
+      }
+      if (line.includes("lapw2")) {
+        return { ...state, status: "running", percent: null, phase: "lapw2 -fermi" };
+      }
+      if (line.includes("lapw1")) {
+        return { ...state, status: "running", percent: null, phase: "lapw1" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k Fermi surface" };
+    case "dos":
+      return updateDosProgress(line, state);
+    case "fermi_surface":
+      return updateFermiSurfaceProgress(line, state);
+    case "hubbard_lrt":
+      if (line.includes("=== Hubbard LRT Complete ===")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("Running hp.x")) {
+        return { ...state, status: "running", percent: 20, phase: "hp.x" };
+      }
+      if (line.includes("Parsing Hubbard parameters")) {
+        return { ...state, status: "running", percent: 90, phase: "Parsing results" };
+      }
+      return { ...state, status: "running", phase: state.phase || "Hubbard LRT" };
+    case "phonon":
+      return updatePhononProgress(line, state);
+    case "epw":
+      return updateEpwProgress(line, state);
+    case "wannier":
+      return updateWannierProgress(line, state);
+    case "transport":
+      return updateTransportProgress(line, state);
+    default:
+      return state;
+  }
+}
+
+export function defaultProgressState(phase: string, meta?: ProgressMeta): ProgressState {
+  return buildDefaultProgressState(phase, meta);
+}

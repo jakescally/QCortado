@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::engines::EngineId;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionMode {
@@ -69,6 +71,14 @@ pub enum HpcLauncher {
     Mpirun,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EnginePathMode {
+    #[default]
+    Path,
+    Module,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SlurmResourceRequest {
     #[serde(default)]
@@ -124,6 +134,21 @@ pub struct HpcProfile {
     pub remote_wannier90_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_postw90_path: Option<String>,
+    /// Remote WIENROOT for the installed WIEN2k engine, if this profile owns one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_wien2k_install_root: Option<String>,
+    #[serde(default)]
+    pub qe_path_mode: EnginePathMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qe_module_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qe_module_load: Option<String>,
+    #[serde(default)]
+    pub wien2k_path_mode: EnginePathMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wien2k_module_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wien2k_module_load: Option<String>,
     pub remote_pseudo_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_cpu_pseudo_dir: Option<String>,
@@ -145,6 +170,11 @@ pub struct HpcProfile {
     pub default_cpu_resources: SlurmResourceRequest,
     #[serde(default = "default_gpu_resources")]
     pub default_gpu_resources: SlurmResourceRequest,
+    /// Small CPU allocation for engine setup and module validation commands.
+    /// Absent legacy values resolve through `utility_resources()` without
+    /// changing calculation resource defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utility_resources: Option<SlurmResourceRequest>,
     #[serde(default)]
     pub credential_persisted: bool,
     #[serde(default)]
@@ -162,6 +192,29 @@ impl HpcProfile {
 
     pub fn preferred_resource_type(&self) -> ResourceType {
         self.resource_mode.preferred_resource_type()
+    }
+
+    pub fn engine_path_mode(&self, engine_id: EngineId) -> EnginePathMode {
+        match engine_id {
+            EngineId::Qe => self.qe_path_mode,
+            EngineId::Wien2k => self.wien2k_path_mode,
+        }
+    }
+
+    pub fn engine_module_use(&self, engine_id: EngineId) -> Option<&str> {
+        let value = match engine_id {
+            EngineId::Qe => self.qe_module_use.as_deref(),
+            EngineId::Wien2k => self.wien2k_module_use.as_deref(),
+        };
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+
+    pub fn engine_module_load(&self, engine_id: EngineId) -> Option<&str> {
+        let value = match engine_id {
+            EngineId::Qe => self.qe_module_load.as_deref(),
+            EngineId::Wien2k => self.wien2k_module_load.as_deref(),
+        };
+        value.map(str::trim).filter(|value| !value.is_empty())
     }
 
     pub fn remote_qe_bin_dir_for_resource(&self, resource_type: ResourceType) -> &str {
@@ -210,6 +263,151 @@ impl HpcProfile {
             .map(str::trim)
             .filter(|value| !value.is_empty())
     }
+
+    pub fn utility_resources(&self) -> SlurmResourceRequest {
+        self.utility_resources.clone().unwrap_or_else(|| {
+            let mut resources = default_utility_resources();
+            resources.partition = self.default_cpu_resources.partition.clone();
+            resources.qos = self.default_cpu_resources.qos.clone();
+            resources.account = self.default_cpu_resources.account.clone();
+            resources.constraint = self.default_cpu_resources.constraint.clone();
+            resources.module_preamble = self.default_cpu_resources.module_preamble.clone();
+            resources.additional_sbatch = self.default_cpu_resources.additional_sbatch.clone();
+            resources
+        })
+    }
+
+    pub fn qe_runtime_profile(&self) -> QeHpcRuntimeProfile {
+        self.qe_runtime_profile_for_resource(self.preferred_resource_type())
+    }
+
+    pub fn qe_runtime_profile_for_resource(
+        &self,
+        resource_type: ResourceType,
+    ) -> QeHpcRuntimeProfile {
+        QeHpcRuntimeProfile {
+            engine_id: EngineId::Qe,
+            supported: true,
+            profile_id: self.id.clone(),
+            profile_name: self.name.clone(),
+            cluster: self.cluster.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            resource_mode: self.resource_mode,
+            resource_type,
+            supports_resource_type: self.supports_resource_type(resource_type),
+            path_mode: self.qe_path_mode,
+            module_use: normalize_optional_runtime_text(&self.qe_module_use),
+            module_load: normalize_optional_runtime_text(&self.qe_module_load),
+            launcher: self.launcher,
+            launcher_extra_args: self
+                .launcher_extra_args_for_resource(resource_type)
+                .map(str::to_string),
+            remote_workspace_root: self.remote_workspace_root.clone(),
+            remote_project_root: self.remote_project_root.clone(),
+            paths: QeHpcRuntimePaths {
+                remote_bin_dir: self
+                    .remote_qe_bin_dir_for_resource(resource_type)
+                    .to_string(),
+                remote_pseudo_dir: self
+                    .remote_pseudo_dir_for_resource(resource_type)
+                    .to_string(),
+                remote_epw_path: normalize_optional_runtime_text(&self.remote_epw_path),
+                remote_wannier90_path: normalize_optional_runtime_text(&self.remote_wannier90_path),
+                remote_postw90_path: normalize_optional_runtime_text(&self.remote_postw90_path),
+                uses_pseudopotentials: true,
+            },
+        }
+    }
+
+    pub fn runtime_profile_for_engine(
+        &self,
+        engine_id: EngineId,
+        resource_type: ResourceType,
+    ) -> EngineHpcRuntimeProfile {
+        match engine_id {
+            EngineId::Qe => {
+                EngineHpcRuntimeProfile::Qe(self.qe_runtime_profile_for_resource(resource_type))
+            }
+            EngineId::Wien2k => {
+                EngineHpcRuntimeProfile::Unsupported(UnsupportedEngineHpcRuntimeProfile {
+                    engine_id,
+                    supported: false,
+                    profile_id: self.id.clone(),
+                    profile_name: self.name.clone(),
+                    reason: "This engine does not have an HPC runtime profile adapter yet."
+                        .to_string(),
+                })
+            }
+        }
+    }
+}
+
+fn normalize_optional_runtime_text(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QeHpcRuntimePaths {
+    pub remote_bin_dir: String,
+    pub remote_pseudo_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_epw_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_wannier90_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_postw90_path: Option<String>,
+    pub uses_pseudopotentials: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QeHpcRuntimeProfile {
+    pub engine_id: EngineId,
+    pub supported: bool,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub cluster: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub resource_mode: HpcResourceMode,
+    pub resource_type: ResourceType,
+    pub supports_resource_type: bool,
+    pub path_mode: EnginePathMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_use: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_load: Option<String>,
+    pub launcher: HpcLauncher,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launcher_extra_args: Option<String>,
+    pub remote_workspace_root: String,
+    pub remote_project_root: String,
+    pub paths: QeHpcRuntimePaths,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedEngineHpcRuntimeProfile {
+    pub engine_id: EngineId,
+    pub supported: bool,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineHpcRuntimeProfile {
+    Qe(QeHpcRuntimeProfile),
+    Unsupported(UnsupportedEngineHpcRuntimeProfile),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -305,6 +503,24 @@ pub fn default_gpu_resources() -> SlurmResourceRequest {
         cpus_per_task: Some(8),
         memory_gb: Some(32),
         gpus: Some(1),
+        qos: None,
+        account: None,
+        constraint: None,
+        module_preamble: None,
+        additional_sbatch: Vec::new(),
+    }
+}
+
+pub fn default_utility_resources() -> SlurmResourceRequest {
+    SlurmResourceRequest {
+        resource_type: ResourceType::Cpu,
+        partition: Some("short".to_string()),
+        walltime: Some("00:10:00".to_string()),
+        nodes: Some(1),
+        ntasks: Some(1),
+        cpus_per_task: Some(1),
+        memory_gb: Some(2),
+        gpus: Some(0),
         qos: None,
         account: None,
         constraint: None,
@@ -424,4 +640,69 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
     );
 
     validation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_profile_without_wien2k_root_remains_readable() {
+        let legacy = serde_json::json!({
+            "id": "profile-1",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/project/qcortado"
+        });
+
+        let profile: HpcProfile = serde_json::from_value(legacy).expect("legacy HPC profile");
+
+        assert_eq!(profile.remote_wien2k_install_root, None);
+        assert_eq!(profile.qe_path_mode, EnginePathMode::Path);
+        assert_eq!(profile.wien2k_path_mode, EnginePathMode::Path);
+        assert_eq!(profile.resource_mode, HpcResourceMode::Both);
+        assert!(profile.utility_resources.is_none());
+        let utilities = profile.utility_resources();
+        assert_eq!(utilities.ntasks, Some(1));
+        assert_eq!(utilities.walltime.as_deref(), Some("00:10:00"));
+    }
+
+    #[test]
+    fn profile_serializes_verified_wien2k_install_root() {
+        let configured = serde_json::json!({
+            "id": "profile-1",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/project/qcortado",
+            "remote_wien2k_install_root": "/opt/WIEN2k",
+            "wien2k_path_mode": "module",
+            "wien2k_module_use": "/cluster/modules",
+            "wien2k_module_load": "WIEN2k/24.1"
+        });
+
+        let profile: HpcProfile = serde_json::from_value(configured).expect("configured profile");
+        let saved = serde_json::to_value(&profile).expect("serialize configured profile");
+
+        assert_eq!(
+            saved.get("remote_wien2k_install_root"),
+            Some(&serde_json::Value::String("/opt/WIEN2k".to_string()))
+        );
+        assert_eq!(profile.wien2k_path_mode, EnginePathMode::Module);
+        assert_eq!(
+            profile.engine_module_use(EngineId::Wien2k),
+            Some("/cluster/modules")
+        );
+        assert_eq!(
+            profile.engine_module_load(EngineId::Wien2k),
+            Some("WIEN2k/24.1")
+        );
+    }
 }

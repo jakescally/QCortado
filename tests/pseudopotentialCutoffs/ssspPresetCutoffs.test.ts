@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeSelectedPseudoCutoffs } from "../../src/lib/pseudopotentialCutoffs";
+import { summarizeSelectedPseudoCutoffs } from "../../src/lib/engines/qe/pseudopotentialCutoffs";
 
 test("uses SSSP JSON cutoffs even before UPF metadata has loaded", () => {
   const summary = summarizeSelectedPseudoCutoffs(

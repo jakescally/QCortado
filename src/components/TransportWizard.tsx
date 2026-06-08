@@ -9,7 +9,7 @@ import {
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
@@ -20,15 +20,21 @@ import {
   defaultResourcesForProfile,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeRuntimeSetupLines,
+  resolveProfileRemoteQeAuxiliaryExecutable,
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { TransportPlot } from "./TransportPlot";
-import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { getWannierIssueCounts, getWannierQualityIssues } from "../lib/engines/qe/wannierQuality";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import type { TransportResult } from "../lib/transport";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -340,10 +346,18 @@ export function TransportWizard({
   );
 
   const hpcCommandLines = useMemo(
-    () => [
-      "cd \"$SLURM_SUBMIT_DIR\"",
-      `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${deriveRemotePostw90Path(activeHpcProfile)} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
-    ],
+    () => {
+      const remotePostw90 = resolveProfileRemoteQeAuxiliaryExecutable(
+        activeHpcProfile,
+        deriveRemotePostw90Path(activeHpcProfile),
+        "postw90.x",
+      );
+      return [
+        "cd \"$SLURM_SUBMIT_DIR\"",
+        ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
+        `${buildHpcLauncherCommand(activeHpcProfile, hpcResources.resource_type)} ${remotePostw90} ${seedname} > ${seedname}.wpout 2> ${seedname}.werr`,
+      ];
+    },
     [activeHpcProfile, hpcResources.resource_type, seedname],
   );
 

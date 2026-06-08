@@ -6,24 +6,47 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
 import { parseCIF } from "../lib/cifParser";
-import { CrystalData, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
+import { CrystalData, HpcProfile, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
-import { getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
-import { isPhononReadyScf } from "../lib/phononReady";
+import { getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
+import {
+  getStoredProjectDashboardActiveEngineId,
+  getStoredProjectDashboardEngineFilter,
+  setStoredProjectDashboardActiveEngineId,
+  setStoredProjectDashboardEngineFilter,
+} from "../lib/projectDashboardSettings";
+import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
+import { parseLatestHubbardOccupations } from "../lib/hubbardOccupations";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
-import { downloadHpcCalculationArtifacts } from "../lib/hpcConfig";
+import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
+import {
+  DEFAULT_ENGINE_ID,
+  FALLBACK_ENGINE_DESCRIPTORS,
+  FALLBACK_ENGINE_PLUGIN_MANIFESTS,
+  INSTALLABLE_ENGINE_DESCRIPTORS,
+  addEngineInstallation,
+  buildDefaultEngineInstallForm,
+  getEngineLabel,
+  getEngineShortLabel,
+  isEngineAlreadyAvailable,
+  isSelectableEngineStatus,
+  listEngineInstallations,
+} from "../lib/engines";
+import type { EngineInstallation, EnginePluginManifest } from "../lib/engines";
+import type { EngineDescriptor, EngineId } from "../lib/engines/types";
+import { listWien2kStructureSources } from "../lib/engines/wien2k";
 import { detectBravaisLattice } from "../lib/brillouinZone";
 import { detectRhombohedralSettingFromLattice } from "../lib/reciprocalLattice";
 import type { BravaisLattice } from "../lib/brillouinZone";
 import type { CenteringType, RhombohedralSetting } from "../lib/reciprocalLattice";
 import { buildConventionalLatticeFromCrystalData } from "../lib/symmetryTransform";
-import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/wannierQuality";
+import { formatWannierConvergenceFlag, getWannierIssueCounts, getWannierQualityIssues } from "../lib/engines/qe/wannierQuality";
 import { getMagnetismViewerData, isMagneticScfCalculation } from "../lib/magnetism";
-import { getScfHubbardUDisplayValues, isDudarevDftUScf, normalizeHubbardLrtUValues } from "../lib/hubbard";
+import { getScfHubbardUDisplayValues, isDudarevDftUScf, normalizeHubbardLrtUValues } from "../lib/engines/qe/hubbard";
 import {
   rememberScfRunSettingsClipboardText,
   serializeScfRunSettings,
-} from "../lib/scfRunSettingsClipboard";
+} from "../lib/engines/qe/scfRunSettingsClipboard";
 import { CifSubstitutionDialog } from "./CifSubstitutionDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
@@ -40,6 +63,7 @@ interface QEResult {
   wall_time_seconds: number | null;
   raw_output: string;
   band_data?: any;  // Band structure data for bands calculations
+  band_dataset?: any;  // Engine-neutral band dataset for bands calculations
   dos_data?: any;  // Electronic DOS data for DOS calculations
   phonon_data?: any;  // Phonon data (DOS + dispersion) for phonon calculations
   epw_data?: any;  // EPW data payload for EPW calculations
@@ -51,9 +75,18 @@ interface QEResult {
 export interface CalculationRun {
   id: string;
   name?: string | null;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: QEResult | null;
+  scf_summary?: {
+    convergence: "converged" | "not_converged" | "failed" | "cancelled" | "unknown";
+    totalEnergy?: { value: number; unit: string } | null;
+    fermiEnergyEv?: number | null;
+    scfSteps?: number | null;
+    wallTimeSeconds?: number | null;
+    totalMagnetization?: number | null;
+  } | null;
   started_at: string;
   completed_at: string | null;
   tags?: string[];
@@ -92,6 +125,7 @@ interface Project {
   name: string;
   description: string | null;
   created_at: string;
+  active_engine_id?: EngineId | null;
   cif_variants: CifVariant[];
   last_opened_cif_id: string | null;
 }
@@ -103,6 +137,7 @@ interface ProjectDashboardProps {
   onBack: () => void;
   onDeleted: () => void;
   onRunSCF: (
+    engineId: EngineId,
     cifId: string,
     crystalData: CrystalData,
     cifContent: string,
@@ -112,34 +147,44 @@ interface ProjectDashboardProps {
     optimizedStructures?: OptimizedStructureOption[],
     calculations?: CalculationRun[],
   ) => void;
-  onRunBands: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onContinueWien2kScf: (
+    cifId: string,
+    crystalData: CrystalData,
+    cifContent: string,
+    filename: string,
+    calculations: CalculationRun[],
+    calculationId: string,
+  ) => void;
+  onRunEngineSetup: (engineId: EngineId, cifId: string, crystalData: CrystalData) => void;
+  onRunBands: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
     bandData: any,
     scfFermiEnergy: number | null,
     calculationParameters?: Record<string, unknown> | null,
     calculationContext?: SavedBandsCalculationContext | null,
   ) => void;
-  onRunDos: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunDos: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewDos: (dosData: any, scfFermiEnergy: number | null) => void;
-  onRunWannier: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunWannier: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewWannier: (
     wannierData: any,
     scfFermiEnergy: number | null,
     overlayOptions?: WannierBandOverlayOption[],
   ) => void;
-  onRunTransport: (cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
+  onRunTransport: (engineId: EngineId, cifId: string, crystalData: CrystalData, wannierCalculations: CalculationRun[]) => void;
   onViewTransport: (transportData: TransportResult) => void;
-  onRunFermiSurface: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunHubbardLrt: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunPhonons: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
-  onRunEPW: (cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
+  onRunFermiSurface: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunHubbardLrt: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunPhonons: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunEPW: (engineId: EngineId, cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
   onViewEPW: (epwData: any, rawOutput?: string | null) => void;
 }
 
-type CalcTagType = "info" | "feature" | "special" | "geometry";
+type CalcTagType = "info" | "feature" | "special" | "geometry" | "engine";
 type CellViewMode = "conventional" | "primitive";
 type CalculationSortMode = "recent" | "best";
+type CalculationEngineFilter = EngineId | "all";
 type CalculationCategory = "scf" | "bands" | "dos" | "wannier" | "transport" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "optimization";
 type CalculationRuntimeKind = "wall" | "cpu";
 
@@ -223,6 +268,58 @@ interface DashboardBravaisInfo {
   shortCode: string;
   qeIbrav: number;
   label: string;
+}
+
+interface EngineSwitcherProps {
+  engines: readonly EngineDescriptor[];
+  value: CalculationEngineFilter;
+  onChange: (engineId: CalculationEngineFilter) => void;
+  ariaLabel: string;
+  includeAll?: boolean;
+  allLabel?: string;
+  isEngineDisabled?: (engine: EngineDescriptor) => boolean;
+}
+
+function EngineSwitcher({
+  engines,
+  value,
+  onChange,
+  ariaLabel,
+  includeAll = false,
+  allLabel = "All",
+  isEngineDisabled,
+}: EngineSwitcherProps) {
+  return (
+    <div className="engine-switcher" role="group" aria-label={ariaLabel}>
+      {includeAll && (
+        <button
+          type="button"
+          className={value === "all" ? "active" : ""}
+          aria-pressed={value === "all"}
+          onClick={() => onChange("all")}
+        >
+          {allLabel}
+        </button>
+      )}
+      {engines.map((engine) => {
+        const isActive = engine.id === value;
+        const disabled = isEngineDisabled?.(engine) ?? false;
+        return (
+          <button
+            key={engine.id}
+            type="button"
+            className={isActive ? "active" : ""}
+            aria-pressed={isActive}
+            title={engine.label}
+            onClick={() => onChange(engine.id)}
+            disabled={disabled}
+          >
+            {getEngineShortLabel(engine)}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 const DASHBOARD_BRAVAIS_INFO: Record<BravaisLattice, Omit<DashboardBravaisInfo, "bravais">> = {
@@ -431,6 +528,20 @@ function getCalcTagClass(tag: { label: string; type: string }): string {
   return `calc-tag calc-tag-${tag.type}${isHpcTag ? " calc-tag-hpc" : ""}${isDownloadedTag ? " calc-tag-downloaded" : ""}${isFailedTag ? " calc-tag-failed" : ""}`;
 }
 
+function getCalculationEngineTag(calc: CalculationRun): { label: string; type: CalcTagType } {
+  return {
+    label: (calc.engine_id ?? DEFAULT_ENGINE_ID) === "wien2k" ? "W2k" : "QE",
+    type: "engine",
+  };
+}
+
+function getTagsWithEngine<T extends { label: string; type: CalcTagType }>(
+  calc: CalculationRun,
+  tags: T[],
+): Array<{ label: string; type: CalcTagType } | T> {
+  return [getCalculationEngineTag(calc), ...tags];
+}
+
 function asNonNegativeInteger(value: unknown): number | null {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric < 0) return null;
@@ -494,10 +605,48 @@ function isWannierReadyScf(calc: CalculationRun): boolean {
   return !vdw || vdw === "none";
 }
 
+function getWien2kScfParameters(calc: CalculationRun): Record<string, any> {
+  if (calc.engine_id !== "wien2k" || calc.calc_type !== "scf") {
+    return {};
+  }
+  return {
+    ...(calc.parameters?.initialization ?? {}),
+    ...(calc.parameters?.run ?? {}),
+    ...calc.parameters,
+  };
+}
+
+function isContinuableWien2kScf(calc: CalculationRun): boolean {
+  if (calc.engine_id !== "wien2k" || calc.calc_type !== "scf") return false;
+  if (calc.scf_summary?.convergence !== "not_converged") return false;
+  const params = calc.parameters || {};
+  return params.native_artifacts_retained_remote === true
+    && typeof params.remote_case_dir === "string"
+    && params.remote_case_dir.trim().length > 0
+    && typeof params.hpc_profile_id === "string"
+    && params.hpc_profile_id.trim().length > 0
+    && typeof params.source_structure_calculation_id === "string"
+    && params.source_structure_calculation_id.trim().length > 0
+    && typeof params.initialization === "object"
+    && params.initialization !== null
+    && typeof params.run === "object"
+    && params.run !== null;
+}
+
+function formatWien2kMeshTag(mesh: unknown): string | null {
+  if (!Array.isArray(mesh) || mesh.length !== 3) return null;
+  const [k1, k2, k3] = mesh.map((value) => Number(value));
+  if (![k1, k2, k3].every((value) => Number.isInteger(value) && value > 0)) {
+    return null;
+  }
+  return `${k1}×${k2}×${k3}`;
+}
+
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
+  const wien2kParams = getWien2kScfParameters(calc);
   const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
   const wannierReady = isWannierReadyScf(calc);
   let hasGeometryTag = false;
@@ -571,6 +720,26 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
     pushTag("vdW", "feature");
   }
 
+  if (calc.engine_id === "wien2k" && calc.calc_type === "scf") {
+    const meshTag = formatWien2kMeshTag(wien2kParams.k_mesh ?? wien2kParams.kMesh);
+    if (meshTag) {
+      pushTag(meshTag, "info");
+    }
+    const rkmax = Number(wien2kParams.rkmax ?? wien2kParams.rkMax);
+    if (Number.isFinite(rkmax) && rkmax > 0) {
+      const rkmaxLabel = rkmax >= 10 || Number.isInteger(rkmax) ? rkmax.toFixed(0) : rkmax.toFixed(1);
+      pushTag(`RKMax ${rkmaxLabel}`, "info");
+    }
+    const spinMode = String(
+      wien2kParams.spin_mode
+      ?? wien2kParams.spinMode
+      ?? "",
+    ).trim().toLowerCase();
+    if (spinMode === "spin_polarized") {
+      pushTag("Spin-polarized", "feature");
+    }
+  }
+
   if (isHpcCalculation(calc)) {
     pushTag("HPC", "feature");
     if (isHpcArtifactsDownloaded(calc)) {
@@ -579,6 +748,10 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
   }
 
   return tags;
+}
+
+function hasHubbardCorrectionTag(calc: CalculationRun): boolean {
+  return getCalculationTags(calc).some((tag) => tag.label === "DFT+U");
 }
 
 function isOptimizationCalculation(calc: CalculationRun): boolean {
@@ -1325,6 +1498,8 @@ export function ProjectDashboard({
   onBack,
   onDeleted,
   onRunSCF,
+  onContinueWien2kScf,
+  onRunEngineSetup,
   onRunBands,
   onViewBands,
   onRunDos,
@@ -1342,6 +1517,23 @@ export function ProjectDashboard({
 }: ProjectDashboardProps) {
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
+  const [enginePluginManifests, setEnginePluginManifests] = useState<EnginePluginManifest[]>(
+    () => Array.from(FALLBACK_ENGINE_PLUGIN_MANIFESTS),
+  );
+  const [engineInstallations, setEngineInstallations] = useState<EngineInstallation[]>([]);
+  const [showAddEngineDialog, setShowAddEngineDialog] = useState(false);
+  const [availableHpcProfiles, setAvailableHpcProfiles] = useState<HpcProfile[]>([]);
+  const [selectedEngineToAdd, setSelectedEngineToAdd] = useState<EngineId | null>(null);
+  const [engineInstallForm, setEngineInstallForm] = useState(() => buildDefaultEngineInstallForm(null));
+  const [isLoadingEngineSetup, setIsLoadingEngineSetup] = useState(false);
+  const [isAddingEngine, setIsAddingEngine] = useState(false);
+  const [engineSetupError, setEngineSetupError] = useState<string | null>(null);
+  const [preferredEngineId, setPreferredEngineId] = useState<EngineId | null>(
+    () => getStoredProjectDashboardActiveEngineId(),
+  );
+  const [calculationEngineFilter, setCalculationEngineFilter] = useState<CalculationEngineFilter>(
+    () => getStoredProjectDashboardEngineFilter() as CalculationEngineFilter,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -1405,14 +1597,102 @@ export function ProjectDashboard({
     status: "copied" | "error";
     message: string;
   } | null>(null);
+  const [occupationViewer, setOccupationViewer] = useState<{
+    calcId: string;
+    calcType: string;
+    atoms: Array<{
+      atomIndex: number;
+      label: string;
+      text: string;
+    }>;
+    activeAtomIndex: number | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
   const [calculationSortMode, setCalculationSortMode] = useState<CalculationSortMode>(() => getStoredSortMode());
+  const activeEngineId = preferredEngineId ?? project?.active_engine_id ?? DEFAULT_ENGINE_ID;
+  const engineDescriptors = useMemo<EngineDescriptor[]>(
+    () => enginePluginManifests.map((manifest) => manifest.descriptor),
+    [enginePluginManifests],
+  );
+  const displayedEngineDescriptors = useMemo(() => {
+    if (engineDescriptors.some((descriptor) => descriptor.id === activeEngineId)) {
+      return engineDescriptors;
+    }
+    const fallback = FALLBACK_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === activeEngineId);
+    return fallback ? [...engineDescriptors, fallback] : engineDescriptors;
+  }, [activeEngineId, engineDescriptors]);
+
+  useEffect(() => {
+    setStoredProjectDashboardEngineFilter(calculationEngineFilter);
+  }, [calculationEngineFilter]);
+
+  useEffect(() => {
+    if (preferredEngineId == null && project) {
+      setPreferredEngineId(project.active_engine_id ?? DEFAULT_ENGINE_ID);
+    }
+  }, [preferredEngineId, project]);
+
+  useEffect(() => {
+    if (preferredEngineId != null) {
+      setStoredProjectDashboardActiveEngineId(preferredEngineId);
+    }
+  }, [preferredEngineId]);
+
+  const selectedHpcProfile = useMemo(
+    () => availableHpcProfiles.find((profile) => profile.id === engineInstallForm.hpcProfileId) ?? null,
+    [availableHpcProfiles, engineInstallForm.hpcProfileId],
+  );
+  const selectedEngineDescriptor = useMemo(
+    () => INSTALLABLE_ENGINE_DESCRIPTORS.find((descriptor) => descriptor.id === selectedEngineToAdd) ?? null,
+    [selectedEngineToAdd],
+  );
+  const selectedEngineNeedsWien2kModuleLoad =
+    selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module";
+  const canSubmitEngineSetup = Boolean(selectedEngineToAdd && engineInstallForm.hpcProfileId.trim());
+  const canSubmitEngineInstallRoot =
+    selectedEngineToAdd !== "wien2k"
+    || engineInstallForm.wien2kPathMode !== "path"
+    || engineInstallForm.remoteInstallRoot.trim().length > 0;
+  const canSubmitWien2kModuleSetup =
+    !selectedEngineNeedsWien2kModuleLoad || engineInstallForm.wien2kModuleLoad.trim().length > 0;
+  const canSubmitSelectedEngineSetup = canSubmitEngineSetup
+    && canSubmitEngineInstallRoot
+    && canSubmitWien2kModuleSetup;
 
   useEffect(() => {
     loadProject();
   }, [projectId, refreshToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadEngineDescriptors() {
+      try {
+        const [manifests, installations] = await Promise.all([
+          invoke<EnginePluginManifest[]>("list_engine_plugin_manifests"),
+          listEngineInstallations(),
+        ]);
+        if (!cancelled && manifests.length > 0) {
+          setEnginePluginManifests(manifests);
+        }
+        if (!cancelled) {
+          setEngineInstallations(installations);
+        }
+      } catch (e) {
+        console.warn("Failed to load engine plugin manifests:", e);
+      }
+    }
+
+    void loadEngineDescriptors();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setCalculationDetailsById({});
@@ -1461,6 +1741,363 @@ export function ProjectDashboard({
           </div>
         )}
       </>
+    );
+  }
+
+  function handleEngineChange(nextEngineId: EngineId) {
+    if (nextEngineId === activeEngineId) {
+      return;
+    }
+    if (readOnly) {
+      setInfoMessage("Engine switching is disabled in this synced project snapshot.");
+      return;
+    }
+
+    setError(null);
+    setPreferredEngineId(nextEngineId);
+    setInfoMessage(`Active engine set to ${getEngineLabel(displayedEngineDescriptors, nextEngineId)}.`);
+  }
+
+  async function refreshEngineRegistry() {
+    const [manifests, installations] = await Promise.all([
+      invoke<EnginePluginManifest[]>("list_engine_plugin_manifests"),
+      listEngineInstallations(),
+    ]);
+    if (manifests.length > 0) {
+      setEnginePluginManifests(manifests);
+    }
+    setEngineInstallations(installations);
+  }
+
+  async function handleAddEngineClick() {
+    setShowAddEngineDialog(true);
+    setEngineSetupError(null);
+    setIsLoadingEngineSetup(true);
+    try {
+      const [profiles, activeProfileId, installations] = await Promise.all([
+        listHpcProfiles(),
+        getActiveHpcProfileId(),
+        listEngineInstallations(),
+      ]);
+      setAvailableHpcProfiles(profiles);
+      setEngineInstallations(installations);
+      const defaultProfile =
+        profiles.find((profile) => profile.id === activeProfileId)
+        ?? profiles[0]
+        ?? null;
+      setEngineInstallForm(buildDefaultEngineInstallForm(defaultProfile));
+      const firstInstallable = INSTALLABLE_ENGINE_DESCRIPTORS.find(
+        (descriptor) => !isEngineAlreadyAvailable(descriptor.id, displayedEngineDescriptors, installations),
+      );
+      setSelectedEngineToAdd(firstInstallable?.id ?? null);
+    } catch (e) {
+      console.error("Failed to prepare engine setup:", e);
+      setEngineSetupError(`Failed to load HPC profiles: ${e}`);
+    } finally {
+      setIsLoadingEngineSetup(false);
+    }
+  }
+
+  function closeAddEngineDialog() {
+    if (isAddingEngine) return;
+    setShowAddEngineDialog(false);
+    setEngineSetupError(null);
+  }
+
+  function selectEngineForSetup(engineId: EngineId) {
+    if (isEngineAlreadyAvailable(engineId, displayedEngineDescriptors, engineInstallations)) {
+      return;
+    }
+    setSelectedEngineToAdd(engineId);
+    if (engineId === "wien2k") {
+      setEngineInstallForm((current) => ({
+        ...current,
+        ...wien2kInstallDefaults(selectedHpcProfile),
+      }));
+    }
+    setEngineSetupError(null);
+  }
+
+  function updateEngineInstallForm(patch: Partial<typeof engineInstallForm>) {
+    setEngineInstallForm((current) => ({ ...current, ...patch }));
+  }
+
+  function wien2kInstallDefaults(profile: HpcProfile | null) {
+    const pathMode = profile?.wien2k_path_mode ?? "path";
+    return {
+      remoteInstallRoot: pathMode === "path" ? profile?.remote_wien2k_install_root ?? "" : "",
+      wien2kPathMode: pathMode,
+      wien2kModuleUse: profile?.wien2k_module_use ?? "",
+      wien2kModuleLoad: profile?.wien2k_module_load ?? "",
+    };
+  }
+
+  function handleEngineSetupProfileChange(profileId: string) {
+    const profile = availableHpcProfiles.find((candidate) => candidate.id === profileId) ?? null;
+    setEngineInstallForm((current) => ({
+      ...current,
+      hpcProfileId: profileId,
+      ...(selectedEngineToAdd === "wien2k" ? wien2kInstallDefaults(profile) : {}),
+    }));
+  }
+
+  async function handleVerifyAndAddEngine() {
+    if (!selectedEngineToAdd || !canSubmitEngineSetup || isAddingEngine) {
+      return;
+    }
+
+    setIsAddingEngine(true);
+    setEngineSetupError(null);
+    try {
+      const result = await addEngineInstallation({
+        engineId: selectedEngineToAdd,
+        hpcProfileId: engineInstallForm.hpcProfileId.trim(),
+        remoteInstallRoot:
+          selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module"
+            ? ""
+            : engineInstallForm.remoteInstallRoot.trim(),
+        pathMode: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kPathMode : undefined,
+        moduleUse: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kModuleUse.trim() || null : undefined,
+        moduleLoad: selectedEngineToAdd === "wien2k" ? engineInstallForm.wien2kModuleLoad.trim() || null : undefined,
+      });
+      await refreshEngineRegistry();
+      setShowAddEngineDialog(false);
+      setInfoMessage(`${getEngineLabel(INSTALLABLE_ENGINE_DESCRIPTORS, result.installation.engineId)} added for ${selectedHpcProfile?.name ?? "the selected HPC profile"}.`);
+    } catch (e) {
+      console.error("Failed to add engine:", e);
+      setEngineSetupError(`Failed to verify engine: ${e}`);
+    } finally {
+      setIsAddingEngine(false);
+    }
+  }
+
+  function renderEngineSelector() {
+    return (
+      <div className="engine-selector" aria-label="Computation engine">
+        <span className="engine-selector-label">Engine</span>
+        <EngineSwitcher
+          engines={displayedEngineDescriptors}
+          value={activeEngineId}
+          onChange={(engineId) => {
+            if (engineId === "all") return;
+            void handleEngineChange(engineId);
+          }}
+          ariaLabel="Active computation engine"
+          isEngineDisabled={(engine) => readOnly || !isSelectableEngineStatus(engine.status)}
+        />
+        {!readOnly && (
+          <InfoTooltip text="Add computation engine">
+            <button
+              type="button"
+              className="engine-add-btn"
+              aria-label="Add computation engine"
+              onClick={handleAddEngineClick}
+            >
+              +
+            </button>
+          </InfoTooltip>
+        )}
+      </div>
+    );
+  }
+
+  function renderAddEngineDialog() {
+    if (!showAddEngineDialog) return null;
+    const selectedEngineAvailable = selectedEngineToAdd
+      ? isEngineAlreadyAvailable(selectedEngineToAdd, displayedEngineDescriptors, engineInstallations)
+      : false;
+    const wien2kModuleMode = selectedEngineToAdd === "wien2k" && engineInstallForm.wien2kPathMode === "module";
+    const installRootPlaceholder =
+      selectedEngineToAdd === "wien2k"
+        ? "/opt/WIEN2k"
+        : "/opt/qe-7.5";
+    const installRootHint = "Remote QE root or bin directory containing pw.x and post-processing executables.";
+
+    return (
+      <div className="dialog-overlay" onClick={closeAddEngineDialog}>
+        <div className="dialog-content engine-add-dialog" onClick={(e) => e.stopPropagation()}>
+          <div className="dialog-header">
+            <h2>Add Engine</h2>
+            <button
+              className="dialog-close"
+              onClick={closeAddEngineDialog}
+              disabled={isAddingEngine}
+            >
+              &times;
+            </button>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleVerifyAndAddEngine();
+            }}
+          >
+            <div className="dialog-body">
+              {engineSetupError && <div className="dialog-error">{engineSetupError}</div>}
+              {isLoadingEngineSetup ? (
+                <p className="engine-setup-state">Loading remote profiles...</p>
+              ) : (
+                <div className="engine-setup-body">
+                  <div className="engine-option-grid" role="list" aria-label="Available engines">
+                    {INSTALLABLE_ENGINE_DESCRIPTORS.map((descriptor) => {
+                      const alreadyAvailable = isEngineAlreadyAvailable(
+                        descriptor.id,
+                        displayedEngineDescriptors,
+                        engineInstallations,
+                      );
+                      const selected = selectedEngineToAdd === descriptor.id;
+                      return (
+                        <button
+                          key={descriptor.id}
+                          type="button"
+                          className={`engine-option${selected ? " selected" : ""}`}
+                          disabled={alreadyAvailable || isAddingEngine}
+                          onClick={() => selectEngineForSetup(descriptor.id)}
+                          aria-pressed={selected}
+                        >
+                          <span>{descriptor.label}</span>
+                          <small>{alreadyAvailable ? "Already added" : descriptor.id === "wien2k" ? "Path or module" : "Remote setup"}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {availableHpcProfiles.length === 0 ? (
+                    <p className="engine-setup-state">
+                      Configure an HPC profile before adding a remote engine.
+                    </p>
+                  ) : selectedEngineDescriptor ? (
+                    <div className="save-form engine-setup-form">
+                      <div className="form-group">
+                        <label>HPC Profile</label>
+                        <select
+                          value={engineInstallForm.hpcProfileId}
+                          onChange={(e) => handleEngineSetupProfileChange(e.target.value)}
+                          disabled={isAddingEngine}
+                        >
+                          {availableHpcProfiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.name} ({profile.host})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      {selectedEngineToAdd === "wien2k" && (
+                        <>
+                          <div className="engine-switcher settings-engine-path-mode" role="group" aria-label="WIEN2k executable resolution">
+                            <button
+                              type="button"
+                              className={engineInstallForm.wien2kPathMode === "path" ? "active" : ""}
+                              aria-pressed={engineInstallForm.wien2kPathMode === "path"}
+                              onClick={() => updateEngineInstallForm({ wien2kPathMode: "path" })}
+                            >
+                              Paths
+                            </button>
+                            <button
+                              type="button"
+                              className={engineInstallForm.wien2kPathMode === "module" ? "active" : ""}
+                              aria-pressed={engineInstallForm.wien2kPathMode === "module"}
+                              onClick={() => updateEngineInstallForm({ wien2kPathMode: "module" })}
+                              >
+                                Modules
+                              </button>
+                          </div>
+                          {wien2kModuleMode ? (
+                            <div className="settings-module-command-list">
+                              <label className="settings-module-command">
+                                <span className="settings-module-keyword">module use</span>
+                                <input
+                                  className="settings-menu-input"
+                                  value={engineInstallForm.wien2kModuleUse}
+                                  onChange={(e) => updateEngineInstallForm({ wien2kModuleUse: e.target.value })}
+                                  placeholder="/cluster/modulefiles"
+                                />
+                                <span className="field-note">(optional)</span>
+                              </label>
+                              <label className="settings-module-command">
+                                <span className="settings-module-keyword">module load</span>
+                                <input
+                                  className="settings-menu-input"
+                                  value={engineInstallForm.wien2kModuleLoad}
+                                  onChange={(e) => updateEngineInstallForm({ wien2kModuleLoad: e.target.value })}
+                                  placeholder="WIEN2k/24.1"
+                                  required
+                                />
+                              </label>
+                            </div>
+                          ) : (
+                            <div className="form-group">
+                              <label>Remote WIENROOT</label>
+                              <input
+                                type="text"
+                                value={engineInstallForm.remoteInstallRoot}
+                                onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
+                                placeholder={installRootPlaceholder}
+                                disabled={isAddingEngine || selectedEngineAvailable}
+                              />
+                              <span className="form-hint">Remote WIENROOT containing x, init_lapw, run_lapw, and runsp_lapw.</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {selectedEngineToAdd !== "wien2k" && (
+                        <div className="form-group">
+                          <label>{`${selectedEngineDescriptor.label} Install Directory`}</label>
+                          <input
+                            type="text"
+                            value={engineInstallForm.remoteInstallRoot}
+                            onChange={(e) => updateEngineInstallForm({ remoteInstallRoot: e.target.value })}
+                            placeholder={installRootPlaceholder}
+                            disabled={isAddingEngine || selectedEngineAvailable}
+                          />
+                          <span className="form-hint">{installRootHint}</span>
+                        </div>
+                      )}
+                      {selectedHpcProfile && (
+                        <div className="engine-profile-roots">
+                          <div>
+                            <span>Workspace root</span>
+                            <code>{selectedHpcProfile.remote_workspace_root}</code>
+                          </div>
+                          <div>
+                            <span>Project root</span>
+                            <code>{selectedHpcProfile.remote_project_root}</code>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="engine-setup-state">All supported engines are already available.</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="dialog-footer">
+              <button
+                type="button"
+                className="dialog-btn cancel"
+                onClick={closeAddEngineDialog}
+                disabled={isAddingEngine}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="dialog-btn save width-lock"
+                disabled={
+                  isLoadingEngineSetup
+                  || isAddingEngine
+                  || !canSubmitSelectedEngineSetup
+                  || selectedEngineAvailable
+                  || availableHpcProfiles.length === 0
+                }
+              >
+                {isAddingEngine ? "Verifying..." : "Verify and Add"}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
     );
   }
 
@@ -1684,12 +2321,100 @@ export function ProjectDashboard({
     );
   }
 
+  async function handleViewOccupations(calc: CalculationRun) {
+    if (calc.calc_type !== "scf") return;
+
+    setError(null);
+    setInfoMessage(null);
+    setOccupationViewer({
+      calcId: calc.id,
+      calcType: calc.calc_type,
+      atoms: [],
+      activeAtomIndex: null,
+      loading: true,
+      error: null,
+    });
+
+    try {
+      const detailed = await ensureCalculationDetails(calc);
+      const rawOutput = detailed.result?.raw_output || "";
+      const occupations = parseLatestHubbardOccupations(rawOutput);
+      if (!occupations) {
+        setOccupationViewer({
+          calcId: calc.id,
+          calcType: calc.calc_type,
+          atoms: [],
+          activeAtomIndex: null,
+          loading: false,
+          error: "No Hubbard occupations block was found in this SCF output.",
+        });
+        return;
+      }
+
+      setOccupationViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        atoms: occupations.atoms,
+        activeAtomIndex: occupations.atoms[0]?.atomIndex ?? null,
+        loading: false,
+        error: null,
+      });
+    } catch (e) {
+      console.error("Failed to load Hubbard occupations viewer data:", e);
+      setOccupationViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        atoms: [],
+        activeAtomIndex: null,
+        loading: false,
+        error: String(e),
+      });
+    }
+  }
+
+  function renderViewOccupationsButton(calc: CalculationRun) {
+    if (calc.calc_type !== "scf" || !hasHubbardCorrectionTag(calc)) return null;
+
+    const opening = occupationViewer?.calcId === calc.id && occupationViewer.loading;
+
+    return (
+      <button
+        className="view-logs-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleViewOccupations(calc);
+        }}
+        disabled={opening}
+        title="Open the Hubbard occupations viewer"
+      >
+        {opening ? "Loading Occupations..." : "View Occupations"}
+      </button>
+    );
+  }
+
   function renderSavedFileButtons(calc: CalculationRun) {
     return (
       <>
         {renderViewInputButton(calc)}
         {renderViewLogsButton(calc)}
+        {renderViewOccupationsButton(calc)}
       </>
+    );
+  }
+
+  function renderWien2kContinueScfButton(calc: CalculationRun) {
+    if (readOnly || !isContinuableWien2kScf(calc)) return null;
+    return (
+      <button
+        type="button"
+        className="continue-calc-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          handleContinueWien2kScf(calc);
+        }}
+      >
+        Continue SCF
+      </button>
     );
   }
 
@@ -2054,8 +2779,7 @@ export function ProjectDashboard({
   }
 
   function selectAllVisibleCalculations() {
-    if (!selectedVariant) return;
-    setSelectedCalcIds(new Set(selectedVariant.calculations.map((calc) => calc.id)));
+    setSelectedCalcIds(new Set(filteredVariantCalculations.map((calc) => calc.id)));
   }
 
   function clearSelectedCalculations() {
@@ -2325,6 +3049,7 @@ export function ProjectDashboard({
     if (!variant) return;
     const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
     onRunSCF(
+      activeEngineId,
       selectedCifId,
       crystalData,
       cifContent,
@@ -2336,12 +3061,32 @@ export function ProjectDashboard({
     );
   }
 
+  function handleContinueWien2kScf(calc: CalculationRun) {
+    if (readOnly || !selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant || !isContinuableWien2kScf(calc)) return;
+    onContinueWien2kScf(
+      selectedCifId,
+      crystalData,
+      cifContent,
+      variant.filename,
+      variant.calculations,
+      calc.id,
+    );
+  }
+
+  function handleRunEngineSetup() {
+    if (!selectedCifId || !crystalData) return;
+    onRunEngineSetup(activeEngineId, selectedCifId, crystalData);
+  }
+
   async function handleRunOptimization() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
     const optimizedStructures = await getOptimizedStructureOptions(variant.calculations);
     onRunSCF(
+      activeEngineId,
       selectedCifId,
       crystalData,
       cifContent,
@@ -2357,36 +3102,37 @@ export function ProjectDashboard({
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
+    if (activeEngineId === "wien2k" && !hasCompletedWien2kScf()) return;
     // Pass all calculations for this CIF - the wizard will filter for SCF
-    onRunBands(selectedCifId, crystalData, variant.calculations);
+    onRunBands(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunDos() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunDos(selectedCifId, crystalData, variant.calculations);
+    onRunDos(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunWannier() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunWannier(selectedCifId, crystalData, variant.calculations);
+    onRunWannier(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunTransport() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunTransport(selectedCifId, crystalData, variant.calculations);
+    onRunTransport(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunFermiSurface() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunFermiSurface(selectedCifId, crystalData, variant.calculations);
+    onRunFermiSurface(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   async function handleViewBands(calc: CalculationRun) {
@@ -2396,7 +3142,11 @@ export function ProjectDashboard({
         return;
       }
       const detail = await ensureCalculationDetails(calc);
-      const bandData = detail.result?.band_data ?? calc.result?.band_data ?? null;
+      const bandData = detail.result?.band_dataset
+        ?? calc.result?.band_dataset
+        ?? detail.result?.band_data
+        ?? calc.result?.band_data
+        ?? null;
       if (!bandData) {
         setError("Saved band data is unavailable for this calculation.");
         return;
@@ -2459,7 +3209,11 @@ export function ProjectDashboard({
     const settled = await Promise.allSettled(
       matchingBandRuns.map(async (candidate) => {
         const candidateDetail = await ensureCalculationDetails(candidate);
-        const bandData = candidateDetail.result?.band_data ?? candidate.result?.band_data ?? null;
+        const bandData = candidateDetail.result?.band_dataset
+          ?? candidate.result?.band_dataset
+          ?? candidateDetail.result?.band_data
+          ?? candidate.result?.band_data
+          ?? null;
         if (!bandData) {
           return null;
         }
@@ -2758,21 +3512,21 @@ export function ProjectDashboard({
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunPhonons(selectedCifId, crystalData, variant.calculations);
+    onRunPhonons(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunHubbardLrt() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunHubbardLrt(selectedCifId, crystalData, variant.calculations);
+    onRunHubbardLrt(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   function handleRunEPW() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return;
-    onRunEPW(selectedCifId, crystalData, variant.calculations);
+    onRunEPW(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
   async function handleViewPhonon(
@@ -2847,7 +3601,26 @@ export function ProjectDashboard({
   function hasConvergedSCF(): boolean {
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
     if (!variant) return false;
-    return variant.calculations.some(c => c.calc_type === "scf" && c.result?.converged);
+    return variant.calculations.some((calc) => {
+      if (calc.calc_type !== "scf") return false;
+      if (calc.engine_id === "wien2k") {
+        return calc.scf_summary?.convergence === "converged";
+      }
+      return Boolean(calc.result?.converged);
+    });
+  }
+
+  function hasCompletedWien2kScf(): boolean {
+    const variant = project?.cif_variants.find((v) => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(
+      (calc) =>
+        calc.engine_id === "wien2k"
+        && calc.calc_type === "scf"
+        && calc.scf_summary?.convergence === "converged"
+        && typeof calc.parameters?.remote_case_dir === "string"
+        && calc.parameters.remote_case_dir.trim().length > 0,
+    );
   }
 
   function hasWannierReadyScf(): boolean {
@@ -2879,7 +3652,7 @@ export function ProjectDashboard({
   }
 
   function getCalculationRuntime(calc: CalculationRun): CalculationRuntimeDisplay | null {
-    const wallSeconds = calc.result?.wall_time_seconds;
+    const wallSeconds = calc.result?.wall_time_seconds ?? calc.scf_summary?.wallTimeSeconds;
     if (typeof wallSeconds === "number" && Number.isFinite(wallSeconds) && wallSeconds > 0) {
       return { kind: "wall", seconds: wallSeconds };
     }
@@ -2956,12 +3729,20 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
     .join(", ");
 }
 
-function normalizeSavedKPath(value: unknown): string {
-  return String(value || "")
-    .replace(/\s*→\s*/g, "→")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+  function normalizeSavedKPath(value: unknown): string {
+    return String(value || "")
+      .replace(/\s*→\s*/g, "→")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getCalculationEngineId(calc: CalculationRun): EngineId {
+    return calc.engine_id ?? DEFAULT_ENGINE_ID;
+  }
+
+  function matchesCalculationEngineFilter(calc: CalculationRun, filter: CalculationEngineFilter): boolean {
+    return filter === "all" || getCalculationEngineId(calc) === filter;
+  }
 
   function getSelectedVariant(): CifVariant | undefined {
     return project?.cif_variants.find(v => v.id === selectedCifId);
@@ -3005,16 +3786,24 @@ function normalizeSavedKPath(value: unknown): string {
   }
 
   const selectedVariant = getSelectedVariant();
+  const filteredVariantCalculations = useMemo<CalculationRun[]>(
+    () => selectedVariant?.calculations.filter((calc) => matchesCalculationEngineFilter(calc, calculationEngineFilter)) ?? [],
+    [selectedVariant, calculationEngineFilter],
+  );
   const selectedVariantCalculationIds = useMemo<string[]>(
-    () => selectedVariant?.calculations.map((calc) => calc.id) ?? [],
-    [selectedVariant],
+    () => filteredVariantCalculations.map((calc) => calc.id),
+    [filteredVariantCalculations],
   );
   const selectedCalculationsForDeletion = useMemo<CalculationRun[]>(
-    () => selectedVariant?.calculations.filter((calc) => selectedCalcIds.has(calc.id)) ?? [],
-    [selectedVariant, selectedCalcIds],
+    () => filteredVariantCalculations.filter((calc) => selectedCalcIds.has(calc.id)),
+    [filteredVariantCalculations, selectedCalcIds],
   );
   const selectedCalculationCount = selectedCalculationsForDeletion.length;
-  const visibleCalculationCount = selectedVariant?.calculations.length ?? 0;
+  const visibleCalculationCount = filteredVariantCalculations.length;
+  const allVariantCalculations = useMemo<CalculationRun[]>(
+    () => selectedVariant?.calculations ?? [],
+    [selectedVariant],
+  );
 
   useEffect(() => {
     setSelectedCalcIds((current) => {
@@ -3042,100 +3831,114 @@ function normalizeSavedKPath(value: unknown): string {
   const pinnedCalcIds = useMemo<Set<string>>(() => {
     if (!selectedVariant) return new Set<string>();
     return new Set(
-      selectedVariant.calculations
+      filteredVariantCalculations
         .filter((calc) => Array.isArray(calc.tags) && calc.tags.includes(PINNED_TAG))
         .map((calc) => calc.id),
     );
-  }, [selectedVariant]);
+  }, [filteredVariantCalculations, selectedVariant]);
   const scfCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "scf") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "scf"),
       calculationSortMode,
       "scf",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
+  );
+  const wien2kStructureSourceCalculations = useMemo<CalculationRun[]>(
+    () => listWien2kStructureSources(allVariantCalculations)
+      .slice()
+      .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
+        - new Date(left.completed_at ?? left.started_at).getTime()),
+    [allVariantCalculations],
+  );
+  const wien2kStructureCalculations = useMemo<CalculationRun[]>(
+    () => listWien2kStructureSources(filteredVariantCalculations)
+      .slice()
+      .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
+        - new Date(left.completed_at ?? left.started_at).getTime()),
+    [filteredVariantCalculations],
   );
   const bandCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "bands") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "bands"),
       calculationSortMode,
       "bands",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const dosCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "dos") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "dos"),
       calculationSortMode,
       "dos",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const wannierCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "wannier") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "wannier"),
       calculationSortMode,
       "wannier",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const transportCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "transport") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "transport"),
       calculationSortMode,
       "transport",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const fermiSurfaceCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "fermi_surface") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "fermi_surface"),
       calculationSortMode,
       "fermi_surface",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const hubbardLrtCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "hubbard_lrt") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "hubbard_lrt"),
       calculationSortMode,
       "hubbard_lrt",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const phononCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "phonon") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "phonon"),
       calculationSortMode,
       "phonon",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const epwCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => calc.calc_type === "epw") || [],
+      filteredVariantCalculations.filter((calc) => calc.calc_type === "epw"),
       calculationSortMode,
       "epw",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const optimizationCalculations = useMemo<CalculationRun[]>(
     () => sortCalculations(
-      selectedVariant?.calculations.filter((calc) => isOptimizationCalculation(calc)) || [],
+      filteredVariantCalculations.filter((calc) => isOptimizationCalculation(calc)),
       calculationSortMode,
       "optimization",
       pinnedCalcIds,
     ),
-    [selectedVariant, calculationSortMode, pinnedCalcIds],
+    [filteredVariantCalculations, calculationSortMode, pinnedCalcIds],
   );
   const primitiveCell = useMemo(() => {
     if (!crystalData) return null;
@@ -3274,6 +4077,7 @@ function normalizeSavedKPath(value: unknown): string {
             )}
           </div>
           <div className="dashboard-header-actions">
+            {renderEngineSelector()}
             <InfoTooltip text="Reload project data">
               <button
                 className="dashboard-refresh-btn"
@@ -3371,6 +4175,7 @@ function normalizeSavedKPath(value: unknown): string {
           )}
         </div>
         <div className="dashboard-header-actions">
+          {renderEngineSelector()}
           <InfoTooltip text="Reload project data">
             <button
               className="dashboard-refresh-btn"
@@ -3583,6 +4388,49 @@ function normalizeSavedKPath(value: unknown): string {
           </div>
           {!readOnly && (
             <div className="calc-action-grid">
+              {activeEngineId === "wien2k" ? (
+                <>
+                  <button className="calc-action-btn" onClick={handleRunEngineSetup}>
+                    <span className="calc-action-icon">Struct</span>
+                    <span className="calc-action-label">WIEN2k Structure</span>
+                    <span className="calc-action-hint">Prepare case.struct</span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={() => void handleRunSCF()}
+                    disabled={wien2kStructureSourceCalculations.length === 0}
+                  >
+                    <span className="calc-action-icon">SCF</span>
+                    <span className="calc-action-label">WIEN2k SCF</span>
+                    <span className="calc-action-hint">
+                      {wien2kStructureSourceCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                    </span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={handleRunBands}
+                    disabled={!hasCompletedWien2kScf()}
+                  >
+                    <span className="calc-action-icon">Band</span>
+                    <span className="calc-action-label">WIEN2k Bands</span>
+                    <span className="calc-action-hint">
+                      {hasCompletedWien2kScf() ? "lapw1 + spaghetti" : "Requires completed WIEN2k SCF"}
+                    </span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={handleRunFermiSurface}
+                    disabled={!hasCompletedWien2kScf()}
+                  >
+                    <span className="calc-action-icon">FS</span>
+                    <span className="calc-action-label">WIEN2k Fermi Surface</span>
+                    <span className="calc-action-hint">
+                      {hasCompletedWien2kScf() ? "XCrySDen BXSF" : "Requires completed WIEN2k SCF"}
+                    </span>
+                  </button>
+                </>
+              ) : (
+                <>
               <button className="calc-action-btn" onClick={handleRunSCF}>
                 <span className="calc-action-icon">SCF</span>
                 <span className="calc-action-label">Self-Consistent Field</span>
@@ -3681,9 +4529,109 @@ function normalizeSavedKPath(value: unknown): string {
                 <span className="calc-action-label">Geometry Optimization</span>
                 <span className="calc-action-hint">VC-Relax preset</span>
               </button>
+                </>
+              )}
             </div>
           )}
+          <div className="calculation-history-filter">
+            <span className="calculation-history-filter-label">Entries</span>
+            <EngineSwitcher
+              engines={displayedEngineDescriptors}
+              value={calculationEngineFilter}
+              onChange={setCalculationEngineFilter}
+              ariaLabel="Filter calculation entries by engine"
+              includeAll
+            />
+          </div>
         </section>
+
+        {selectedVariant && selectedVariant.calculations.length > 0 && visibleCalculationCount === 0 && (
+          <div className="history-empty-state">
+            No calculations from {
+              calculationEngineFilter === "all"
+                ? "all engines"
+                : getEngineLabel(displayedEngineDescriptors, calculationEngineFilter)
+            } were found for this structure.
+          </div>
+        )}
+
+        {wien2kStructureCalculations.length > 0 && (
+          <section className="history-section">
+            <h3>WIEN2k Structures</h3>
+            <div className="calculations-list">
+              {wien2kStructureCalculations.map((calc) => {
+                const calcData = getCalculationRecord(calc);
+                const parameters = calcData.parameters ?? {};
+                const caseName = typeof parameters.case_name === "string" ? parameters.case_name : "case";
+                const finalSummary = parameters.final_structure_summary as {
+                  spacegroupSymbol?: string | null;
+                  spacegroupNumber?: number | null;
+                } | undefined;
+                const spaceGroup = typeof finalSummary?.spacegroupSymbol === "string"
+                  ? `${finalSummary.spacegroupSymbol} (#${finalSummary.spacegroupNumber ?? "?"})`
+                  : typeof parameters.standardized_spacegroup_symbol === "string"
+                  ? `${parameters.standardized_spacegroup_symbol} (#${parameters.standardized_spacegroup_number ?? "?"})`
+                  : "Native refinement accepted";
+                return (
+                  <div key={calc.id} className="calculation-item">
+                    <div
+                      className="calculation-header"
+                      onClick={() => handleCalculationHeaderClick(calc, () =>
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
+                      )}
+                    >
+                      {renderCalculationSelectionControl(calc)}
+                      <div className="calculation-info">
+                        {renderCalculationEntryName(calc)}
+                        <span className="calc-type">Structure</span>
+                        <span className="calc-status converged">Accepted</span>
+                        <span className="calc-energy">{caseName}.struct</span>
+                      </div>
+                      <div className="calculation-meta">
+                        {renderRenameCalculationButton(calc)}
+                        <span className="calc-date">
+                          {calc.completed_at ? formatDate(calc.completed_at) : "Saving..."}
+                        </span>
+                        {calc.storage_bytes != null && (
+                          <span className="calc-size">{formatBytes(calc.storage_bytes)}</span>
+                        )}
+                        <span className="expand-icon">{expandedCalc === calc.id ? "▼" : "▶"}</span>
+                      </div>
+                    </div>
+                    {expandedCalc === calc.id && (
+                      <div className="calculation-details">
+                        <div className="details-grid">
+                          <div className="detail-item">
+                            <label>Case</label>
+                            <span>{caseName}</span>
+                          </div>
+                          <div className="detail-item">
+                            <label>Space Group</label>
+                            <span>{spaceGroup}</span>
+                          </div>
+                        </div>
+                        <div className="calc-actions">
+                          {renderSavedFileButtons(calc)}
+                          {!readOnly && (
+                            <button
+                              className="delete-calc-btn"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openDeleteCalcDialog(calc.id, calc.calc_type);
+                              }}
+                            >
+                              Delete Structure Source
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* SCF Calculations */}
         {scfCalculations.length > 0 && (
@@ -3695,6 +4643,11 @@ function normalizeSavedKPath(value: unknown): string {
                 const calcData = getCalculationRecord(calc);
                 const runtime = getCalculationRuntime(calcData);
                 const hubbardUDisplay = formatScfDashboardHubbardU(calc);
+                const wien2kSummary = calc.scf_summary ?? calcData.scf_summary ?? null;
+                const isWien2k = calc.engine_id === "wien2k";
+                const converged = isWien2k
+                  ? wien2kSummary?.convergence === "converged"
+                  : Boolean(calc.result?.converged);
                 return (
                   <div key={calc.id} className="calculation-item">
                     <div
@@ -3712,18 +4665,20 @@ function normalizeSavedKPath(value: unknown): string {
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">SCF</span>
-                        {calc.result && (
+                        {(calc.result || wien2kSummary) && (
                           <span
                             className={`calc-status ${
-                              calc.result.converged ? "converged" : "failed"
+                              converged ? "converged" : "failed"
                             }`}
                           >
-                            {calc.result.converged ? "Converged" : "Not converged"}
+                            {converged ? "Converged" : wien2kSummary?.convergence === "failed" ? "Failed" : "Not converged"}
                           </span>
                         )}
-                        {calc.result?.total_energy && (
+                        {(calc.result?.total_energy != null || wien2kSummary?.totalEnergy) && (
                           <span className="calc-energy">
-                            E = {formatEnergy(calc.result.total_energy)}
+                            E = {calc.result?.total_energy != null
+                              ? formatEnergy(calc.result.total_energy)
+                              : `${wien2kSummary?.totalEnergy?.value.toFixed(6)} ${wien2kSummary?.totalEnergy?.unit}`}
                           </span>
                         )}
                         {hubbardUDisplay && (
@@ -3732,7 +4687,7 @@ function normalizeSavedKPath(value: unknown): string {
                           </span>
                         )}
                         <div className="calc-tags">
-                          {getCalculationTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getCalculationTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -3755,7 +4710,7 @@ function normalizeSavedKPath(value: unknown): string {
                             <path d="M12 2.5L14.9 8.38L21.4 9.33L16.7 13.91L17.81 20.38L12 17.33L6.19 20.38L7.3 13.91L2.6 9.33L9.1 8.38L12 2.5Z" />
                           </svg>
                         </button>
-                        {renderCopyScfSettingsButton(calc)}
+                        {!isWien2k && renderCopyScfSettingsButton(calc)}
                         {renderRenameCalculationButton(calc)}
                         <span className="calc-date">
                           {calc.completed_at
@@ -3776,26 +4731,28 @@ function normalizeSavedKPath(value: unknown): string {
                       </div>
                     </div>
 
-                    {expandedCalc === calc.id && calcData.result && (
+                    {expandedCalc === calc.id && (calcData.result || wien2kSummary) && (
                       <div className="calculation-details">
-                        {renderCalculationFailure(calcData)}
+                        {calcData.result && renderCalculationFailure(calcData)}
                         <div className="details-grid">
-                          {calcData.result.total_energy && (
+                          {(calcData.result?.total_energy != null || wien2kSummary?.totalEnergy) && (
                             <div className="detail-item">
                               <label>Total Energy</label>
-                              <span>{formatEnergy(calcData.result.total_energy)}</span>
+                              <span>{calcData.result?.total_energy != null
+                                ? formatEnergy(calcData.result.total_energy)
+                                : `${wien2kSummary?.totalEnergy?.value.toFixed(8)} ${wien2kSummary?.totalEnergy?.unit}`}</span>
                             </div>
                           )}
-                          {calcData.result.fermi_energy && (
+                          {(calcData.result?.fermi_energy != null || wien2kSummary?.fermiEnergyEv != null) && (
                             <div className="detail-item">
                               <label>Fermi Energy</label>
-                              <span>{calcData.result.fermi_energy.toFixed(4)} eV</span>
+                              <span>{(calcData.result?.fermi_energy ?? wien2kSummary?.fermiEnergyEv)?.toFixed(4)} eV</span>
                             </div>
                           )}
-                          {calcData.result.n_scf_steps && (
+                          {(calcData.result?.n_scf_steps != null || wien2kSummary?.scfSteps != null) && (
                             <div className="detail-item">
                               <label>SCF Steps</label>
-                              <span>{calcData.result.n_scf_steps}</span>
+                              <span>{calcData.result?.n_scf_steps ?? wien2kSummary?.scfSteps}</span>
                             </div>
                           )}
                           {runtime && (
@@ -3813,6 +4770,7 @@ function normalizeSavedKPath(value: unknown): string {
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {renderSavedFileButtons(calc)}
+                          {renderWien2kContinueScfButton(calcData)}
                           {renderMagnetismViewerButton(calcData)}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (
@@ -3849,9 +4807,14 @@ function normalizeSavedKPath(value: unknown): string {
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
                       className="calculation-header"
-                      onClick={() => handleCalculationHeaderClick(calc, () =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
-                      )}
+                      onClick={() => handleCalculationHeaderClick(calc, () => {
+                        if (expandedCalc !== calc.id) {
+                          void ensureCalculationDetails(calc).catch((e) => {
+                            console.warn("Failed to load Hubbard LRT detail:", e);
+                          });
+                        }
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id);
+                      })}
                     >
                       {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
@@ -3861,7 +4824,7 @@ function normalizeSavedKPath(value: unknown): string {
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getBandsTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getBandsTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -3999,7 +4962,7 @@ function normalizeSavedKPath(value: unknown): string {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">DOS</span>
                         <div className="calc-tags">
-                          {getDosTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getDosTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4156,7 +5119,7 @@ function normalizeSavedKPath(value: unknown): string {
                           <span className="calc-kpath">{calc.parameters.k_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getWannierTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getWannierTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4347,7 +5310,7 @@ function normalizeSavedKPath(value: unknown): string {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">BOLTZWANN</span>
                         <div className="calc-tags">
-                          {getTransportTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getTransportTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4513,7 +5476,7 @@ function normalizeSavedKPath(value: unknown): string {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">FERMI</span>
                         <div className="calc-tags">
-                          {getFermiSurfaceTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getFermiSurfaceTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4785,7 +5748,7 @@ function normalizeSavedKPath(value: unknown): string {
                           <span className="calc-kpath">{calc.parameters.q_path}</span>
                         )}
                         <div className="calc-tags">
-                          {getPhononTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getPhononTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -4965,7 +5928,7 @@ function normalizeSavedKPath(value: unknown): string {
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">EPW</span>
                         <div className="calc-tags">
-                          {getEpwTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getEpwTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5210,7 +6173,7 @@ function normalizeSavedKPath(value: unknown): string {
                           </span>
                         )}
                         <div className="calc-tags">
-                          {getOptimizationTags(calc).map((tag, i) => (
+                          {getTagsWithEngine(calc, getOptimizationTags(calc)).map((tag, i) => (
                             <span key={i} className={getCalcTagClass(tag)}>
                               {tag.label}
                             </span>
@@ -5388,6 +6351,8 @@ function normalizeSavedKPath(value: unknown): string {
             onClose={() => setShowCifSubstitutionDialog(false)}
             onSaved={handleCifSubstitutionSaved}
           />
+
+          {renderAddEngineDialog()}
 
           {calculationNameEditor && (
             <div className="dialog-overlay" onClick={closeCalculationNameEditor}>
@@ -5788,6 +6753,55 @@ function normalizeSavedKPath(value: unknown): string {
                   <div className="calculation-log-content">
                     <pre>
                       {fileViewer.files.find((file) => file.path === fileViewer.activePath)?.contents || ""}
+                    </pre>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {occupationViewer && (
+        <div className="dialog-overlay" onClick={() => setOccupationViewer(null)}>
+          <div className="dialog-content dialog-large calculation-logs-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>{occupationViewer.calcType.toUpperCase()} Hubbard Occupations</h2>
+              <div className="calculation-viewer-header-actions">
+                <button className="dialog-close" onClick={() => setOccupationViewer(null)}>
+                  &times;
+                </button>
+              </div>
+            </div>
+            <div className="dialog-body calculation-logs-body">
+              {occupationViewer.loading ? (
+                <p>Loading occupations...</p>
+              ) : occupationViewer.error ? (
+                <div className="error-banner">{occupationViewer.error}</div>
+              ) : occupationViewer.atoms.length === 0 ? (
+                <p>No Hubbard occupations were found for this calculation.</p>
+              ) : (
+                <>
+                  <div className="calculation-log-list">
+                    {occupationViewer.atoms.map((atom) => (
+                      <button
+                        key={atom.atomIndex}
+                        type="button"
+                        className={`calculation-log-tab ${occupationViewer.activeAtomIndex === atom.atomIndex ? "active" : ""}`}
+                        onClick={() => {
+                          setOccupationViewer((current) => (
+                            current ? { ...current, activeAtomIndex: atom.atomIndex } : current
+                          ));
+                        }}
+                      >
+                        <span>{atom.label}</span>
+                        <small>Hubbard atom</small>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="calculation-log-content">
+                    <pre>
+                      {occupationViewer.atoms.find((atom) => atom.atomIndex === occupationViewer.activeAtomIndex)?.text || ""}
                     </pre>
                   </div>
                 </>

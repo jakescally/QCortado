@@ -2795,7 +2795,7 @@ pub fn export_ludwig_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qe::types::{
+    use crate::engines::qe::types::{
         Atom, AtomicSpecies, BravaisLattice, CalculationType, KPoints, Occupations, PositionUnits,
         QECalculation, QESystem, SmearingType,
     };

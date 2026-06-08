@@ -1,4 +1,4 @@
-import { ProgressState } from "../lib/qeProgress";
+import type { ProgressState } from "../lib/progress";
 
 interface ProgressBarProps extends ProgressState {
   compact?: boolean;

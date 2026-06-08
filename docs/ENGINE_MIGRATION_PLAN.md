@@ -1,0 +1,360 @@
+# Engine Migration Plan
+
+## Purpose
+
+QCortado currently behaves as a Quantum ESPRESSO desktop app. The migration target is an engine-based Cortado platform where shared application infrastructure is separated from engine-specific scientific workflows.
+
+This plan began as boundary extraction. The current tree additionally exposes
+remote-only WIEN2k `engine_setup` for reviewed `case.struct` creation and
+`scf` for reviewed native initialization/SCF execution from accepted structure
+sources. It does not implement WIEN2k bands/DOS calculations, change QE
+calculation behavior, or replace QE inputs with a generic universal SCF model.
+
+## Migration Goals
+
+- Preserve all current QE behavior.
+- Make QE an explicit engine implementation.
+- Keep engine-specific inputs engine-specific.
+- Normalize result datasets only where shared viewers benefit.
+- Keep platform features reusable by future engines.
+- Make future remote-only Wien2k support possible without mixing QE pseudopotential concepts into Wien2k code.
+
+## Current Architecture Map
+
+### Frontend
+
+- `src/App.tsx`
+  - Main application shell.
+  - Owns routing, settings, QE executable paths, HPC profile state, recovery flows, viewer state, and wizard handoff.
+- `src/ViewerApp.tsx`
+  - Read-only viewer application shell.
+  - Syncs remote project library and reuses project/viewer components.
+- `src/components`
+  - Mixes shared UI and engine-specific workflows.
+  - Shared candidates: `ProjectBrowser`, `ProjectDashboard`, `TaskQueuePage`, `LiveOutputPanel`, `StorageManagerPage`, HPC pages, `UnitCellViewer`, `BrillouinZoneViewer`.
+  - QE-specific workflows: imported by app shells through `src/components/qe/index.ts`; the large source files remain in `src/components` for now.
+  - Viewer candidates: `BandPlot`, `ElectronicDOSPlot`, `PhononPlot`, `TransportPlot`, `EpwViewer`.
+- `src/lib`
+  - Mixes platform utilities, viewer math, and QE-specific helpers.
+  - Shared candidates: CIF parsing, symmetry transforms, reciprocal lattice, k-path transforms, live output, task context, theme, storage helpers.
+  - QE-specific helpers now have an explicit namespace under `src/lib/engines/qe`; top-level QE helper files are compatibility shims where they still exist.
+
+### Backend
+
+- `src-tauri/src/lib.rs`
+  - Main command registration and application state.
+  - Current hotspot for stable Tauri command wrappers, QE settings, HPC commands, task orchestration, and utility helpers.
+  - QE pseudopotential parsing/repair implementation is owned by `src-tauri/src/engines/qe/pseudopotentials.rs`; command names remain here for compatibility.
+- `src-tauri/src/engines/qe`
+  - QE engine source of truth.
+  - Contains QE types, input generation, output parsing, runner, pseudopotentials, bands, phonons, Hubbard, Wannier, EPW, and transport logic.
+- `src-tauri/src/qe/mod.rs`
+  - Compatibility shim re-exporting `crate::engines::qe`.
+- `src-tauri/src/hpc`
+  - Shared SSH, Slurm, utilization, cluster snapshots, sync, and viewer library primitives.
+  - Still contains QE-shaped profile fields and validation.
+- `src-tauri/src/projects.rs`
+  - Project storage and archive management.
+  - Current saved calculation result envelope is `QEResult`.
+- `src-tauri/src/config.rs`
+  - Application config.
+  - Current config contains QE defaults and QE executable paths.
+
+## Target Architecture
+
+The target shape is a platform shell plus engine modules.
+
+```text
+src/
+  platform/
+    app/
+    projects/
+    tasks/
+    hpc/
+    storage/
+    viewer/
+  results/
+    bands/
+    dos/
+    phonons/
+    transport/
+    tables/
+  engines/
+    qe/
+      components/
+      lib/
+      types/
+      adapters/
+    wien2k/
+      types/
+      remote/
+
+src-tauri/src/
+  config.rs
+  projects.rs
+  process_manager.rs
+  hpc/
+  results/
+    mod.rs
+    bands.rs
+    dos.rs
+    phonons.rs
+    transport.rs
+    tables.rs
+  engines/
+    mod.rs
+    types.rs
+    common.rs
+    qe/
+      mod.rs
+      types.rs
+      input.rs
+      output.rs
+      tasks.rs
+      pseudopotentials.rs
+      bands.rs
+      phonon.rs
+      hubbard.rs
+      wannier.rs
+      epw.rs
+      transport.rs
+    wien2k/
+      mod.rs
+      types.rs
+      remote.rs
+  qe/
+    mod.rs                 # compatibility shim only
+```
+
+This is a target layout, not a single PR. Early PRs should use re-export shims so existing imports and Tauri commands keep working.
+
+## Ownership Boundaries
+
+### Shared platform code
+
+Platform code may know that engines exist, but should not know QE namelists or Wien2k case files.
+
+- Project browser and project metadata.
+- Task queue and live output.
+- Local app settings shell.
+- HPC profile shell, SSH transport, Slurm submission, scheduler polling, and artifact sync.
+- CIF parsing and crystal/unit-cell display.
+- Brillouin-zone and k-path UI primitives.
+- Normalized viewer datasets.
+
+### QE engine code
+
+QE code owns QE inputs, QE outputs, QE executable names, QE pseudopotentials, and QE artifact rules.
+
+- `pw.x`, `bands.x`, `projwfc.x`, `dos.x`, `ph.x`, `q2r.x`, `matdyn.x`, `hp.x`, `epw.x`.
+- QE namelists and cards.
+- `prefix`, `outdir`, `pseudo_dir`, `.save` directories.
+- Pseudopotentials, UPF parsing, SSSP metadata, cutoffs.
+- QE smearing names and Hubbard card.
+- QE parser behavior and QE recovery behavior.
+
+### Future Wien2k engine code
+
+Wien2k support is future work. It should be added as a remote-only engine after QE boundaries are explicit.
+
+- Case directory lifecycle.
+- `case.struct`.
+- RMT, RKmax, Gmax, lmax.
+- `init_lapw` flow.
+- `x nn`, `x sgroup`, `x symmetry`, `lstart`, `kgen`, `dstart`.
+- `run_lapw`, `runsp_lapw`.
+- `case.scf` parsing.
+- `lapw1`, `lapw2`, `spaghetti` workflows.
+
+Wien2k must not receive QE pseudopotential fields.
+
+## Phased Migration Steps
+
+### Phase 1: Document and label existing behavior
+
+PR size: docs plus minimal type annotations only.
+
+- Add docs describing platform, engine, and dataset boundaries.
+- Add an `engine_id` concept to new documentation and future type names.
+- Do not change runtime behavior.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+For docs-only changes, code validation is optional unless application files are touched.
+
+### Phase 2: Introduce stable engine identifiers
+
+PR size: type additions and legacy-safe defaults.
+
+- Add frontend `EngineId = "qe"` type.
+- Add backend `EngineId` or string-backed equivalent.
+- Default existing saved calculations to QE when missing `engine_id`.
+- Do not alter calculation payload shapes.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+### Phase 3: Create result dataset adapters
+
+PR size: viewer type extraction and adapters.
+
+- Define normalized result dataset types under `src/lib/viewers`.
+- Add QE adapters from current `BandData`, DOS, phonon, transport, and EPW table payloads.
+- Keep viewer props backward compatible during the transition.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+```
+
+### Phase 4: Move frontend QE helpers behind re-export shims
+
+PR size: one helper group at a time.
+
+- Move QE-specific helpers from `src/lib` to `src/lib/engines/qe`.
+- Low-risk pure helpers such as `qeProgress`, `qeBravaisInference`, `hubbard`, `wannierQuality`, EPW helpers, SCF sorting, phonon readiness, and SCF run-settings clipboard now live under `src/lib/engines/qe`.
+- Leave re-export files in old locations until all imports are migrated.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+```
+
+### Phase 5: Move backend pseudopotential code into the QE engine
+
+PR size: backend module extraction only.
+
+- Move UPF, SSSP, cutoff, and pseudopotential repair helpers out of `src-tauri/src/lib.rs`.
+- Current state: implementation lives in `src-tauri/src/engines/qe/pseudopotentials.rs`; Tauri command wrappers still live in `src-tauri/src/lib.rs` to preserve command names.
+- Keep Tauri command names stable.
+- Keep local and remote pseudopotential behavior unchanged.
+
+Validation:
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Recommended additional check:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml pseudopotential
+```
+
+### Phase 6: Extract QE task orchestration
+
+PR size: one workflow family per PR.
+
+- Move backend task bodies from `src-tauri/src/lib.rs` into QE task modules.
+- Start with a workflow that has clear inputs and outputs.
+- Keep command names such as `start_scf_calculation` as compatibility wrappers.
+
+Suggested order:
+
+1. SCF and optimization.
+2. Bands and DOS.
+3. Fermi surface.
+4. Hubbard LRT.
+5. Phonons.
+6. Wannier and transport.
+7. EPW.
+
+Validation for each PR:
+
+```bash
+npm run build
+npm run test:unit
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+### Phase 7: Split HPC profile shell from engine toolchains
+
+PR size: type compatibility plus adapters.
+
+- Keep cluster identity shared.
+- Present profile editing with explicit engine-specific sections for QE paths
+  and verified WIEN2k `WIENROOT` configuration.
+- Persist each engine's executable resolution as explicit paths or an
+  environment-module bootstrap (`module use` optionally, then `module load`);
+  missing values in legacy profiles default to explicit paths.
+- Apply engine-owned module bootstraps in generated scheduled commands and
+  invoke engine tools from `PATH` in module mode.
+- Run module-loaded validation and engine setup/refinement as lightweight
+  Slurm utility jobs rather than executing engine tools on login nodes.
+- Keep legacy config loading compatible with existing profiles.
+- Keep WIEN2k settings out of QE calculation input structures.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+### Phase 8: Add engine job bundle interface
+
+PR size: interface plus one QE adapter.
+
+- Define a shared HPC job bundle shape:
+  - engine id
+  - task kind
+  - label
+  - local bundle files
+  - remote commands
+  - artifact sync policy
+  - result parser
+- Adapt one existing QE workflow without changing behavior.
+- Keep old direct code path available until the adapter is proven.
+
+Validation:
+
+```bash
+npm run build
+npm run test:unit
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+## Files That Should Not Be Refactored in Parallel
+
+- `src-tauri/src/lib.rs` and `src-tauri/src/engines/qe/*`.
+- `src-tauri/src/projects.rs` and `src/lib/TaskContext.tsx`.
+- `src/lib/types.ts`, `src/lib/hpcConfig.ts`, and `src-tauri/src/hpc/profile.rs`.
+- `src/App.tsx` and `src/ViewerApp.tsx`.
+- Workflow wizard files and their backend task payloads.
+
+## Completion Criteria For Each Migration PR
+
+- Existing QE workflows still run through the same UI.
+- Existing saved projects still load.
+- Existing command names are either preserved or wrapped.
+- No universal fake SCF config is introduced.
+- QE pseudopotential behavior remains inside QE-owned code.
+- Shared viewers consume normalized datasets only through explicit adapters.
+- Validation commands are run and failures are documented with exact logs.
+
+## Existing Data Migration Needs
+
+No destructive project migration is required for the QE abstraction pass.
+
+- Existing calculation records without `engine_id` must continue to default to `qe`.
+- Existing `calc_type` strings such as `scf`, `bands`, `dos`, `phonon`, `wannier`, `epw`, `transport`, and `hubbard_lrt` should not be renamed.
+- Existing `QEResult` payloads should remain readable and stored as QE-native provenance.
+- New normalized viewer datasets should be derived by adapters, not by rewriting old result payloads in place.
+- When future engines are added, new calculation records should include `engine_id` and may store engine-native result payloads beside normalized summaries.
+- A future optional migration can backfill `engine_id: "qe"` into old project JSON files, but runtime fallback must remain because users may import old archives.

@@ -7,19 +7,20 @@ import {
   HpcProfile,
   SlurmResourceRequest,
 } from "../lib/types";
-import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/scfSorting";
+import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { analyzeCrystalSymmetry, SymmetryTransformResult } from "../lib/symmetryTransform";
 import { sourceScfUsesPrimitiveCell } from "../lib/kPathTransforms";
-import { inferQeBravaisCellFromCif } from "../lib/qeBravaisInference";
+import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
 import { ProgressBar } from "./ProgressBar";
 import { ElapsedTimer } from "./ElapsedTimer";
 import { LiveOutputPanel } from "./LiveOutputPanel";
 import { InfoTooltip } from "./InfoTooltip";
-import { defaultProgressState, ProgressState } from "../lib/qeProgress";
+import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
 import { countVisibleOutputLines } from "../lib/liveOutput";
 import { useTaskContext } from "../lib/TaskContext";
 import { ElectronicDOSData } from "./ElectronicDOSPlot";
+import { getScfHubbardUDisplayValues } from "../lib/hubbard";
 import { loadGlobalMpiDefaults } from "../lib/mpiDefaults";
 import { useViewportScrollLock } from "../lib/useViewportScrollLock";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
@@ -27,19 +28,23 @@ import { formatCalculationSourceLabel, getCalculationName } from "../lib/calcula
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import {
   buildExecutionTarget,
-  buildHpcQeInputCommandLine,
   downloadHpcCalculationArtifacts,
   defaultResourcesForProfile,
-  listRemotePseudopotentials,
-  resolveProfileRemoteQeBinDir,
-  resolveProfileRemotePseudoDir,
   saveExecutionMode,
 } from "../lib/hpcConfig";
+import {
+  buildHpcQeInputCommandLine,
+  buildHpcQeRuntimeSetupLines,
+  listRemotePseudopotentials,
+  resolveProfileRemotePseudoDir,
+} from "../lib/engines/qe/hpc";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
+import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
   id: string;
+  engine_id?: EngineId | null;
   calc_type: string;
   parameters: any;
   result: {
@@ -79,6 +84,14 @@ function getScfProfileId(calc: CalculationRun): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatHubbardUDisplay(calc: CalculationRun): string | null {
+  const values = getScfHubbardUDisplayValues(calc);
+  if (values.length === 0) return null;
+  return values
+    .map((entry) => `${entry.target} = ${entry.value_ev.toFixed(3)} eV`)
+    .join(", ");
 }
 
 interface ElectronicDOSWizardProps {
@@ -282,7 +295,7 @@ export function ElectronicDOSWizard({
   const hpcCommandLines = useMemo(
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
-      `QE_BIN="${resolveProfileRemoteQeBinDir(activeHpcProfile, hpcResources.resource_type)}"`,
+      ...buildHpcQeRuntimeSetupLines(activeHpcProfile, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "pw.x", "nscf.in", "nscf.out", undefined, hpcResources.resource_type),
       buildHpcQeInputCommandLine(activeHpcProfile, "dos.x", "dos.in", "dos.out", undefined, hpcResources.resource_type),
     ],
@@ -902,6 +915,7 @@ export function ElectronicDOSWizard({
 
         <div className="scf-list">
           {sortedScfs.map((scf) => {
+            const hubbardUDisplay = formatHubbardUDisplay(scf);
             const scfName = getCalculationName(scf);
             return (
               <div
@@ -936,6 +950,9 @@ export function ElectronicDOSWizard({
                   <span>E = {scf.result?.total_energy?.toFixed(6)} Ry</span>
                   {scf.result?.fermi_energy != null && (
                     <span>EF = {scf.result.fermi_energy.toFixed(3)} eV</span>
+                  )}
+                  {hubbardUDisplay && (
+                    <span>Hubbard U: {hubbardUDisplay}</span>
                   )}
                 </div>
                 <div className="calc-tags">

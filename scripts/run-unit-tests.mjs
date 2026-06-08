@@ -5,18 +5,26 @@ import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const testEntries = [
+  "tests/bandDatasetAdapters/bandDatasetAdapters.test.ts",
   "tests/bandPlot/bandEnergyReference.test.ts",
   "tests/cifSubstitution/cifSubstitution.test.ts",
+  "tests/engineInstallations/engineInstallations.test.ts",
+  "tests/enginePlugin/enginePluginRegistry.test.ts",
   "tests/epw/epwUtils.test.ts",
   "tests/transport/transportUtils.test.ts",
+  "tests/wien2k/wien2kSkeleton.test.ts",
   "tests/qeBravais/qeBravaisInference.test.ts",
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
   "tests/brillouinZoneData/tetragonalBodyCentered.test.ts",
   "tests/hpcBandLimits/hpcBandLimits.test.ts",
+  "tests/hpcProfileAdapter/hpcProfileAdapter.test.ts",
   "tests/hpcUtilization/hpcUtilization.test.ts",
   "tests/hubbard/hubbard.test.ts",
+  "tests/hubbard/hubbardOccupations.test.ts",
   "tests/magnetism/magnetism.test.ts",
   "tests/pseudopotentialCutoffs/ssspPresetCutoffs.test.ts",
+  "tests/tooltip/tooltipTiming.test.ts",
+  "tests/tooltip/infoTooltipAccessibility.test.ts",
 ];
 
 const tempDir = mkdtempSync(join(tmpdir(), "qcortado-unit-tests-"));

@@ -9,7 +9,7 @@ import {
   PseudopotentialMetadata,
   SlurmResourceRequest,
 } from "./types";
-import type { PseudopotentialInventoryEntry } from "./pseudopotentialMetadataCache";
+import type { PseudopotentialInventoryEntry } from "./engines/qe/pseudopotentialMetadataCache";
 
 export interface HpcConnectionTestResult {
   success: boolean;
@@ -242,6 +242,20 @@ export function defaultGpuResources(): SlurmResourceRequest {
   };
 }
 
+export function defaultUtilityResources(): SlurmResourceRequest {
+  return {
+    resource_type: "cpu",
+    partition: "short",
+    walltime: "00:10:00",
+    nodes: 1,
+    ntasks: 1,
+    cpus_per_task: 1,
+    memory_gb: 2,
+    gpus: 0,
+    additional_sbatch: [],
+  };
+}
+
 function cloneResourceTemplate(
   source: SlurmResourceRequest,
   resourceType: "cpu" | "gpu",
@@ -276,6 +290,8 @@ export function defaultResourcesForProfile(profile: HpcProfile | null | undefine
   return cloneResourceTemplate(profile.default_cpu_resources, "cpu");
 }
 
+// Transitional QE-specific helpers. New QE call sites should import these via
+// ./engines/qe/hpc so platform code does not need to know QE path names.
 function normalizeRemoteQeBinDir(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
     return null;
@@ -322,6 +338,44 @@ export function resolveProfileRemotePseudoDir(
     return normalizeRemotePseudoDir(profile.remote_gpu_pseudo_dir) || fallback;
   }
   return normalizeRemotePseudoDir(profile.remote_cpu_pseudo_dir) || fallback;
+}
+
+export function qeEngineUsesModuleMode(profile: HpcProfile | null | undefined): boolean {
+  return profile?.qe_path_mode === "module";
+}
+
+function quoteShellArgument(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+export function buildHpcQeRuntimeSetupLines(
+  profile: HpcProfile | null | undefined,
+  resourceType?: HpcResourceType | null,
+): string[] {
+  if (!qeEngineUsesModuleMode(profile)) {
+    return [`QE_BIN="${resolveProfileRemoteQeBinDir(profile, resourceType)}"`];
+  }
+  const lines: string[] = [];
+  const moduleUse = (profile?.qe_module_use ?? "").trim();
+  const moduleLoad = (profile?.qe_module_load ?? "").trim();
+  if (moduleUse) {
+    lines.push(`module use ${quoteShellArgument(moduleUse)}`);
+  }
+  if (moduleLoad) {
+    lines.push(`module load ${quoteShellArgument(moduleLoad)}`);
+  }
+  return lines;
+}
+
+export function resolveProfileRemoteQeAuxiliaryExecutable(
+  profile: HpcProfile | null | undefined,
+  configuredPath: string | null | undefined,
+  commandName: string,
+): string {
+  if (qeEngineUsesModuleMode(profile)) {
+    return commandName;
+  }
+  return (configuredPath ?? "").trim() || commandName;
 }
 
 function resolveProfileLauncherExtraArgs(
@@ -415,7 +469,10 @@ export function buildHpcQeInputCommandLine(
   const pdSegment = qeExecutableUsesPencilDecomposition(executable) && !hasPencilDecomposition
     ? " -pd .true."
     : "";
-  return `${launcher} "$QE_BIN/${executable}"${argSegment}${defaultArgSegment}${pdSegment} -in ${inputFile} > ${outputFile} 2>&1`;
+  const executableCommand = qeEngineUsesModuleMode(profile)
+    ? executable
+    : `"$QE_BIN/${executable}"`;
+  return `${launcher} ${executableCommand}${argSegment}${defaultArgSegment}${pdSegment} -in ${inputFile} > ${outputFile} 2>&1`;
 }
 
 export async function loadExecutionMode(): Promise<ExecutionMode> {

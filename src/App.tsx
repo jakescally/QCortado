@@ -4,21 +4,18 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
-import { SCFWizard } from "./components/SCFWizard";
-import { BandStructureWizard } from "./components/BandStructureWizard";
-import { BandData, BandPlot } from "./components/BandPlot";
-import { ElectronicDOSWizard } from "./components/ElectronicDOSWizard";
+import { EpwViewer } from "./components/qe";
+import type { EpwViewerPayload } from "./components/qe";
+import {
+  canRenderEngineWorkflowHost,
+  EngineWorkflowHost,
+} from "./components/engine";
+import type { EngineWorkflowBackDestination } from "./components/engine";
+import { BandPlot } from "./components/BandPlot";
+import type { BandData, BandPlotData } from "./components/BandPlot";
 import { ElectronicDOSData, ElectronicDOSPlot } from "./components/ElectronicDOSPlot";
-import { EpwWizard } from "./components/EpwWizard";
-import { EpwViewer } from "./components/EpwViewer";
-import type { EpwViewerPayload } from "./components/EpwViewer";
-import { FermiSurfaceWizard } from "./components/FermiSurfaceWizard";
-import { PhononWizard } from "./components/PhononWizard";
-import { HubbardLrtWizard } from "./components/HubbardLrtWizard";
 import { PhononDOSPlot } from "./components/PhononPlot";
 import { TransportPlot } from "./components/TransportPlot";
-import { TransportWizard } from "./components/TransportWizard";
-import { WannierWizard } from "./components/WannierWizard";
 import { ProjectBrowser } from "./components/ProjectBrowser";
 import {
   ProjectDashboard,
@@ -30,6 +27,7 @@ import { ProcessIndicator } from "./components/ProcessIndicator";
 import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
+import { HpcProfileEditor } from "./components/HpcProfileEditor";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
 import { StorageManagerPage } from "./components/StorageManagerPage";
 import { BandsMultiview } from "./components/BandsMultiview";
@@ -40,7 +38,13 @@ import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
-import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/wannierQuality";
+import {
+  listEngineInstallations,
+  resolveEngineWorkflowHostRoute,
+} from "./lib/engines";
+import type { EngineInstallation, EngineWorkflowHostRoute } from "./lib/engines";
+import type { EngineWorkflowView } from "./lib/engines/plugin";
+import { formatWannierConvergenceFlag, getWannierQualityIssues } from "./lib/engines/qe/wannierQuality";
 import {
   CrystalData,
   SCFPreset,
@@ -68,13 +72,14 @@ import {
   migrateHpcRemoteRoots,
   normalizeCliDashText,
   openHpcActivityWindow,
-  resolveProfileRemotePseudoDir,
   saveExecutionMode,
   setActiveHpcProfile,
   updateHpcProfileDefaults,
 } from "./lib/hpcConfig";
+import { resolveProfileRemotePseudoDir } from "./lib/engines/qe/hpc";
 import type { HpcHeadlessJobCandidate } from "./lib/hpcConfig";
 import type { TransportResult } from "./lib/transport";
+import type { CalculationKind, EngineId } from "./lib/engines/types";
 
 interface TempCleanupResult {
   removed_paths: string[];
@@ -144,7 +149,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -161,6 +166,7 @@ interface SCFContext {
   presetLock?: boolean;
   optimizedStructures?: OptimizedStructureOption[];
   calculations?: CalculationRun[];
+  continuationCalculationId?: string | null;
 }
 
 interface BandsContext {
@@ -217,6 +223,12 @@ interface HubbardLrtContext {
   crystalData: CrystalData;
   projectId: string;
   scfCalculations: CalculationRun[];
+}
+
+interface Wien2kStructureContext {
+  cifId: string;
+  crystalData: CrystalData;
+  projectId: string;
 }
 
 interface PhononData {
@@ -422,6 +434,7 @@ function AppInner() {
   const [wannier90Status, setWannier90Status] = useState<"Found" | "Not configured" | "Not found">("Not configured");
   const [error, setError] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("project-browser");
+  const [activeWorkflowRoute, setActiveWorkflowRoute] = useState<EngineWorkflowHostRoute | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
@@ -431,11 +444,13 @@ function AppInner() {
   const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("project-browser");
   const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<"general" | "hpc">("general");
+  const [settingsPage, setSettingsPage] = useState<"general" | "hpc" | "hpc-profile">("general");
+  const [hpcProfileEditorDirty, setHpcProfileEditorDirty] = useState(false);
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("local");
   const [hpcProfiles, setHpcProfiles] = useState<HpcProfile[]>([]);
   const [activeHpcProfileId, setActiveHpcProfileId] = useState<string | null>(null);
+  const [engineInstallations, setEngineInstallations] = useState<EngineInstallation[]>([]);
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
   const [hpcStatus, setHpcStatus] = useState<string | null>(null);
@@ -498,6 +513,18 @@ function AppInner() {
   const [migrateProjectRootDraft, setMigrateProjectRootDraft] = useState("");
   const [projectDashboardRefreshToken, setProjectDashboardRefreshToken] = useState(0);
 
+  function openEngineWorkflow(engineId: EngineId, kind: CalculationKind, fallbackView: EngineWorkflowView) {
+    const route = resolveEngineWorkflowHostRoute(engineId, kind);
+    if (!route) {
+      console.warn(`No frontend workflow route registered for ${engineId}:${kind}`);
+      setActiveWorkflowRoute(null);
+      setCurrentView(fallbackView);
+      return;
+    }
+    setActiveWorkflowRoute(route);
+    setCurrentView(route.view);
+  }
+
   // Active task ID for reconnection when navigating to wizard from indicator
   const [reconnectTaskId, setReconnectTaskId] = useState<string | null>(null);
 
@@ -509,7 +536,7 @@ function AppInner() {
 
   // Context for viewing saved band data
   const [viewBandsData, setViewBandsData] = useState<{
-    bandData: any;
+    bandData: BandPlotData;
     fermiEnergy: number | null;
     calculationParameters?: Record<string, unknown> | null;
     calculationContext?: SavedBandsCalculationContext | null;
@@ -549,6 +576,9 @@ function AppInner() {
   // Context for running EPW from a project
   const [epwContext, setEpwContext] = useState<EpwContext | null>(null);
 
+  // Context for preparing a WIEN2k structure source from a project CIF
+  const [wien2kStructureContext, setWien2kStructureContext] = useState<Wien2kStructureContext | null>(null);
+
   // Context for viewing saved phonon data
   const [viewPhononData, setViewPhononData] = useState<{ data: PhononData; mode: PhononViewMode } | null>(null);
   const [viewEpwData, setViewEpwData] = useState<EpwViewerPayload | null>(null);
@@ -563,6 +593,25 @@ function AppInner() {
     () => hpcProfiles.find((profile) => profile.id === editingHpcProfileId) ?? null,
     [hpcProfiles, editingHpcProfileId],
   );
+
+  function confirmDiscardHpcProfileChanges(): boolean {
+    return settingsPage !== "hpc-profile"
+      || !hpcProfileEditorDirty
+      || window.confirm("Discard unsaved changes to this HPC profile?");
+  }
+
+  function closeSettingsMenu() {
+    if (!confirmDiscardHpcProfileChanges()) return false;
+    setHpcProfileEditorDirty(false);
+    setShowSettingsMenu(false);
+    return true;
+  }
+
+  function leaveHpcProfileEditor() {
+    if (!confirmDiscardHpcProfileChanges()) return;
+    setHpcProfileEditorDirty(false);
+    setSettingsPage("hpc");
+  }
 
   useEffect(() => {
     if (!activeHpcProfile) {
@@ -626,12 +675,12 @@ function AppInner() {
         return;
       }
       if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
-        setShowSettingsMenu(false);
+        closeSettingsMenu();
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showRemotePhononSelectionDialog]);
+  }, [showRemotePhononSelectionDialog, settingsPage, hpcProfileEditorDirty]);
 
   useEffect(() => {
     if (showHpcSetupWizard) {
@@ -640,7 +689,7 @@ function AppInner() {
   }, [showHpcSetupWizard]);
 
   useEffect(() => {
-    if (executionMode !== "hpc" && settingsPage === "hpc") {
+    if (executionMode !== "hpc" && (settingsPage === "hpc" || settingsPage === "hpc-profile")) {
       setSettingsPage("general");
     }
   }, [executionMode, settingsPage]);
@@ -969,19 +1018,22 @@ function AppInner() {
 
   async function loadHpcExecutionSettings() {
     try {
-      const [mode, profiles, activeProfileId] = await Promise.all([
+      const [mode, profiles, activeProfileId, installations] = await Promise.all([
         loadExecutionMode(),
         listHpcProfiles(),
         getActiveHpcProfileId(),
+        listEngineInstallations(),
       ]);
       setExecutionMode(mode);
       setHpcProfiles(profiles);
       setActiveHpcProfileId(activeProfileId);
+      setEngineInstallations(installations);
     } catch (e) {
       console.error("Failed to load HPC settings:", e);
       setExecutionMode("local");
       setHpcProfiles([]);
       setActiveHpcProfileId(null);
+      setEngineInstallations([]);
     }
   }
 
@@ -1594,6 +1646,7 @@ function AppInner() {
       setViewPhononData(null);
       setViewEpwData(null);
       setReconnectTaskId(null);
+      setActiveWorkflowRoute(null);
       setSelectedProjectId(null);
       setCurrentView("project-browser");
     } catch (e) {
@@ -1606,9 +1659,26 @@ function AppInner() {
 
   function handleNavigateToTask(taskId: string, taskType: string) {
     setReconnectTaskId(taskId);
-    const viewMap: Record<string, AppView> = {
+    const kindMap: Record<string, CalculationKind> = {
+      scf: "scf",
+      bands: "bands",
+      wien2k_scf: "scf",
+      wien2k_bands: "bands",
+      wien2k_fermi_surface: "fermi_surface",
+      dos: "dos",
+      wannier: "wannier",
+      transport: "transport",
+      fermi_surface: "fermi_surface",
+      hubbard_lrt: "hubbard_lrt",
+      phonon: "phonon",
+      epw: "epw",
+    };
+    const fallbackViewMap: Record<string, EngineWorkflowView> = {
       scf: "scf-wizard",
       bands: "bands-wizard",
+      wien2k_scf: "wien2k-scf-wizard",
+      wien2k_bands: "bands-wizard",
+      wien2k_fermi_surface: "fermi-surface-wizard",
       dos: "dos-wizard",
       wannier: "wannier-wizard",
       transport: "transport-wizard",
@@ -1617,10 +1687,58 @@ function AppInner() {
       phonon: "phonon-wizard",
       epw: "epw-wizard",
     };
-    const view = viewMap[taskType];
-    if (view) {
-      setCurrentView(view);
+    const kind = kindMap[taskType];
+    const fallbackView = fallbackViewMap[taskType];
+    if (kind && fallbackView) {
+      openEngineWorkflow(taskType.startsWith("wien2k_") ? "wien2k" : "qe", kind, fallbackView);
     }
+  }
+
+  function clearWorkflowContext(view: EngineWorkflowView) {
+    switch (view) {
+      case "scf-wizard":
+        setScfContext(null);
+        break;
+      case "bands-wizard":
+        setBandsContext(null);
+        break;
+      case "dos-wizard":
+        setDosContext(null);
+        break;
+      case "wannier-wizard":
+        setWannierContext(null);
+        break;
+      case "transport-wizard":
+        setTransportContext(null);
+        break;
+      case "fermi-surface-wizard":
+        setFermiSurfaceContext(null);
+        break;
+      case "hubbard-lrt-wizard":
+        setHubbardLrtContext(null);
+        break;
+      case "phonon-wizard":
+        setPhononsContext(null);
+        break;
+      case "epw-wizard":
+        setEpwContext(null);
+        break;
+      case "wien2k-structure-wizard":
+        setWien2kStructureContext(null);
+        break;
+      case "wien2k-scf-wizard":
+        setScfContext(null);
+        break;
+    }
+  }
+
+  function handleWorkflowBack(view: EngineWorkflowView, destination: EngineWorkflowBackDestination) {
+    if (activeWorkflowRoute?.engineId !== "wien2k") {
+      clearWorkflowContext(view);
+    }
+    setReconnectTaskId(null);
+    setActiveWorkflowRoute(null);
+    setCurrentView(destination);
   }
 
   useEffect(() => {
@@ -1745,7 +1863,7 @@ function AppInner() {
         <button
           className="floating-queue-btn"
           onClick={() => {
-            setShowSettingsMenu(false);
+            if (!closeSettingsMenu()) return;
             setShowQueueMenu((prev) => !prev);
           }}
           aria-label={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
@@ -1775,7 +1893,7 @@ function AppInner() {
           className="floating-activity-btn"
           onClick={() => {
             setShowQueueMenu(false);
-            setShowSettingsMenu(false);
+            if (!closeSettingsMenu()) return;
             void openHpcActivityWindow();
           }}
           aria-label="Open cluster activity console"
@@ -1806,7 +1924,11 @@ function AppInner() {
           className="floating-settings-btn"
           onClick={() => {
             setShowQueueMenu(false);
-            setShowSettingsMenu((prev) => !prev);
+            if (showSettingsMenu) {
+              closeSettingsMenu();
+            } else {
+              setShowSettingsMenu(true);
+            }
           }}
           aria-label="Settings"
         >
@@ -1817,19 +1939,31 @@ function AppInner() {
       </InfoTooltip>
 
       {showSettingsMenu && (
-        <div className="settings-window-overlay" onClick={() => setShowSettingsMenu(false)}>
+        <div className="settings-window-overlay" onClick={() => closeSettingsMenu()}>
           <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
             <div className="settings-window-header">
+              {settingsPage === "hpc-profile" && (
+                <button className="settings-header-back" onClick={leaveHpcProfileEditor} aria-label="Back to HPC settings">
+                  Back
+                </button>
+              )}
               <h3>Settings</h3>
-              <button
-                className="settings-window-close"
-                onClick={() => setShowSettingsMenu(false)}
-                aria-label="Close settings"
-              >
-                &times;
-              </button>
+              <div className="settings-header-actions">
+                {settingsPage === "hpc-profile" && (
+                  <button type="submit" form="hpc-profile-editor-form" className="settings-header-save">
+                    Save
+                  </button>
+                )}
+                <button
+                  className="settings-window-close"
+                  onClick={() => closeSettingsMenu()}
+                  aria-label="Close settings"
+                >
+                  &times;
+                </button>
+              </div>
             </div>
-            <div className="settings-page-nav">
+            {settingsPage !== "hpc-profile" && <div className="settings-page-nav">
               <button
                 className={`settings-page-tab ${settingsPage === "general" ? "active" : ""}`}
                 onClick={() => setSettingsPage("general")}
@@ -1843,8 +1977,19 @@ function AppInner() {
               >
                 HPC
               </button>
-            </div>
+            </div>}
             <div className="settings-window-content">
+              {settingsPage === "hpc-profile" && editingHpcProfile ? (
+                <HpcProfileEditor
+                  profile={editingHpcProfile}
+                  installations={engineInstallations}
+                  onDirtyChange={setHpcProfileEditorDirty}
+                  onSaved={(_profile, message) => {
+                    setHpcStatus(message);
+                    void loadHpcExecutionSettings();
+                  }}
+                />
+              ) : (
               <div className="settings-pane">
               <div className="settings-menu-section">
                 <label className="settings-menu-label" htmlFor="execution-mode-select">
@@ -1905,7 +2050,8 @@ function AppInner() {
                         className="settings-menu-item"
                         onClick={() => {
                           setEditingHpcProfileId(activeHpcProfileId);
-                          setShowHpcSetupWizard(true);
+                          setHpcProfileEditorDirty(false);
+                          setSettingsPage("hpc-profile");
                         }}
                         disabled={!activeHpcProfile}
                       >
@@ -2825,6 +2971,7 @@ function AppInner() {
                 </>
               )}
               </div>
+              )}
             </div>
           </div>
         </div>
@@ -3202,13 +3349,13 @@ function AppInner() {
       {activeDialogModal}
       <HpcSetupWizard
         isOpen={showHpcSetupWizard}
-        initialProfile={editingHpcProfile}
+        initialProfile={null}
         onClose={() => {
           setShowHpcSetupWizard(false);
           setEditingHpcProfileId(null);
         }}
-        onSaved={(profile) => {
-          setEditingHpcProfileId(profile.id);
+        onSaved={() => {
+          setEditingHpcProfileId(null);
           setHpcStatus("HPC profile saved.");
           void loadHpcExecutionSettings();
         }}
@@ -3264,15 +3411,45 @@ function AppInner() {
     );
   }
 
-  if (currentView === "bands-wizard" && (qePath || executionMode === "hpc") && (bandsContext || reconnectTaskId)) {
+  const workflowHostRuntime = {
+    qePath,
+    defaultSmearing: qeDefaults.smearing,
+    executionMode,
+    onExecutionModeChange: handleExecutionModeChange,
+    activeHpcProfile,
+  };
+  const workflowHostContexts = {
+    scf: scfContext,
+    bands: bandsContext,
+    dos: dosContext,
+    wannier: wannierContext,
+    fermiSurface: fermiSurfaceContext,
+    hubbardLrt: hubbardLrtContext,
+    phonons: phononsContext,
+    transport: transportContext,
+    epw: epwContext,
+    structureSetup: wien2kStructureContext,
+    wien2kScf: scfContext,
+  };
+
+  if (
+    activeWorkflowRoute &&
+    currentView === activeWorkflowRoute.view &&
+    canRenderEngineWorkflowHost({
+      route: activeWorkflowRoute,
+      runtime: workflowHostRuntime,
+      contexts: workflowHostContexts,
+      reconnectTaskId,
+    })
+  ) {
     return (
       <>
-        <BandStructureWizard
-          qePath={qePath || ""}
-          defaultSmearing={qeDefaults.smearing}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
+        <EngineWorkflowHost
+          route={activeWorkflowRoute}
+          runtime={workflowHostRuntime}
+          contexts={workflowHostContexts}
+          reconnectTaskId={reconnectTaskId}
+          onBack={handleWorkflowBack}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({
               bandData,
@@ -3280,19 +3457,54 @@ function AppInner() {
               calculationParameters,
               calculationContext,
             });
+            setActiveWorkflowRoute(null);
             setCurrentView("bands-viewer");
             setReconnectTaskId(null);
           }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setBandsContext(null);
+          onViewDos={(dosData, fermiEnergy) => {
+            setViewDosData({ dosData, fermiEnergy });
+            setActiveWorkflowRoute(null);
+            setCurrentView("dos-viewer");
             setReconnectTaskId(null);
           }}
-          projectId={bandsContext?.projectId ?? ""}
-          cifId={bandsContext?.cifId ?? ""}
-          crystalData={bandsContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={bandsContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
+          onViewWannier={(result, fermiEnergy, overlayOptions = []) => {
+            setViewWannierData({ result, fermiEnergy, overlayOptions });
+            setActiveWorkflowRoute(null);
+            setCurrentView("wannier-viewer");
+            setReconnectTaskId(null);
+          }}
+          onViewTransport={(transportData) => {
+            setViewTransportData({ data: transportData });
+            setActiveWorkflowRoute(null);
+            setCurrentView("transport-viewer");
+            setReconnectTaskId(null);
+          }}
+          onViewPhonons={(phononData, viewMode) => {
+            setViewPhononData({
+              data: phononData,
+              mode: viewMode,
+            });
+            setActiveWorkflowRoute(null);
+            setCurrentView("phonon-viewer");
+            setReconnectTaskId(null);
+          }}
+          onViewEpw={(epwData, rawOutput) => {
+            setViewEpwData({
+              data: epwData,
+              rawOutput: rawOutput ?? null,
+            });
+            setActiveWorkflowRoute(null);
+            setCurrentView("epw-viewer");
+            setReconnectTaskId(null);
+          }}
+          onStructureSourceSaved={() => {
+            setProjectDashboardRefreshToken((previous) => previous + 1);
+            handleWorkflowBack("wien2k-structure-wizard", "project-dashboard");
+          }}
+          onWien2kScfSaved={() => {
+            setProjectDashboardRefreshToken((previous) => previous + 1);
+            handleWorkflowBack("wien2k-scf-wizard", "project-dashboard");
+          }}
         />
         {appChrome}
       </>
@@ -3350,36 +3562,6 @@ function AppInner() {
     );
   }
 
-  if (currentView === "dos-wizard" && (qePath || executionMode === "hpc") && (dosContext || reconnectTaskId)) {
-    return (
-      <>
-        <ElectronicDOSWizard
-          qePath={qePath || ""}
-          defaultSmearing={qeDefaults.smearing}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onViewDos={(dosData, fermiEnergy) => {
-            setViewDosData({ dosData, fermiEnergy });
-            setCurrentView("dos-viewer");
-            setReconnectTaskId(null);
-          }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setDosContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={dosContext?.projectId ?? ""}
-          cifId={dosContext?.cifId ?? ""}
-          crystalData={dosContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={dosContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
   if (currentView === "dos-viewer" && viewDosData) {
     return (
       <>
@@ -3405,36 +3587,6 @@ function AppInner() {
             />
           </div>
         </div>
-        {appChrome}
-      </>
-    );
-  }
-
-  if (currentView === "wannier-wizard" && (qePath || executionMode === "hpc") && (wannierContext || reconnectTaskId)) {
-    return (
-      <>
-        <WannierWizard
-          qePath={qePath || ""}
-          defaultSmearing={qeDefaults.smearing}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onViewWannier={(result, fermiEnergy, overlayOptions = []) => {
-            setViewWannierData({ result, fermiEnergy, overlayOptions });
-            setCurrentView("wannier-viewer");
-            setReconnectTaskId(null);
-          }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setWannierContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={wannierContext?.projectId ?? ""}
-          cifId={wannierContext?.cifId ?? ""}
-          crystalData={wannierContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={wannierContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
         {appChrome}
       </>
     );
@@ -3517,35 +3669,6 @@ function AppInner() {
     );
   }
 
-  if (currentView === "transport-wizard" && (qePath || executionMode === "hpc") && (transportContext || reconnectTaskId)) {
-    return (
-      <>
-        <TransportWizard
-          qePath={qePath || ""}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onViewTransport={(transportData) => {
-            setViewTransportData({ data: transportData });
-            setCurrentView("transport-viewer");
-            setReconnectTaskId(null);
-          }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setTransportContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={transportContext?.projectId ?? ""}
-          cifId={transportContext?.cifId ?? ""}
-          crystalData={transportContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          wannierCalculations={transportContext?.wannierCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
   if (currentView === "transport-viewer" && viewTransportData) {
     return (
       <>
@@ -3566,87 +3689,6 @@ function AppInner() {
             <TransportPlot data={viewTransportData.data} />
           </div>
         </div>
-        {appChrome}
-      </>
-    );
-  }
-
-  if (currentView === "fermi-surface-wizard" && (qePath || executionMode === "hpc") && (fermiSurfaceContext || reconnectTaskId)) {
-    return (
-      <>
-        <FermiSurfaceWizard
-          qePath={qePath || ""}
-          defaultSmearing={qeDefaults.smearing}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setFermiSurfaceContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={fermiSurfaceContext?.projectId ?? ""}
-          cifId={fermiSurfaceContext?.cifId ?? ""}
-          crystalData={fermiSurfaceContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={fermiSurfaceContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
-  if (currentView === "hubbard-lrt-wizard" && (qePath || executionMode === "hpc") && (hubbardLrtContext || reconnectTaskId)) {
-    return (
-      <>
-        <HubbardLrtWizard
-          qePath={qePath || ""}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setHubbardLrtContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={hubbardLrtContext?.projectId ?? ""}
-          cifId={hubbardLrtContext?.cifId ?? ""}
-          crystalData={hubbardLrtContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={hubbardLrtContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
-  if (currentView === "phonon-wizard" && (qePath || executionMode === "hpc") && (phononsContext || reconnectTaskId)) {
-    return (
-      <>
-        <PhononWizard
-          qePath={qePath || ""}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          activeHpcProfile={activeHpcProfile}
-          onViewPhonons={(phononData, viewMode) => {
-            setViewPhononData({
-              data: phononData,
-              mode: viewMode,
-            });
-            setCurrentView("phonon-viewer");
-            setReconnectTaskId(null);
-          }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setPhononsContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={phononsContext?.projectId ?? ""}
-          cifId={phononsContext?.cifId ?? ""}
-          crystalData={phononsContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          scfCalculations={phononsContext?.scfCalculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
         {appChrome}
       </>
     );
@@ -3780,37 +3822,6 @@ function AppInner() {
     );
   }
 
-  if (currentView === "epw-wizard" && (qePath || executionMode === "hpc") && (epwContext || reconnectTaskId)) {
-    return (
-      <>
-        <EpwWizard
-          qePath={qePath || ""}
-          executionMode={executionMode}
-          activeHpcProfile={activeHpcProfile}
-          onViewEPW={(epwData, rawOutput) => {
-            setViewEpwData({
-              data: epwData,
-              rawOutput: rawOutput ?? null,
-            });
-            setCurrentView("epw-viewer");
-            setReconnectTaskId(null);
-          }}
-          onBack={() => {
-            setCurrentView("project-dashboard");
-            setEpwContext(null);
-            setReconnectTaskId(null);
-          }}
-          projectId={epwContext?.projectId ?? ""}
-          cifId={epwContext?.cifId ?? ""}
-          crystalData={epwContext?.crystalData ?? { a: 0, b: 0, c: 0, alpha: 0, beta: 0, gamma: 0, spaceGroup: "", formula: "", atoms: [], species: [] } as any}
-          calculations={epwContext?.calculations ?? []}
-          reconnectTaskId={reconnectTaskId ?? undefined}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
   if (currentView === "epw-viewer" && viewEpwData) {
     return (
       <>
@@ -3820,34 +3831,6 @@ function AppInner() {
             setCurrentView("project-dashboard");
             setViewEpwData(null);
           }}
-        />
-        {appChrome}
-      </>
-    );
-  }
-
-  if (currentView === "scf-wizard" && (qePath || executionMode === "hpc")) {
-    return (
-      <>
-        <SCFWizard
-          qePath={qePath || ""}
-          defaultSmearing={qeDefaults.smearing}
-          executionMode={executionMode}
-          activeHpcProfile={activeHpcProfile}
-          onBack={() => {
-            if (scfContext) {
-              setCurrentView("project-dashboard");
-              setScfContext(null);
-            } else {
-              setCurrentView("project-browser");
-            }
-            setReconnectTaskId(null);
-          }}
-          initialCif={scfContext || undefined}
-          initialPreset={scfContext?.initialPreset}
-          presetLock={scfContext?.presetLock}
-          optimizedStructures={scfContext?.optimizedStructures}
-          reconnectTaskId={reconnectTaskId ?? undefined}
         />
         {appChrome}
       </>
@@ -3903,7 +3886,7 @@ function AppInner() {
             setCurrentView("project-browser");
             setSelectedProjectId(null);
           }}
-          onRunSCF={(cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures, calculations) => {
+          onRunSCF={(engineId, cifId, crystalData, cifContent, filename, preset, presetLock, optimizedStructures, calculations) => {
             setScfContext({
               cifId,
               crystalData,
@@ -3915,16 +3898,36 @@ function AppInner() {
               optimizedStructures,
               calculations,
             });
-            setCurrentView("scf-wizard");
+            openEngineWorkflow(engineId, preset === "relax" ? "structure_optimization" : "scf", "scf-wizard");
           }}
-          onRunBands={(cifId, crystalData, scfCalculations) => {
+          onContinueWien2kScf={(cifId, crystalData, cifContent, filename, calculations, calculationId) => {
+            setScfContext({
+              cifId,
+              crystalData,
+              cifContent,
+              filename,
+              projectId: selectedProjectId,
+              calculations,
+              continuationCalculationId: calculationId,
+            });
+            openEngineWorkflow("wien2k", "scf", "wien2k-scf-wizard");
+          }}
+          onRunEngineSetup={(engineId, cifId, crystalData) => {
+            setWien2kStructureContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+            });
+            openEngineWorkflow(engineId, "engine_setup", "wien2k-structure-wizard");
+          }}
+          onRunBands={(engineId, cifId, crystalData, scfCalculations) => {
             setBandsContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("bands-wizard");
+            openEngineWorkflow(engineId, "bands", "bands-wizard");
           }}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({
@@ -3935,80 +3938,80 @@ function AppInner() {
             });
             setCurrentView("bands-viewer");
           }}
-          onRunDos={(cifId, crystalData, scfCalculations) => {
+          onRunDos={(engineId, cifId, crystalData, scfCalculations) => {
             setDosContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("dos-wizard");
+            openEngineWorkflow(engineId, "dos", "dos-wizard");
           }}
           onViewDos={(dosData, fermiEnergy) => {
             setViewDosData({ dosData, fermiEnergy });
             setCurrentView("dos-viewer");
           }}
-          onRunWannier={(cifId, crystalData, scfCalculations) => {
+          onRunWannier={(engineId, cifId, crystalData, scfCalculations) => {
             setWannierContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("wannier-wizard");
+            openEngineWorkflow(engineId, "wannier", "wannier-wizard");
           }}
           onViewWannier={(wannierData, fermiEnergy, overlayOptions = []) => {
             setViewWannierData({ result: wannierData, fermiEnergy, overlayOptions });
             setCurrentView("wannier-viewer");
           }}
-          onRunTransport={(cifId, crystalData, wannierCalculations) => {
+          onRunTransport={(engineId, cifId, crystalData, wannierCalculations) => {
             setTransportContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               wannierCalculations,
             });
-            setCurrentView("transport-wizard");
+            openEngineWorkflow(engineId, "transport", "transport-wizard");
           }}
           onViewTransport={(transportData) => {
             setViewTransportData({ data: transportData });
             setCurrentView("transport-viewer");
           }}
-          onRunFermiSurface={(cifId, crystalData, scfCalculations) => {
+          onRunFermiSurface={(engineId, cifId, crystalData, scfCalculations) => {
             setFermiSurfaceContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("fermi-surface-wizard");
+            openEngineWorkflow(engineId, "fermi_surface", "fermi-surface-wizard");
           }}
-          onRunPhonons={(cifId, crystalData, scfCalculations) => {
+          onRunPhonons={(engineId, cifId, crystalData, scfCalculations) => {
             setPhononsContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("phonon-wizard");
+            openEngineWorkflow(engineId, "phonon", "phonon-wizard");
           }}
-          onRunHubbardLrt={(cifId, crystalData, scfCalculations) => {
+          onRunHubbardLrt={(engineId, cifId, crystalData, scfCalculations) => {
             setHubbardLrtContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               scfCalculations,
             });
-            setCurrentView("hubbard-lrt-wizard");
+            openEngineWorkflow(engineId, "hubbard_lrt", "hubbard-lrt-wizard");
           }}
-          onRunEPW={(cifId, crystalData, calculations) => {
+          onRunEPW={(engineId, cifId, crystalData, calculations) => {
             setEpwContext({
               cifId,
               crystalData,
               projectId: selectedProjectId,
               calculations,
             });
-            setCurrentView("epw-wizard");
+            openEngineWorkflow(engineId, "epw", "epw-wizard");
           }}
           onViewPhonons={(phononData, viewMode) => {
             setViewPhononData({

@@ -62,6 +62,8 @@ export function ProcessIndicator({ onNavigateToTask }: ProcessIndicatorProps) {
   const typeLabels: Record<string, string> = {
     scf: "SCF",
     bands: "Band Structure",
+    wien2k_scf: "WIEN2k SCF",
+    wien2k_bands: "WIEN2k Bands",
     dos: "Electronic DOS",
     fermi_surface: "Fermi Surface",
     hubbard_lrt: "Hubbard LRT",
