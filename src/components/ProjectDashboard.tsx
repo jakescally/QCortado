@@ -1,10 +1,18 @@
 // Project Dashboard - Main view for working with a project's structures and calculations
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
+import { AppHeaderPortal } from "./AppHeaderPortal";
+import {
+  ArrowLeft,
+  FilePenLine,
+  MoreHorizontal,
+  RefreshCw,
+  Upload,
+} from "lucide-react";
 import { parseCIF } from "../lib/cifParser";
 import { CrystalData, HpcProfile, SCFPreset, OptimizedStructureOption, SavedCellSummary } from "../lib/types";
 import { getPrimitiveCell } from "../lib/primitiveCell";
@@ -1522,6 +1530,8 @@ export function ProjectDashboard({
   );
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallation[]>([]);
   const [showAddEngineDialog, setShowAddEngineDialog] = useState(false);
+  const [showProjectOverflow, setShowProjectOverflow] = useState(false);
+  const projectOverflowRef = useRef<HTMLDivElement | null>(null);
   const [availableHpcProfiles, setAvailableHpcProfiles] = useState<HpcProfile[]>([]);
   const [selectedEngineToAdd, setSelectedEngineToAdd] = useState<EngineId | null>(null);
   const [engineInstallForm, setEngineInstallForm] = useState(() => buildDefaultEngineInstallForm(null));
@@ -1755,7 +1765,6 @@ export function ProjectDashboard({
 
     setError(null);
     setPreferredEngineId(nextEngineId);
-    setInfoMessage(`Active engine set to ${getEngineLabel(displayedEngineDescriptors, nextEngineId)}.`);
   }
 
   async function refreshEngineRegistry() {
@@ -1891,7 +1900,10 @@ export function ProjectDashboard({
               type="button"
               className="engine-add-btn"
               aria-label="Add computation engine"
-              onClick={handleAddEngineClick}
+              onClick={() => {
+                setShowProjectOverflow(false);
+                handleAddEngineClick();
+              }}
             >
               +
             </button>
@@ -2151,10 +2163,7 @@ export function ProjectDashboard({
     if (isRefreshingProject) return;
     setIsRefreshingProject(true);
     setInfoMessage(null);
-    const refreshed = await loadProject({ showLoading: false, refreshSelectedCif: false });
-    if (refreshed) {
-      setInfoMessage("Project refreshed.");
-    }
+    await loadProject({ showLoading: false, refreshSelectedCif: false });
     setIsRefreshingProject(false);
   }
 
@@ -4007,15 +4016,240 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
     }
   }, [hasPrimitiveDisplay, cellViewMode]);
 
+  useEffect(() => {
+    if (!showProjectOverflow) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (!projectOverflowRef.current?.contains(event.target as Node)) {
+        setShowProjectOverflow(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setShowProjectOverflow(false);
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showProjectOverflow]);
+
+  function renderProjectOverflowMenu(showStructureControls: boolean) {
+    return (
+      <div className="project-header-overflow" ref={projectOverflowRef}>
+        <button
+          type="button"
+          className="project-header-icon-btn"
+          onClick={() => setShowProjectOverflow((open) => !open)}
+          aria-label="Project actions"
+          aria-expanded={showProjectOverflow}
+        >
+          <MoreHorizontal size={18} />
+        </button>
+        {showProjectOverflow && (
+          <div className="project-header-overflow-menu">
+            {showStructureControls && (
+              <>
+                <label className="project-overflow-control">
+                  <span className="project-overflow-label">Structure</span>
+                  <select
+                    value={selectedCifId || ""}
+                    onChange={(event) => selectCif(event.target.value)}
+                  >
+                    {project?.cif_variants.map((variant) => (
+                      <option key={variant.id} value={variant.id}>
+                        {variant.formula} ({variant.filename})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="project-overflow-control">
+                  <span className="project-overflow-label">Sort</span>
+                  <div className="project-sort-segment" role="group" aria-label="Sort calculation entries">
+                    <button
+                      type="button"
+                      className={calculationSortMode === "recent" ? "active" : ""}
+                      onClick={() => handleCalculationSortModeChange("recent")}
+                    >
+                      Recent
+                    </button>
+                    <button
+                      type="button"
+                      className={calculationSortMode === "best" ? "active" : ""}
+                      onClick={() => handleCalculationSortModeChange("best")}
+                    >
+                      Best
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            <div className="project-overflow-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowProjectOverflow(false);
+                  void handleRefreshProject();
+                }}
+                disabled={isRefreshingProject}
+              >
+                <RefreshCw size={15} /> {isRefreshingProject ? "Refreshing..." : "Refresh"}
+              </button>
+              {!readOnly && (
+                <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProjectOverflow(false);
+                    void handleImportCIF();
+                  }}
+                  disabled={isImporting}
+                >
+                  <Upload size={15} /> Import CIF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProjectOverflow(false);
+                    setShowCifSubstitutionDialog(true);
+                  }}
+                  disabled={isImporting}
+                >
+                  <FilePenLine size={15} /> Modify Structure
+                </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderProjectCommandHeader(title: string, options: { showProjectTitle?: boolean; showStructureControls?: boolean } = {}) {
+    const { showProjectTitle = false, showStructureControls = false } = options;
+    return (
+      <AppHeaderPortal className={`dashboard-header project-command-header ${isMultiDeleteMode ? "selection-active" : ""}`}>
+        <div className="project-command-primary">
+          <div className="project-command-heading">
+            <button className="back-btn project-header-back-btn" onClick={onBack} aria-label="Back to projects">
+              <ArrowLeft size={17} />
+              <span>Back</span>
+            </button>
+            <div className="dashboard-title">
+              {showProjectTitle ? (
+                <>
+                  <div className="dashboard-title-row">
+                    <h2>{title}</h2>
+                    {!readOnly && (
+                      <InfoTooltip text="Edit project">
+                        <button
+                          className="project-title-edit-btn"
+                          type="button"
+                          onClick={openEditProjectDialog}
+                          aria-label="Edit project"
+                        >
+                          <PencilIcon />
+                        </button>
+                      </InfoTooltip>
+                    )}
+                  </div>
+                  {project?.description && (
+                    <p className="dashboard-description">{project.description}</p>
+                  )}
+                </>
+              ) : (
+                <h2>{title}</h2>
+              )}
+            </div>
+          </div>
+
+          <div className="project-header-center-controls">
+            {isMultiDeleteMode ? (
+              <div className="multi-delete-toolbar project-header-selection-toolbar">
+                <span className="multi-delete-count">{selectedCalculationCount} selected</span>
+                <button
+                  type="button"
+                  className="multi-delete-action-btn"
+                  onClick={selectAllVisibleCalculations}
+                  disabled={isBulkDeletingCalc || selectedCalculationCount === visibleCalculationCount}
+                >
+                  Select All
+                </button>
+                <button
+                  type="button"
+                  className="multi-delete-action-btn"
+                  onClick={clearSelectedCalculations}
+                  disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  className="multi-delete-danger-btn"
+                  onClick={() => setShowBulkDeleteCalcDialog(true)}
+                  disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                >
+                  Delete Selected
+                </button>
+                <button
+                  type="button"
+                  className="multi-delete-action-btn"
+                  onClick={exitMultiDeleteMode}
+                  disabled={isBulkDeletingCalc}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <>
+                {project && (
+                  <div className="project-header-engine-control">
+                    {renderEngineSelector()}
+                  </div>
+                )}
+                {showStructureControls && (
+                  <div className="project-header-entry-controls">
+                    <span className="calculation-history-filter-label">Entries</span>
+                    <EngineSwitcher
+                      engines={displayedEngineDescriptors}
+                      value={calculationEngineFilter}
+                      onChange={setCalculationEngineFilter}
+                      ariaLabel="Filter calculation entries by engine"
+                      includeAll
+                    />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="dashboard-header-actions project-command-actions">
+            {showStructureControls && !isMultiDeleteMode && !readOnly && allVariantCalculations.length > 0 && (
+              <button
+                type="button"
+                className="multi-delete-action-btn project-header-select-btn"
+                onClick={enterMultiDeleteMode}
+                disabled={visibleCalculationCount === 0}
+              >
+                Select
+              </button>
+            )}
+            {renderProjectOverflowMenu(showStructureControls)}
+          </div>
+        </div>
+      </AppHeaderPortal>
+    );
+  }
+
   if (isLoading) {
     return (
       <div className="dashboard-container">
-        <div className="dashboard-header">
-          <button className="back-btn" onClick={onBack}>
-            ← Back
-          </button>
-          <h2>Loading...</h2>
-        </div>
+        {renderProjectCommandHeader("Loading...")}
       </div>
     );
   }
@@ -4023,12 +4257,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
   if (error && !project) {
     return (
       <div className="dashboard-container">
-        <div className="dashboard-header">
-          <button className="back-btn" onClick={onBack}>
-            ← Back
-          </button>
-          <h2>Error</h2>
-        </div>
+        {renderProjectCommandHeader("Error")}
         {infoMessage && <div className="info-banner">{infoMessage}</div>}
         <div className="error-banner">{error}</div>
       </div>
@@ -4038,12 +4267,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
   if (!project) {
     return (
       <div className="dashboard-container">
-        <div className="dashboard-header">
-          <button className="back-btn" onClick={onBack}>
-            ← Back
-          </button>
-          <h2>Project not found</h2>
-        </div>
+        {renderProjectCommandHeader("Project not found")}
       </div>
     );
   }
@@ -4052,44 +4276,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
   if (project.cif_variants.length === 0) {
     return (
       <div className="dashboard-container">
-        <div className="dashboard-header">
-          <button className="back-btn" onClick={onBack}>
-            ← Back
-          </button>
-          <div className="dashboard-title">
-            <div className="dashboard-title-row">
-              <h2>{project.name}</h2>
-              {!readOnly && (
-                <InfoTooltip text="Edit project">
-                  <button
-                    className="project-title-edit-btn"
-                    type="button"
-                    onClick={openEditProjectDialog}
-                    aria-label="Edit project"
-                  >
-                    <PencilIcon />
-                  </button>
-                </InfoTooltip>
-              )}
-            </div>
-            {project.description && (
-              <p className="dashboard-description">{project.description}</p>
-            )}
-          </div>
-          <div className="dashboard-header-actions">
-            {renderEngineSelector()}
-            <InfoTooltip text="Reload project data">
-              <button
-                className="dashboard-refresh-btn"
-                onClick={() => void handleRefreshProject()}
-                disabled={isRefreshingProject}
-                aria-label="Reload project data"
-              >
-                {isRefreshingProject ? "Refreshing..." : "Refresh"}
-              </button>
-            </InfoTooltip>
-          </div>
-        </div>
+        {renderProjectCommandHeader(project.name, { showProjectTitle: true })}
 
         {infoMessage && <div className="info-banner">{infoMessage}</div>}
         {error && <div className="error-banner">{error}</div>}
@@ -4150,81 +4337,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
 
   return (
     <div className="dashboard-container">
-      <div className="dashboard-header">
-        <button className="back-btn" onClick={onBack}>
-          ← Back
-        </button>
-        <div className="dashboard-title">
-          <div className="dashboard-title-row">
-            <h2>{project.name}</h2>
-            {!readOnly && (
-              <InfoTooltip text="Edit project">
-                <button
-                  className="project-title-edit-btn"
-                  type="button"
-                  onClick={openEditProjectDialog}
-                  aria-label="Edit project"
-                >
-                  <PencilIcon />
-                </button>
-              </InfoTooltip>
-            )}
-          </div>
-          {project.description && (
-            <p className="dashboard-description">{project.description}</p>
-          )}
-        </div>
-        <div className="dashboard-header-actions">
-          {renderEngineSelector()}
-          <InfoTooltip text="Reload project data">
-            <button
-              className="dashboard-refresh-btn"
-              onClick={() => void handleRefreshProject()}
-              disabled={isRefreshingProject}
-              aria-label="Reload project data"
-            >
-              {isRefreshingProject ? "Refreshing..." : "Refresh"}
-            </button>
-          </InfoTooltip>
-          <div className="structure-selector">
-            <label className="structure-selector-label">Structure</label>
-            <select
-              value={selectedCifId || ""}
-              onChange={(e) => selectCif(e.target.value)}
-            >
-              {project.cif_variants.map((variant) => (
-                <option key={variant.id} value={variant.id}>
-                  {variant.formula} ({variant.filename})
-                </option>
-              ))}
-            </select>
-            {!readOnly && (
-              <div className="structure-selector-actions">
-                <InfoTooltip text="Import CIF file">
-                  <button
-                    className="add-structure-inline-btn"
-                    onClick={handleImportCIF}
-                    disabled={isImporting}
-                    aria-label="Import CIF file"
-                  >
-                    +
-                  </button>
-                </InfoTooltip>
-                <InfoTooltip text="Modify an existing CIF">
-                  <button
-                    className="modify-structure-inline-btn"
-                    onClick={() => setShowCifSubstitutionDialog(true)}
-                    disabled={isImporting}
-                    aria-label="Modify an existing CIF"
-                  >
-                    Modify
-                  </button>
-                </InfoTooltip>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      {renderProjectCommandHeader(project.name, { showProjectTitle: true, showStructureControls: true })}
 
       {infoMessage && <div className="info-banner">{infoMessage}</div>}
       {error && <div className="error-banner">{error}</div>}
@@ -4321,70 +4434,6 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
         <section className="actions-section">
           <div className="actions-section-header">
             <h3>Calculations</h3>
-            <div className="history-header-controls">
-              {!readOnly && visibleCalculationCount > 0 && (
-                <div className="multi-delete-toolbar">
-                  {isMultiDeleteMode ? (
-                    <>
-                      <span className="multi-delete-count">
-                        {selectedCalculationCount} selected
-                      </span>
-                      <button
-                        type="button"
-                        className="multi-delete-action-btn"
-                        onClick={selectAllVisibleCalculations}
-                        disabled={isBulkDeletingCalc || selectedCalculationCount === visibleCalculationCount}
-                      >
-                        Select All
-                      </button>
-                      <button
-                        type="button"
-                        className="multi-delete-action-btn"
-                        onClick={clearSelectedCalculations}
-                        disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
-                      >
-                        Clear
-                      </button>
-                      <button
-                        type="button"
-                        className="multi-delete-danger-btn"
-                        onClick={() => setShowBulkDeleteCalcDialog(true)}
-                        disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
-                      >
-                        Delete Selected
-                      </button>
-                      <button
-                        type="button"
-                        className="multi-delete-action-btn"
-                        onClick={exitMultiDeleteMode}
-                        disabled={isBulkDeletingCalc}
-                      >
-                        Cancel
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="multi-delete-action-btn"
-                      onClick={enterMultiDeleteMode}
-                    >
-                      Select
-                    </button>
-                  )}
-                </div>
-              )}
-              <div className="history-sort-control">
-                <label htmlFor="dashboard-sort-mode">Sort Entries</label>
-                <select
-                  id="dashboard-sort-mode"
-                  value={calculationSortMode}
-                  onChange={(e) => handleCalculationSortModeChange(e.target.value as CalculationSortMode)}
-                >
-                  <option value="recent">Most Recent</option>
-                  <option value="best">Best</option>
-                </select>
-              </div>
-            </div>
           </div>
           {!readOnly && (
             <div className="calc-action-grid">
@@ -4533,16 +4582,6 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
               )}
             </div>
           )}
-          <div className="calculation-history-filter">
-            <span className="calculation-history-filter-label">Entries</span>
-            <EngineSwitcher
-              engines={displayedEngineDescriptors}
-              value={calculationEngineFilter}
-              onChange={setCalculationEngineFilter}
-              ariaLabel="Filter calculation entries by engine"
-              includeAll
-            />
-          </div>
         </section>
 
         {selectedVariant && selectedVariant.calculations.length > 0 && visibleCalculationCount === 0 && (

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   CrystalData,
   ExecutionMode,
@@ -1552,7 +1553,7 @@ export function EpwWizard({
 
   return (
     <div className={`epw-wizard wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -1571,7 +1572,7 @@ export function EpwWizard({
             4. Results
           </span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       {error && <div className="error-banner">{error}</div>}
 

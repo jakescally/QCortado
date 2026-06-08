@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { AppHeaderPortal } from "../AppHeaderPortal";
 import type { BandData } from "../BandPlot";
 import { BrillouinZoneViewer, type KPathPoint } from "../BrillouinZoneViewer";
 import { ElapsedTimer } from "../ElapsedTimer";
@@ -519,7 +520,7 @@ export function Wien2kBandsWizard({
 
   function renderHeader() {
     return (
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-btn" type="button" disabled={isPreparing} onClick={() => void leaveWizard("back")}>
           ← Exit
         </button>
@@ -531,7 +532,7 @@ export function Wien2kBandsWizard({
             </span>
           ))}
         </div>
-      </div>
+      </AppHeaderPortal>
     );
   }
 

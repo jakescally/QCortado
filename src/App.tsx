@@ -23,9 +23,11 @@ import {
   SavedBandsCalculationContext,
   WannierBandOverlayOption,
 } from "./components/ProjectDashboard";
-import { ProcessIndicator } from "./components/ProcessIndicator";
-import { TaskQueuePage } from "./components/TaskQueuePage";
 import { HpcActivityPanel } from "./components/HpcActivityPanel";
+import { AppNavigationDrawer } from "./components/AppNavigationDrawer";
+import { AppHeaderPortal } from "./components/AppHeaderPortal";
+import { AppTopBar } from "./components/AppTopBar";
+import { TaskManagerDrawer } from "./components/TaskManagerDrawer";
 import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { HpcProfileEditor } from "./components/HpcProfileEditor";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
@@ -36,6 +38,12 @@ import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
 import { TaskProvider, useTaskContext } from "./lib/TaskContext";
 import { ThemeProvider, useTheme } from "./lib/ThemeContext";
 import { useWindowSize } from "./lib/useWindowSize";
+import {
+  buildTaskManagerEntries,
+  findRelevantTaskManagerEntry,
+  summarizeTaskManagerEntries,
+} from "./lib/taskManager";
+import type { TaskManagerFilter } from "./lib/taskManager";
 import { clampMpiProcs, loadGlobalMpiDefaults, saveGlobalMpiDefaults } from "./lib/mpiDefaults";
 import { SaveSizeMode, loadGlobalSaveSizeMode, saveGlobalSaveSizeMode } from "./lib/saveSizeMode";
 import {
@@ -71,7 +79,6 @@ import {
   loadExecutionMode,
   migrateHpcRemoteRoots,
   normalizeCliDashText,
-  openHpcActivityWindow,
   saveExecutionMode,
   setActiveHpcProfile,
   updateHpcProfileDefaults,
@@ -149,7 +156,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "project-browser" | "project-dashboard" | "task-queue" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "project-browser" | "project-dashboard" | "settings" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -440,9 +447,11 @@ function AppInner() {
   const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
     useState<BandsMultiviewCalculation[] | undefined>(undefined);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
-  const [showQueueMenu, setShowQueueMenu] = useState(false);
+  const [showNavigationDrawer, setShowNavigationDrawer] = useState(false);
+  const [showTaskDrawer, setShowTaskDrawer] = useState(false);
+  const [taskDrawerFilter, setTaskDrawerFilter] = useState<TaskManagerFilter>("active");
+  const [taskDrawerFocusId, setTaskDrawerFocusId] = useState<string | null>(null);
   const [lastNonUtilityView, setLastNonUtilityView] = useState<AppView>("project-browser");
-  const queueMenuRef = useRef<HTMLDivElement | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"general" | "hpc" | "hpc-profile">("general");
   const [hpcProfileEditorDirty, setHpcProfileEditorDirty] = useState(false);
@@ -589,6 +598,26 @@ function AppInner() {
     () => hpcProfiles.find((profile) => profile.id === activeHpcProfileId) ?? null,
     [hpcProfiles, activeHpcProfileId],
   );
+  const taskManagerEntries = useMemo(
+    () => buildTaskManagerEntries(taskContext.tasks.values(), taskContext.queueItems),
+    [taskContext.queueItems, taskContext.tasks],
+  );
+  const taskManagerSummary = useMemo(
+    () => summarizeTaskManagerEntries(taskManagerEntries),
+    [taskManagerEntries],
+  );
+  const relevantTaskManagerEntry = useMemo(
+    () => findRelevantTaskManagerEntry(taskManagerEntries),
+    [taskManagerEntries],
+  );
+
+  useEffect(() => {
+    const hasTopBar = !isHpcActivityPopout;
+    document.documentElement.setAttribute("data-app-chrome", hasTopBar ? "topbar" : "none");
+    return () => {
+      document.documentElement.removeAttribute("data-app-chrome");
+    };
+  }, [currentView, isHpcActivityPopout]);
   const editingHpcProfile = useMemo(
     () => hpcProfiles.find((profile) => profile.id === editingHpcProfileId) ?? null,
     [hpcProfiles, editingHpcProfileId],
@@ -604,6 +633,9 @@ function AppInner() {
     if (!confirmDiscardHpcProfileChanges()) return false;
     setHpcProfileEditorDirty(false);
     setShowSettingsMenu(false);
+    if (currentView === "settings") {
+      returnFromUtilityView();
+    }
     return true;
   }
 
@@ -611,6 +643,28 @@ function AppInner() {
     if (!confirmDiscardHpcProfileChanges()) return;
     setHpcProfileEditorDirty(false);
     setSettingsPage("hpc");
+  }
+
+  function openNavigationDrawer() {
+    if (windowSize.width <= 900) setShowTaskDrawer(false);
+    setShowNavigationDrawer(true);
+  }
+
+  function openTaskDrawer(filter: TaskManagerFilter = "active", taskId: string | null = null) {
+    if (windowSize.width <= 900) setShowNavigationDrawer(false);
+    const focusedEntry = taskId
+      ? taskManagerEntries.find((entry) => entry.taskId === taskId)
+      : null;
+    setTaskDrawerFilter(filter === "active" && focusedEntry?.group === "finished" ? "finished" : filter);
+    setTaskDrawerFocusId(taskId);
+    setShowTaskDrawer(true);
+  }
+
+  function openSettingsWorkspace() {
+    setShowNavigationDrawer(false);
+    if (currentView !== "settings") setLastNonUtilityView(currentView);
+    setShowSettingsMenu(true);
+    setCurrentView("settings");
   }
 
   useEffect(() => {
@@ -665,28 +719,6 @@ function AppInner() {
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (queueMenuRef.current && !queueMenuRef.current.contains(event.target as Node)) {
-        setShowQueueMenu(false);
-      }
-      if (showRemotePhononSelectionDialog) {
-        return;
-      }
-      if (settingsMenuRef.current && !settingsMenuRef.current.contains(event.target as Node)) {
-        closeSettingsMenu();
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [showRemotePhononSelectionDialog, settingsPage, hpcProfileEditorDirty]);
-
-  useEffect(() => {
-    if (showHpcSetupWizard) {
-      setShowSettingsMenu(false);
-    }
-  }, [showHpcSetupWizard]);
 
   useEffect(() => {
     if (executionMode !== "hpc" && (settingsPage === "hpc" || settingsPage === "hpc-profile")) {
@@ -1234,7 +1266,7 @@ function AppInner() {
       setHpcStatus("Select an active HPC profile first.");
       return;
     }
-    setShowQueueMenu(false);
+    setShowNavigationDrawer(false);
     setShowHeadlessRecoveryDialog(true);
     setHeadlessRecoveryStatus(null);
     setIsLoadingHeadlessCandidates(true);
@@ -1273,7 +1305,7 @@ function AppInner() {
       );
       await taskContext.reconnectToTask(result.task_id);
       setShowHeadlessRecoveryDialog(false);
-      setCurrentView("task-queue");
+      openTaskDrawer("hpc", result.task_id);
     } catch (e) {
       console.error("Failed to attach headless HPC job:", e);
       setHeadlessRecoveryStatus(`Failed to attach job: ${e}`);
@@ -1484,7 +1516,7 @@ function AppInner() {
 
     setRecoveryStatus(null);
     setShowSettingsMenu(false);
-    setShowQueueMenu(false);
+    returnFromUtilityView();
     closeRemotePhononSelectionDialog(true);
     setShowRemotePhononSelectionDialog(true);
     setIsLoadingRemotePhononCandidates(true);
@@ -1773,16 +1805,13 @@ function AppInner() {
     };
   }, [isHpcActivityPopout]);
 
-  function navigateToQueue() {
-    setShowQueueMenu(false);
-    if (currentView !== "task-queue") {
-      setLastNonUtilityView(currentView);
-      setCurrentView("task-queue");
-    }
+  function navigateToProjects() {
+    setShowNavigationDrawer(false);
+    setCurrentView("project-browser");
   }
 
   function navigateToNodeActivity() {
-    setShowQueueMenu(false);
+    setShowNavigationDrawer(false);
     if (currentView !== "node-activity") {
       setLastNonUtilityView(currentView);
       setCurrentView("node-activity");
@@ -1790,7 +1819,7 @@ function AppInner() {
   }
 
   function navigateToStorageManager() {
-    setShowQueueMenu(false);
+    setShowNavigationDrawer(false);
     if (currentView !== "storage-manager") {
       setLastNonUtilityView(currentView);
       setCurrentView("storage-manager");
@@ -1799,7 +1828,7 @@ function AppInner() {
 
   function returnFromUtilityView() {
     const fallback: AppView = selectedProjectId ? "project-dashboard" : "project-browser";
-    const destination = (lastNonUtilityView === "task-queue" || lastNonUtilityView === "node-activity" || lastNonUtilityView === "storage-manager")
+    const destination = (lastNonUtilityView === "settings" || lastNonUtilityView === "node-activity" || lastNonUtilityView === "storage-manager")
       ? fallback
       : lastNonUtilityView;
     setCurrentView(destination);
@@ -1855,93 +1884,10 @@ function AppInner() {
     </div>
   ) : null;
 
-  // The process indicator is always rendered
-  const processIndicator = <ProcessIndicator onNavigateToTask={handleNavigateToTask} />;
-  const queueLauncher = (
-    <div className="floating-queue" ref={queueMenuRef}>
-      <InfoTooltip text={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}>
-        <button
-          className="floating-queue-btn"
-          onClick={() => {
-            if (!closeSettingsMenu()) return;
-            setShowQueueMenu((prev) => !prev);
-          }}
-          aria-label={executionMode === "hpc" ? "HPC tools menu" : "Task queue menu"}
-        >
-          ☰
-        </button>
-      </InfoTooltip>
-      {showQueueMenu && (
-        <div className="floating-queue-menu">
-          <button onClick={navigateToQueue}>{executionMode === "hpc" ? "View Task Manager" : "View Queue"}</button>
-          <button onClick={navigateToStorageManager}>Open Storage Manager</button>
-          {executionMode === "hpc" && (
-            <>
-              <button onClick={navigateToNodeActivity}>View Node Activity</button>
-              <button onClick={() => void openHeadlessRecoveryDialog()}>Recover Headless Job</button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-
-  const clusterActivityLauncher = executionMode === "hpc" ? (
-    <div className="floating-activity">
-      <InfoTooltip text="Open cluster activity console">
-        <button
-          className="floating-activity-btn"
-          onClick={() => {
-            setShowQueueMenu(false);
-            if (!closeSettingsMenu()) return;
-            void openHpcActivityWindow();
-          }}
-          aria-label="Open cluster activity console"
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path
-              d="M4 6.5h16a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 16V8A1.5 1.5 0 0 1 4 6.5Z"
-              stroke="currentColor"
-              strokeWidth="1.8"
-            />
-            <path
-              d="m7.5 10.5 2.5 2-2.5 2M12.5 14.5h3.5"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-      </InfoTooltip>
-    </div>
-  ) : null;
-
-  const settingsLauncher = (
-    <div className="floating-settings" ref={settingsMenuRef}>
-      <InfoTooltip text="Settings">
-        <button
-          className="floating-settings-btn"
-          onClick={() => {
-            setShowQueueMenu(false);
-            if (showSettingsMenu) {
-              closeSettingsMenu();
-            } else {
-              setShowSettingsMenu(true);
-            }
-          }}
-          aria-label="Settings"
-        >
-          <svg width="24" height="24" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-          </svg>
-        </button>
-      </InfoTooltip>
-
-      {showSettingsMenu && (
-        <div className="settings-window-overlay" onClick={() => closeSettingsMenu()}>
-          <div className="floating-settings-menu" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Settings">
-            <div className="settings-window-header">
+  const settingsWorkspace = showSettingsMenu ? (
+    <div className="settings-workspace-shell" ref={settingsMenuRef}>
+      <div className="settings-workspace" role="region" aria-label="Settings">
+            <AppHeaderPortal className="settings-window-header">
               {settingsPage === "hpc-profile" && (
                 <button className="settings-header-back" onClick={leaveHpcProfileEditor} aria-label="Back to HPC settings">
                   Back
@@ -1962,7 +1908,7 @@ function AppInner() {
                   &times;
                 </button>
               </div>
-            </div>
+            </AppHeaderPortal>
             {settingsPage !== "hpc-profile" && <div className="settings-page-nav">
               <button
                 className={`settings-page-tab ${settingsPage === "general" ? "active" : ""}`}
@@ -2973,11 +2919,9 @@ function AppInner() {
               </div>
               )}
             </div>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
-  );
+  ) : null;
 
   const remotePhononSelectionModal = showRemotePhononSelectionDialog ? (
     <div
@@ -3340,12 +3284,73 @@ function AppInner() {
     || cleanRemoteConfirmModal
     || migrateHpcRootsModal;
 
+  const appContextLabel: Record<AppView, string> = {
+    "project-browser": "Projects",
+    "project-dashboard": "Project",
+    "bands-multiview": "Band Comparison",
+    "settings": "Settings",
+    "node-activity": "Node Activity",
+    "storage-manager": "Storage Manager",
+    "scf-wizard": "SCF Workflow",
+    "bands-wizard": "Band Structure Workflow",
+    "bands-viewer": "Band Structure",
+    "dos-wizard": "Electronic DOS Workflow",
+    "dos-viewer": "Electronic DOS",
+    "wannier-wizard": "Wannier90 Workflow",
+    "wannier-viewer": "Wannier90",
+    "transport-wizard": "Transport Workflow",
+    "transport-viewer": "Transport",
+    "fermi-surface-wizard": "Fermi Surface Workflow",
+    "hubbard-lrt-wizard": "Hubbard LRT Workflow",
+    "phonon-wizard": "Phonon Workflow",
+    "phonon-viewer": "Phonons",
+    "epw-wizard": "EPW Workflow",
+    "epw-viewer": "EPW",
+    "wien2k-structure-wizard": "WIEN2k Structure Workflow",
+    "wien2k-scf-wizard": "WIEN2k SCF Workflow",
+  };
+
   const appChrome = (
     <>
-      {queueLauncher}
-      {clusterActivityLauncher}
-      {settingsLauncher}
-      {processIndicator}
+      {!isHpcActivityPopout && (
+        <AppTopBar
+          contextLabel={appContextLabel[currentView]}
+          task={relevantTaskManagerEntry}
+          summary={taskManagerSummary}
+          onOpenMenu={openNavigationDrawer}
+          onOpenTasks={(taskId) => openTaskDrawer("active", taskId ?? null)}
+          embeddedHeader
+        />
+      )}
+      <AppNavigationDrawer
+        isOpen={showNavigationDrawer}
+        executionMode={executionMode}
+        activeHpcProfile={activeHpcProfile}
+        taskSummary={taskManagerSummary}
+        onClose={() => setShowNavigationDrawer(false)}
+        onProjects={navigateToProjects}
+        onStorage={navigateToStorageManager}
+        onNodeActivity={navigateToNodeActivity}
+        onRecoverHeadless={() => {
+          setShowNavigationDrawer(false);
+          void openHeadlessRecoveryDialog();
+        }}
+        onSettings={openSettingsWorkspace}
+        onHpcTasks={() => {
+          setShowNavigationDrawer(false);
+          openTaskDrawer("hpc");
+        }}
+      />
+      <TaskManagerDrawer
+        isOpen={showTaskDrawer}
+        requestedFilter={taskDrawerFilter}
+        focusedTaskId={taskDrawerFocusId}
+        onClose={() => setShowTaskDrawer(false)}
+        onNavigateToTask={(taskId, taskType) => {
+          setShowTaskDrawer(false);
+          handleNavigateToTask(taskId, taskType);
+        }}
+      />
       {activeDialogModal}
       <HpcSetupWizard
         isOpen={showHpcSetupWizard}
@@ -3371,14 +3376,10 @@ function AppInner() {
     );
   }
 
-  if (currentView === "task-queue") {
+  if (currentView === "settings") {
     return (
       <>
-        <TaskQueuePage
-          onBack={returnFromUtilityView}
-          executionMode={executionMode}
-          onNavigateToTask={handleNavigateToTask}
-        />
+        {settingsWorkspace}
         {appChrome}
       </>
     );
@@ -3515,7 +3516,7 @@ function AppInner() {
     return (
       <>
         <div className="bands-viewer-container">
-          <div className="bands-viewer-header">
+          <AppHeaderPortal className="bands-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -3526,7 +3527,7 @@ function AppInner() {
               ← Back to Dashboard
             </button>
             <h2>Band Structure</h2>
-          </div>
+          </AppHeaderPortal>
           <div className="bands-viewer-content">
             <BandPlot
               data={viewBandsData.bandData}
@@ -3566,7 +3567,7 @@ function AppInner() {
     return (
       <>
         <div className="bands-viewer-container">
-          <div className="bands-viewer-header">
+          <AppHeaderPortal className="bands-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -3577,7 +3578,7 @@ function AppInner() {
               ← Back to Dashboard
             </button>
             <h2>Electronic DOS</h2>
-          </div>
+          </AppHeaderPortal>
           <div className="bands-viewer-content">
             <ElectronicDOSPlot
               data={{
@@ -3598,7 +3599,7 @@ function AppInner() {
     return (
       <>
         <div className="bands-viewer-container">
-          <div className="bands-viewer-header">
+          <AppHeaderPortal className="bands-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -3609,7 +3610,7 @@ function AppInner() {
               ← Back to Dashboard
             </button>
             <h2>Wannier90</h2>
-          </div>
+          </AppHeaderPortal>
           <div className="bands-viewer-content bands-viewer-content-stacked">
             <div className="bands-viewer-plot-region">
               <BandPlot
@@ -3673,7 +3674,7 @@ function AppInner() {
     return (
       <>
         <div className="bands-viewer-container transport-viewer-container">
-          <div className="bands-viewer-header transport-viewer-header">
+          <AppHeaderPortal className="bands-viewer-header transport-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -3684,7 +3685,7 @@ function AppInner() {
               ← Back to Dashboard
             </button>
             <h2>BoltzWann Transport</h2>
-          </div>
+          </AppHeaderPortal>
           <div className="bands-viewer-content transport-viewer-content">
             <TransportPlot data={viewTransportData.data} />
           </div>
@@ -3731,7 +3732,7 @@ function AppInner() {
     return (
       <>
         <div className="phonon-viewer-container">
-          <div className="phonon-viewer-header">
+          <AppHeaderPortal className="phonon-viewer-header">
             <button
               className="back-button"
               onClick={() => {
@@ -3787,7 +3788,7 @@ function AppInner() {
                 </div>
               </div>
             )}
-          </div>
+          </AppHeaderPortal>
           <div className="phonon-viewer-content">
             {showingBands && displayPhononBandData && activePhononRange ? (
               <BandPlot

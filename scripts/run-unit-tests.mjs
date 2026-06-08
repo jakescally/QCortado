@@ -25,6 +25,7 @@ const testEntries = [
   "tests/pseudopotentialCutoffs/ssspPresetCutoffs.test.ts",
   "tests/tooltip/tooltipTiming.test.ts",
   "tests/tooltip/infoTooltipAccessibility.test.ts",
+  "tests/taskManager/taskManager.test.ts",
 ];
 
 const tempDir = mkdtempSync(join(tmpdir(), "qcortado-unit-tests-"));

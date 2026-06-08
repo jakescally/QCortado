@@ -5,7 +5,7 @@ This folder marks platform and viewer ownership for engine-neutral UI. Existing 
 ## Current Shared Owners
 
 - Project and storage shell: `ProjectBrowser.tsx`, `ProjectDashboard.tsx`, `StorageManagerPage.tsx`, project dialogs.
-- Task and execution shell: `TaskQueuePage.tsx`, `ProcessIndicator.tsx`, `LiveOutputPanel.tsx`, `ProgressBar.tsx`, timers.
+- Task and execution shell: `TaskManagerDrawer.tsx`, `LiveOutputPanel.tsx`, `ProgressBar.tsx`, timers.
 - HPC shell: `HpcActivityPanel.tsx`, `HpcNodeActivityPage.tsx`, `HpcRunSettings.tsx`, `RemoteUtilizationPanel.tsx`, `HpcSetupWizard.tsx`.
 - Structure viewers: `UnitCellViewer.tsx`, `BrillouinZoneViewer.tsx`, `MagnetismViewer.tsx`.
 - Result viewers: `BandPlot.tsx`, `ElectronicDOSPlot.tsx`, `PhononPlot.tsx`, `TransportPlot.tsx`, `BandsMultiview.tsx`.

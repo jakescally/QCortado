@@ -8,6 +8,7 @@ interface LiveOutputPanelProps {
   visibleLineCount?: number;
   panelClassName?: string;
   outputClassName?: string;
+  showTools?: boolean;
 }
 
 export function LiveOutputPanel({
@@ -18,6 +19,7 @@ export function LiveOutputPanel({
   visibleLineCount = 0,
   panelClassName = "output-panel",
   outputClassName = "output-text",
+  showTools = true,
 }: LiveOutputPanelProps) {
   const outputRef = useRef<HTMLPreElement>(null);
   const scrollFrameRef = useRef<number | null>(null);
@@ -77,34 +79,36 @@ export function LiveOutputPanel({
     <div className={panelClassName}>
       <div className="output-panel-header">
         <h3>{title}</h3>
-        <div className="output-panel-tools">
-          {hiddenLineCount > 0 && (
-            <span
-              className="output-panel-note"
-              title={`${hiddenLineCount.toLocaleString()} earlier lines are hidden to keep the live view responsive.`}
-            >
-              Newest {visibleLineCount.toLocaleString()} of {totalLineCount.toLocaleString()} lines
-            </span>
-          )}
-          <div className="output-follow-toggle" role="group" aria-label="Output scrolling mode">
-            <button
-              type="button"
-              className={isFollowing ? "active" : ""}
-              aria-pressed={isFollowing}
-              onClick={() => handleFollowModeChange(true)}
-            >
-              Follow
-            </button>
-            <button
-              type="button"
-              className={!isFollowing ? "active" : ""}
-              aria-pressed={!isFollowing}
-              onClick={() => handleFollowModeChange(false)}
-            >
-              Pause
-            </button>
+        {showTools && (
+          <div className="output-panel-tools">
+            {hiddenLineCount > 0 && (
+              <span
+                className="output-panel-note"
+                title={`${hiddenLineCount.toLocaleString()} earlier lines are hidden to keep the live view responsive.`}
+              >
+                Newest {visibleLineCount.toLocaleString()} of {totalLineCount.toLocaleString()} lines
+              </span>
+            )}
+            <div className="output-follow-toggle" role="group" aria-label="Output scrolling mode">
+              <button
+                type="button"
+                className={isFollowing ? "active" : ""}
+                aria-pressed={isFollowing}
+                onClick={() => handleFollowModeChange(true)}
+              >
+                Follow
+              </button>
+              <button
+                type="button"
+                className={!isFollowing ? "active" : ""}
+                aria-pressed={!isFollowing}
+                onClick={() => handleFollowModeChange(false)}
+              >
+                Pause
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
       <pre ref={outputRef} className={outputClassName} onScroll={handleScroll}>
         {output || placeholder}

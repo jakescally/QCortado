@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CrystalData } from "../../lib/types";
+import { AppHeaderPortal } from "../AppHeaderPortal";
 import {
   DEFAULT_WIEN2K_STRUCTURE_CONTROLS,
   discardWien2kStructureSession,
@@ -261,7 +262,7 @@ export function Wien2kStructureWizard({
 
   return (
     <div className="wizard-container wien2k-structure-wizard">
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-btn" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
           ← Exit
         </button>
@@ -276,7 +277,7 @@ export function Wien2kStructureWizard({
             </span>
           ))}
         </div>
-      </div>
+      </AppHeaderPortal>
       {error && <div className="error-banner">{error}</div>}
       <div className="wien2k-structure-content">
         <section className="wien2k-structure-controls">

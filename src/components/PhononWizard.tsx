@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   CrystalData,
   ExecutionMode,
@@ -2268,7 +2269,7 @@ export function PhononWizard({
 
   return (
     <div className={`phonon-wizard wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -2290,7 +2291,7 @@ export function PhononWizard({
             5. Results
           </span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="wizard-content">
         {renderStep()}

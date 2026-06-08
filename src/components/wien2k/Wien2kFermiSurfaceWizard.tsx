@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppHeaderPortal } from "../AppHeaderPortal";
 import { ElapsedTimer } from "../ElapsedTimer";
 import { HpcRunSettings } from "../HpcRunSettings";
 import { InfoTooltip } from "../InfoTooltip";
@@ -293,7 +294,7 @@ export function Wien2kFermiSurfaceWizard({
 
   function renderHeader() {
     return (
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-btn" type="button" disabled={runIsActive} onClick={onBack}>
           ← Exit
         </button>
@@ -305,7 +306,7 @@ export function Wien2kFermiSurfaceWizard({
             </span>
           ))}
         </div>
-      </div>
+      </AppHeaderPortal>
     );
   }
 

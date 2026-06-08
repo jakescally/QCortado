@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import { CrystalData, ExecutionMode, HpcProfile, SlurmResourceRequest } from "../lib/types";
 import { sortScfByMode, ScfSortMode, getStoredSortMode, setStoredSortMode } from "../lib/engines/qe/scfSorting";
 import { defaultProgressState, ProgressState } from "../lib/engines/qe/progress";
@@ -976,7 +977,7 @@ export function HubbardLrtWizard({
 
   return (
     <div className={`hubbard-lrt-wizard wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -995,7 +996,7 @@ export function HubbardLrtWizard({
             4. Results
           </span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="wizard-content">
         {step === "source" && renderSourceStep()}
