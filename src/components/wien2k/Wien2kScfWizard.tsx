@@ -7,6 +7,7 @@ import {
   discardWien2kScfSession,
   initializeWien2kScfSession,
   listWien2kStructureSources,
+  startWien2kScfContinuationSession,
   startWien2kScfSession,
   validateWien2kInitializationSettings,
   validateWien2kScfRunSettings,
@@ -39,6 +40,7 @@ interface Wien2kScfWizardProps {
   calculations: Wien2kStructureSourceRecord[];
   activeHpcProfile?: HpcProfile | null;
   reconnectTaskId?: string;
+  continuationCalculationId?: string | null;
   onBack: () => void;
   onSaved: () => void;
 }
@@ -149,6 +151,7 @@ export function Wien2kScfWizard({
   calculations,
   activeHpcProfile = null,
   reconnectTaskId,
+  continuationCalculationId = null,
   onBack,
   onSaved,
 }: Wien2kScfWizardProps) {
@@ -165,6 +168,7 @@ export function Wien2kScfWizard({
   const [result, setResult] = useState<Wien2kScfExecutionResult | null>(null);
   const [outputLines, setOutputLines] = useState<string[]>([]);
   const [isInitializing, setIsInitializing] = useState(false);
+  const [isPreparingContinuation, setIsPreparingContinuation] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<SectionKey, boolean>>({
@@ -183,6 +187,9 @@ export function Wien2kScfWizard({
   const [remoteJobId, setRemoteJobId] = useState<string | null>(null);
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const [continuationParentCalculationId, setContinuationParentCalculationId] = useState<string | null>(
+    continuationCalculationId,
+  );
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const selectedSource = sources.find((source) => source.id === sourceId) ?? sources[0] ?? null;
@@ -254,10 +261,56 @@ export function Wien2kScfWizard({
   const runHasFailed = activeTask?.status === "failed" || activeTask?.status === "cancelled" || Boolean(error);
   const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
   const runRemoteNode = activeTask?.hpc.remote_node ?? remoteNode;
+  const isContinuationSession = Boolean(continuationParentCalculationId);
 
   useViewportScrollLock(scfRunStarted && runIsActive);
 
   useEffect(() => () => outputUnlistenRef.current?.(), []);
+
+  useEffect(() => {
+    if (!continuationCalculationId) return;
+    let cancelled = false;
+    setIsPreparingContinuation(true);
+    setError(null);
+    setResult(null);
+    setContinuationParentCalculationId(continuationCalculationId);
+    void startWien2kScfContinuationSession(projectId, cifId, continuationCalculationId)
+      .then(async (continuationSession) => {
+        if (cancelled) return;
+        setSession(continuationSession);
+        setSourceId(continuationSession.sourceStructureCalculationId);
+        if (continuationSession.initialization) {
+          setInitialization(continuationSession.initialization);
+        }
+        if (continuationSession.latestRun) {
+          setRunSettings(continuationSession.latestRun);
+        }
+        setOutputLines([
+          `Reopened retained ${continuationSession.caseName} case for continuation.`,
+          `Remote case: ${continuationSession.remoteCaseDir}`,
+        ]);
+        setExpandedSections({
+          source: false,
+          radii: false,
+          initialization: false,
+          magnetism: false,
+          dftu: Boolean(continuationSession.latestRun?.dftU.enabled),
+          scf: true,
+          advanced: false,
+          hpc: true,
+        });
+        await attachOutputListener(continuationSession.sessionId);
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(String(reason));
+      })
+      .finally(() => {
+        if (!cancelled) setIsPreparingContinuation(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [continuationCalculationId, projectId, cifId]);
 
   useEffect(() => {
     if (!reconnectTaskId) return;
@@ -286,6 +339,7 @@ export function Wien2kScfWizard({
       latestRun: effectiveRunSettings,
       latestCalculationId: taskResult.calculationId,
     } : current);
+    setContinuationParentCalculationId(taskResult.calculationId);
     setIsRunning(false);
   }, [activeTask, taskResult, effectiveRunSettings]);
 
@@ -381,7 +435,9 @@ export function Wien2kScfWizard({
           sessionId: session.sessionId,
           settings: effectiveRunSettings,
           continuation,
-          parentCalculationId: continuation ? result?.calculationId ?? null : null,
+          parentCalculationId: continuation
+            ? continuationParentCalculationId ?? result?.calculationId ?? session.latestCalculationId ?? null
+            : null,
           resources: hpcResources,
         },
         `WIEN2k SCF - ${caseName}`,
@@ -408,6 +464,7 @@ export function Wien2kScfWizard({
       setRemoteJobId(null);
       setRemoteNode(null);
       setActiveTaskId(null);
+      setContinuationParentCalculationId(null);
       setExpandedSections({
         source: true,
         radii: true,
@@ -548,6 +605,9 @@ export function Wien2kScfWizard({
           </div>
         </div>
         {error && <div className="error-banner">{error}</div>}
+        {isPreparingContinuation && (
+          <div className="info-banner">Loading saved WIEN2k continuation state...</div>
+        )}
         <div className="wizard-content">
           <div className="wizard-step run-step run-step-focused scf-run-step">
             <div className="run-step-headline">
@@ -631,6 +691,9 @@ export function Wien2kScfWizard({
         </div>
       </div>
       {error && <div className="error-banner">{error}</div>}
+      {isPreparingContinuation && (
+        <div className="info-banner">Loading saved WIEN2k continuation state...</div>
+      )}
       <div className="wien2k-structure-content">
         <section className="wien2k-structure-controls">
           {renderSection("source", "Accepted Structure Source", (
@@ -996,7 +1059,7 @@ export function Wien2kScfWizard({
         </section>
       </div>
       <div className="step-actions">
-        {session && !result && initialized && (
+        {session && !result && initialized && !isContinuationSession && (
           <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void resetInitialization()}>
             Restart Initialization
           </button>
@@ -1007,8 +1070,13 @@ export function Wien2kScfWizard({
           </button>
         )}
         {initialized && !result && (
-          <button type="button" className="primary-button" disabled={Boolean(runError) || isRunning} onClick={() => void submitScf(false)}>
-            {isRunning ? "Running SCF..." : "Run SCF"}
+          <button
+            type="button"
+            className="primary-button"
+            disabled={Boolean(runError) || isRunning || isPreparingContinuation}
+            onClick={() => void submitScf(isContinuationSession)}
+          >
+            {isRunning ? (isContinuationSession ? "Continuing..." : "Running SCF...") : isContinuationSession ? "Continue SCF" : "Run SCF"}
           </button>
         )}
         {result?.summary.convergence === "not_converged" && (

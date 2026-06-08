@@ -43,6 +43,7 @@ export interface ScfWorkflowContext {
   presetLock?: boolean;
   optimizedStructures?: OptimizedStructureOption[];
   calculations?: CalculationRun[];
+  continuationCalculationId?: string | null;
 }
 
 export interface SourceScfWorkflowContext {
@@ -217,6 +218,7 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           calculations={context.calculations ?? []}
           activeHpcProfile={runtime.activeHpcProfile}
           reconnectTaskId={reconnectTaskIdValue}
+          continuationCalculationId={context.continuationCalculationId}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onWien2kScfSaved}
         />

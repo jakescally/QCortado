@@ -4272,6 +4272,154 @@ async fn wien2k_start_scf_session(
 }
 
 #[tauri::command]
+async fn wien2k_start_scf_continuation_session(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    calculation_id: String,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kScfSession, String> {
+    let calculation =
+        projects::get_project_calculation(app.clone(), project_id.clone(), calculation_id.clone())?;
+    if calculation.engine_id != engines::EngineId::Wien2k || calculation.calc_type != "scf" {
+        return Err("Select a saved WIEN2k SCF calculation to continue.".to_string());
+    }
+    let summary = calculation
+        .scf_summary
+        .clone()
+        .ok_or_else(|| "The saved WIEN2k SCF is missing its convergence summary.".to_string())?;
+    if summary.convergence != engines::ScfConvergenceState::NotConverged {
+        return Err("Only saved non-converged WIEN2k SCFs can be continued.".to_string());
+    }
+    if summary.provenance.project_id.as_deref() != Some(project_id.as_str())
+        || summary.provenance.cif_id.as_deref() != Some(cif_id.as_str())
+    {
+        return Err("The selected WIEN2k SCF belongs to another project structure.".to_string());
+    }
+
+    let parameters = calculation
+        .parameters
+        .as_object()
+        .ok_or_else(|| "The saved WIEN2k SCF parameters are unavailable.".to_string())?;
+    if !parameters
+        .get("native_artifacts_retained_remote")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(
+            "This WIEN2k SCF was saved without retained remote native artifacts and cannot be continued."
+                .to_string(),
+        );
+    }
+    let case_name = parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .and_then(engines::wien2k::normalize_case_name)
+        .ok_or_else(|| "The saved WIEN2k SCF has no valid case name.".to_string())?;
+    let remote_case_dir = parameters
+        .get("remote_case_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The saved WIEN2k SCF has no retained remote case directory.".to_string())?
+        .to_string();
+    let hpc_profile_id = parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The saved WIEN2k SCF has no HPC profile metadata.".to_string())?
+        .to_string();
+    let source_structure_calculation_id = parameters
+        .get("source_structure_calculation_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The saved WIEN2k SCF has no source structure metadata.".to_string())?
+        .to_string();
+    let source_structure_sites: Vec<engines::wien2k::Wien2kStructureSite> = parameters
+        .get("source_structure_sites")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let initialization: engines::wien2k::Wien2kInitializationSettings = parameters
+        .get("initialization")
+        .cloned()
+        .ok_or_else(|| "The saved WIEN2k SCF is missing initialization settings.".to_string())
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|err| {
+                format!("The saved WIEN2k initialization settings are invalid: {}", err)
+            })
+        })?;
+    let latest_run: engines::wien2k::Wien2kScfRunSettings = parameters
+        .get("run")
+        .cloned()
+        .ok_or_else(|| "The saved WIEN2k SCF is missing run settings.".to_string())
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|err| format!("The saved WIEN2k run settings are invalid: {}", err))
+        })?;
+
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if profile.id != hpc_profile_id {
+        return Err(format!(
+            "Activate the HPC profile used by this WIEN2k SCF ({}) before continuing it.",
+            hpc_profile_id
+        ));
+    }
+    let check_command = format!("test -d {}", shell_single_quote_local(&remote_case_dir));
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &check_command, 20)
+        .await
+        .map_err(|_| {
+            format!(
+                "The retained remote WIEN2k case directory is unavailable: {}",
+                remote_case_dir
+            )
+        })?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let remote_install_root = parameters
+        .get("remote_install_root")
+        .or_else(|| parameters.get("remote_wienroot"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| profile.remote_wien2k_install_root.clone().unwrap_or_default());
+    let session = engines::wien2k::Wien2kScfSession {
+        session_id: session_id.clone(),
+        project_id,
+        cif_id,
+        source_structure_calculation_id,
+        source_structure_sites,
+        case_name,
+        remote_case_dir: remote_case_dir.clone(),
+        remote_install_root,
+        hpc_profile_id,
+        phase: engines::wien2k::Wien2kScfSessionPhase::ScfComplete,
+        initialization: Some(initialization),
+        latest_run: Some(latest_run),
+        latest_calculation_id: Some(calculation_id),
+        artifacts: std::collections::BTreeMap::new(),
+        transcript: vec![format!(
+            "Reopened retained WIEN2k case for SCF continuation: {}",
+            remote_case_dir
+        )],
+        started_at: now_iso(),
+    };
+    state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session.clone());
+    let _ = app.emit(
+        &format!("wien2k-scf-output:{}", session_id),
+        "Reopened retained WIEN2k case for SCF continuation.",
+    );
+    Ok(session)
+}
+
+#[tauri::command]
 async fn wien2k_initialize_scf_session(
     app: AppHandle,
     session_id: String,
@@ -17782,6 +17930,7 @@ pub fn run() {
         wien2k_save_structure_source,
         wien2k_discard_structure_session,
         wien2k_start_scf_session,
+        wien2k_start_scf_continuation_session,
         wien2k_initialize_scf_session,
         wien2k_run_scf_session,
         wien2k_discard_scf_session,
@@ -17857,6 +18006,7 @@ pub fn run() {
         wien2k_save_structure_source,
         wien2k_discard_structure_session,
         wien2k_start_scf_session,
+        wien2k_start_scf_continuation_session,
         wien2k_initialize_scf_session,
         wien2k_run_scf_session,
         wien2k_discard_scf_session,

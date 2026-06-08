@@ -62,6 +62,14 @@ export function startWien2kScfSession(
   return invoke("wien2k_start_scf_session", { projectId, cifId, structureCalculationId });
 }
 
+export function startWien2kScfContinuationSession(
+  projectId: string,
+  cifId: string,
+  calculationId: string,
+): Promise<Wien2kScfSession> {
+  return invoke("wien2k_start_scf_continuation_session", { projectId, cifId, calculationId });
+}
+
 export function initializeWien2kScfSession(
   sessionId: string,
   settings: Wien2kInitializationSettings,

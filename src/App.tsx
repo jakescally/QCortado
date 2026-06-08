@@ -166,6 +166,7 @@ interface SCFContext {
   presetLock?: boolean;
   optimizedStructures?: OptimizedStructureOption[];
   calculations?: CalculationRun[];
+  continuationCalculationId?: string | null;
 }
 
 interface BandsContext {
@@ -3898,6 +3899,18 @@ function AppInner() {
               calculations,
             });
             openEngineWorkflow(engineId, preset === "relax" ? "structure_optimization" : "scf", "scf-wizard");
+          }}
+          onContinueWien2kScf={(cifId, crystalData, cifContent, filename, calculations, calculationId) => {
+            setScfContext({
+              cifId,
+              crystalData,
+              cifContent,
+              filename,
+              projectId: selectedProjectId,
+              calculations,
+              continuationCalculationId: calculationId,
+            });
+            openEngineWorkflow("wien2k", "scf", "wien2k-scf-wizard");
           }}
           onRunEngineSetup={(engineId, cifId, crystalData) => {
             setWien2kStructureContext({

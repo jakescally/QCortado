@@ -9279,6 +9279,26 @@ html[data-theme="dark"] {
   background: #f1f5f9;
 }
 
+.continue-calc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 112px;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+  background: transparent;
+  border: 1px solid #047857;
+  color: #047857;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.continue-calc-btn:hover {
+  background: #047857;
+  color: #ffffff;
+}
+
 .bulk-delete-summary {
   display: flex;
   flex-direction: column;

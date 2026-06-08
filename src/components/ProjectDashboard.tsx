@@ -146,6 +146,14 @@ interface ProjectDashboardProps {
     optimizedStructures?: OptimizedStructureOption[],
     calculations?: CalculationRun[],
   ) => void;
+  onContinueWien2kScf: (
+    cifId: string,
+    crystalData: CrystalData,
+    cifContent: string,
+    filename: string,
+    calculations: CalculationRun[],
+    calculationId: string,
+  ) => void;
   onRunEngineSetup: (engineId: EngineId, cifId: string, crystalData: CrystalData) => void;
   onRunBands: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
@@ -605,6 +613,23 @@ function getWien2kScfParameters(calc: CalculationRun): Record<string, any> {
     ...(calc.parameters?.run ?? {}),
     ...calc.parameters,
   };
+}
+
+function isContinuableWien2kScf(calc: CalculationRun): boolean {
+  if (calc.engine_id !== "wien2k" || calc.calc_type !== "scf") return false;
+  if (calc.scf_summary?.convergence !== "not_converged") return false;
+  const params = calc.parameters || {};
+  return params.native_artifacts_retained_remote === true
+    && typeof params.remote_case_dir === "string"
+    && params.remote_case_dir.trim().length > 0
+    && typeof params.hpc_profile_id === "string"
+    && params.hpc_profile_id.trim().length > 0
+    && typeof params.source_structure_calculation_id === "string"
+    && params.source_structure_calculation_id.trim().length > 0
+    && typeof params.initialization === "object"
+    && params.initialization !== null
+    && typeof params.run === "object"
+    && params.run !== null;
 }
 
 function formatWien2kMeshTag(mesh: unknown): string | null {
@@ -1468,6 +1493,7 @@ export function ProjectDashboard({
   onBack,
   onDeleted,
   onRunSCF,
+  onContinueWien2kScf,
   onRunEngineSetup,
   onRunBands,
   onViewBands,
@@ -2287,6 +2313,22 @@ export function ProjectDashboard({
     );
   }
 
+  function renderWien2kContinueScfButton(calc: CalculationRun) {
+    if (readOnly || !isContinuableWien2kScf(calc)) return null;
+    return (
+      <button
+        type="button"
+        className="continue-calc-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          handleContinueWien2kScf(calc);
+        }}
+      >
+        Continue SCF
+      </button>
+    );
+  }
+
   function renderMagnetismViewer(calc: CalculationRun) {
     if (!isMagneticScfCalculation(calc)) return null;
     const viewerData = getMagnetismViewerData(calc);
@@ -2927,6 +2969,20 @@ export function ProjectDashboard({
       undefined,
       optimizedStructures,
       variant.calculations,
+    );
+  }
+
+  function handleContinueWien2kScf(calc: CalculationRun) {
+    if (readOnly || !selectedCifId || !crystalData) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant || !isContinuableWien2kScf(calc)) return;
+    onContinueWien2kScf(
+      selectedCifId,
+      crystalData,
+      cifContent,
+      variant.filename,
+      variant.calculations,
+      calc.id,
     );
   }
 
@@ -4625,6 +4681,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                         <div className="calc-actions">
                           {renderHpcDownloadProgress(calc)}
                           {renderSavedFileButtons(calc)}
+                          {renderWien2kContinueScfButton(calcData)}
                           {renderMagnetismViewerButton(calcData)}
                           {renderHpcDownloadButton(calc)}
                           {!readOnly && (

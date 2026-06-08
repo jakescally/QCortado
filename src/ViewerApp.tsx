@@ -199,6 +199,14 @@ function ViewerAppInner() {
     _presetLock?: boolean,
     _optimizedStructures?: any[],
   ) => undefined;
+  const viewOnlyNoopWien2kContinue = (
+    _cifId: string,
+    _crystalData: any,
+    _cifContent: string,
+    _filename: string,
+    _calculations: CalculationRun[],
+    _calculationId: string,
+  ) => undefined;
   const viewOnlyNoopEngineSetup = (_engineId: any, _cifId: string, _crystalData: any) => undefined;
   const viewOnlyNoopCalc = (_engineId: any, _cifId: string, _crystalData: any, _scfCalculations: CalculationRun[]) => undefined;
   const viewOnlyNoopTransport = (_engineId: any, _cifId: string, _crystalData: any, _wannierCalculations: CalculationRun[]) => undefined;
@@ -272,6 +280,7 @@ function ViewerAppInner() {
             setSelectedProjectId(null);
           }}
           onRunSCF={viewOnlyNoopScf}
+          onContinueWien2kScf={viewOnlyNoopWien2kContinue}
           onRunEngineSetup={viewOnlyNoopEngineSetup}
           onRunBands={viewOnlyNoopCalc}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
