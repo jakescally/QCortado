@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import { ProgressBar } from "./ProgressBar";
 import type {
   ExecutionMode,
@@ -625,7 +626,7 @@ export function StorageManagerPage({
 
   return (
     <div className="queue-page-container storage-manager-page">
-      <div className="queue-page-header storage-manager-header">
+      <AppHeaderPortal className="queue-page-header storage-manager-header">
         <div className="storage-manager-header-main">
           <button className="back-button" onClick={onBack}>
             ← Back
@@ -658,7 +659,7 @@ export function StorageManagerPage({
             {isLoading ? "Scanning..." : "Refresh"}
           </button>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="storage-manager-subhead">
         <span>Showing {mode === "hpc" ? "remote" : "local"} QCortado storage.</span>

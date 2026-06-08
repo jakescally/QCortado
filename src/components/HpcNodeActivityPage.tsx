@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   getHpcClusterSnapshot,
   HpcClusterSnapshot,
@@ -403,7 +404,7 @@ export function HpcNodeActivityPage({
 
   return (
     <div className="queue-page-container node-activity-page">
-      <div className="queue-page-header node-activity-header">
+      <AppHeaderPortal className="queue-page-header node-activity-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -428,7 +429,7 @@ export function HpcNodeActivityPage({
             {isRefreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       {!activeProfileId && (
         <div className="queue-empty-state">

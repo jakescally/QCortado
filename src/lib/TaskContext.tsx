@@ -128,6 +128,7 @@ interface TaskContextValue {
   removeQueueItem: (queueItemId: string) => void;
   moveQueueItem: (queueItemId: string, direction: "up" | "down") => void;
   clearFinishedQueueItems: () => void;
+  clearFinishedTasks: () => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   dismissTask: (taskId: string) => Promise<void>;
   getTask: (taskId: string) => TaskState | undefined;
@@ -1205,6 +1206,32 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     setQueueItems((prev) => prev.filter((item) => item.status === "queued" || item.status === "running" || item.status === "saving"));
   }, []);
 
+  const clearFinishedTasks = useCallback(async () => {
+    const finishedTaskIds = Array.from(tasksRef.current.values())
+      .filter((task) => task.status !== "running")
+      .map((task) => task.taskId);
+
+    await Promise.all(finishedTaskIds.map(async (taskId) => {
+      try {
+        await invoke("dismiss_task", { taskId });
+      } catch (e) {
+        console.error("Failed to dismiss finished task:", e);
+      }
+      const fns = unlistenRefs.current.get(taskId);
+      if (fns) {
+        for (const fn of fns) fn();
+        unlistenRefs.current.delete(taskId);
+      }
+    }));
+
+    setTasks((prev) => {
+      const next = new Map(prev);
+      for (const taskId of finishedTaskIds) next.delete(taskId);
+      return next;
+    });
+    clearFinishedQueueItems();
+  }, [clearFinishedQueueItems]);
+
   const waitForTaskCompletion = useCallback(async (taskId: string): Promise<TaskState> => {
     while (true) {
       const local = tasksRef.current.get(taskId);
@@ -1593,6 +1620,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
     removeQueueItem,
     moveQueueItem,
     clearFinishedQueueItems,
+    clearFinishedTasks,
     cancelTask,
     dismissTask,
     getTask,

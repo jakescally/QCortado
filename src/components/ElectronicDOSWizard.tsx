@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   CrystalData,
   ELEMENT_MASSES,
@@ -1334,7 +1335,7 @@ export function ElectronicDOSWizard({
 
   return (
     <div className={`electronic-dos-wizard wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -1353,7 +1354,7 @@ export function ElectronicDOSWizard({
             4. Results
           </span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="wizard-content">
         {step === "source" && renderSourceStep()}

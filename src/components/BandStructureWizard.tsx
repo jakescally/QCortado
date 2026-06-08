@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   CrystalData,
   ELEMENT_MASSES,
@@ -2631,7 +2632,7 @@ export function BandStructureWizard({
 
   return (
     <div className={`band-structure-wizard wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-button" onClick={onBack}>
           ← Back
         </button>
@@ -2653,7 +2654,7 @@ export function BandStructureWizard({
             5. Results
           </span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="wizard-content">
         {renderStep()}

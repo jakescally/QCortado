@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import { InfoTooltip } from "./InfoTooltip";
 import { EpwCompactHeatmap, EpwLinePlot } from "./epw/EpwLinePlot";
 import {
@@ -682,7 +683,7 @@ export function EpwViewer({ payload, onBack }: EpwViewerProps) {
 
   return (
     <div className="bands-viewer-container epw-viewer-container">
-      <div className="bands-viewer-header epw-viewer-header">
+      <AppHeaderPortal className="bands-viewer-header epw-viewer-header">
         <button className="back-button" onClick={onBack}>
           ← Back to Dashboard
         </button>
@@ -690,7 +691,7 @@ export function EpwViewer({ payload, onBack }: EpwViewerProps) {
           <span>EPW Results</span>
           <h2>{hasEpwTransportData(data) ? "Transport" : hasEpwSuperconductivityData(data) ? "Superconductivity" : "Results"}</h2>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       <div className="epw-tab-bar" role="tablist" aria-label="EPW result views">
         {tabs.map((tab) => (

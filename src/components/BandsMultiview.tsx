@@ -10,6 +10,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   BandData,
   BandPlot,
@@ -692,7 +693,7 @@ export function BandsMultiview({
 
   return (
     <div className="bands-viewer-container bands-multiview-screen">
-      <div className="bands-viewer-header bands-multiview-header">
+      <AppHeaderPortal className="bands-viewer-header bands-multiview-header">
         <button className="back-button" onClick={onBack}>
           ← Back to Projects
         </button>
@@ -718,7 +719,7 @@ export function BandsMultiview({
             </>
           )}
         </div>
-      </div>
+      </AppHeaderPortal>
 
       {error && <div className="error-banner">{error}</div>}
 

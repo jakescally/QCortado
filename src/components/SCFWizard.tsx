@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
   CrystalData,
   ELEMENT_MASSES,
@@ -2906,7 +2907,7 @@ export function SCFWizard({
 
   return (
     <div className={`wizard-container wizard-step-${step}`}>
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-btn" onClick={onBack}>
           ← Back
         </button>
@@ -2923,7 +2924,7 @@ export function SCFWizard({
           </span>
           <span className={step === "results" ? "active" : ""}>4. Results</span>
         </div>
-      </div>
+      </AppHeaderPortal>
 
       {error && <div className="error-banner">{error}</div>}
       {copiedRunSettingsMessage && <div className="info-banner">{copiedRunSettingsMessage}</div>}

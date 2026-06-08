@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { AppHeaderPortal } from "../AppHeaderPortal";
 import {
   DEFAULT_WIEN2K_INITIALIZATION_SETTINGS,
   DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
@@ -588,7 +589,7 @@ export function Wien2kScfWizard({
       runHasFailed ? "error" : displayedResult ? "complete" : runIsActive ? "running" : "idle";
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard wizard-step-run">
-        <div className="wizard-header">
+        <AppHeaderPortal className="wizard-header">
           <button className="back-btn" type="button" onClick={() => void leaveWizard("back")}>
             ← Exit
           </button>
@@ -603,7 +604,7 @@ export function Wien2kScfWizard({
               </span>
             ))}
           </div>
-        </div>
+        </AppHeaderPortal>
         {error && <div className="error-banner">{error}</div>}
         {isPreparingContinuation && (
           <div className="info-banner">Loading saved WIEN2k continuation state...</div>
@@ -674,7 +675,7 @@ export function Wien2kScfWizard({
 
   return (
     <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
-      <div className="wizard-header">
+      <AppHeaderPortal className="wizard-header">
         <button className="back-btn" type="button" disabled={isInitializing || isRunning} onClick={() => void leaveWizard("back")}>
           ← Exit
         </button>
@@ -689,7 +690,7 @@ export function Wien2kScfWizard({
             </span>
           ))}
         </div>
-      </div>
+      </AppHeaderPortal>
       {error && <div className="error-banner">{error}</div>}
       {isPreparingContinuation && (
         <div className="info-banner">Loading saved WIEN2k continuation state...</div>

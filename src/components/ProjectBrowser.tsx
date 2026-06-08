@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { AppHeaderPortal } from "./AppHeaderPortal";
 import { CreateProjectDialog } from "./CreateProjectDialog";
 import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
@@ -980,7 +981,7 @@ export function ProjectBrowser({
   return (
     <div className={`browser-container ${isOpeningBandsMultiview ? "browser-container-multiview-loading" : ""}`}>
       {isOpeningBandsMultiview && <div className="browser-multiview-loading-backdrop" />}
-      <div className="browser-header">
+      <AppHeaderPortal className="browser-header">
         {onBack && (
           <button className="back-btn" onClick={onBack}>
             ← Back
@@ -1061,7 +1062,7 @@ export function ProjectBrowser({
             </>
           )}
         </div>
-      </div>
+      </AppHeaderPortal>
 
       {error && <div className="error-banner">{error}</div>}
       {statusMessage && <div className="success-banner">{statusMessage}</div>}
