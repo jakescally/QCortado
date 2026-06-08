@@ -2112,6 +2112,60 @@ fn hydrate_missing_calculation_sizes(
     Ok(changed)
 }
 
+/// Restores missing compact Hubbard LRT data in project summaries from calc.json files.
+fn hydrate_missing_hubbard_lrt_data(
+    project: &mut Project,
+    project_dir: &Path,
+) -> Result<bool, String> {
+    let mut changed = false;
+
+    for variant in &mut project.cif_variants {
+        for calculation in &mut variant.calculations {
+            if normalize_summary_calc_type(&calculation.calc_type) != Some("hubbard_lrt") {
+                continue;
+            }
+
+            if calculation
+                .result
+                .as_ref()
+                .and_then(|result| result.hubbard_lrt_data.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+
+            let Some(full_calculation) =
+                load_full_calculation_from_disk(project_dir, &calculation.id)?
+            else {
+                continue;
+            };
+
+            let Some(full_result) = full_calculation.result.as_ref() else {
+                continue;
+            };
+            let Some(full_hubbard_lrt_data) = full_result.hubbard_lrt_data.as_ref() else {
+                continue;
+            };
+
+            let Some(compact_hubbard_lrt_data) =
+                summarize_hubbard_lrt_data_for_project(full_hubbard_lrt_data)
+            else {
+                continue;
+            };
+
+            if calculation.result.is_none() {
+                calculation.result = Some(summarize_qe_result_for_project(full_result));
+            } else if let Some(summary_result) = calculation.result.as_mut() {
+                summary_result.hubbard_lrt_data = Some(compact_hubbard_lrt_data);
+            }
+
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
 fn collect_saved_calculation_descriptors(
     app: &AppHandle,
 ) -> Result<Vec<SavedCalculationDescriptor>, String> {
@@ -3894,7 +3948,9 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         }
 
         let mut project = read_project_json(&project_json)?;
-        if project
+        let hydrated_hubbard_lrt_data = hydrate_missing_hubbard_lrt_data(&mut project, &path)?;
+        if hydrated_hubbard_lrt_data
+            || project
             .cif_variants
             .iter()
             .flat_map(|variant| variant.calculations.iter())
@@ -4264,6 +4320,7 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
         .any(calculation_has_embedded_project_detail);
 
     if hydrate_missing_calculation_sizes(&mut project, &project_dir)?
+        || hydrate_missing_hubbard_lrt_data(&mut project, &project_dir)?
         || has_embedded_detail
         || repaired_phonon_entries
         || repaired_wien2k_bands_entries
@@ -6712,13 +6769,13 @@ pub fn get_saved_phonon_data(
 
 #[cfg(test)]
 mod tests {
-    use super::Project;
     use super::{
-        calculation_can_lighten, is_calculation_input_file, is_calculation_log_file,
-        is_wavefunction_archive_file, looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
+        calculation_can_lighten, hydrate_missing_hubbard_lrt_data,
+        is_calculation_input_file, is_calculation_log_file, is_wavefunction_archive_file,
+        looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
         path_contains_wavefunction_archives, remove_wavefunction_archives,
         repair_phonon_calculation_with_workdir, repair_wien2k_band_path_parameters,
-        summarize_qe_result_for_project, CalculationRun,
+        summarize_qe_result_for_project, CalculationRun, CifVariant, Project,
     };
     use crate::engines::qe::QEResult;
     use crate::engines::EngineId;
@@ -6861,6 +6918,99 @@ mod tests {
         );
         assert!(lrt.get("raw_output").is_none());
         assert!(lrt.get("parameters_output").is_none());
+    }
+
+    #[test]
+    fn hydrate_missing_hubbard_lrt_data_backfills_project_summary() {
+        let project_dir = make_temp_test_dir("hydrate_hubbard_lrt");
+        let calc_id = "test_hubbard_calc";
+        let project_json_path = project_dir.join("project.json");
+        let calc_dir = project_dir.join("calculations").join(calc_id);
+        fs::create_dir_all(&calc_dir).expect("failed to create calc directory");
+
+        let summary_calc = CalculationRun {
+            id: calc_id.to_string(),
+            engine_id: EngineId::Qe,
+            name: None,
+            calc_type: "hubbard_lrt".to_string(),
+            parameters: serde_json::json!({
+                "source_scf_id": "scf_123",
+                "q_mesh": [2, 2, 2]
+            }),
+            result: Some(QEResult {
+                converged: true,
+                raw_output: String::new(),
+                ..QEResult::default()
+            }),
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:10:00Z".to_string()),
+            tags: vec!["Hubbard-LRT".to_string()],
+            storage_bytes: Some(123),
+        };
+        let full_calc = CalculationRun {
+            result: Some(QEResult {
+                converged: true,
+                raw_output: "full hp output".to_string(),
+                hubbard_lrt_data: Some(serde_json::json!({
+                    "converged": true,
+                    "q_mesh": [2, 2, 2],
+                    "u_values": [
+                        {
+                            "element": "Er",
+                            "manifold": "4f",
+                            "target": "Er-4f",
+                            "value_ev": 6.52
+                        }
+                    ]
+                })),
+                ..QEResult::default()
+            }),
+            ..summary_calc.clone()
+        };
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "Project 1".to_string(),
+            description: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            folder_id: None,
+            active_engine_id: EngineId::Qe,
+            cif_variants: vec![CifVariant {
+                id: "cif-1".to_string(),
+                filename: "structure.cif".to_string(),
+                formula: "ErP".to_string(),
+                added_at: "2026-01-01T00:00:00Z".to_string(),
+                calculations: vec![summary_calc],
+            }],
+            last_opened_cif_id: Some("cif-1".to_string()),
+        };
+
+        fs::write(
+            &project_json_path,
+            serde_json::to_string_pretty(&project).expect("failed to serialize project"),
+        )
+        .expect("failed to write project.json");
+        fs::write(
+            calc_dir.join("calc.json"),
+            serde_json::to_string_pretty(&full_calc).expect("failed to serialize calc"),
+        )
+        .expect("failed to write calc.json");
+
+        let mut loaded_project = super::read_project_json(&project_json_path)
+            .expect("failed to read project.json");
+        let changed = hydrate_missing_hubbard_lrt_data(&mut loaded_project, &project_dir)
+            .expect("hydration should succeed");
+        assert!(changed);
+
+        let hydrated = loaded_project.cif_variants[0].calculations[0]
+            .result
+            .as_ref()
+            .and_then(|result| result.hubbard_lrt_data.as_ref())
+            .expect("summary should now contain Hubbard LRT data");
+        assert_eq!(hydrated.pointer("/u_values/0/target"), Some(&serde_json::json!("Er-4f")));
+
+        let _ = fs::remove_dir_all(&project_dir);
     }
 
     #[test]

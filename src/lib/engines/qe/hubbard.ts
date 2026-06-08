@@ -209,6 +209,19 @@ export function getHubbardLrtValues(calculations: HubbardCalculationLike[]): Hub
   return values;
 }
 
+export function getLatestHubbardLrtValue(
+  element: string,
+  manifold: string,
+  calculations: HubbardCalculationLike[],
+): HubbardLrtValue | null {
+  const normalizedElement = normalizeElementSymbol(element);
+  const normalizedManifold = normalizeHubbardTarget(manifold);
+  const matching = getHubbardLrtValues(calculations)
+    .filter((entry) => entry.element === normalizedElement && entry.manifold === normalizedManifold)
+    .sort((a, b) => Date.parse(b.completedAt || "0") - Date.parse(a.completedAt || "0"));
+  return matching[0] ?? null;
+}
+
 export function resolveHubbardUDefault(
   element: string,
   manifold: string,
@@ -216,16 +229,14 @@ export function resolveHubbardUDefault(
 ): HubbardUDefault {
   const normalizedElement = normalizeElementSymbol(element);
   const normalizedManifold = normalizeHubbardTarget(manifold);
-  const matching = getHubbardLrtValues(calculations)
-    .filter((entry) => entry.element === normalizedElement && entry.manifold === normalizedManifold)
-    .sort((a, b) => Date.parse(b.completedAt || "0") - Date.parse(a.completedAt || "0"));
+  const matching = getLatestHubbardLrtValue(normalizedElement, normalizedManifold, calculations);
 
-  if (matching[0]) {
+  if (matching) {
     return {
-      value: matching[0].value,
+      value: matching.value,
       source: "lrt",
-      label: `From Hubbard LRT (${matching[0].value.toFixed(3)} eV)`,
-      lrtCalcId: matching[0].calcId,
+      label: `From Hubbard LRT (${matching.value.toFixed(3)} eV)`,
+      lrtCalcId: matching.calcId,
     };
   }
 

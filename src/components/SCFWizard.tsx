@@ -58,9 +58,10 @@ import {
 } from "../lib/electronConfigurations";
 import {
   getHubbardRecommendations,
+  getLatestHubbardLrtValue,
   getHundJDefaultEv,
+  GENERAL_HUBBARD_U_GUESS_EV,
   HUBBARD_J_SOURCE,
-  resolveHubbardUDefault,
 } from "../lib/engines/qe/hubbard";
 import {
   CutoffDerivation,
@@ -255,6 +256,7 @@ function toOffsetTriplet(value: [number, number, number]): [number, number, numb
 
 type PseudopotentialPreset = "sssp" | "paw" | "uspp" | "ncpp";
 const SCF_WIZARD_SETTINGS_ID = "scf";
+const OPTIMIZATION_WIZARD_SETTINGS_ID = "optimization";
 const PSEUDO_CACHE_REMOTE_CHECK_TTL_MS = 5 * 60 * 1000;
 
 interface StoredScfWizardSettings {
@@ -279,9 +281,12 @@ export function SCFWizard({
   const resolvedDefaultSmearing = normalizeDefaultSmearing(defaultSmearing);
   const taskContext = useTaskContext();
   const isHpcMode = executionMode === "hpc";
+  const lockedPreset = presetLock && initialPreset ? initialPreset : null;
+  const isOptimizationWizard = lockedPreset === "relax";
+  const wizardSettingsId = isOptimizationWizard ? OPTIMIZATION_WIZARD_SETTINGS_ID : SCF_WIZARD_SETTINGS_ID;
   const storedWizardSettings = useMemo(
-    () => readProjectWizardSettings<StoredScfWizardSettings>(initialCif?.projectId, SCF_WIZARD_SETTINGS_ID),
-    [initialCif?.projectId],
+    () => readProjectWizardSettings<StoredScfWizardSettings>(initialCif?.projectId, wizardSettingsId),
+    [initialCif?.projectId, wizardSettingsId],
   );
   // Track background task for this wizard
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
@@ -341,76 +346,85 @@ export function SCFWizard({
   const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const hasTaskLinkedAutosave = Boolean(activeQueueItem?.saveSpec);
   const autoSaveExpected = Boolean(projectContext || hasTaskLinkedAutosave);
+  const initialConfig = useMemo<SCFConfig>(() => {
+    const storedConfig = (storedWizardSettings?.config ?? {}) as Partial<SCFConfig>;
+    const storedCalculation = storedConfig.calculation;
+    const normalizedCalculation = isOptimizationWizard
+      ? (storedCalculation === "scf" || storedCalculation === "relax" || storedCalculation === "vcrelax"
+        ? storedCalculation
+        : "vcrelax")
+      : "scf";
+    return {
+      // Basic parameters
+      ecutwfc: 40,
+      ecutrho: 320,
+      kgrid: [4, 4, 4],
+      kgrid_offset: [0, 0, 0],
+
+      // Relaxation parameters
+      forc_conv_thr: 1e-4,
+      etot_conv_thr: 1e-5,
+      press: 0.0,
+
+      // Electronic structure
+      occupations: "smearing",
+      smearing: resolvedDefaultSmearing,
+      degauss: 0.01,
+      nbnd: null,
+      tot_charge: 0,
+
+      // Magnetism & Spin
+      nspin: 1,
+      noncolin: false,
+      lspinorb: false,
+      starting_magnetization: {},
+      starting_magnetization_theta: {},
+      starting_magnetization_phi: {},
+      tot_magnetization: null,
+      constrained_magnetization: "none",
+
+      // SCF Convergence
+      conv_thr: 1e-12,
+      electron_maxstep: 1000,
+      mixing_mode: "plain",
+      mixing_beta: 0.7,
+      mixing_ndim: 8,
+      diagonalization: "david",
+      startingpot: "atomic",
+      startingwfc: "atomic",
+
+      // DFT+U
+      lda_plus_u: false,
+      lda_plus_u_kind: 0,
+      hubbard_projector: "ortho-atomic",
+      hubbard_manifold: {},
+      hubbard_u: {},
+      hubbard_j: {},
+
+      // Van der Waals
+      vdw_corr: "none",
+
+      // Isolated systems
+      assume_isolated: "none",
+
+      // XC functional override
+      input_dft: "",
+
+      // Output control
+      verbosity: "high",
+      tprnfor: true,
+      tstress: true,
+      disk_io: "low",
+      ...storedConfig,
+      calculation: normalizedCalculation,
+    };
+  }, [isOptimizationWizard, resolvedDefaultSmearing, storedWizardSettings?.config]);
 
   const [config, setConfig] = useState<SCFConfig>(() => ({
-    // Calculation type
-    calculation: "scf",
-
-    // Basic parameters
-    ecutwfc: 40,
-    ecutrho: 320,
-    kgrid: [4, 4, 4],
-    kgrid_offset: [0, 0, 0],
-
-    // Relaxation parameters
-    forc_conv_thr: 1e-4,
-    etot_conv_thr: 1e-5,
-    press: 0.0,
-
-    // Electronic structure
-    occupations: "smearing",
-    smearing: resolvedDefaultSmearing,
-    degauss: 0.01,
-    nbnd: null,
-    tot_charge: 0,
-
-    // Magnetism & Spin
-    nspin: 1,
-    noncolin: false,
-    lspinorb: false,
-    starting_magnetization: {},
-    starting_magnetization_theta: {},
-    starting_magnetization_phi: {},
-    tot_magnetization: null,
-    constrained_magnetization: "none",
-
-    // SCF Convergence
-    conv_thr: 1e-12,
-    electron_maxstep: 1000,
-    mixing_mode: "plain",
-    mixing_beta: 0.7,
-    mixing_ndim: 8,
-    diagonalization: "david",
-    startingpot: "atomic",
-    startingwfc: "atomic",
-
-    // DFT+U
-    lda_plus_u: false,
-    lda_plus_u_kind: 0,
-    hubbard_projector: "ortho-atomic",
-    hubbard_manifold: {},
-    hubbard_u: {},
-    hubbard_j: {},
-
-    // Van der Waals
-    vdw_corr: "none",
-
-    // Isolated systems
-    assume_isolated: "none",
-
-    // XC functional override
-    input_dft: "",
-
-    // Output control
-    verbosity: "high",
-    tprnfor: true,
-    tstress: true,
-    disk_io: "low",
-    ...(storedWizardSettings?.config ?? {}),
+    ...initialConfig,
   }));
   const [manuallyEditedHubbardU, setManuallyEditedHubbardU] = useState<Record<string, boolean>>({});
   const [manuallyEditedHubbardJ, setManuallyEditedHubbardJ] = useState<Record<string, boolean>>({});
-  const [hubbardUDefaultLabels, setHubbardUDefaultLabels] = useState<Record<string, string>>({});
   const [hubbardJDefaultLabels, setHubbardJDefaultLabels] = useState<Record<string, string>>({});
   const [selectedPreset, setSelectedPreset] = useState<SCFPreset | null>(null);
   const [structureSource, setStructureSource] = useState<string>(() => storedWizardSettings?.structureSource ?? "cif");
@@ -614,8 +628,6 @@ export function SCFWizard({
     }
   }, [activeQueueItem, activeTask, activeTaskId, autoSaveExpected]);
 
-  const lockedPreset = presetLock && initialPreset ? initialPreset : null;
-  const isOptimizationWizard = lockedPreset === "relax";
   const wizardTitle = isOptimizationWizard ? "Structure Optimization Wizard" : "SCF Calculation Wizard";
   const structureSourceTooltip = isOptimizationWizard
     ? "For complicated runs, you may want to run a relaxation with a coarse k-grid, then use that result as a structure source and run a finer relaxation."
@@ -757,13 +769,21 @@ export function SCFWizard({
   useViewportScrollLock(step === "run");
 
   useEffect(() => {
-    writeProjectWizardSettings(projectContext?.projectId, SCF_WIZARD_SETTINGS_ID, {
-      config,
+    const persistedConfig = isOptimizationWizard
+      ? config
+      : { ...config, calculation: "scf" as const };
+    writeProjectWizardSettings(projectContext?.projectId, wizardSettingsId, {
+      config: persistedConfig,
       selectedPseudos,
       selectedPseudoPreset,
       structureSource,
     });
-  }, [projectContext?.projectId, config, selectedPseudos, selectedPseudoPreset, structureSource]);
+  }, [config, isOptimizationWizard, projectContext?.projectId, selectedPseudos, selectedPseudoPreset, structureSource, wizardSettingsId]);
+
+  useEffect(() => {
+    if (isOptimizationWizard || config.calculation === "scf") return;
+    setConfig((prev) => (prev.calculation === "scf" ? prev : { ...prev, calculation: "scf" }));
+  }, [config.calculation, isOptimizationWizard]);
 
   useEffect(() => {
     if (visibleOutputLineCount > outputLineCount) {
@@ -1592,8 +1612,13 @@ export function SCFWizard({
       const next: SCFConfig = { ...prev };
 
       const calculationMode = settings.calculation_mode;
-      if (calculationMode === "scf" || calculationMode === "relax" || calculationMode === "vcrelax") {
+      if (
+        isOptimizationWizard
+        && (calculationMode === "scf" || calculationMode === "relax" || calculationMode === "vcrelax")
+      ) {
         next.calculation = calculationMode;
+      } else {
+        next.calculation = "scf";
       }
 
       const occupations = settings.occupations;
@@ -1908,9 +1933,6 @@ export function SCFWizard({
 
   useEffect(() => {
     if (hubbardRecommendations.length === 0) return;
-    const calculations = initialCif?.calculations ?? [];
-    const nextULabels: Record<string, string> = {};
-
     setConfig((prev) => {
       let changed = false;
       const nextU = { ...prev.hubbard_u };
@@ -1919,24 +1941,14 @@ export function SCFWizard({
         if (manuallyEditedHubbardU[recommendation.element]) continue;
         const current = nextU[recommendation.element];
         if (current != null && current !== 0) continue;
-        const resolved = resolveHubbardUDefault(
-          recommendation.element,
-          recommendation.manifold,
-          calculations,
-        );
-        nextU[recommendation.element] = resolved.value;
-        nextULabels[recommendation.element] = resolved.label;
+        nextU[recommendation.element] = GENERAL_HUBBARD_U_GUESS_EV;
         changed = true;
       }
 
       if (!changed) return prev;
       return { ...prev, hubbard_u: nextU };
     });
-
-    if (Object.keys(nextULabels).length > 0) {
-      setHubbardUDefaultLabels((prev) => ({ ...prev, ...nextULabels }));
-    }
-  }, [hubbardDefaultElementKey, initialCif?.calculations, manuallyEditedHubbardU]);
+  }, [hubbardDefaultElementKey, manuallyEditedHubbardU]);
 
   useEffect(() => {
     if (config.lda_plus_u_kind !== 1 || hubbardDefaultElements.length === 0) return;
@@ -1975,6 +1987,20 @@ export function SCFWizard({
   function getHubbardManifoldForElement(element: string): string | null {
     const explicit = normalizeHubbardManifold(config.hubbard_manifold[element] || "");
     return explicit || getDefaultHubbardManifold(element);
+  }
+
+  function applyCalculatedHubbardU(element: string) {
+    const manifold = getHubbardManifoldForElement(element);
+    if (!manifold) return;
+
+    const lrtValue = getLatestHubbardLrtValue(element, manifold, (initialCif?.calculations ?? []) as any[]);
+    if (!lrtValue) return;
+
+    setConfig((prev) => ({
+      ...prev,
+      hubbard_u: { ...prev.hubbard_u, [element]: lrtValue.value },
+    }));
+    setManuallyEditedHubbardU((prev) => ({ ...prev, [element]: true }));
   }
 
   function buildHubbardSettings(elements: string[]) {
@@ -3199,21 +3225,23 @@ export function SCFWizard({
                         </select>
                       </div>
 
-                      <div className="param-row">
-                        <label>
-                          Calculation Type
-                          <InfoTooltip text="scf: ground state energy only. relax: optimize atomic positions. vcrelax: optimize both positions and cell shape/size." />
-                        </label>
-                        <select
-                          value={config.calculation}
-                          onChange={(e) => setConfig((prev) => ({ ...prev, calculation: e.target.value as "scf" | "relax" | "vcrelax" }))}
-                          disabled={Boolean(lockedPreset)}
-                        >
-                          <option value="scf">SCF (ground state)</option>
-                          <option value="relax">Relax (fixed cell)</option>
-                          <option value="vcrelax">VC-Relax (variable cell)</option>
-                        </select>
-                      </div>
+                      {isOptimizationWizard && (
+                        <div className="param-row">
+                          <label>
+                            Calculation Type
+                            <InfoTooltip text="scf: ground state energy only. relax: optimize atomic positions. vcrelax: optimize both positions and cell shape/size." />
+                          </label>
+                          <select
+                            value={config.calculation}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, calculation: e.target.value as "scf" | "relax" | "vcrelax" }))}
+                            disabled={Boolean(lockedPreset)}
+                          >
+                            <option value="scf">SCF (ground state)</option>
+                            <option value="relax">Relax (fixed cell)</option>
+                            <option value="vcrelax">VC-Relax (variable cell)</option>
+                          </select>
+                        </div>
+                      )}
 
                       {/* Relaxation parameters - shown only for relax/vcrelax */}
                       {(config.calculation === "relax" || config.calculation === "vcrelax") && (
@@ -3717,7 +3745,7 @@ export function SCFWizard({
                         </label>
                         {isHubbardRecommended && (
                           <p className="field-hint">
-                            Recommended for {hubbardRecommendationText}. U defaults use saved LRT values when available, otherwise a general 6.0 eV guess.
+                            Recommended for {hubbardRecommendationText}. U keeps any saved run value, otherwise uses a general 6.0 eV guess, and the button lets you pull in a saved LRT value on demand.
                           </p>
                         )}
                       </div>
@@ -3753,7 +3781,12 @@ export function SCFWizard({
                             <label>Hubbard manifolds and values (per element, in eV)</label>
                           </div>
                           <div className="hubbard-grid">
-                            {getUniqueElements().map((el) => (
+                            {getUniqueElements().map((el) => {
+                              const manifold = getHubbardManifoldForElement(el);
+                              const lrtValue = manifold
+                                ? getLatestHubbardLrtValue(el, manifold, (initialCif?.calculations ?? []) as any[])
+                                : null;
+                              return (
                               <div key={el} className="hubbard-row">
                                 <label className="hubbard-element">{el}</label>
                                 <label className="hubbard-field">
@@ -3768,16 +3801,25 @@ export function SCFWizard({
                                 </label>
                                 <label className="hubbard-field hubbard-value-field">
                                   <span>U</span>
-                                  <input type="number" step="0.1" min={0}
-                                    value={config.hubbard_u[el] ?? 0}
-                                    onChange={(e) => setConfig((prev) => ({
-                                      ...prev,
-                                      hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
-                                    }))}
-                                    onInput={() => setManuallyEditedHubbardU((prev) => ({ ...prev, [el]: true }))} />
-                                  {hubbardUDefaultLabels[el] && (
-                                    <small className="hubbard-default-label">{hubbardUDefaultLabels[el]}</small>
-                                  )}
+                                  <span className="hubbard-value-inline">
+                                    <input type="number" step="0.1" min={0}
+                                      value={config.hubbard_u[el] ?? 0}
+                                      onChange={(e) => setConfig((prev) => ({
+                                        ...prev,
+                                        hubbard_u: { ...prev.hubbard_u, [el]: parseFloat(e.target.value) || 0 }
+                                      }))}
+                                      onInput={() => setManuallyEditedHubbardU((prev) => ({ ...prev, [el]: true }))} />
+                                    {lrtValue && (
+                                      <button
+                                        type="button"
+                                        className="secondary-button hubbard-lrt-use-btn"
+                                        onClick={() => applyCalculatedHubbardU(el)}
+                                        title="Populate this element's U from the latest completed Hubbard LRT calculation saved in the project."
+                                      >
+                                        Auto
+                                      </button>
+                                    )}
+                                  </span>
                                 </label>
                                 {config.lda_plus_u_kind > 0 && (
                                   <label className="hubbard-field hubbard-value-field">
@@ -3795,7 +3837,8 @@ export function SCFWizard({
                                   </label>
                                 )}
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         </>
                       )}

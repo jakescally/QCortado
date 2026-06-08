@@ -16,6 +16,7 @@ import {
   setStoredProjectDashboardEngineFilter,
 } from "../lib/projectDashboardSettings";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
+import { parseLatestHubbardOccupations } from "../lib/hubbardOccupations";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
 import {
@@ -747,6 +748,10 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
   }
 
   return tags;
+}
+
+function hasHubbardCorrectionTag(calc: CalculationRun): boolean {
+  return getCalculationTags(calc).some((tag) => tag.label === "DFT+U");
 }
 
 function isOptimizationCalculation(calc: CalculationRun): boolean {
@@ -1592,6 +1597,18 @@ export function ProjectDashboard({
     status: "copied" | "error";
     message: string;
   } | null>(null);
+  const [occupationViewer, setOccupationViewer] = useState<{
+    calcId: string;
+    calcType: string;
+    atoms: Array<{
+      atomIndex: number;
+      label: string;
+      text: string;
+    }>;
+    activeAtomIndex: number | null;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
 
   // Expanded calculation
   const [expandedCalc, setExpandedCalc] = useState<string | null>(null);
@@ -2304,11 +2321,83 @@ export function ProjectDashboard({
     );
   }
 
+  async function handleViewOccupations(calc: CalculationRun) {
+    if (calc.calc_type !== "scf") return;
+
+    setError(null);
+    setInfoMessage(null);
+    setOccupationViewer({
+      calcId: calc.id,
+      calcType: calc.calc_type,
+      atoms: [],
+      activeAtomIndex: null,
+      loading: true,
+      error: null,
+    });
+
+    try {
+      const detailed = await ensureCalculationDetails(calc);
+      const rawOutput = detailed.result?.raw_output || "";
+      const occupations = parseLatestHubbardOccupations(rawOutput);
+      if (!occupations) {
+        setOccupationViewer({
+          calcId: calc.id,
+          calcType: calc.calc_type,
+          atoms: [],
+          activeAtomIndex: null,
+          loading: false,
+          error: "No Hubbard occupations block was found in this SCF output.",
+        });
+        return;
+      }
+
+      setOccupationViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        atoms: occupations.atoms,
+        activeAtomIndex: occupations.atoms[0]?.atomIndex ?? null,
+        loading: false,
+        error: null,
+      });
+    } catch (e) {
+      console.error("Failed to load Hubbard occupations viewer data:", e);
+      setOccupationViewer({
+        calcId: calc.id,
+        calcType: calc.calc_type,
+        atoms: [],
+        activeAtomIndex: null,
+        loading: false,
+        error: String(e),
+      });
+    }
+  }
+
+  function renderViewOccupationsButton(calc: CalculationRun) {
+    if (calc.calc_type !== "scf" || !hasHubbardCorrectionTag(calc)) return null;
+
+    const opening = occupationViewer?.calcId === calc.id && occupationViewer.loading;
+
+    return (
+      <button
+        className="view-logs-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          void handleViewOccupations(calc);
+        }}
+        disabled={opening}
+        title="Open the Hubbard occupations viewer"
+      >
+        {opening ? "Loading Occupations..." : "View Occupations"}
+      </button>
+    );
+  }
+
   function renderSavedFileButtons(calc: CalculationRun) {
     return (
       <>
         {renderViewInputButton(calc)}
         {renderViewLogsButton(calc)}
+        {renderViewOccupationsButton(calc)}
       </>
     );
   }
@@ -4718,9 +4807,14 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                   <div key={calc.id} className="calculation-item bands-item">
                     <div
                       className="calculation-header"
-                      onClick={() => handleCalculationHeaderClick(calc, () =>
-                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id),
-                      )}
+                      onClick={() => handleCalculationHeaderClick(calc, () => {
+                        if (expandedCalc !== calc.id) {
+                          void ensureCalculationDetails(calc).catch((e) => {
+                            console.warn("Failed to load Hubbard LRT detail:", e);
+                          });
+                        }
+                        setExpandedCalc(expandedCalc === calc.id ? null : calc.id);
+                      })}
                     >
                       {renderCalculationSelectionControl(calc)}
                       <div className="calculation-info">
@@ -6659,6 +6753,55 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                   <div className="calculation-log-content">
                     <pre>
                       {fileViewer.files.find((file) => file.path === fileViewer.activePath)?.contents || ""}
+                    </pre>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {occupationViewer && (
+        <div className="dialog-overlay" onClick={() => setOccupationViewer(null)}>
+          <div className="dialog-content dialog-large calculation-logs-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>{occupationViewer.calcType.toUpperCase()} Hubbard Occupations</h2>
+              <div className="calculation-viewer-header-actions">
+                <button className="dialog-close" onClick={() => setOccupationViewer(null)}>
+                  &times;
+                </button>
+              </div>
+            </div>
+            <div className="dialog-body calculation-logs-body">
+              {occupationViewer.loading ? (
+                <p>Loading occupations...</p>
+              ) : occupationViewer.error ? (
+                <div className="error-banner">{occupationViewer.error}</div>
+              ) : occupationViewer.atoms.length === 0 ? (
+                <p>No Hubbard occupations were found for this calculation.</p>
+              ) : (
+                <>
+                  <div className="calculation-log-list">
+                    {occupationViewer.atoms.map((atom) => (
+                      <button
+                        key={atom.atomIndex}
+                        type="button"
+                        className={`calculation-log-tab ${occupationViewer.activeAtomIndex === atom.atomIndex ? "active" : ""}`}
+                        onClick={() => {
+                          setOccupationViewer((current) => (
+                            current ? { ...current, activeAtomIndex: atom.atomIndex } : current
+                          ));
+                        }}
+                      >
+                        <span>{atom.label}</span>
+                        <small>Hubbard atom</small>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="calculation-log-content">
+                    <pre>
+                      {occupationViewer.atoms.find((atom) => atom.atomIndex === occupationViewer.activeAtomIndex)?.text || ""}
                     </pre>
                   </div>
                 </>
