@@ -618,6 +618,13 @@ function AppInner() {
       document.documentElement.removeAttribute("data-app-chrome");
     };
   }, [currentView, isHpcActivityPopout]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-current-view", currentView);
+    return () => {
+      document.documentElement.removeAttribute("data-current-view");
+    };
+  }, [currentView]);
   const editingHpcProfile = useMemo(
     () => hpcProfiles.find((profile) => profile.id === editingHpcProfileId) ?? null,
     [hpcProfiles, editingHpcProfileId],
@@ -1689,8 +1696,7 @@ function AppInner() {
     }
   }
 
-  function handleNavigateToTask(taskId: string, taskType: string) {
-    setReconnectTaskId(taskId);
+  function handleNavigateToTask(taskId: string, taskType: string): boolean {
     const kindMap: Record<string, CalculationKind> = {
       scf: "scf",
       bands: "bands",
@@ -1721,9 +1727,41 @@ function AppInner() {
     };
     const kind = kindMap[taskType];
     const fallbackView = fallbackViewMap[taskType];
-    if (kind && fallbackView) {
-      openEngineWorkflow(taskType.startsWith("wien2k_") ? "wien2k" : "qe", kind, fallbackView);
-    }
+    if (!kind || !fallbackView) return false;
+
+    const route = resolveEngineWorkflowHostRoute(taskType.startsWith("wien2k_") ? "wien2k" : "qe", kind);
+    if (!route) return false;
+
+    const canOpen = canRenderEngineWorkflowHost({
+      route,
+      runtime: {
+        qePath,
+        defaultSmearing: qeDefaults.smearing,
+        executionMode,
+        onExecutionModeChange: handleExecutionModeChange,
+        activeHpcProfile,
+      },
+      contexts: {
+        scf: scfContext,
+        bands: bandsContext,
+        dos: dosContext,
+        wannier: wannierContext,
+        fermiSurface: fermiSurfaceContext,
+        hubbardLrt: hubbardLrtContext,
+        phonons: phononsContext,
+        transport: transportContext,
+        epw: epwContext,
+        structureSetup: wien2kStructureContext,
+        wien2kScf: scfContext,
+      },
+      reconnectTaskId: taskId,
+    });
+    if (!canOpen) return false;
+
+    setReconnectTaskId(taskId);
+    setActiveWorkflowRoute(route);
+    setCurrentView(route.view);
+    return true;
   }
 
   function clearWorkflowContext(view: EngineWorkflowView) {
@@ -3347,8 +3385,9 @@ function AppInner() {
         focusedTaskId={taskDrawerFocusId}
         onClose={() => setShowTaskDrawer(false)}
         onNavigateToTask={(taskId, taskType) => {
-          setShowTaskDrawer(false);
-          handleNavigateToTask(taskId, taskType);
+          const opened = handleNavigateToTask(taskId, taskType);
+          if (opened) setShowTaskDrawer(false);
+          return opened;
         }}
       />
       {activeDialogModal}

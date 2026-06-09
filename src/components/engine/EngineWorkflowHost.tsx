@@ -147,9 +147,9 @@ export function canRenderEngineWorkflowHost({
 }: Pick<EngineWorkflowHostProps, "route" | "runtime" | "contexts" | "reconnectTaskId">): boolean {
   if (route.engineId === "wien2k") {
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
-    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf || reconnectTaskId);
-    if (route.view === "bands-wizard") return Boolean(contexts.bands || reconnectTaskId);
-    if (route.view === "fermi-surface-wizard") return Boolean(contexts.fermiSurface || reconnectTaskId);
+    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
+    if (route.view === "bands-wizard") return Boolean(contexts.bands);
+    if (route.view === "fermi-surface-wizard") return Boolean(contexts.fermiSurface);
     return false;
   }
   if (route.engineId !== "qe") {

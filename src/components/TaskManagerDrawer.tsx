@@ -26,7 +26,7 @@ interface TaskManagerDrawerProps {
   requestedFilter: TaskManagerFilter;
   focusedTaskId: string | null;
   onClose: () => void;
-  onNavigateToTask?: (taskId: string, taskType: string) => void;
+  onNavigateToTask?: (taskId: string, taskType: string) => boolean;
 }
 
 const FILTERS: Array<{ id: TaskManagerFilter; label: string }> = [
@@ -80,6 +80,7 @@ export function TaskManagerDrawer({
   const [filter, setFilter] = useState<TaskManagerFilter>(requestedFilter);
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
+  const [navigationError, setNavigationError] = useState<string | null>(null);
 
   const entries = useMemo(
     () => buildTaskManagerEntries(tasks.values(), queueItems),
@@ -107,6 +108,7 @@ export function TaskManagerDrawer({
 
   useEffect(() => {
     setConfirmingCancelId(null);
+    setNavigationError(null);
   }, [selectedEntry?.id]);
 
   const queuedEntries = entries.filter((entry) => entry.group === "queued");
@@ -137,7 +139,11 @@ export function TaskManagerDrawer({
   }
 
   function handleOpenRun(entry: TaskManagerEntry) {
-    if (entry.taskId) onNavigateToTask?.(entry.taskId, entry.taskType);
+    if (!entry.taskId || !onNavigateToTask) return;
+    const opened = onNavigateToTask(entry.taskId, entry.taskType);
+    if (!opened) {
+      setNavigationError("This run no longer has enough project context to reopen its workflow. Its status, log, and artifacts remain available here.");
+    }
   }
 
   return (
@@ -274,6 +280,7 @@ export function TaskManagerDrawer({
                 )}
 
                 {selectedEntry.error && <div className="task-detail-error">{selectedEntry.error}</div>}
+                {navigationError && <div className="task-detail-error">{navigationError}</div>}
 
                 {selectedEntry.queueItemId && selectedEntry.group === "queued" && (
                   <div className="task-queue-controls">

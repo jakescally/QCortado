@@ -124,6 +124,13 @@ function ViewerAppInner() {
   }, []);
 
   useEffect(() => {
+    document.documentElement.setAttribute("data-current-view", currentView);
+    return () => {
+      document.documentElement.removeAttribute("data-current-view");
+    };
+  }, [currentView]);
+
+  useEffect(() => {
     if (!activeHpcProfileId) return;
     void runSync(false);
     const handle = window.setInterval(() => {

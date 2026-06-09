@@ -50,6 +50,15 @@ html, body {
   scroll-padding-bottom: var(--floating-content-clearance);
 }
 
+html[data-current-view="project-dashboard"] #root {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+html[data-current-view="project-dashboard"] #root::-webkit-scrollbar {
+  display: none;
+}
+
 html[data-app-chrome="topbar"] #root {
   padding-top: var(--app-top-bar-height);
   scroll-padding-top: var(--app-top-bar-height);
