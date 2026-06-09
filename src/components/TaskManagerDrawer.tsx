@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -81,6 +81,7 @@ export function TaskManagerDrawer({
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
   const [navigationError, setNavigationError] = useState<string | null>(null);
+  const appliedFocusedTaskIdRef = useRef<string | null>(null);
 
   const entries = useMemo(
     () => buildTaskManagerEntries(tasks.values(), queueItems),
@@ -101,9 +102,16 @@ export function TaskManagerDrawer({
   }, [isOpen, requestedFilter]);
 
   useEffect(() => {
-    if (!isOpen || !focusedTaskId) return;
+    if (!isOpen || !focusedTaskId) {
+      appliedFocusedTaskIdRef.current = null;
+      return;
+    }
+    if (appliedFocusedTaskIdRef.current === focusedTaskId) return;
     const focused = entries.find((entry) => entry.taskId === focusedTaskId);
-    if (focused) setSelectedEntryId(focused.id);
+    if (focused) {
+      setSelectedEntryId(focused.id);
+      appliedFocusedTaskIdRef.current = focusedTaskId;
+    }
   }, [entries, focusedTaskId, isOpen]);
 
   useEffect(() => {

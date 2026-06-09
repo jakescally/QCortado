@@ -4218,6 +4218,95 @@ pub async fn list_multiview_band_calculations(
     .map_err(|e| format!("Multiview scan task failed to join: {}", e))?
 }
 
+/// Loads only the requested saved band calculations from one project for the
+/// project-dashboard selection flow.
+#[tauri::command]
+pub async fn get_selected_multiview_band_calculations(
+    app: AppHandle,
+    project_id: String,
+    calc_ids: Vec<String>,
+) -> Result<Vec<BandsMultiviewCalculation>, String> {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let projects_dir = ensure_projects_dir(&app_handle)?;
+        let project_dir = projects_dir.join(&project_id);
+        if !project_dir.exists() {
+            return Err(format!("Project not found: {}", project_id));
+        }
+
+        let project = read_project_json(&project_dir.join("project.json"))?;
+        let folder_name = project.folder_id.as_ref().and_then(|folder_id| {
+            load_project_folders(&app_handle)
+                .ok()?
+                .into_iter()
+                .find(|folder| folder.id == *folder_id)
+                .map(|folder| folder.name)
+        });
+        let mut calculations = Vec::new();
+
+        for calc_id in calc_ids {
+            let Some((variant, summary_calc)) = project.cif_variants.iter().find_map(|variant| {
+                variant
+                    .calculations
+                    .iter()
+                    .find(|calc| calc.id == calc_id)
+                    .map(|calc| (variant, calc))
+            }) else {
+                continue;
+            };
+            if normalize_summary_calc_type(&summary_calc.calc_type) != Some("bands") {
+                continue;
+            }
+            let Some(completed_at) = summary_calc.completed_at.as_ref() else {
+                continue;
+            };
+
+            let mut full_calc =
+                match load_full_calculation_from_disk(&project_dir, &summary_calc.id)? {
+                    Some(calc) => calc,
+                    None => continue,
+                };
+            merge_summary_into_full_calculation(&mut full_calc, summary_calc);
+            let Some(result) = full_calc.result.as_ref() else {
+                continue;
+            };
+            let Some(raw_band_data) = result.band_data.clone() else {
+                continue;
+            };
+            let band_data: BandData = serde_json::from_value(raw_band_data).map_err(|e| {
+                format!(
+                    "Failed to parse saved band data for {}: {}",
+                    full_calc.id, e
+                )
+            })?;
+
+            calculations.push(BandsMultiviewCalculation {
+                engine_id: full_calc.engine_id,
+                folder_id: project.folder_id.clone(),
+                folder_name: folder_name.clone(),
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                cif_id: variant.id.clone(),
+                cif_filename: variant.filename.clone(),
+                cif_formula: variant.formula.clone(),
+                calc_id: full_calc.id.clone(),
+                name: full_calc.name.clone(),
+                parameters: full_calc.parameters.clone(),
+                tags: full_calc.tags.clone(),
+                started_at: full_calc.started_at.clone(),
+                completed_at: completed_at.clone(),
+                storage_bytes: full_calc.storage_bytes,
+                band_data,
+                scf_fermi_energy: result.fermi_energy,
+            });
+        }
+
+        Ok(calculations)
+    })
+    .await
+    .map_err(|e| format!("Selected multiview task failed to join: {}", e))?
+}
+
 /// Creates a new project
 #[tauri::command]
 pub fn create_project(

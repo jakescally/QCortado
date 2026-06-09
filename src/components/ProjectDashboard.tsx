@@ -60,6 +60,7 @@ import { EditProjectDialog } from "./EditProjectDialog";
 import { InfoTooltip } from "./InfoTooltip";
 import { MagnetismViewer } from "./MagnetismViewer";
 import type { TransportResult } from "../lib/transport";
+import type { BandsMultiviewCalculation } from "./BandsMultiview";
 
 interface QEResult {
   converged: boolean;
@@ -187,6 +188,7 @@ interface ProjectDashboardProps {
   onRunEPW: (engineId: EngineId, cifId: string, crystalData: CrystalData, calculations: CalculationRun[]) => void;
   onViewPhonons: (phononData: any, viewMode: "bands" | "dos") => void;
   onViewEPW: (epwData: any, rawOutput?: string | null) => void;
+  onOpenBandsMultiview: (calculations: BandsMultiviewCalculation[]) => void;
 }
 
 type CalcTagType = "info" | "feature" | "special" | "geometry" | "engine";
@@ -1522,6 +1524,7 @@ export function ProjectDashboard({
   onRunEPW,
   onViewPhonons,
   onViewEPW,
+  onOpenBandsMultiview,
 }: ProjectDashboardProps) {
   const [cellViewMode, setCellViewMode] = useState<CellViewMode>("conventional");
   const [project, setProject] = useState<Project | null>(null);
@@ -1567,6 +1570,7 @@ export function ProjectDashboard({
   const [selectedCalcIds, setSelectedCalcIds] = useState<Set<string>>(() => new Set());
   const [showBulkDeleteCalcDialog, setShowBulkDeleteCalcDialog] = useState(false);
   const [isBulkDeletingCalc, setIsBulkDeletingCalc] = useState(false);
+  const [isOpeningSelectedBandsMultiview, setIsOpeningSelectedBandsMultiview] = useState(false);
   const [calculationNameEditor, setCalculationNameEditor] = useState<{ calcId: string; calcType: string } | null>(null);
   const [calculationNameDraft, setCalculationNameDraft] = useState("");
   const [isSavingCalculationName, setIsSavingCalculationName] = useState(false);
@@ -2760,7 +2764,6 @@ export function ProjectDashboard({
   }
 
   function enterMultiDeleteMode() {
-    if (readOnly) return;
     setSelectedCalcIds(new Set());
     setIsMultiDeleteMode(true);
     setError(null);
@@ -2821,6 +2824,31 @@ export function ProjectDashboard({
         />
       </label>
     );
+  }
+
+  async function openSelectedBandsMultiview() {
+    if (selectedBandsCalculations.length < 2 || isOpeningSelectedBandsMultiview) return;
+    setIsOpeningSelectedBandsMultiview(true);
+    setError(null);
+    try {
+      const calculations = await invoke<BandsMultiviewCalculation[]>(
+        "get_selected_multiview_band_calculations",
+        {
+          projectId,
+          calcIds: selectedBandsCalculations.map((calc) => calc.id),
+        },
+      );
+      if (calculations.length < 2) {
+        setError("At least two selected band calculations must contain saved band data.");
+        return;
+      }
+      onOpenBandsMultiview(calculations);
+    } catch (e) {
+      console.error("Failed to open selected band calculations in multiview:", e);
+      setError(`Failed to open selected band calculations: ${e}`);
+    } finally {
+      setIsOpeningSelectedBandsMultiview(false);
+    }
   }
 
   async function handleConfirmDeleteCalc() {
@@ -3808,6 +3836,12 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
     [filteredVariantCalculations, selectedCalcIds],
   );
   const selectedCalculationCount = selectedCalculationsForDeletion.length;
+  const selectedBandsCalculations = useMemo<CalculationRun[]>(
+    () => selectedCalculationsForDeletion.filter(
+      (calc) => calc.calc_type === "bands" && Boolean(calc.completed_at),
+    ),
+    [selectedCalculationsForDeletion],
+  );
   const visibleCalculationCount = filteredVariantCalculations.length;
   const allVariantCalculations = useMemo<CalculationRun[]>(
     () => selectedVariant?.calculations ?? [],
@@ -4190,12 +4224,22 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                 </button>
                 <button
                   type="button"
-                  className="multi-delete-danger-btn"
-                  onClick={() => setShowBulkDeleteCalcDialog(true)}
-                  disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                  className="multi-delete-action-btn"
+                  onClick={() => void openSelectedBandsMultiview()}
+                  disabled={isBulkDeletingCalc || isOpeningSelectedBandsMultiview || selectedBandsCalculations.length < 2}
                 >
-                  Delete Selected
+                  {isOpeningSelectedBandsMultiview ? "Opening..." : "Bands Multiview"}
                 </button>
+                {!readOnly && (
+                  <button
+                    type="button"
+                    className="multi-delete-danger-btn"
+                    onClick={() => setShowBulkDeleteCalcDialog(true)}
+                    disabled={isBulkDeletingCalc || selectedCalculationCount === 0}
+                  >
+                    Delete Selected
+                  </button>
+                )}
                 <button
                   type="button"
                   className="multi-delete-action-btn"
@@ -4229,7 +4273,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
           </div>
 
           <div className="dashboard-header-actions project-command-actions">
-            {showStructureControls && !isMultiDeleteMode && !readOnly && allVariantCalculations.length > 0 && (
+            {showStructureControls && !isMultiDeleteMode && allVariantCalculations.length > 0 && (
               <button
                 type="button"
                 className="multi-delete-action-btn project-header-select-btn"

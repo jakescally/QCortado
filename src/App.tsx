@@ -446,6 +446,10 @@ function AppInner() {
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
     useState<BandsMultiviewCalculation[] | undefined>(undefined);
+  const [bandsMultiviewReturnView, setBandsMultiviewReturnView] =
+    useState<"project-browser" | "project-dashboard">("project-browser");
+  const [openBandsMultiviewInitialCalculationsInPreview, setOpenBandsMultiviewInitialCalculationsInPreview] =
+    useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showNavigationDrawer, setShowNavigationDrawer] = useState(false);
   const [showTaskDrawer, setShowTaskDrawer] = useState(false);
@@ -3889,6 +3893,8 @@ function AppInner() {
           }}
           onOpenBandsMultiview={(initialCalculations) => {
             setBandsMultiviewInitialCalculations(initialCalculations);
+            setBandsMultiviewReturnView("project-browser");
+            setOpenBandsMultiviewInitialCalculationsInPreview(false);
             setCurrentView("bands-multiview");
           }}
         />
@@ -3901,11 +3907,14 @@ function AppInner() {
     return (
       <>
         <BandsMultiview
+          backLabel={bandsMultiviewReturnView === "project-dashboard" ? "Back to Project" : "Back to Projects"}
           onBack={() => {
             setBandsMultiviewInitialCalculations(undefined);
-            setCurrentView("project-browser");
+            setOpenBandsMultiviewInitialCalculationsInPreview(false);
+            setCurrentView(bandsMultiviewReturnView);
           }}
           initialCalculations={bandsMultiviewInitialCalculations}
+          openInitialCalculationsInPreview={openBandsMultiviewInitialCalculationsInPreview}
         />
         {appChrome}
       </>
@@ -4067,6 +4076,12 @@ function AppInner() {
             });
             setCurrentView("epw-viewer");
           }}
+          onOpenBandsMultiview={(initialCalculations) => {
+            setBandsMultiviewInitialCalculations(initialCalculations);
+            setBandsMultiviewReturnView("project-dashboard");
+            setOpenBandsMultiviewInitialCalculationsInPreview(true);
+            setCurrentView("bands-multiview");
+          }}
         />
         {appChrome}
       </>
@@ -4084,6 +4099,8 @@ function AppInner() {
         }}
         onOpenBandsMultiview={(initialCalculations) => {
           setBandsMultiviewInitialCalculations(initialCalculations);
+          setBandsMultiviewReturnView("project-browser");
+          setOpenBandsMultiviewInitialCalculationsInPreview(false);
           setCurrentView("bands-multiview");
         }}
       />

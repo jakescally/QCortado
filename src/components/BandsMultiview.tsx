@@ -45,7 +45,9 @@ export interface BandsMultiviewCalculation {
 
 interface BandsMultiviewProps {
   onBack: () => void;
+  backLabel?: string;
   initialCalculations?: BandsMultiviewCalculation[] | null;
+  openInitialCalculationsInPreview?: boolean;
 }
 
 export interface BandsMultiviewScanProgress {
@@ -242,7 +244,9 @@ function buildFolderGroups(calculations: BandsMultiviewCalculation[]): Multiview
 
 export function BandsMultiview({
   onBack,
+  backLabel = "Back to Projects",
   initialCalculations,
+  openInitialCalculationsInPreview = false,
 }: BandsMultiviewProps) {
   const [calculations, setCalculations] = useState<BandsMultiviewCalculation[]>(
     initialCalculations ?? [],
@@ -256,8 +260,12 @@ export function BandsMultiview({
     scanned_projects: 0,
     total_projects: 0,
   });
-  const [showSelector, setShowSelector] = useState(true);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showSelector, setShowSelector] = useState(!openInitialCalculationsInPreview);
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    openInitialCalculationsInPreview
+      ? (initialCalculations ?? []).map((calc) => calc.calc_id)
+      : [],
+  );
   const [sharedSettings, setSharedSettings] = useState<BandPlotSharedSettings>(
     DEFAULT_SHARED_SETTINGS,
   );
@@ -285,9 +293,13 @@ export function BandsMultiview({
       return;
     }
     setCalculations(initialCalculations ?? []);
+    if (openInitialCalculationsInPreview) {
+      setSelectedIds((initialCalculations ?? []).map((calc) => calc.calc_id));
+      setShowSelector(false);
+    }
     setIsLoading(false);
     setError(null);
-  }, [initialCalculations]);
+  }, [initialCalculations, openInitialCalculationsInPreview]);
 
   useEffect(() => {
     if (initialCalculations !== undefined) {
@@ -695,7 +707,7 @@ export function BandsMultiview({
     <div className="bands-viewer-container bands-multiview-screen">
       <AppHeaderPortal className="bands-viewer-header bands-multiview-header">
         <button className="back-button" onClick={onBack}>
-          ← Back to Projects
+          ← {backLabel}
         </button>
         <h2>Band Multiview</h2>
         <div className="bands-multiview-header-actions">

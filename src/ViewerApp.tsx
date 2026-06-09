@@ -80,6 +80,10 @@ function ViewerAppInner() {
   const [projectBrowserFolderId, setProjectBrowserFolderId] = useState<string | null>(null);
   const [bandsMultiviewInitialCalculations, setBandsMultiviewInitialCalculations] =
     useState<BandsMultiviewCalculation[] | undefined>(undefined);
+  const [bandsMultiviewReturnView, setBandsMultiviewReturnView] =
+    useState<"project-browser" | "project-dashboard">("project-browser");
+  const [openBandsMultiviewInitialCalculationsInPreview, setOpenBandsMultiviewInitialCalculationsInPreview] =
+    useState(false);
   const [showHpcSetupWizard, setShowHpcSetupWizard] = useState(false);
   const [editingHpcProfileId, setEditingHpcProfileId] = useState<string | null>(null);
 
@@ -249,6 +253,8 @@ function ViewerAppInner() {
           }}
           onOpenBandsMultiview={(initialCalculations) => {
             setBandsMultiviewInitialCalculations(initialCalculations);
+            setBandsMultiviewReturnView("project-browser");
+            setOpenBandsMultiviewInitialCalculationsInPreview(false);
             setCurrentView("bands-multiview");
           }}
         />
@@ -261,11 +267,14 @@ function ViewerAppInner() {
     return (
       <>
         <BandsMultiview
+          backLabel={bandsMultiviewReturnView === "project-dashboard" ? "Back to Project" : "Back to Projects"}
           onBack={() => {
             setBandsMultiviewInitialCalculations(undefined);
-            setCurrentView("project-browser");
+            setOpenBandsMultiviewInitialCalculationsInPreview(false);
+            setCurrentView(bandsMultiviewReturnView);
           }}
           initialCalculations={bandsMultiviewInitialCalculations}
+          openInitialCalculationsInPreview={openBandsMultiviewInitialCalculationsInPreview}
         />
         {appChrome}
       </>
@@ -328,6 +337,12 @@ function ViewerAppInner() {
               rawOutput: rawOutput ?? null,
             });
             setCurrentView("epw-viewer");
+          }}
+          onOpenBandsMultiview={(initialCalculations) => {
+            setBandsMultiviewInitialCalculations(initialCalculations);
+            setBandsMultiviewReturnView("project-dashboard");
+            setOpenBandsMultiviewInitialCalculationsInPreview(true);
+            setCurrentView("bands-multiview");
           }}
         />
         {appChrome}
