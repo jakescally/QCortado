@@ -104,6 +104,8 @@ pub struct Wien2kBandsSession {
     pub remote_install_root: String,
     pub hpc_profile_id: String,
     pub spin_mode: Wien2kSpinMode,
+    #[serde(default)]
+    pub source_spin_orbit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fermi_energy_ev: Option<f64>,
     pub phase: Wien2kBandsSessionPhase,

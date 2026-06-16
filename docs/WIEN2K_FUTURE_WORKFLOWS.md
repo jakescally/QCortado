@@ -139,8 +139,9 @@ initialization review from the SCF submission:
    and scalar or basic spin-polarized mode.
 3. Submit `init_lapw -b` without `-red`; batch initialization validates the
    accepted structure and produces active inputs and starting densities.
-4. Review initialization logs/artifacts, then submit serial `run_lapw` or
-   `runsp_lapw` with convergence controls.
+4. Review initialization logs/artifacts, then submit `run_lapw` or
+   `runsp_lapw` with convergence controls using either single-node OpenMP or
+   Slurm-backed k-point parallelization.
 5. Parse `case.scf`/`case.dayfile`, save native artifacts plus a normalized
    SCF summary, and offer `-NI` continuation for non-converged attempts.
 
@@ -266,7 +267,7 @@ Remote workflow PRs should also include manual validation notes for:
 ## Non-Goals For The WIEN2k V1 Workflows
 
 - Do not add RMT changes, `sgroup` review, or structure editing to SCF.
-- Do not implement parallel `.machines`, AFM, SOC, or `+U` configuration in SCF v1.
+- Do not add AFM configuration in SCF v1.
 - Do not add Wien2k settings to the current QE setup UI.
 - Do not add placeholder Wien2k commands that cannot run.
 - Do not change QE calculation behavior.

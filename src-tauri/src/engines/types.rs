@@ -63,6 +63,7 @@ pub enum EngineExecutionMode {
 #[serde(rename_all = "snake_case")]
 pub enum CalculationKind {
     Scf,
+    Soc,
     StructureOptimization,
     Bands,
     Dos,
@@ -81,6 +82,8 @@ pub enum CalculationKind {
 pub enum EngineTaskKind {
     /// A pw.x or engine-native self-consistent-field calculation.
     Scf,
+    /// A spin-orbit-coupled self-consistent-field calculation.
+    Soc,
     /// A relax/vc-relax or engine-native structural optimization task.
     StructureOptimization,
     Bands,
@@ -106,6 +109,7 @@ impl EngineTaskKind {
     pub const fn calculation_kind(self) -> Option<CalculationKind> {
         match self {
             Self::Scf => Some(CalculationKind::Scf),
+            Self::Soc => Some(CalculationKind::Soc),
             Self::StructureOptimization => Some(CalculationKind::StructureOptimization),
             Self::Bands => Some(CalculationKind::Bands),
             Self::Dos => Some(CalculationKind::Dos),
@@ -126,6 +130,7 @@ impl From<CalculationKind> for EngineTaskKind {
     fn from(kind: CalculationKind) -> Self {
         match kind {
             CalculationKind::Scf => Self::Scf,
+            CalculationKind::Soc => Self::Soc,
             CalculationKind::StructureOptimization => Self::StructureOptimization,
             CalculationKind::Bands => Self::Bands,
             CalculationKind::Dos => Self::Dos,

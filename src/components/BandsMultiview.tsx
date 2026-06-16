@@ -22,6 +22,7 @@ import {
 } from "./BandPlot";
 import { InfoTooltip } from "./InfoTooltip";
 import type { EngineId } from "../lib/engines/types";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 
 export interface BandsMultiviewCalculation {
   folder_id?: string | null;
@@ -155,6 +156,10 @@ function getCalcTagClass(tag: { label: string; type: CalcTagType }): string {
 }
 
 function getBandsTags(calc: BandsMultiviewCalculation): { label: string; type: CalcTagType }[] {
+  return getUnifiedCalculationTagBadges(
+    { ...calc, calc_type: "bands" },
+    { legacyFallback: true, calcId: calc.calc_id },
+  ) as { label: string; type: CalcTagType }[];
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: CalcTagType) => {
@@ -180,7 +185,7 @@ function getBandsTags(calc: BandsMultiviewCalculation): { label: string; type: C
   }
 
   const hasProjectionTag = Array.isArray(calc.tags)
-    && calc.tags.some((tag) => {
+    && (calc.tags ?? []).some((tag) => {
       const normalized = String(tag).trim().toLowerCase();
       return normalized === "proj" || normalized === "orb";
     });

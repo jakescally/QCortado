@@ -29,6 +29,7 @@ import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import { InfoTooltip } from "./InfoTooltip";
 import type { EngineId } from "../lib/engines/types";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 
 interface CalculationRun {
   id: string;
@@ -130,6 +131,11 @@ function getCalculationTags(
   calc: CalculationRun,
   downloadedIds?: Set<string>,
 ): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
+  return getUnifiedCalculationTagBadges(calc, {
+    legacyFallback: true,
+    downloadedIds,
+    calcId: calc.id,
+  }) as { label: string; type: "info" | "feature" | "special" | "geometry" }[];
   const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
   const phononReady = calc.calc_type === "scf" && isPhononReadyScf(params, calc.tags);
@@ -140,7 +146,7 @@ function getCalculationTags(
   };
 
   if (calc.tags) {
-    for (const tag of calc.tags) {
+    for (const tag of calc.tags ?? []) {
       if (tag === "phonon-ready") {
         if (phononReady) pushTag("Phonon-Ready", "special");
       } else if (tag === "structure-optimized") {

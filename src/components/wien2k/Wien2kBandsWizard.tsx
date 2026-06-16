@@ -30,6 +30,7 @@ import { defaultCpuResources } from "../../lib/hpcConfig";
 import type { CrystalData, HpcProfile, SlurmResourceRequest } from "../../lib/types";
 import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
 import { formatCalculationSourceLabel, getCalculationName } from "../../lib/calculationNames";
+import { getCalculationTagBadges, getCalcTagClass } from "../../lib/calculationTags";
 import { useTaskContext } from "../../lib/TaskContext";
 
 interface CalculationRun {
@@ -156,6 +157,15 @@ function sourceSpinMode(calc: CalculationRun | null): "non_spin_polarized" | "sp
   return value === "spin_polarized" ? "spin_polarized" : "non_spin_polarized";
 }
 
+function sourceHasSpinOrbit(calc: CalculationRun | null): boolean {
+  return Boolean(
+    calc?.parameters?.spin_orbit
+    || calc?.parameters?.spinOrbit
+    || calc?.parameters?.soc
+    || calc?.tags?.includes("soc"),
+  );
+}
+
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, Math.round(value)));
@@ -232,6 +242,7 @@ export function Wien2kBandsWizard({
   const runRemoteNode = activeTask?.hpc.remote_node ?? remoteNode;
   const fermiEnergy = sourceFermi(selectedScf);
   const selectedSpinMode = session?.spinMode ?? sourceSpinMode(selectedScf);
+  const selectedSourceHasSpinOrbit = sourceHasSpinOrbit(selectedScf);
   const currentStepIndex = STEPS.findIndex((entry) => entry.id === step);
   const runStepActive = step === "run" && runIsActive;
   const projectionOptions = useMemo(
@@ -323,6 +334,12 @@ export function Wien2kBandsWizard({
   }, [selectedSpinMode, spinChannel]);
 
   useEffect(() => {
+    if (!selectedSourceHasSpinOrbit) return;
+    setSpinOrbit(true);
+    setSpinChannel(selectedSpinMode === "spin_polarized" ? "up" : "none");
+  }, [selectedSourceHasSpinOrbit, selectedSpinMode]);
+
+  useEffect(() => {
     if (characterAtom > 0 && !runLapw2Qtl) {
       setRunLapw2Qtl(true);
     }
@@ -380,7 +397,8 @@ export function Wien2kBandsWizard({
       buildWien2kBandsOpenMpPreview(hpcResources),
       "rm -f lapw1.error lapw2.error irrep.error spaghetti.error *.error",
       ...(diagnosticLog ? ["# QCortado diagnostic tails enabled"] : []),
-      `x lapw1 -band${spinArg}${spinOrbitArg}`,
+      `x lapw1 -band${spinArg}`,
+      ...(spinOrbit ? [`x lapwso${spinChannel === "none" ? "" : " -up"}`] : []),
       ...(runLapw2Qtl ? [`x lapw2 -qtl -band${spinArg}${spinOrbitArg}`] : []),
       ...(runIrrep ? [`x irrep -band${spinArg}`] : []),
       `x spaghetti${spinArg}${spinOrbitArg}`,
@@ -393,6 +411,7 @@ export function Wien2kBandsWizard({
     const next = await startWien2kBandsSession(projectId, cifId, selectedScf.id);
     setSession(next);
     setSpinChannel(next.spinMode === "spin_polarized" ? "up" : "none");
+    setSpinOrbit(next.sourceSpinOrbit);
     setOutputLines([`Staged ${next.caseName} from source SCF ${selectedScf.id.slice(0, 8)}.`]);
     await attachOutputListener(next.sessionId);
     return next;
@@ -573,8 +592,11 @@ export function Wien2kBandsWizard({
                   {summary?.fermiEnergyEv != null && <span>E_F = {summary.fermiEnergyEv.toFixed(3)} eV</span>}
                 </div>
                 <div className="calc-tags">
-                  <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>
-                  <span className="calc-tag calc-tag-special">WIEN2k</span>
+                  {getCalculationTagBadges(scf as any, { legacyFallback: true, calcId: scf.id }).map((tag, i) => (
+                    <span key={`${tag.label}-${i}`} className={getCalcTagClass(tag)}>
+                      {tag.label}
+                    </span>
+                  ))}
                 </div>
               </div>
             );
@@ -824,12 +846,13 @@ export function Wien2kBandsWizard({
                   </span>
                 </label>
                 <label className="option-checkbox">
-                  <input type="checkbox" checked={spinOrbit} onChange={(event) => setSpinOrbit(event.target.checked)} />
+                  <input type="checkbox" checked={spinOrbit} disabled={selectedSourceHasSpinOrbit} onChange={(event) => setSpinOrbit(event.target.checked)} />
                   <span>
                     Enable spin-orbit coupling
                     <Wien2kFieldLabel tooltip="Passes `-so` to the band commands. Use only when the source case was prepared for spin-orbit coupling and contains the required SO files."> </Wien2kFieldLabel>
                   </span>
                 </label>
+                {selectedSourceHasSpinOrbit && <p className="wien2k-hint">SOC is required because the selected source is a converged SOC calculation.</p>}
               </>
             ), { status: prepared ? "Prepared" : undefined })}
             {renderSection("logging", "Run Logging", (

@@ -200,6 +200,356 @@ pub struct CifData {
     pub crystal_data: serde_json::Value,
 }
 
+fn calculation_tag_display_key(tag: &str) -> String {
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "phonon-ready" => "phonon-ready".to_string(),
+        "structure-optimized" => "optimized".to_string(),
+        "wien2k-native" => "wien2k".to_string(),
+        "orb" => "proj".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn push_calculation_tag(tags: &mut Vec<String>, tag: impl AsRef<str>) {
+    let trimmed = tag.as_ref().trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("pinned") {
+        return;
+    }
+    let key = calculation_tag_display_key(trimmed);
+    if !tags
+        .iter()
+        .any(|existing| calculation_tag_display_key(existing) == key)
+    {
+        tags.push(trimmed.to_string());
+    }
+}
+
+fn json_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value {
+        Some(serde_json::Value::Number(number)) => number.as_f64(),
+        Some(serde_json::Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_bool(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(text)) => text.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn json_grid_tag(value: Option<&serde_json::Value>, suffix: &str) -> Option<String> {
+    let values = value?.as_array()?;
+    if values.len() != 3 {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(3);
+    for value in values {
+        let number = value.as_f64().or_else(|| value.as_str()?.parse::<f64>().ok())?;
+        if !number.is_finite() || number <= 0.0 {
+            return None;
+        }
+        if (number.fract()).abs() < f64::EPSILON {
+            parts.push(format!("{}", number as i64));
+        } else {
+            parts.push(format!("{}", number));
+        }
+    }
+    Some(format!("{}×{}×{}{}", parts[0], parts[1], parts[2], suffix))
+}
+
+fn threshold_tag(value: Option<&serde_json::Value>) -> Option<String> {
+    let number = json_number(value)?;
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+    if number < 0.001 {
+        Some(format!("{:.0e}", number))
+    } else {
+        Some(format!("{}", number))
+    }
+}
+
+fn calculation_uses_hpc_value(parameters: &serde_json::Value, result: Option<&QEResult>) -> bool {
+    let backend = parameters
+        .get("execution_backend")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if backend == "hpc" {
+        return true;
+    }
+    if parameters.get("remote_job_id").is_some()
+        || parameters.get("remote_workdir").is_some()
+        || parameters.get("remote_project_path").is_some()
+    {
+        return true;
+    }
+    result
+        .map(|result| result.raw_output.contains("HPC_STAGE|") || result.raw_output.contains("HPC_CMD|"))
+        .unwrap_or(false)
+}
+
+fn calculation_artifacts_downloaded(parameters: &serde_json::Value) -> bool {
+    if json_bool(parameters.get("artifacts_downloaded_full")) {
+        return true;
+    }
+    parameters
+        .get("artifact_sync_mode")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().eq_ignore_ascii_case("full"))
+        .unwrap_or(false)
+}
+
+fn uses_optimized_structure(parameters: &serde_json::Value, tags: &[String]) -> bool {
+    let structure_source = parameters.get("structure_source");
+    if matches!(structure_source.and_then(|value| value.as_str()), Some("optimization")) {
+        return true;
+    }
+    if structure_source
+        .and_then(|value| value.get("type"))
+        .and_then(|value| value.as_str())
+        .map(|value| value == "optimization")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    tags.iter()
+        .any(|tag| tag == "geometry" || tag == "structure-optimized")
+}
+
+fn is_phonon_ready_scf(parameters: &serde_json::Value, tags: &[String]) -> bool {
+    json_number(parameters.get("conv_thr"))
+        .map(|value| value > 0.0 && value <= 1e-12)
+        .unwrap_or(false)
+        && uses_optimized_structure(parameters, tags)
+}
+
+fn is_wannier_ready_scf(parameters: &serde_json::Value, result: Option<&QEResult>) -> bool {
+    if !result.map(|result| result.converged).unwrap_or(false) {
+        return false;
+    }
+    let nspin = json_number(parameters.get("nspin")).unwrap_or(1.0) as i64;
+    if nspin != 1 {
+        return false;
+    }
+    if json_bool(parameters.get("noncolin"))
+        || json_bool(parameters.get("lspinorb"))
+        || json_bool(parameters.get("lda_plus_u"))
+    {
+        return false;
+    }
+    parameters
+        .get("vdw_corr")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value.is_empty() || value == "none"
+        })
+        .unwrap_or(true)
+}
+
+fn normalize_calculation_tags(
+    engine_id: EngineId,
+    calc_type: &str,
+    parameters: &serde_json::Value,
+    result: Option<&QEResult>,
+    source_tags: &[String],
+) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in source_tags {
+        push_calculation_tag(&mut tags, tag);
+    }
+
+    if parameters
+        .get("run_status")
+        .or_else(|| parameters.get("status"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().eq_ignore_ascii_case("failed"))
+        .unwrap_or(false)
+    {
+        push_calculation_tag(&mut tags, "failed");
+    }
+
+    if engine_id == EngineId::Wien2k {
+        push_calculation_tag(&mut tags, "wien2k-native");
+    } else {
+        push_calculation_tag(&mut tags, "QE");
+    }
+
+    match calc_type {
+        "optimization" | "relax" | "vcrelax" => {
+            push_calculation_tag(&mut tags, "geometry");
+            let mode = parameters
+                .get("optimization_mode")
+                .and_then(|value| value.as_str())
+                .unwrap_or(calc_type);
+            push_calculation_tag(
+                &mut tags,
+                if mode == "relax" { "Relax" } else { "VC-Relax" },
+            );
+            if let Some(tag) = json_grid_tag(parameters.get("kgrid"), "") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(tag) = threshold_tag(parameters.get("forc_conv_thr")) {
+                push_calculation_tag(&mut tags, format!("F {}", tag));
+            }
+            if let Some(tag) = threshold_tag(parameters.get("etot_conv_thr")) {
+                push_calculation_tag(&mut tags, format!("E {}", tag));
+            }
+        }
+        "scf" => {
+            if uses_optimized_structure(parameters, source_tags) {
+                push_calculation_tag(&mut tags, "geometry");
+            }
+            if is_phonon_ready_scf(parameters, source_tags) {
+                push_calculation_tag(&mut tags, "phonon-ready");
+            }
+            if is_wannier_ready_scf(parameters, result) {
+                push_calculation_tag(&mut tags, "wannier-ready");
+            }
+            if let Some(tag) = json_grid_tag(parameters.get("kgrid"), "") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(tag) = threshold_tag(parameters.get("conv_thr")) {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if json_bool(parameters.get("lspinorb"))
+                || json_bool(parameters.get("spin_orbit"))
+                || json_bool(parameters.get("soc"))
+            {
+                push_calculation_tag(&mut tags, "SOC");
+            }
+            match json_number(parameters.get("nspin")).map(|value| value as i64) {
+                Some(4) => push_calculation_tag(&mut tags, "Non-collinear"),
+                Some(2) => push_calculation_tag(&mut tags, "Magnetic"),
+                _ => {}
+            }
+            if json_bool(parameters.get("lda_plus_u")) {
+                push_calculation_tag(&mut tags, "DFT+U");
+            }
+            if parameters
+                .get("vdw_corr")
+                .and_then(|value| value.as_str())
+                .map(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && !value.eq_ignore_ascii_case("none")
+                })
+                .unwrap_or(false)
+            {
+                push_calculation_tag(&mut tags, "vdW");
+            }
+        }
+        "bands" => {
+            if let Some(points) = json_number(parameters.get("total_k_points")) {
+                push_calculation_tag(&mut tags, format!("{} k-pts", points as i64));
+            }
+            if json_bool(parameters.get("fat_bands_requested")) {
+                push_calculation_tag(&mut tags, "Proj");
+            }
+        }
+        "dos" => {
+            if let Some(tag) = json_grid_tag(parameters.get("dos_k_grid"), " K") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(points) = json_number(parameters.get("n_points")) {
+                push_calculation_tag(&mut tags, format!("{} pts", points as i64));
+            }
+        }
+        "wannier" => {
+            if let Some(tag) = json_grid_tag(parameters.get("k_grid"), " K") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(count) = json_number(parameters.get("n_wann")) {
+                push_calculation_tag(&mut tags, format!("{} WF", count as i64));
+            }
+            if let Some(count) = json_number(parameters.get("n_bands")) {
+                push_calculation_tag(&mut tags, format!("{} bands", count as i64));
+            }
+        }
+        "transport" => {
+            if let Some(tag) = json_grid_tag(parameters.get("boltz_kmesh"), " K") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(points) = json_number(parameters.get("mu_points")) {
+                push_calculation_tag(&mut tags, format!("{} μ", points as i64));
+            }
+            if let Some(points) = json_number(parameters.get("temperature_points")) {
+                push_calculation_tag(&mut tags, format!("{} T", points as i64));
+            }
+        }
+        "fermi_surface" => {
+            if let Some(tag) = json_grid_tag(parameters.get("fermi_k_grid"), " K") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(count) = json_number(parameters.get("n_frmsf_files")) {
+                push_calculation_tag(&mut tags, format!("{} FRMSF", count as i64));
+            } else if let Some(count) = json_number(parameters.get("n_bxsf_files")) {
+                push_calculation_tag(&mut tags, format!("{} BXSF", count as i64));
+            }
+        }
+        "phonon" => {
+            if let Some(tag) = json_grid_tag(parameters.get("q_grid"), " Q") {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(count) = json_number(parameters.get("n_modes")) {
+                push_calculation_tag(&mut tags, format!("{} modes", count as i64));
+            }
+            if json_bool(parameters.get("calculate_dos")) {
+                push_calculation_tag(&mut tags, "DOS");
+            }
+            if json_bool(parameters.get("calculate_dispersion")) {
+                push_calculation_tag(&mut tags, "Dispersion");
+            }
+        }
+        "epw" => {
+            if let Some(tag) = json_grid_tag(
+                parameters
+                    .get("fine_k_grid")
+                    .or_else(|| parameters.get("k_mesh")),
+                " fine K",
+            ) {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if let Some(tag) = json_grid_tag(
+                parameters
+                    .get("coarse_q_grid")
+                    .or_else(|| parameters.get("q_mesh")),
+                " Q",
+            ) {
+                push_calculation_tag(&mut tags, tag);
+            }
+            if json_bool(parameters.get("parse_partial")) {
+                push_calculation_tag(&mut tags, "Limited results");
+            }
+        }
+        _ => {}
+    }
+
+    for feature in ["lspinorb", "lda_plus_u"] {
+        if json_bool(parameters.get(feature)) {
+            push_calculation_tag(
+                &mut tags,
+                if feature == "lspinorb" { "SOC" } else { "DFT+U" },
+            );
+        }
+    }
+    if json_number(parameters.get("nspin")).map(|value| value as i64) == Some(2) {
+        push_calculation_tag(&mut tags, "Magnetic");
+    }
+    if calculation_uses_hpc_value(parameters, result) {
+        push_calculation_tag(&mut tags, "HPC");
+        if calculation_artifacts_downloaded(parameters) {
+            push_calculation_tag(&mut tags, "Downloaded");
+        }
+    }
+
+    tags
+}
+
 /// Metadata returned after exporting a project archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectArchiveExportResult {
@@ -4552,6 +4902,7 @@ pub fn refresh_calculation_artifact_metadata(
 
     calculation.storage_bytes = Some(local_storage_bytes);
 
+    let mut mark_downloaded_tag = false;
     if let Some(parameters) = calculation.parameters.as_object_mut() {
         parameters.insert(
             "local_storage_bytes".to_string(),
@@ -4573,12 +4924,16 @@ pub fn refresh_calculation_artifact_metadata(
                     "artifacts_downloaded_full".to_string(),
                     serde_json::json!(true),
                 );
+                mark_downloaded_tag = true;
             }
         }
         parameters.insert(
             "artifact_synced_at".to_string(),
             serde_json::json!(now_iso()),
         );
+    }
+    if mark_downloaded_tag {
+        push_calculation_tag(&mut calculation.tags, "Downloaded");
     }
 
     let updated_calculation = calculation.clone();
@@ -4970,6 +5325,14 @@ pub fn save_calculation(
     let storage_bytes = Some(calculate_directory_size(&calc_dir)?);
 
     // Create calculation run record
+    let tags = normalize_calculation_tags(
+        calc_data.engine_id,
+        &calc_data.calc_type,
+        &calculation_parameters,
+        Some(&calc_data.result),
+        &calc_data.tags,
+    );
+
     let calc_run = CalculationRun {
         id: calc_id,
         engine_id: calc_data.engine_id,
@@ -4980,7 +5343,7 @@ pub fn save_calculation(
         scf_summary: None,
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
-        tags: calc_data.tags,
+        tags,
         storage_bytes,
     };
 
@@ -5048,6 +5411,13 @@ pub fn save_engine_setup_artifact(
             .map_err(|err| format!("Failed to write setup artifact {}: {}", filename, err))?;
     }
 
+    let tags = normalize_calculation_tags(
+        setup_data.engine_id,
+        "engine_setup",
+        &setup_data.parameters,
+        None,
+        &setup_data.tags,
+    );
     let calc_run = CalculationRun {
         id: calc_id,
         engine_id: setup_data.engine_id,
@@ -5058,7 +5428,7 @@ pub fn save_engine_setup_artifact(
         scf_summary: None,
         started_at: setup_data.started_at,
         completed_at: Some(setup_data.completed_at),
-        tags: setup_data.tags,
+        tags,
         storage_bytes: Some(calculate_directory_size(&calc_dir)?),
     };
     persist_full_calculation(&project_dir, &calc_run)?;
@@ -5117,6 +5487,13 @@ pub fn save_engine_calculation_artifact(
         }
     }
 
+    let tags = normalize_calculation_tags(
+        calc_data.engine_id,
+        &calc_data.calc_type,
+        &calc_data.parameters,
+        result.as_ref(),
+        &calc_data.tags,
+    );
     let calc_run = CalculationRun {
         id: calc_id,
         engine_id: calc_data.engine_id,
@@ -5127,7 +5504,7 @@ pub fn save_engine_calculation_artifact(
         scf_summary: calc_data.scf_summary,
         started_at: calc_data.started_at,
         completed_at: Some(calc_data.completed_at),
-        tags: calc_data.tags,
+        tags,
         storage_bytes: Some(calculate_directory_size(&calc_dir)?),
     };
     persist_full_calculation(&project_dir, &calc_run)?;

@@ -180,7 +180,7 @@ fn workflows() -> Vec<EngineWorkflowDescriptor> {
                     "wien2k.scf.cycle",
                     50,
                     true,
-                    "Serial WIEN2k run_lapw/runsp_lapw convergence and basic spin-mode controls.",
+                    "WIEN2k run_lapw/runsp_lapw convergence with OpenMP or k-point parallelization and basic spin-mode controls.",
                 ),
             ],
             input_requirements: vec![
@@ -195,6 +195,42 @@ fn workflows() -> Vec<EngineWorkflowDescriptor> {
                     WorkflowInputRequirementKind::EngineCaseState,
                     "Wien2k remote case state",
                     false,
+                ),
+            ],
+            produces: vec![
+                EngineResultDatasetKind::ScfSummary,
+                EngineResultDatasetKind::NativeArtifacts,
+            ],
+        },
+        EngineWorkflowDescriptor {
+            kind: CalculationKind::Soc,
+            label: "Wien2k SOC".to_string(),
+            route_key: "wien2k.soc".to_string(),
+            execution_modes: vec![EngineExecutionMode::Remote],
+            shared_panels: source_scf_panels(),
+            engine_panels: vec![engine_panel(
+                "wien2k-soc-init",
+                "SOC initialization",
+                "wien2k.soc.init",
+                30,
+                true,
+                "WIEN2k init_so_lapw inputs, symmetso review, and self-consistent run_lapw/runsp_lapw -so controls.",
+            )],
+            input_requirements: vec![
+                requirement(
+                    WorkflowInputRequirementKind::SourceScfCalculation,
+                    "Converged scalar-relativistic Wien2k SCF calculation",
+                    true,
+                ),
+                requirement(
+                    WorkflowInputRequirementKind::EngineCaseState,
+                    "Retained converged Wien2k case state",
+                    true,
+                ),
+                requirement(
+                    WorkflowInputRequirementKind::EngineRuntimeProfile,
+                    "Wien2k remote runtime profile",
+                    true,
                 ),
             ],
             produces: vec![
@@ -294,6 +330,7 @@ impl EnginePlugin for Wien2kReservedEnginePlugin {
             calculation_kinds: vec![
                 CalculationKind::EngineSetup,
                 CalculationKind::Scf,
+                CalculationKind::Soc,
                 CalculationKind::Bands,
                 CalculationKind::Dos,
             ],
@@ -350,5 +387,20 @@ mod tests {
             .iter()
             .all(|panel| !panel.component_key.contains("pseudo")));
         assert!(scf.produces.contains(&EngineResultDatasetKind::ScfSummary));
+    }
+
+    #[test]
+    fn reserved_manifest_exposes_soc_from_a_source_scf() {
+        let manifest = WIEN2K_RESERVED_ENGINE_PLUGIN.manifest();
+        let soc = manifest
+            .workflows
+            .iter()
+            .find(|workflow| workflow.kind == CalculationKind::Soc)
+            .expect("SOC workflow should exist");
+
+        assert!(soc.input_requirements.iter().any(|requirement| {
+            requirement.kind == WorkflowInputRequirementKind::SourceScfCalculation
+        }));
+        assert!(soc.produces.contains(&EngineResultDatasetKind::ScfSummary));
     }
 }

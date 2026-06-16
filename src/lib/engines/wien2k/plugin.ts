@@ -73,7 +73,7 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
     label: "WIEN2k",
     status: "reserved",
     executionModes: ["remote"],
-    calculationKinds: ["engine_setup", "scf", "bands", "fermi_surface", "dos"],
+    calculationKinds: ["engine_setup", "scf", "soc", "bands", "fermi_surface", "dos"],
   },
   hpc: {
     supportsLocal: false,
@@ -108,13 +108,29 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
       enginePanels: [
         enginePanel("wien2k-case-state", "Case state", "wien2k.case.state", 30, true, "Remote case-state selection, staging, and resume policy for WIEN2k."),
         enginePanel("wien2k-scf-basis", "Basis and k mesh", "wien2k.scf.basis", 40, true, "WIEN2k RKmax, Gmax, lmax, k-mesh, and LSTART controls. Accepted RMT values remain owned by case.struct."),
-        enginePanel("wien2k-scf-cycle", "SCF cycle", "wien2k.scf.cycle", 50, true, "Serial WIEN2k run_lapw/runsp_lapw convergence and basic spin-mode controls."),
+        enginePanel("wien2k-scf-cycle", "SCF cycle", "wien2k.scf.cycle", 50, true, "WIEN2k run_lapw/runsp_lapw convergence with OpenMP or k-point parallelization and basic spin-mode controls."),
       ],
       inputRequirements: [
         requirement("crystal_structure", "Crystal structure"),
         requirement("cif_content", "CIF content"),
         requirement("engine_runtime_profile", "Wien2k remote runtime profile"),
         requirement("engine_case_state", "Wien2k remote case state", false),
+      ],
+      produces: ["scf_summary", "native_artifacts"],
+    },
+    {
+      kind: "soc",
+      label: "Wien2k SOC",
+      routeKey: "wien2k.soc",
+      executionModes: ["remote"],
+      sharedPanels: sourceScfPanels,
+      enginePanels: [
+        enginePanel("wien2k-soc-init", "SOC initialization", "wien2k.soc.init", 30, true, "WIEN2k init_so_lapw inputs, symmetso review, and self-consistent run_lapw/runsp_lapw -so controls."),
+      ],
+      inputRequirements: [
+        requirement("source_scf_calculation", "Converged scalar-relativistic Wien2k SCF calculation"),
+        requirement("engine_case_state", "Retained converged Wien2k case state"),
+        requirement("engine_runtime_profile", "Wien2k remote runtime profile"),
       ],
       produces: ["scf_summary", "native_artifacts"],
     },
@@ -184,9 +200,9 @@ export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
     ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
     status: "configured",
-    calculationKinds: ["engine_setup", "scf", "bands", "fermi_surface"],
+    calculationKinds: ["engine_setup", "scf", "soc", "bands", "fermi_surface"],
   },
   workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
-    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "bands" || workflow.kind === "fermi_surface",
+    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "soc" || workflow.kind === "bands" || workflow.kind === "fermi_surface",
   ),
 };

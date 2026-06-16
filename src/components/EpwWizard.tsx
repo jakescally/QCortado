@@ -30,6 +30,7 @@ import { HpcRunSettings } from "./HpcRunSettings";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import type { EngineId } from "../lib/engines/types";
+import { getCalculationTagBadges, getCalcTagClass } from "../lib/calculationTags";
 
 interface CalculationRun {
   id: string;
@@ -203,19 +204,6 @@ function parseOverrides(text: string): Record<string, string> {
     overrides[key] = value;
   }
   return overrides;
-}
-
-function isHpcCalculation(calc: CalculationRun): boolean {
-  const params = calc.parameters || {};
-  const backend = String(params.execution_backend || "").trim().toLowerCase();
-  if (backend === "hpc") {
-    return true;
-  }
-  if (params.remote_job_id || params.remote_workdir || params.remote_project_path) {
-    return true;
-  }
-  const rawOutput = typeof calc.result?.raw_output === "string" ? calc.result.raw_output : "";
-  return rawOutput.includes("HPC_STAGE|") || rawOutput.includes("HPC_CMD|");
 }
 
 function formatBytes(bytes: number): string {
@@ -946,8 +934,14 @@ export function EpwWizard({
                     <span>{calc.completed_at ? "Completed" : "In progress"}</span>
                   </div>
                   <div className="calc-tags">
-                    {isHpcCalculation(calc) && <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>}
-                    {calc.result?.converged && <span className="calc-tag calc-tag-special">Converged</span>}
+                    {getCalculationTagBadges(
+                      { ...calc, tags: calc.result?.converged ? [...(calc.tags ?? []), "converged"] : calc.tags },
+                      { legacyFallback: true, calcId: calc.id },
+                    ).map((tag, i) => (
+                      <span key={`${tag.label}-${i}`} className={getCalcTagClass(tag)}>
+                        {tag.label}
+                      </span>
+                    ))}
                   </div>
                 </div>
               );
@@ -1007,8 +1001,14 @@ export function EpwWizard({
                     <span>{calc.completed_at ? "Completed" : "In progress"}</span>
                   </div>
                   <div className="calc-tags">
-                    {isHpcCalculation(calc) && <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>}
-                    {calc.result?.converged && <span className="calc-tag calc-tag-special">Converged</span>}
+                    {getCalculationTagBadges(
+                      { ...calc, tags: calc.result?.converged ? [...(calc.tags ?? []), "converged"] : calc.tags },
+                      { legacyFallback: true, calcId: calc.id },
+                    ).map((tag, i) => (
+                      <span key={`${tag.label}-${i}`} className={getCalcTagClass(tag)}>
+                        {tag.label}
+                      </span>
+                    ))}
                   </div>
                 </div>
               );

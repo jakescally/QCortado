@@ -299,6 +299,7 @@ function ViewerAppInner() {
           onContinueWien2kScf={viewOnlyNoopWien2kContinue}
           onRunEngineSetup={viewOnlyNoopEngineSetup}
           onRunBands={viewOnlyNoopCalc}
+          onRunSoc={(_cifId, _crystalData, _scfCalculations) => undefined}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({
               bandData,

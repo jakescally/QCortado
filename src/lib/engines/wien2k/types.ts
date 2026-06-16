@@ -1,6 +1,7 @@
 /** WIEN2k-native remote case-directory workflow types. */
 
 export type Wien2kSpinMode = "non_spin_polarized" | "spin_polarized";
+export type Wien2kParallelMode = "openmp" | "kpoint";
 
 export type Wien2kInitialSpinConfiguration = "up" | "down" | "non_magnetic";
 export type Wien2kDftUDoubleCounting = "amf" | "sic" | "hmf";
@@ -114,6 +115,7 @@ export interface Wien2kInitializationSettings {
 
 export interface Wien2kScfRunSettings {
   spinMode: Wien2kSpinMode;
+  parallelMode: Wien2kParallelMode;
   maxIterations: number;
   energyConvergenceRy: number;
   chargeConvergence: number;
@@ -157,6 +159,7 @@ export const DEFAULT_WIEN2K_INITIALIZATION_SETTINGS: Wien2kInitializationSetting
 
 export const DEFAULT_WIEN2K_SCF_RUN_SETTINGS: Wien2kScfRunSettings = {
   spinMode: "non_spin_polarized",
+  parallelMode: "openmp",
   maxIterations: 40,
   energyConvergenceRy: 0.0001,
   chargeConvergence: 0.0001,

@@ -30,6 +30,7 @@ import type { EngineWorkflowView } from "../../lib/engines/plugin";
 import type { EpwViewerPayload } from "../qe";
 import { Wien2kStructureWizard } from "../wien2k/Wien2kStructureWizard";
 import { Wien2kScfWizard } from "../wien2k/Wien2kScfWizard";
+import { Wien2kSocWizard } from "../wien2k/Wien2kSocWizard";
 import { Wien2kBandsWizard } from "../wien2k/Wien2kBandsWizard";
 import { Wien2kFermiSurfaceWizard } from "../wien2k/Wien2kFermiSurfaceWizard";
 
@@ -85,6 +86,7 @@ export interface EngineWorkflowHostContexts {
   epw: EpwWorkflowContext | null;
   structureSetup: Wien2kStructureWorkflowContext | null;
   wien2kScf: ScfWorkflowContext | null;
+  soc: SourceScfWorkflowContext | null;
 }
 
 export interface PhononWorkflowViewerData {
@@ -125,6 +127,7 @@ export interface EngineWorkflowHostProps {
   onViewEpw: (epwData: EpwViewerPayload["data"], rawOutput?: string | null) => void;
   onStructureSourceSaved: () => void;
   onWien2kScfSaved: () => void;
+  onWien2kSocSaved: () => void;
 }
 
 const EMPTY_CRYSTAL_DATA: CrystalData = {
@@ -148,6 +151,7 @@ export function canRenderEngineWorkflowHost({
   if (route.engineId === "wien2k") {
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
     if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
+    if (route.view === "wien2k-soc-wizard") return Boolean(contexts.soc || reconnectTaskId);
     if (route.view === "bands-wizard") return Boolean(contexts.bands);
     if (route.view === "fermi-surface-wizard") return Boolean(contexts.fermiSurface);
     return false;
@@ -221,6 +225,21 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           continuationCalculationId={context.continuationCalculationId}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onWien2kScfSaved}
+        />
+      );
+    }
+    case "wien2k-soc-wizard": {
+      const context = contexts.soc;
+      if (!context) return null;
+      return (
+        <Wien2kSocWizard
+          projectId={context.projectId}
+          cifId={context.cifId}
+          scfCalculations={context.scfCalculations}
+          activeHpcProfile={runtime.activeHpcProfile}
+          reconnectTaskId={reconnectTaskIdValue}
+          onBack={() => onBack(route.view, "project-dashboard")}
+          onSaved={props.onWien2kSocSaved}
         />
       );
     }
