@@ -1,6 +1,6 @@
 [package]
 name = "qcortado"
-version = "0.1.1"
+version = "0.2.0"
 description = "A modern UI for Quantum ESPRESSO"
 authors = ["Jake Scally"]
 edition = "2021"
