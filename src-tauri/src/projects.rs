@@ -447,6 +447,13 @@ fn normalize_calculation_tags(
             if let Some(points) = json_number(parameters.get("total_k_points")) {
                 push_calculation_tag(&mut tags, format!("{} k-pts", points as i64));
             }
+            if json_bool(parameters.get("lspinorb"))
+                || json_bool(parameters.get("spin_orbit"))
+                || json_bool(parameters.get("spinOrbit"))
+                || parameters.get("soc").is_some()
+            {
+                push_calculation_tag(&mut tags, "SOC");
+            }
             if json_bool(parameters.get("fat_bands_requested")) {
                 push_calculation_tag(&mut tags, "Proj");
             }
@@ -1784,42 +1791,101 @@ fn wien2k_band_path_label_from_points(points: &serde_json::Value) -> Option<Stri
     Some(labels.join(" → "))
 }
 
-fn repair_wien2k_band_path_parameters(calculation: &mut CalculationRun) -> bool {
+fn wien2k_calculation_has_soc(calculation: &CalculationRun) -> bool {
+    if calculation.engine_id != EngineId::Wien2k {
+        return false;
+    }
+
+    json_bool(calculation.parameters.get("spin_orbit"))
+        || json_bool(calculation.parameters.get("spinOrbit"))
+        || calculation.parameters.get("soc").is_some()
+        || calculation
+            .tags
+            .iter()
+            .any(|tag| tag.trim().eq_ignore_ascii_case("soc"))
+}
+
+fn build_wien2k_soc_lookup(project: &Project) -> HashMap<String, bool> {
+    project
+        .cif_variants
+        .iter()
+        .flat_map(|variant| variant.calculations.iter())
+        .map(|calculation| (calculation.id.clone(), wien2k_calculation_has_soc(calculation)))
+        .collect()
+}
+
+fn repair_wien2k_band_parameters(
+    source_soc_by_id: &HashMap<String, bool>,
+    calculation: &mut CalculationRun,
+) -> bool {
     if calculation.engine_id != EngineId::Wien2k
         || normalize_summary_calc_type(&calculation.calc_type) != Some("bands")
     {
         return false;
     }
 
-    let Some(parameters) = calculation.parameters.as_object_mut() else {
-        return false;
-    };
+    let has_soc_tag = calculation
+        .tags
+        .iter()
+        .any(|tag| tag.trim().eq_ignore_ascii_case("soc"));
+    let has_spin_orbit = json_bool(calculation.parameters.get("spin_orbit"))
+        || json_bool(calculation.parameters.get("spinOrbit"));
+    let source_has_soc = calculation
+        .parameters
+        .get("source_scf_calculation_id")
+        .or_else(|| calculation.parameters.get("source_scf_id"))
+        .and_then(|value| value.as_str())
+        .and_then(|source_id| source_soc_by_id.get(source_id))
+        .copied()
+        .unwrap_or(false);
 
-    if parameters
+    let needs_k_path = calculation
+        .parameters
         .get("k_path")
         .and_then(|value| value.as_str())
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true);
+    let needs_soc_metadata = source_has_soc && (!has_soc_tag || !has_spin_orbit);
+
+    if !needs_k_path && !needs_soc_metadata {
         return false;
     }
 
-    let repaired = parameters
-        .get("prepare")
-        .and_then(|value| value.get("k_path"))
-        .and_then(wien2k_band_path_label_from_points);
-    let repaired = repaired.or_else(|| {
-        parameters
-            .get("k_path_points")
-            .and_then(wien2k_band_path_label_from_points)
-    });
+    let mut changed = false;
+    {
+        let Some(parameters) = calculation.parameters.as_object_mut() else {
+            return false;
+        };
 
-    if let Some(k_path) = repaired {
-        parameters.insert("k_path".to_string(), serde_json::Value::String(k_path));
-        return true;
+        if needs_k_path {
+            let repaired = parameters
+                .get("prepare")
+                .and_then(|value| value.get("k_path"))
+                .and_then(wien2k_band_path_label_from_points);
+            let repaired = repaired.or_else(|| {
+                parameters
+                    .get("k_path_points")
+                    .and_then(wien2k_band_path_label_from_points)
+            });
+
+            if let Some(k_path) = repaired {
+                parameters.insert("k_path".to_string(), serde_json::Value::String(k_path));
+                changed = true;
+            }
+        }
+
+        if source_has_soc && !has_spin_orbit {
+            parameters.insert("spin_orbit".to_string(), serde_json::Value::Bool(true));
+            changed = true;
+        }
     }
 
-    false
+    if source_has_soc && !has_soc_tag {
+        push_calculation_tag(&mut calculation.tags, "SOC");
+        changed = true;
+    }
+
+    changed
 }
 
 fn summarize_qe_result_for_project(result: &QEResult) -> QEResult {
@@ -4450,9 +4516,10 @@ pub async fn list_multiview_band_calculations(
                 .flat_map(|variant| variant.calculations.iter())
                 .any(calculation_has_embedded_project_detail);
             let mut repaired_wien2k_bands_entries = false;
+            let wien2k_soc_lookup = build_wien2k_soc_lookup(&project);
             for variant in &mut project.cif_variants {
                 for summary_calc in &mut variant.calculations {
-                    if repair_wien2k_band_path_parameters(summary_calc) {
+                    if repair_wien2k_band_parameters(&wien2k_soc_lookup, summary_calc) {
                         repaired_wien2k_bands_entries = true;
                     }
                 }
@@ -4710,9 +4777,10 @@ pub fn get_project(app: AppHandle, project_id: String) -> Result<Project, String
     let mut project = read_project_json(&project_json)?;
     let mut repaired_phonon_entries = false;
     let mut repaired_wien2k_bands_entries = false;
+    let wien2k_soc_lookup = build_wien2k_soc_lookup(&project);
     for variant in &mut project.cif_variants {
         for summary_calc in &mut variant.calculations {
-            if repair_wien2k_band_path_parameters(summary_calc) {
+            if repair_wien2k_band_parameters(&wien2k_soc_lookup, summary_calc) {
                 repaired_wien2k_bands_entries = true;
             }
             if normalize_summary_calc_type(&summary_calc.calc_type) != Some("phonon") {
@@ -4784,19 +4852,26 @@ pub fn get_project_calculation(
         return Err(format!("Project not found: {}", project_id));
     }
 
-    if let Some(calculation) = load_full_calculation_from_disk(&project_dir, &calc_id)? {
-        return Ok(calculation);
-    }
-
     let project_json = project_dir.join("project.json");
     let project = read_project_json(&project_json)?;
-    project
+    let wien2k_soc_lookup = build_wien2k_soc_lookup(&project);
+    let summary_calc = project
         .cif_variants
         .iter()
         .flat_map(|variant| variant.calculations.iter())
         .find(|calc| calc.id == calc_id)
         .cloned()
-        .ok_or_else(|| format!("Calculation not found: {}", calc_id))
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+    let full_calculation = load_full_calculation_from_disk(&project_dir, &calc_id)?;
+    let had_full_calculation = full_calculation.is_some();
+    let mut calculation = full_calculation.unwrap_or(summary_calc);
+    if normalize_summary_calc_type(&calculation.calc_type) == Some("bands")
+        && repair_wien2k_band_parameters(&wien2k_soc_lookup, &mut calculation)
+        && had_full_calculation
+    {
+        persist_full_calculation(&project_dir, &calculation)?;
+    }
+    Ok(calculation)
 }
 
 /// Loads full text logs and run inputs saved under a calculation directory.
@@ -7240,7 +7315,7 @@ mod tests {
         is_calculation_input_file, is_calculation_log_file, is_wavefunction_archive_file,
         looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
         path_contains_wavefunction_archives, remove_wavefunction_archives,
-        repair_phonon_calculation_with_workdir, repair_wien2k_band_path_parameters,
+        repair_phonon_calculation_with_workdir, repair_wien2k_band_parameters,
         summarize_qe_result_for_project, CalculationRun, CifVariant, Project,
     };
     use crate::engines::qe::QEResult;
@@ -7629,6 +7704,7 @@ mod tests {
             calc_type: "bands".to_string(),
             parameters: serde_json::json!({
                 "case_name": "Si",
+                "source_scf_calculation_id": "source-scf",
                 "prepare": {
                     "k_path": [
                         { "label": "Γ", "coords": [0.0, 0.0, 0.0], "npoints": 20 },
@@ -7645,7 +7721,8 @@ mod tests {
             storage_bytes: None,
         };
 
-        let changed = repair_wien2k_band_path_parameters(&mut calculation);
+        let source_soc_by_id = std::collections::HashMap::new();
+        let changed = repair_wien2k_band_parameters(&source_soc_by_id, &mut calculation);
         assert!(
             changed,
             "expected WIEN2k band metadata repair to add k_path"
@@ -7654,6 +7731,40 @@ mod tests {
             calculation.parameters.get("k_path"),
             Some(&serde_json::json!("Γ → X → L"))
         );
+    }
+
+    #[test]
+    fn repair_wien2k_band_parameters_inherits_soc_from_source_scf() {
+        let mut calculation = CalculationRun {
+            id: "test_band_soc_calc".to_string(),
+            engine_id: EngineId::Wien2k,
+            name: None,
+            calc_type: "bands".to_string(),
+            parameters: serde_json::json!({
+                "case_name": "Si",
+                "source_scf_calculation_id": "source-scf",
+                "k_path": "Γ → X → L"
+            }),
+            result: None,
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:05:00Z".to_string()),
+            tags: vec!["wien2k-native".to_string()],
+            storage_bytes: None,
+        };
+        let mut source_soc_by_id = std::collections::HashMap::new();
+        source_soc_by_id.insert("source-scf".to_string(), true);
+
+        let changed = repair_wien2k_band_parameters(&source_soc_by_id, &mut calculation);
+        assert!(changed, "expected WIEN2k band metadata repair to inherit SOC");
+        assert_eq!(
+            calculation.parameters.get("spin_orbit"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(calculation
+            .tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("soc")));
     }
 
     #[test]

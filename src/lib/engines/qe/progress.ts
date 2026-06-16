@@ -380,8 +380,11 @@ function updateHpcProgress(line: string, state: ProgressState): ProgressState | 
 type ProgressKind =
   | "scf"
   | "bands"
+  | "wien2k_structure_stage"
+  | "wien2k_scf_initialize"
   | "wien2k_scf"
   | "wien2k_soc"
+  | "wien2k_bands_prepare"
   | "wien2k_bands"
   | "wien2k_fermi_surface"
   | "dos"
@@ -407,6 +410,22 @@ export function progressReducer(
       return updateScfProgress(line, state);
     case "bands":
       return updateBandsProgress(line, state);
+    case "wien2k_structure_stage":
+      if (line.includes("setrmt_lapw") || line.includes(" nn ")) {
+        return { ...state, status: "running", percent: null, phase: "RMT refinement" };
+      }
+      if (line.includes("sgroup")) {
+        return { ...state, status: "running", percent: null, phase: "SGROUP" };
+      }
+      if (line.includes("symmetry")) {
+        return { ...state, status: "running", percent: null, phase: "SYMMETRY" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k structure" };
+    case "wien2k_scf_initialize":
+      if (line.includes("init_lapw")) {
+        return { ...state, status: "running", percent: null, phase: "Initialization" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k initialization" };
     case "wien2k_scf":
       if (line.includes("[saved calculation")) {
         return { ...state, status: "complete", percent: 100, phase: "Complete" };
@@ -423,6 +442,11 @@ export function progressReducer(
         return { ...state, status: "running", percent: null, phase: "SOC SCF cycle" };
       }
       return { ...state, status: "running", percent: null, phase: state.phase || "SOC SCF cycle" };
+    case "wien2k_bands_prepare":
+      if (line.includes("Prepared case.klist_band") || line.includes("case.insp")) {
+        return { ...state, status: "running", percent: null, phase: "Preparing band files" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k band preparation" };
     case "wien2k_bands":
       if (line.includes("[saved bands calculation")) {
         return { ...state, status: "complete", percent: 100, phase: "Complete" };

@@ -242,7 +242,7 @@ export function TaskManagerDrawer({
                   <div className="task-detail-actions">
                     {selectedEntry.taskId && (
                       <button type="button" onClick={() => handleOpenRun(selectedEntry)}>
-                        <ExternalLink size={15} /> Open run
+                        <ExternalLink size={15} /> {selectedEntry.metadata?.wizardResume ? "Continue" : "Open run"}
                       </button>
                     )}
                     {selectedEntry.taskId && (

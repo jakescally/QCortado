@@ -207,6 +207,7 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           projectId={context.projectId}
           cifId={context.cifId}
           crystalData={context.crystalData}
+          reconnectTaskId={reconnectTaskIdValue}
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onStructureSourceSaved}
         />

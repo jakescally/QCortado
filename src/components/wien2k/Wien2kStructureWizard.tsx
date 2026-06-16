@@ -7,7 +7,6 @@ import {
   discardWien2kStructureSession,
   normalizeWien2kCaseName,
   prepareWien2kStructureDraft,
-  runWien2kStructureStage,
   saveWien2kStructureSource,
   startWien2kStructureSession,
   validateWien2kStructureControls,
@@ -22,11 +21,13 @@ import type {
 } from "../../lib/engines/wien2k";
 import { LiveOutputPanel } from "../LiveOutputPanel";
 import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
+import { useTaskContext } from "../../lib/TaskContext";
 
 interface Wien2kStructureWizardProps {
   projectId: string;
   cifId: string;
   crystalData: CrystalData;
+  reconnectTaskId?: string;
   onBack: () => void;
   onSaved: () => void;
 }
@@ -42,14 +43,6 @@ function displaySiteValue(site: Wien2kStructureSite, controls: Wien2kStructureCo
   return override?.[field] ?? site[field];
 }
 
-function stageOutputArtifact(stage: Wien2kStructureStage): string {
-  switch (stage) {
-    case "rmt": return "outputnn";
-    case "sgroup": return "outputsgroup";
-    case "symmetry": return "outputs";
-  }
-}
-
 type StructureWizardStep = "draft" | "rmt" | "sgroup" | "symmetry" | "save";
 const STRUCTURE_STEPS: Array<{ id: StructureWizardStep; label: string }> = [
   { id: "draft", label: "Draft" },
@@ -63,9 +56,11 @@ export function Wien2kStructureWizard({
   projectId,
   cifId,
   crystalData,
+  reconnectTaskId,
   onBack,
   onSaved,
 }: Wien2kStructureWizardProps) {
+  const taskContext = useTaskContext();
   const [caseName, setCaseName] = useState(() => defaultCaseName(crystalData));
   const [controls, setControls] = useState<Wien2kStructureControls>(DEFAULT_WIEN2K_STRUCTURE_CONTROLS);
   const [draft, setDraft] = useState<Wien2kStructureDraft | null>(null);
@@ -77,8 +72,10 @@ export function Wien2kStructureWizard({
   const [isRunning, setIsRunning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
   const draftRequestRef = useRef(0);
+  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const caseNameValid = normalizeWien2kCaseName(caseName) !== null;
   const controlsError = validateWien2kStructureControls(controls);
   const draftSiteSettingsKey = JSON.stringify(controls.siteOverrides.map(({ siteIndex, npt, r0 }) => ({
@@ -89,6 +86,10 @@ export function Wien2kStructureWizard({
   const sites = lastResult?.sites ?? draft?.sites ?? [];
   const hasNativeRmtValues = Boolean(session && session.phase !== "staged");
   const canOperate = Boolean(draft && !draftStale && !controlsError && caseNameValid);
+  const stageIsActive = activeTask?.taskType === "wien2k_structure_stage" && activeTask.status === "running";
+  const displayedOutputLines = activeTask?.taskType === "wien2k_structure_stage" ? activeTask.output : outputLines;
+  const displayedOutputText = activeTask?.taskType === "wien2k_structure_stage" ? activeTask.outputText : outputLines.join("\n");
+  const displayedOutputLineCount = activeTask?.taskType === "wien2k_structure_stage" ? activeTask.outputLineCount : outputLines.length;
   const currentStep: StructureWizardStep = (() => {
     if (!draft || draftStale || isPreparing) return "draft";
     if (!session || session.phase === "staged") return "rmt";
@@ -103,6 +104,42 @@ export function Wien2kStructureWizard({
       outputUnlistenRef.current?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (!reconnectTaskId) return;
+    setActiveTaskId(reconnectTaskId);
+    void taskContext.reconnectToTask(reconnectTaskId);
+  }, [reconnectTaskId, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTaskId || activeTask) return;
+    void taskContext.reconnectToTask(activeTaskId);
+  }, [activeTaskId, activeTask, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!activeTask || activeTask.taskType !== "wien2k_structure_stage") return;
+    const resume = activeTask.metadata?.wizardResume;
+    if (resume?.caseName) setCaseName(String(resume.caseName));
+    if (resume?.controls) setControls(resume.controls as Wien2kStructureControls);
+    if (resume?.draft) {
+      setDraft(resume.draft as Wien2kStructureDraft);
+      setDraftStale(false);
+    }
+    if (resume?.session) setSession(resume.session as Wien2kStructureSession);
+    if (resume?.lastResult) setLastResult(resume.lastResult as Wien2kStructureStageResult);
+    if (activeTask.status === "failed" || activeTask.status === "cancelled") {
+      setError(activeTask.error ?? "WIEN2k structure refinement failed.");
+      setIsRunning(false);
+      return;
+    }
+    if (activeTask.status !== "completed") return;
+    const result = activeTask.result as (Wien2kStructureStageResult & { session?: Wien2kStructureSession }) | null;
+    if (!result) return;
+    setSession(result.session ?? ((current) => current ? { ...current, phase: result.phase, currentStruct: result.candidateStruct } : current));
+    setLastResult(result);
+    setOutputLines(activeTask.output);
+    setIsRunning(false);
+  }, [activeTask]);
 
   useEffect(() => {
     if (session || !caseNameValid || controlsError) return;
@@ -192,20 +229,29 @@ export function Wien2kStructureWizard({
       if (!activeSession) {
         throw new Error("A local structure draft is required before remote refinement.");
       }
-      const result = await runWien2kStructureStage(activeSession.sessionId, stage, controls);
-      setSession((current) => current ? { ...current, phase: result.phase, currentStruct: result.candidateStruct } : current);
-      setLastResult(result);
-      if (result.artifactOutput.trim()) {
-        const nativeLines = result.artifactOutput.trimEnd().split(/\r?\n/);
-        setOutputLines((current) => [
-          ...current,
-          `[native ${draft?.caseName ?? "case"}.${stageOutputArtifact(stage)}]`,
-          ...nativeLines,
-        ].slice(-1000));
-      }
-      if (result.diagnostics.length > 0) {
-        setOutputLines((current) => [...current, ...result.diagnostics.map((item) => `[diagnostic] ${item}`)]);
-      }
+      const taskId = await taskContext.startTask(
+        "wien2k_structure_stage",
+        {
+          sessionId: activeSession.sessionId,
+          stage,
+          controls,
+          workflowMetadata: {
+            wizardResume: {
+              view: "wien2k-structure-wizard",
+              utility: "structure_stage",
+              context: { projectId, cifId, crystalData },
+              caseName,
+              controls,
+              draft,
+              session: activeSession,
+              lastResult,
+              stage,
+            },
+          },
+        },
+        `WIEN2k ${stage.toUpperCase()} - ${activeSession.draft.caseName}`,
+      );
+      setActiveTaskId(taskId);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -216,7 +262,7 @@ export function Wien2kStructureWizard({
   async function discardSessionAndReturn() {
     setError(null);
     try {
-      if (session) {
+      if (session && !stageIsActive) {
         await discardWien2kStructureSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
@@ -230,7 +276,7 @@ export function Wien2kStructureWizard({
   async function discardSessionAndGoBack() {
     setError(null);
     try {
-      if (session) {
+      if (session && !stageIsActive) {
         await discardWien2kStructureSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
@@ -238,6 +284,7 @@ export function Wien2kStructureWizard({
       setSession(null);
       setLastResult(null);
       setOutputLines([]);
+      setActiveTaskId(null);
       setDraftStale(false);
     } catch (reason) {
       setError(String(reason));
@@ -263,7 +310,7 @@ export function Wien2kStructureWizard({
   return (
     <div className="wizard-container wien2k-structure-wizard">
       <AppHeaderPortal className="wizard-header">
-        <button className="back-btn" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndReturn()}>
+        <button className="back-btn" type="button" disabled={isSaving} onClick={() => void discardSessionAndReturn()}>
           ← Exit
         </button>
         <h2>WIEN2k Structure</h2>
@@ -454,9 +501,9 @@ export function Wien2kStructureWizard({
         <section className="wien2k-output-column">
           <LiveOutputPanel
             title="WIEN2k structure refinement"
-            output={outputLines.join("\n")}
-            totalLineCount={outputLines.length}
-            visibleLineCount={outputLines.length}
+            output={displayedOutputText}
+            totalLineCount={displayedOutputLineCount}
+            visibleLineCount={displayedOutputLines.length}
             panelClassName="output-panel wien2k-inline-output"
             outputClassName="output-text wien2k-inline-output-text"
           />
@@ -464,27 +511,27 @@ export function Wien2kStructureWizard({
       </div>
       <div className="step-actions">
         {session && (
-          <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void discardSessionAndGoBack()}>
+          <button className="secondary-button" type="button" disabled={isRunning || stageIsActive || isSaving} onClick={() => void discardSessionAndGoBack()}>
             Back
           </button>
         )}
         {draft && !session && (
-          <button type="button" className="primary-button" disabled={!canOperate || isRunning} onClick={() => void runStage("rmt")}>
+          <button type="button" className="primary-button" disabled={!canOperate || isRunning || stageIsActive} onClick={() => void runStage("rmt")}>
             Start RMT Refinement
           </button>
         )}
         {session?.phase === "rmt_ready" && (
           <>
-            <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void runStage("rmt")}>Re-run RMT</button>
-            <button type="button" className="primary-button" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("sgroup")}>
+            <button className="secondary-button" type="button" disabled={isRunning || stageIsActive} onClick={() => void runStage("rmt")}>Re-run RMT</button>
+            <button type="button" className="primary-button" disabled={isRunning || stageIsActive || Boolean(controlsError)} onClick={() => void runStage("sgroup")}>
               Accept RMT and Run SGROUP
             </button>
           </>
         )}
         {session?.phase === "sgroup_ready" && (
           <>
-            <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void runStage("sgroup")}>Re-run SGROUP</button>
-            <button type="button" className="primary-button" disabled={isRunning || Boolean(controlsError)} onClick={() => void runStage("symmetry")}>
+            <button className="secondary-button" type="button" disabled={isRunning || stageIsActive} onClick={() => void runStage("sgroup")}>Re-run SGROUP</button>
+            <button type="button" className="primary-button" disabled={isRunning || stageIsActive || Boolean(controlsError)} onClick={() => void runStage("symmetry")}>
               Accept SGROUP and Run SYMMETRY
             </button>
           </>
@@ -492,11 +539,11 @@ export function Wien2kStructureWizard({
         {session?.phase === "symmetry_ready" && (
           <>
             {!lastResult?.saveAllowed && (
-              <button className="secondary-button" type="button" disabled={isRunning || isSaving} onClick={() => void runStage("symmetry")}>
+              <button className="secondary-button" type="button" disabled={isRunning || stageIsActive || isSaving} onClick={() => void runStage("symmetry")}>
                 Retry SYMMETRY
               </button>
             )}
-            <button type="button" className="primary-button" disabled={isSaving || !lastResult?.saveAllowed} onClick={() => void saveSource()}>
+            <button type="button" className="primary-button" disabled={isSaving || stageIsActive || !lastResult?.saveAllowed} onClick={() => void saveSource()}>
               {isSaving ? "Saving..." : "Save Structure Source"}
             </button>
           </>

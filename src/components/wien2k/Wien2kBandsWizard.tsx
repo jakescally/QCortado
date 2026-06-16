@@ -11,8 +11,8 @@ import { RemoteUtilizationPanel } from "../RemoteUtilizationPanel";
 import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
 import {
   discardWien2kBandsSession,
-  prepareWien2kBandsSession,
   startWien2kBandsSession,
+  type Wien2kBandsPrepareResult,
   type Wien2kBandsExecutionResult,
   type Wien2kBandsRunSettings,
   type Wien2kBandsSession,
@@ -229,13 +229,24 @@ export function Wien2kBandsWizard({
   const [remoteJobId, setRemoteJobId] = useState<string | null>(null);
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const [activePrepareTaskId, setActivePrepareTaskId] = useState<string | null>(null);
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
-  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const reconnectTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const activeTask = reconnectTask?.taskType === "wien2k_bands" ? reconnectTask : undefined;
+  const activePrepareTask = activePrepareTaskId
+    ? taskContext.getTask(activePrepareTaskId)
+    : reconnectTask?.taskType === "wien2k_bands_prepare"
+      ? reconnectTask
+      : undefined;
   const taskResult = activeTask?.result as Wien2kBandsExecutionResult | null | undefined;
   const displayedResult = result ?? taskResult ?? null;
   const taskOutputLines = activeTask ? activeTask.output : outputLines;
   const taskOutputText = activeTask ? activeTask.outputText : outputLines.join("\n");
   const taskOutputLineCount = activeTask ? activeTask.outputLineCount : outputLines.length;
+  const prepareOutputLines = activePrepareTask ? activePrepareTask.output : outputLines;
+  const prepareOutputText = activePrepareTask ? activePrepareTask.outputText : outputLines.join("\n");
+  const prepareOutputLineCount = activePrepareTask ? activePrepareTask.outputLineCount : outputLines.length;
+  const prepareIsActive = activePrepareTask?.status === "running" || isPreparing;
   const runIsActive = activeTask?.status === "running" || isRunning;
   const runHasFailed = activeTask?.status === "failed" || activeTask?.status === "cancelled" || Boolean(error);
   const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
@@ -301,14 +312,23 @@ export function Wien2kBandsWizard({
   useEffect(() => {
     if (!reconnectTaskId) return;
     setActiveTaskId(reconnectTaskId);
-    setStep("run");
     void taskContext.reconnectToTask(reconnectTaskId);
   }, [reconnectTaskId, taskContext.reconnectToTask]);
 
   useEffect(() => {
-    if (!activeTaskId || activeTask) return;
+    if (!activeTaskId || reconnectTask) return;
     void taskContext.reconnectToTask(activeTaskId);
-  }, [activeTaskId, activeTask, taskContext.reconnectToTask]);
+  }, [activeTaskId, reconnectTask, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!reconnectTask) return;
+    if (reconnectTask.taskType === "wien2k_bands_prepare") {
+      setActivePrepareTaskId(reconnectTask.taskId);
+      setStep("prepare");
+    } else if (reconnectTask.taskType === "wien2k_bands") {
+      setStep("run");
+    }
+  }, [reconnectTask]);
 
   useEffect(() => {
     if (!activeTask) return;
@@ -322,6 +342,40 @@ export function Wien2kBandsWizard({
     setSession((current) => current ? { ...current, phase: taskResult.phase } : current);
     setIsRunning(false);
   }, [activeTask, taskResult]);
+
+  useEffect(() => {
+    if (!activePrepareTask) return;
+    const resume = activePrepareTask.metadata?.wizardResume;
+    if (resume?.sourceScfCalculationId) {
+      setSelectedScf(sources.find((source) => source.id === resume.sourceScfCalculationId) ?? selectedScf);
+    }
+    if (Array.isArray(resume?.kPath)) setKPath(resume.kPath as KPathPoint[]);
+    if (typeof resume?.totalKPointsTarget === "number") setTotalKPointsTarget(resume.totalKPointsTarget);
+    if (typeof resume?.energyMinEv === "number") setEnergyMinEv(resume.energyMinEv);
+    if (typeof resume?.energyMaxEv === "number") setEnergyMaxEv(resume.energyMaxEv);
+    if (typeof resume?.characterAtom === "number") setCharacterAtom(resume.characterAtom);
+    if (typeof resume?.characterL === "number") setCharacterL(resume.characterL);
+    if (typeof resume?.characterScale === "number") setCharacterScale(resume.characterScale);
+    if (typeof resume?.runLapw2Qtl === "boolean") setRunLapw2Qtl(resume.runLapw2Qtl);
+    if (typeof resume?.runIrrep === "boolean") setRunIrrep(resume.runIrrep);
+    if (typeof resume?.spinOrbit === "boolean") setSpinOrbit(resume.spinOrbit);
+    if (typeof resume?.diagnosticLog === "boolean") setDiagnosticLog(resume.diagnosticLog);
+    if (resume?.spinChannel) setSpinChannel(resume.spinChannel as Wien2kBandsSpinChannel);
+    if (resume?.hpcResources) setHpcResources(resume.hpcResources as SlurmResourceRequest);
+    if (resume?.session) setSession(resume.session as Wien2kBandsSession);
+    if (activePrepareTask.status === "failed" || activePrepareTask.status === "cancelled") {
+      setError(activePrepareTask.error ?? "WIEN2k bands preparation failed.");
+      setIsPreparing(false);
+      return;
+    }
+    if (activePrepareTask.status !== "completed") return;
+    const prepareResult = activePrepareTask.result as (Wien2kBandsPrepareResult & { session?: Wien2kBandsSession }) | null;
+    if (!prepareResult) return;
+    setSession(prepareResult.session ?? ((current) => current ? { ...current, phase: prepareResult.phase } : current));
+    setOutputLines(activePrepareTask.output);
+    setExpandedSections((current) => ({ ...current, hpc: true }));
+    setIsPreparing(false);
+  }, [activePrepareTask, selectedScf, sources]);
 
   useEffect(() => {
     setHpcResources(cloneWien2kBandsResources(activeHpcProfile));
@@ -424,7 +478,7 @@ export function Wien2kBandsWizard({
     try {
       const activeSession = await ensureSession();
       const klistPath = transformWien2kKPathForKlistBand(kPath, crystalData);
-      const prepared = await prepareWien2kBandsSession(activeSession.sessionId, {
+      const prepareSettings = {
         kPath: klistPath.map((point) => ({
           label: point.label,
           coords: point.coords,
@@ -438,13 +492,38 @@ export function Wien2kBandsWizard({
         runLapw2Qtl,
         runIrrep,
         spinChannel,
-      });
-      setSession((current) => current ? { ...current, phase: prepared.phase } : current);
-      setOutputLines((current) => [
-        ...current,
-        `[prepared ${Object.keys(prepared.artifacts).join(", ")}]`,
-      ].slice(-1500));
-      setExpandedSections((current) => ({ ...current, hpc: true }));
+      };
+      const taskId = await taskContext.startTask(
+        "wien2k_bands_prepare",
+        {
+          sessionId: activeSession.sessionId,
+          settings: prepareSettings,
+          workflowMetadata: {
+            wizardResume: {
+              view: "bands-wizard",
+              utility: "bands_prepare",
+              context: { projectId, cifId, crystalData, scfCalculations },
+              sourceScfCalculationId: selectedScf?.id ?? null,
+              kPath,
+              totalKPointsTarget,
+              energyMinEv,
+              energyMaxEv,
+              characterAtom,
+              characterL,
+              characterScale,
+              runLapw2Qtl,
+              runIrrep,
+              spinOrbit,
+              diagnosticLog,
+              spinChannel,
+              hpcResources,
+              session: activeSession,
+            },
+          },
+        },
+        `WIEN2k Band Preparation - ${activeSession.caseName}`,
+      );
+      setActivePrepareTaskId(taskId);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -492,7 +571,7 @@ export function Wien2kBandsWizard({
   async function leaveWizard(destination: "back" | "view" = "back") {
     setError(null);
     try {
-      if (session && !displayedResult && !runIsActive) {
+      if (session && !displayedResult && !runIsActive && !prepareIsActive) {
         await discardWien2kBandsSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
@@ -540,7 +619,7 @@ export function Wien2kBandsWizard({
   function renderHeader() {
     return (
       <AppHeaderPortal className="wizard-header">
-        <button className="back-btn" type="button" disabled={isPreparing} onClick={() => void leaveWizard("back")}>
+          <button className="back-btn" type="button" onClick={() => void leaveWizard("back")}>
           ← Exit
         </button>
         <h2>WIEN2k Bands</h2>
@@ -681,7 +760,7 @@ export function Wien2kBandsWizard({
     const pathString = kPath.map((point) => point.label).join(" → ");
     const totalKPoints = kPath.reduce((sum, point) => sum + point.npoints, 0) + (kPath.length > 0 ? 1 : 0);
     const prepared = session?.phase === "prepared" || session?.phase === "bands_complete";
-    const canPrepare = kPath.length >= 2 && energyMinEv < energyMaxEv && characterScale >= 0 && !isPreparing;
+    const canPrepare = kPath.length >= 2 && energyMinEv < energyMaxEv && characterScale >= 0 && !prepareIsActive;
     const canRun = prepared && Boolean(session) && !runIsActive && (selectedSpinMode !== "spin_polarized" || spinChannel !== "none");
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
@@ -879,14 +958,14 @@ export function Wien2kBandsWizard({
                 defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
                 defaultGpuResources={null}
                 onResourcesChange={setHpcResources}
-                disabled={!prepared || isPreparing || runIsActive}
+                disabled={!prepared || prepareIsActive || runIsActive}
               />
             ), {
               locked: !prepared,
               status: prepared ? "Ready" : "Locked - prepare files first",
             })}
             <div className="run-actions">
-              <button type="button" disabled={isPreparing} onClick={() => setStep("kpath")}>Back</button>
+              <button type="button" disabled={prepareIsActive} onClick={() => setStep("kpath")}>Back</button>
               <button
                 type="button"
                 className="primary-button"
@@ -896,17 +975,17 @@ export function Wien2kBandsWizard({
                   else void prepareBands();
                 }}
               >
-                {prepared ? "Run WIEN2k Bands" : isPreparing ? "Preparing..." : "Prepare WIEN2k Files"}
+                {prepared ? "Run WIEN2k Bands" : prepareIsActive ? "Preparing..." : "Prepare WIEN2k Files"}
               </button>
             </div>
           </section>
           <section className="wien2k-structure-preview">
             <LiveOutputPanel
-              title={isPreparing ? "Preparing..." : "Preparation log"}
-              output={outputLines.join("\n")}
+              title={prepareIsActive ? "Preparing..." : "Preparation log"}
+              output={prepareOutputText}
               placeholder="Preparation output will appear here."
-              totalLineCount={outputLines.length}
-              visibleLineCount={outputLines.length}
+              totalLineCount={prepareOutputLineCount}
+              visibleLineCount={prepareOutputLines.length}
             />
           </section>
         </div>

@@ -6,7 +6,6 @@ import {
   DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
   WIEN2K_EXCHANGE_CORRELATION_OPTIONS,
   discardWien2kScfSession,
-  initializeWien2kScfSession,
   listWien2kStructureSources,
   startWien2kScfContinuationSession,
   startWien2kScfSession,
@@ -16,6 +15,7 @@ import {
 import type {
   NormalizedScfSummary,
   Wien2kHubbardTarget,
+  Wien2kInitializationResult,
   Wien2kInitializationSettings,
   Wien2kScfExecutionResult,
   Wien2kScfRunSettings,
@@ -209,11 +209,18 @@ export function Wien2kScfWizard({
   const [remoteJobId, setRemoteJobId] = useState<string | null>(null);
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
+  const [activeInitializationTaskId, setActiveInitializationTaskId] = useState<string | null>(null);
   const [continuationParentCalculationId, setContinuationParentCalculationId] = useState<string | null>(
     continuationCalculationId,
   );
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
-  const activeTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const reconnectTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
+  const activeTask = reconnectTask?.taskType === "wien2k_scf" ? reconnectTask : undefined;
+  const activeInitializationTask = activeInitializationTaskId
+    ? taskContext.getTask(activeInitializationTaskId)
+    : reconnectTask?.taskType === "wien2k_scf_initialize"
+      ? reconnectTask
+      : undefined;
   const selectedSource = sources.find((source) => source.id === sourceId) ?? sources[0] ?? null;
   const initError = validateWien2kInitializationSettings(initialization);
   const effectiveRunSettings = useMemo(
@@ -221,8 +228,9 @@ export function Wien2kScfWizard({
     [runSettings, initialization.spinMode],
   );
   const runError = validateWien2kScfRunSettings(effectiveRunSettings);
+  const initializationRunning = activeInitializationTask?.status === "running" || isInitializing;
   const initialized = session?.phase === "initialized" || session?.phase === "scf_complete" || session?.phase === "failed";
-  const initializationLocked = initialized || isInitializing;
+  const initializationLocked = initialized || initializationRunning;
   const currentStep: ScfWizardStep = !session
     ? "source"
     : !initialized
@@ -279,6 +287,9 @@ export function Wien2kScfWizard({
   const taskOutputLines = activeTask ? activeTask.output : outputLines;
   const taskOutputText = activeTask ? activeTask.outputText : outputLines.join("\n");
   const taskOutputLineCount = activeTask ? activeTask.outputLineCount : outputLines.length;
+  const initializationOutputLines = activeInitializationTask ? activeInitializationTask.output : outputLines;
+  const initializationOutputText = activeInitializationTask ? activeInitializationTask.outputText : outputLines.join("\n");
+  const initializationOutputLineCount = activeInitializationTask ? activeInitializationTask.outputLineCount : outputLines.length;
   const runIsActive = activeTask?.status === "running" || isRunning;
   const runHasFailed = activeTask?.status === "failed" || activeTask?.status === "cancelled" || Boolean(error);
   const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
@@ -337,14 +348,23 @@ export function Wien2kScfWizard({
   useEffect(() => {
     if (!reconnectTaskId) return;
     setActiveTaskId(reconnectTaskId);
-    setScfRunStarted(true);
     void taskContext.reconnectToTask(reconnectTaskId);
   }, [reconnectTaskId, taskContext.reconnectToTask]);
 
   useEffect(() => {
-    if (!activeTaskId || activeTask) return;
+    if (!activeTaskId || reconnectTask) return;
     void taskContext.reconnectToTask(activeTaskId);
-  }, [activeTaskId, activeTask, taskContext.reconnectToTask]);
+  }, [activeTaskId, reconnectTask, taskContext.reconnectToTask]);
+
+  useEffect(() => {
+    if (!reconnectTask) return;
+    if (reconnectTask.taskType === "wien2k_scf_initialize") {
+      setActiveInitializationTaskId(reconnectTask.taskId);
+      setScfRunStarted(false);
+    } else if (reconnectTask.taskType === "wien2k_scf") {
+      setScfRunStarted(true);
+    }
+  }, [reconnectTask]);
 
   useEffect(() => {
     if (!activeTask) return;
@@ -364,6 +384,41 @@ export function Wien2kScfWizard({
     setContinuationParentCalculationId(taskResult.calculationId);
     setIsRunning(false);
   }, [activeTask, taskResult, effectiveRunSettings]);
+
+  useEffect(() => {
+    if (!activeInitializationTask) return;
+    const resume = activeInitializationTask.metadata?.wizardResume;
+    if (resume?.sourceId) setSourceId(String(resume.sourceId));
+    if (resume?.initialization) setInitialization(resume.initialization as Wien2kInitializationSettings);
+    if (resume?.runSettings) setRunSettings(resume.runSettings as Wien2kScfRunSettings);
+    if (resume?.session) setSession(resume.session as Wien2kScfSession);
+    if (activeInitializationTask.status === "failed" || activeInitializationTask.status === "cancelled") {
+      setError(activeInitializationTask.error ?? "WIEN2k initialization failed.");
+      setIsInitializing(false);
+      return;
+    }
+    if (activeInitializationTask.status !== "completed") return;
+    const initResult = activeInitializationTask.result as (Wien2kInitializationResult & { session?: Wien2kScfSession }) | null;
+    if (!initResult) return;
+    setSession(initResult.session ?? ((current) => current ? {
+      ...current,
+      phase: initResult.phase,
+      initialization,
+      artifacts: { ...current.artifacts, ...initResult.artifacts },
+    } : current));
+    setOutputLines(activeInitializationTask.output);
+    setExpandedSections({
+      source: false,
+      radii: false,
+      initialization: false,
+      magnetism: false,
+      dftu: runSettings.dftU.enabled,
+      scf: true,
+      advanced: false,
+      hpc: true,
+    });
+    setIsInitializing(false);
+  }, [activeInitializationTask, initialization, runSettings]);
 
   useEffect(() => {
     setHpcResources(runSettings.parallelMode === "kpoint"
@@ -416,27 +471,26 @@ export function Wien2kScfWizard({
         setOutputLines([`Staged accepted ${activeSession.caseName}.struct in ${activeSession.remoteCaseDir}.`]);
         await attachOutputListener(activeSession.sessionId);
       }
-      const initializedResult = await initializeWien2kScfSession(activeSession.sessionId, initialization);
-      setSession((current) => current ? {
-        ...current,
-        phase: initializedResult.phase,
-        initialization,
-        artifacts: { ...current.artifacts, ...initializedResult.artifacts },
-      } : current);
-      setOutputLines((current) => [
-        ...current,
-        `[native initialization validated: ${Object.keys(initializedResult.artifacts).length} text artifacts retrieved]`,
-      ].slice(-1500));
-      setExpandedSections({
-        source: false,
-        radii: false,
-        initialization: false,
-        magnetism: false,
-        dftu: runSettings.dftU.enabled,
-        scf: true,
-        advanced: false,
-        hpc: true,
-      });
+      const taskId = await taskContext.startTask(
+        "wien2k_scf_initialize",
+        {
+          sessionId: activeSession.sessionId,
+          settings: initialization,
+          workflowMetadata: {
+            wizardResume: {
+              view: "wien2k-scf-wizard",
+              utility: "initialization",
+              context: { projectId, cifId, calculations },
+              sourceId: selectedSource.id,
+              initialization,
+              runSettings,
+              session: activeSession,
+            },
+          },
+        },
+        `WIEN2k Initialization - ${activeSession.caseName}`,
+      );
+      setActiveInitializationTaskId(taskId);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -488,6 +542,7 @@ export function Wien2kScfWizard({
       setRemoteJobId(null);
       setRemoteNode(null);
       setActiveTaskId(null);
+      setActiveInitializationTaskId(null);
       setContinuationParentCalculationId(null);
       setExpandedSections({
         source: true,
@@ -507,7 +562,7 @@ export function Wien2kScfWizard({
   async function leaveWizard(destination: "back" | "saved") {
     setError(null);
     try {
-      if (session && !runIsActive) {
+      if (session && !runIsActive && !initializationRunning) {
         await discardWien2kScfSession(session.sessionId);
       }
       outputUnlistenRef.current?.();
@@ -715,7 +770,7 @@ export function Wien2kScfWizard({
   return (
     <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
       <AppHeaderPortal className="wizard-header">
-        <button className="back-btn" type="button" disabled={isInitializing || isRunning} onClick={() => void leaveWizard("back")}>
+        <button className="back-btn" type="button" disabled={isRunning} onClick={() => void leaveWizard("back")}>
           ← Exit
         </button>
         <h2>WIEN2k SCF</h2>
@@ -1115,9 +1170,9 @@ export function Wien2kScfWizard({
         <section className="wien2k-output-column">
           <LiveOutputPanel
             title="WIEN2k initialization and SCF"
-            output={outputLines.join("\n")}
-            totalLineCount={outputLines.length}
-            visibleLineCount={outputLines.length}
+            output={initializationOutputText}
+            totalLineCount={initializationOutputLineCount}
+            visibleLineCount={initializationOutputLines.length}
             panelClassName="output-panel wien2k-inline-output"
             outputClassName="output-text wien2k-inline-output-text"
           />
@@ -1125,13 +1180,13 @@ export function Wien2kScfWizard({
       </div>
       <div className="step-actions">
         {session && !result && initialized && !isContinuationSession && (
-          <button className="secondary-button" type="button" disabled={isRunning} onClick={() => void resetInitialization()}>
+          <button className="secondary-button" type="button" disabled={isRunning || initializationRunning} onClick={() => void resetInitialization()}>
             Restart Initialization
           </button>
         )}
         {!initialized && (
-          <button type="button" className="primary-button" disabled={!selectedSource || Boolean(initError) || isInitializing} onClick={() => void beginInitialization()}>
-            {isInitializing ? "Initializing..." : "Run Initialization"}
+          <button type="button" className="primary-button" disabled={!selectedSource || Boolean(initError) || initializationRunning} onClick={() => void beginInitialization()}>
+            {initializationRunning ? "Initializing..." : "Run Initialization"}
           </button>
         )}
         {initialized && !result && (

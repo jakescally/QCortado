@@ -35,6 +35,7 @@ function task(overrides: Partial<TaskState> & Pick<TaskState, "taskId" | "status
       recovery_save: null,
       headless_attached: false,
     },
+    metadata: null,
     ...overrides,
   };
 }
@@ -136,4 +137,43 @@ test("recognizes queued HPC work before a backend task exists", () => {
     hpcQueued: 1,
     total: 1,
   });
+});
+
+test("preserves resumable utility metadata on task manager entries", () => {
+  const utility = task({
+    taskId: "init-task",
+    taskType: "wien2k_scf_initialize",
+    status: "completed",
+    metadata: {
+      wizardResume: {
+        view: "wien2k-scf-wizard",
+        utility: "initialization",
+        context: { projectId: "project-1", cifId: "cif-1" },
+      },
+    },
+  });
+  const entries = buildTaskManagerEntries([utility], []);
+
+  assert.equal(entries[0]?.taskType, "wien2k_scf_initialize");
+  assert.equal(entries[0]?.metadata?.wizardResume?.view, "wien2k-scf-wizard");
+});
+
+test("preserves WIEN2k structure stage resume metadata", () => {
+  const utility = task({
+    taskId: "structure-task",
+    taskType: "wien2k_structure_stage",
+    status: "running",
+    metadata: {
+      wizardResume: {
+        view: "wien2k-structure-wizard",
+        utility: "structure_stage",
+        stage: "rmt",
+        context: { projectId: "project-1", cifId: "cif-1" },
+      },
+    },
+  });
+  const entries = buildTaskManagerEntries([utility], []);
+
+  assert.equal(entries[0]?.taskType, "wien2k_structure_stage");
+  assert.equal(entries[0]?.metadata?.wizardResume?.stage, "rmt");
 });

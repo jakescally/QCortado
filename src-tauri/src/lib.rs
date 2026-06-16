@@ -3885,6 +3885,18 @@ async fn wien2k_run_structure_stage(
     controls: engines::wien2k::Wien2kStructureControls,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kStructureStageResult, String> {
+    let event_name = format!("wien2k-structure-output:{}", session_id);
+    wien2k_run_structure_stage_impl(app, session_id, stage, controls, &state, event_name).await
+}
+
+async fn wien2k_run_structure_stage_impl(
+    app: AppHandle,
+    session_id: String,
+    stage: engines::wien2k::Wien2kStructureStage,
+    controls: engines::wien2k::Wien2kStructureControls,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kStructureStageResult, String> {
     let session = state
         .wien2k_structure_sessions
         .lock()
@@ -3905,7 +3917,6 @@ async fn wien2k_run_structure_stage(
         profile.wien2k_module_use.as_deref(),
         profile.wien2k_module_load.as_deref(),
     )?;
-    let event_name = format!("wien2k-structure-output:{}", session_id);
     let native_output = hpc::utility::run_scheduled_utility_operation(
         Some(&app),
         Some(&event_name),
@@ -4615,6 +4626,17 @@ async fn wien2k_initialize_scf_session(
     settings: engines::wien2k::Wien2kInitializationSettings,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kInitializationResult, String> {
+    let event_name = format!("wien2k-scf-output:{}", session_id);
+    wien2k_initialize_scf_session_impl(app, session_id, settings, &state, event_name).await
+}
+
+async fn wien2k_initialize_scf_session_impl(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kInitializationSettings,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kInitializationResult, String> {
     engines::wien2k::validate_initialization_settings(&settings)?;
     let session = state
         .wien2k_scf_sessions
@@ -4643,7 +4665,6 @@ async fn wien2k_initialize_scf_session(
     };
     let plan = engines::wien2k::build_init_lapw_plan(&case_ref, &settings);
     let command = build_wien2k_native_command(&session, &profile, plan.program, &plan.argv)?;
-    let event_name = format!("wien2k-scf-output:{}", session_id);
     let output = hpc::utility::run_scheduled_utility_operation(
         Some(&app),
         Some(&event_name),
@@ -5522,6 +5543,17 @@ async fn wien2k_prepare_bands_session(
     settings: engines::wien2k::Wien2kBandsPrepareSettings,
     state: State<'_, AppState>,
 ) -> Result<engines::wien2k::Wien2kBandsPrepareResult, String> {
+    let event_name = format!("wien2k-bands-output:{}", session_id);
+    wien2k_prepare_bands_session_impl(app, session_id, settings, &state, event_name).await
+}
+
+async fn wien2k_prepare_bands_session_impl(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsPrepareSettings,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kBandsPrepareResult, String> {
     engines::wien2k::validate_prepare_settings(&settings)?;
     let session = state
         .wien2k_bands_sessions
@@ -5560,11 +5592,10 @@ async fn wien2k_prepare_bands_session(
          {case}.output2 {case}.output2up {case}.output2dn \
          {case}.outputso {case}.outputsoup {case}.outputsodn \
          {case}.spaghetti {case}.spaghetti_ene {case}.bands.agr && \
-         echo '[QCortado] Prepared case.klist_band and case.insp'",
+        echo '[QCortado] Prepared case.klist_band and case.insp'",
         shell_single_quote_local(&session.remote_case_dir),
         case = quoted_case,
     );
-    let event_name = format!("wien2k-bands-output:{}", session_id);
     let output = hpc::utility::run_scheduled_utility_operation(
         Some(&app),
         Some(&event_name),
@@ -5765,6 +5796,7 @@ async fn wien2k_run_bands_session_impl(
         "case_name": session.case_name,
         "source_scf_id": session.source_scf_calculation_id,
         "source_scf_calculation_id": session.source_scf_calculation_id,
+        "spin_orbit": session.source_spin_orbit,
         "k_path": k_path,
         "prepare": session.latest_prepare,
         "run": settings,
@@ -5809,7 +5841,11 @@ async fn wien2k_run_bands_session_impl(
             scf_summary: None,
             started_at: session.started_at.clone(),
             completed_at: completed_at.clone(),
-            tags: vec!["wien2k-native".to_string()],
+            tags: if session.source_spin_orbit {
+                vec!["wien2k-native".to_string(), "soc".to_string()]
+            } else {
+                vec!["wien2k-native".to_string()]
+            },
             artifacts: artifacts
                 .iter()
                 .map(|(filename, contents)| projects::EngineSetupTextArtifact {
@@ -13120,8 +13156,307 @@ fn build_epw_input_preview(config: EpwCalculationConfig) -> Result<EpwInputPrevi
 // Background Task Commands (Process Manager)
 // ============================================================================
 
-/// Starts a WIEN2k SCF session run as a background task. Initialization stays a
-/// wizard utility operation; only the heavy SCF cycle is registered here.
+/// Starts a WIEN2k structure refinement stage as a background utility task.
+/// RMT, SGROUP and SYMMETRY all run as scheduled Slurm utilities and carry
+/// enough metadata for the Structure wizard to resume at the completed stage.
+#[tauri::command]
+async fn start_wien2k_structure_stage_task(
+    app: AppHandle,
+    session_id: String,
+    stage: engines::wien2k::Wien2kStructureStage,
+    controls: engines::wien2k::Wien2kStructureControls,
+    label: String,
+    workflow_metadata: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state
+        .wien2k_structure_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k structure session is no longer available.".to_string())?;
+    engines::wien2k::validate_stage_transition(session.phase, stage)?;
+    engines::wien2k::validate_controls(&controls)?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm
+        .register("wien2k_structure_stage".to_string(), label)
+        .await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+    pm.set_metadata(&task_id, workflow_metadata).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_run_structure_stage_impl(
+                app_handle.clone(),
+                session_id.clone(),
+                stage,
+                controls,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(stage_result) => {
+                for line in stage_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let session_snapshot = {
+                    let app_state = app_handle.state::<AppState>();
+                    let snapshot = app_state
+                        .wien2k_structure_sessions
+                        .lock()
+                        .unwrap()
+                        .get(&session_id)
+                        .cloned();
+                    snapshot
+                };
+                let mut json =
+                    serde_json::to_value(&stage_result).unwrap_or(serde_json::Value::Null);
+                if let (serde_json::Value::Object(object), Some(snapshot)) =
+                    (&mut json, session_snapshot)
+                {
+                    object.insert(
+                        "session".to_string(),
+                        serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+/// Starts WIEN2k SCF initialization as a background utility task. The task
+/// result carries the initialized session so the wizard can resume at the SCF
+/// settings page after Slurm finishes the lightweight utility job.
+#[tauri::command]
+async fn start_wien2k_scf_initialization_task(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kInitializationSettings,
+    label: String,
+    workflow_metadata: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    engines::wien2k::validate_initialization_settings(&settings)?;
+    let session = state
+        .wien2k_scf_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm
+        .register("wien2k_scf_initialize".to_string(), label)
+        .await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+    pm.set_metadata(&task_id, workflow_metadata).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_initialize_scf_session_impl(
+                app_handle.clone(),
+                session_id.clone(),
+                settings,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(init_result) => {
+                for line in init_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let session_snapshot = {
+                    let app_state = app_handle.state::<AppState>();
+                    let snapshot = app_state
+                        .wien2k_scf_sessions
+                        .lock()
+                        .unwrap()
+                        .get(&session_id)
+                        .cloned();
+                    snapshot
+                };
+                let mut json =
+                    serde_json::to_value(&init_result).unwrap_or(serde_json::Value::Null);
+                if let (serde_json::Value::Object(object), Some(snapshot)) =
+                    (&mut json, session_snapshot)
+                {
+                    object.insert(
+                        "session".to_string(),
+                        serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+/// Starts WIEN2k band-file preparation as a background utility task. The task
+/// result carries the prepared session so the wizard can resume with the same
+/// k-path/settings and proceed to the band run.
+#[tauri::command]
+async fn start_wien2k_bands_prepare_task(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kBandsPrepareSettings,
+    label: String,
+    workflow_metadata: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    engines::wien2k::validate_prepare_settings(&settings)?;
+    let session = state
+        .wien2k_bands_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm
+        .register("wien2k_bands_prepare".to_string(), label)
+        .await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+    pm.set_metadata(&task_id, workflow_metadata).await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_prepare_bands_session_impl(
+                app_handle.clone(),
+                session_id.clone(),
+                settings,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(prepare_result) => {
+                for line in prepare_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let session_snapshot = {
+                    let app_state = app_handle.state::<AppState>();
+                    let snapshot = app_state
+                        .wien2k_bands_sessions
+                        .lock()
+                        .unwrap()
+                        .get(&session_id)
+                        .cloned();
+                    snapshot
+                };
+                let mut json =
+                    serde_json::to_value(&prepare_result).unwrap_or(serde_json::Value::Null);
+                if let (serde_json::Value::Object(object), Some(snapshot)) =
+                    (&mut json, session_snapshot)
+                {
+                    object.insert(
+                        "session".to_string(),
+                        serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
+/// Starts a WIEN2k SCF session run as a background task.
 #[tauri::command]
 async fn start_wien2k_scf_calculation(
     app: AppHandle,
@@ -19077,6 +19412,9 @@ pub fn run() {
         wien2k_accept_soc_symmetry,
         wien2k_run_soc_session,
         wien2k_discard_soc_session,
+        start_wien2k_structure_stage_task,
+        start_wien2k_scf_initialization_task,
+        start_wien2k_bands_prepare_task,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
         start_wien2k_soc_calculation,
@@ -19161,6 +19499,9 @@ pub fn run() {
         wien2k_accept_soc_symmetry,
         wien2k_run_soc_session,
         wien2k_discard_soc_session,
+        start_wien2k_structure_stage_task,
+        start_wien2k_scf_initialization_task,
+        start_wien2k_bands_prepare_task,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
         start_wien2k_soc_calculation,

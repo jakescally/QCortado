@@ -9,7 +9,7 @@ import { HpcTaskMeta } from "./types";
 import type { BandDataset } from "./viewers/bands";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "wien2k_scf" | "wien2k_soc" | "wien2k_bands" | "wien2k_fermi_surface" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
+export type TaskType = "scf" | "bands" | "wien2k_structure_stage" | "wien2k_scf_initialize" | "wien2k_scf" | "wien2k_soc" | "wien2k_bands_prepare" | "wien2k_bands" | "wien2k_fermi_surface" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -25,6 +25,7 @@ export interface TaskState {
   result: any | null;
   error: string | null;
   hpc: HpcTaskMeta;
+  metadata: Record<string, any> | null;
 }
 
 interface TaskSummary {
@@ -45,6 +46,7 @@ interface TaskSummary {
   local_sync_dir?: string | null;
   recovery_save?: HpcRecoverySaveSpec | null;
   headless_attached?: boolean;
+  metadata?: Record<string, any> | null;
 }
 
 interface TaskInfo {
@@ -67,6 +69,7 @@ interface TaskInfo {
   local_sync_dir?: string | null;
   recovery_save?: HpcRecoverySaveSpec | null;
   headless_attached?: boolean;
+  metadata?: Record<string, any> | null;
 }
 
 interface QueueSaveSpec {
@@ -142,8 +145,11 @@ const TaskContext = createContext<TaskContextValue | null>(null);
 const COMMAND_MAP: Record<TaskType, string> = {
   scf: "start_scf_calculation",
   bands: "start_bands_calculation",
+  wien2k_structure_stage: "start_wien2k_structure_stage_task",
+  wien2k_scf_initialize: "start_wien2k_scf_initialization_task",
   wien2k_scf: "start_wien2k_scf_calculation",
   wien2k_soc: "start_wien2k_soc_calculation",
+  wien2k_bands_prepare: "start_wien2k_bands_prepare_task",
   wien2k_bands: "start_wien2k_bands_calculation",
   wien2k_fermi_surface: "start_wien2k_fermi_surface_calculation",
   dos: "start_dos_calculation",
@@ -177,7 +183,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "wien2k_scf" || taskType === "wien2k_soc" || taskType === "wien2k_bands" || taskType === "wien2k_fermi_surface" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "wien2k_structure_stage" || taskType === "wien2k_scf_initialize" || taskType === "wien2k_scf" || taskType === "wien2k_soc" || taskType === "wien2k_bands_prepare" || taskType === "wien2k_bands" || taskType === "wien2k_fermi_surface" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
@@ -361,6 +367,7 @@ function buildTaskState(
   result: any | null,
   error: string | null,
   hpc: HpcTaskMeta,
+  metadata: Record<string, any> | null = null,
   visibleOnly = true,
 ): TaskState {
   const visibleOutput = visibleOnly
@@ -384,6 +391,7 @@ function buildTaskState(
     result,
     error: addPslibraryPseudoRepairHint(error, output, hpc),
     hpc,
+    metadata,
   };
 }
 
@@ -859,6 +867,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             info?.result ?? task.result,
             info?.error ?? task.error,
             buildHpcMetaFromSnapshot(info, output, task.hpc),
+            info?.metadata ?? task.metadata,
           );
           next.set(taskId, refreshedTask);
           return next;
@@ -893,6 +902,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             status: "completed",
             result: info.result,
             hpc: buildHpcMetaFromSnapshot(info, task.output, task.hpc),
+            metadata: info.metadata ?? task.metadata,
             progress: {
               status: "complete",
               percent: 100,
@@ -968,6 +978,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
         result: initialInfo?.result ?? null,
         error: initialInfo?.error ?? null,
         hpc: buildHpcMetaFromSnapshot(initialInfo ?? { recovery_save: effectiveParams.executionTarget?.hpc?.recovery_save ?? null }),
+        metadata: initialInfo?.metadata ?? effectiveParams.workflowMetadata ?? null,
       };
 
       setTasks((prev) => {
@@ -1108,6 +1119,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
           info.result,
           info.error,
           buildHpcMetaFromSnapshot(info, output, localTask?.hpc),
+          info.metadata ?? localTask?.metadata ?? null,
         );
         setTasks((prev) => {
           const next = new Map(prev);
@@ -1128,6 +1140,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             result: info.result ?? current.result,
             error: info.error ?? current.error,
             hpc: buildHpcMetaFromSnapshot(info, current.output, current.hpc),
+            metadata: info.metadata ?? current.metadata,
           });
           return next;
         });
@@ -1165,6 +1178,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               info.result,
               info.error,
               buildHpcMetaFromSnapshot(info, output, tasksRef.current.get(summary.task_id)?.hpc),
+              info.metadata ?? tasksRef.current.get(summary.task_id)?.metadata ?? null,
             ));
             return next;
           });
@@ -1254,6 +1268,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             info.result,
             info.error,
             hpc,
+            info.metadata ?? local.metadata,
             false,
           );
           setTasks((prev) => {
@@ -1268,6 +1283,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               info.result,
               info.error,
               hpc,
+              info.metadata ?? local.metadata,
             ));
             return next;
           });
@@ -1296,6 +1312,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
             info.result,
             info.error,
             hpc,
+            info.metadata ?? tasksRef.current.get(taskId)?.metadata ?? null,
             false,
           );
 
@@ -1311,6 +1328,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
               info.result,
               info.error,
               hpc,
+              info.metadata ?? tasksRef.current.get(taskId)?.metadata ?? null,
             ));
             return next;
           });
@@ -1570,7 +1588,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       label: string,
       saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
-      if (isHpcStartParams(params) || type === "wien2k_scf" || type === "wien2k_soc" || type === "wien2k_bands" || type === "wien2k_fermi_surface") {
+      if (isHpcStartParams(params) || type === "wien2k_structure_stage" || type === "wien2k_scf_initialize" || type === "wien2k_scf" || type === "wien2k_soc" || type === "wien2k_bands_prepare" || type === "wien2k_bands" || type === "wien2k_fermi_surface") {
         return startTaskInternal(type, params, label, saveSpec ?? null);
       }
       const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);

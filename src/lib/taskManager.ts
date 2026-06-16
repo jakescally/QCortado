@@ -16,6 +16,7 @@ export interface TaskManagerEntry {
   finishedAt: string | null;
   error: string | null;
   isHpc: boolean;
+  metadata: Record<string, any> | null;
   task: TaskState | null;
   queueItem: QueueItem | null;
 }
@@ -77,6 +78,7 @@ export function buildTaskManagerEntries(
       error: task?.error ?? queueItem.error,
       isHpc: task?.hpc.backend === "hpc"
         || String(queueItem.params?.executionTarget?.mode ?? "").toLowerCase() === "hpc",
+      metadata: task?.metadata ?? null,
       task,
       queueItem,
     };
@@ -97,6 +99,7 @@ export function buildTaskManagerEntries(
       finishedAt: null,
       error: task.error,
       isHpc: task.hpc.backend === "hpc",
+      metadata: task.metadata,
       task,
       queueItem: null,
     });

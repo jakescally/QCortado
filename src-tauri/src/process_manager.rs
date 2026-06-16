@@ -45,6 +45,8 @@ pub struct TaskInfo {
     pub recovery_save: Option<serde_json::Value>,
     #[serde(default)]
     pub headless_attached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -78,6 +80,8 @@ pub struct TaskSummary {
     pub recovery_save: Option<serde_json::Value>,
     #[serde(default)]
     pub headless_attached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub struct RunningTask {
@@ -103,6 +107,7 @@ pub struct RunningTask {
     pub local_sync_dir: Option<String>,
     pub recovery_save: Option<serde_json::Value>,
     pub headless_attached: bool,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +174,7 @@ impl ProcessManager {
             local_sync_dir: None,
             recovery_save: None,
             headless_attached: false,
+            metadata: None,
         };
         let mut tasks = self.tasks.lock().await;
         tasks.insert(task_id.clone(), task);
@@ -242,6 +248,7 @@ impl ProcessManager {
             local_sync_dir: t.local_sync_dir.clone(),
             recovery_save: t.recovery_save.clone(),
             headless_attached: t.headless_attached,
+            metadata: t.metadata.clone(),
         })
     }
 
@@ -267,6 +274,7 @@ impl ProcessManager {
                 local_sync_dir: t.local_sync_dir.clone(),
                 recovery_save: t.recovery_save.clone(),
                 headless_attached: t.headless_attached,
+                metadata: t.metadata.clone(),
             })
             .collect()
     }
@@ -404,6 +412,13 @@ impl ProcessManager {
         }
     }
 
+    pub async fn set_metadata(&self, task_id: &str, metadata: Option<serde_json::Value>) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.metadata = metadata;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn attach_hpc_task(
         &self,
@@ -450,6 +465,7 @@ impl ProcessManager {
             local_sync_dir,
             recovery_save,
             headless_attached: true,
+            metadata: None,
         };
         tasks.insert(task_id, task);
         if !was_running {

@@ -1706,8 +1706,11 @@ function AppInner() {
     const kindMap: Record<string, CalculationKind> = {
       scf: "scf",
       bands: "bands",
+      wien2k_structure_stage: "engine_setup",
+      wien2k_scf_initialize: "scf",
       wien2k_scf: "scf",
       wien2k_soc: "soc",
+      wien2k_bands_prepare: "bands",
       wien2k_bands: "bands",
       wien2k_fermi_surface: "fermi_surface",
       dos: "dos",
@@ -1721,8 +1724,11 @@ function AppInner() {
     const fallbackViewMap: Record<string, EngineWorkflowView> = {
       scf: "scf-wizard",
       bands: "bands-wizard",
+      wien2k_structure_stage: "wien2k-structure-wizard",
+      wien2k_scf_initialize: "wien2k-scf-wizard",
       wien2k_scf: "wien2k-scf-wizard",
       wien2k_soc: "wien2k-soc-wizard",
+      wien2k_bands_prepare: "bands-wizard",
       wien2k_bands: "bands-wizard",
       wien2k_fermi_surface: "fermi-surface-wizard",
       dos: "dos-wizard",
@@ -1739,6 +1745,23 @@ function AppInner() {
 
     const route = resolveEngineWorkflowHostRoute(taskType.startsWith("wien2k_") ? "wien2k" : "qe", kind);
     if (!route) return false;
+    const taskEntry = taskManagerEntries.find((entry) => entry.taskId === taskId);
+    const wizardResume = taskEntry?.metadata?.wizardResume;
+    const resumeContext = wizardResume && typeof wizardResume === "object"
+      ? wizardResume.context
+      : null;
+    const resumeScfContext = route.view === "wien2k-scf-wizard" && resumeContext
+      ? resumeContext as SCFContext
+      : scfContext;
+    const resumeBandsContext = route.view === "bands-wizard" && taskType.startsWith("wien2k_") && resumeContext
+      ? resumeContext as BandsContext
+      : bandsContext;
+    const resumeFermiSurfaceContext = route.view === "fermi-surface-wizard" && taskType.startsWith("wien2k_") && resumeContext
+      ? resumeContext as FermiSurfaceContext
+      : fermiSurfaceContext;
+    const resumeStructureContext = route.view === "wien2k-structure-wizard" && resumeContext
+      ? resumeContext as Wien2kStructureContext
+      : wien2kStructureContext;
 
     const canOpen = canRenderEngineWorkflowHost({
       route,
@@ -1751,22 +1774,35 @@ function AppInner() {
       },
       contexts: {
         scf: scfContext,
-        bands: bandsContext,
+        bands: resumeBandsContext,
         dos: dosContext,
         wannier: wannierContext,
-        fermiSurface: fermiSurfaceContext,
+        fermiSurface: resumeFermiSurfaceContext,
         hubbardLrt: hubbardLrtContext,
         phonons: phononsContext,
         transport: transportContext,
         epw: epwContext,
-        structureSetup: wien2kStructureContext,
-        wien2kScf: scfContext,
+        structureSetup: resumeStructureContext,
+        wien2kScf: resumeScfContext,
         soc: socContext,
       },
       reconnectTaskId: taskId,
     });
     if (!canOpen) return false;
 
+    if (resumeContext?.projectId) setSelectedProjectId(resumeContext.projectId);
+    if (route.view === "wien2k-scf-wizard" && resumeScfContext) {
+      setScfContext(resumeScfContext);
+    }
+    if (route.view === "bands-wizard" && taskType.startsWith("wien2k_") && resumeBandsContext) {
+      setBandsContext(resumeBandsContext);
+    }
+    if (route.view === "fermi-surface-wizard" && taskType.startsWith("wien2k_") && resumeFermiSurfaceContext) {
+      setFermiSurfaceContext(resumeFermiSurfaceContext);
+    }
+    if (route.view === "wien2k-structure-wizard" && resumeStructureContext) {
+      setWien2kStructureContext(resumeStructureContext);
+    }
     setReconnectTaskId(taskId);
     setActiveWorkflowRoute(route);
     setCurrentView(route.view);

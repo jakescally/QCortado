@@ -241,7 +241,7 @@ export function buildCalculationTagList(
     if (spinMode === "spin_polarized") pushRawTag(tags, "Spin-polarized");
   } else if (calc.calc_type === "bands") {
     if (params.total_k_points) pushRawTag(tags, `${params.total_k_points} k-pts`);
-    if (params.lspinorb) pushRawTag(tags, "SOC");
+    if (params.lspinorb || params.spin_orbit || params.spinOrbit || params.soc) pushRawTag(tags, "SOC");
     if (params.nspin === 2) pushRawTag(tags, "Magnetic");
     if (params.lda_plus_u) pushRawTag(tags, "DFT+U");
     if (params.vdw_corr && params.vdw_corr !== "none") pushRawTag(tags, "vdW");

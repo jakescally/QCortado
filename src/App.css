@@ -32,6 +32,7 @@
   );
   --floating-content-clearance: var(--bottom-action-clearance);
   --app-top-bar-height: 54px;
+  --app-content-height: 100vh;
   --app-chrome-z: 9000;
   --app-drawer-width-left: 360px;
   --app-drawer-width-right: 680px;
@@ -62,6 +63,23 @@ html[data-current-view="project-dashboard"] #root::-webkit-scrollbar {
 html[data-app-chrome="topbar"] #root {
   padding-top: var(--app-top-bar-height);
   scroll-padding-top: var(--app-top-bar-height);
+}
+
+html[data-app-chrome="topbar"] {
+  --app-content-height: calc(100vh - var(--app-top-bar-height));
+}
+
+html[data-current-view="bands-viewer"] #root,
+html[data-current-view="dos-viewer"] #root,
+html[data-current-view="wannier-viewer"] #root,
+html[data-current-view="transport-viewer"] #root,
+html[data-current-view="phonon-viewer"] #root,
+html[data-current-view="epw-viewer"] #root,
+html[data-current-view="bands-multiview"] #root,
+html[data-current-view="node-activity"] #root,
+html[data-current-view="settings"] #root {
+  overflow-y: hidden;
+  overscroll-behavior: contain;
 }
 
 * {
@@ -4830,13 +4848,16 @@ html[data-theme="dark"] {
 }
 
 .settings-workspace-shell {
-  min-height: 100vh;
+  height: var(--app-content-height);
+  min-height: 0;
   padding: 1rem;
   background: #f4f7fb;
+  overflow: hidden;
 }
 
 .settings-workspace {
-  min-height: calc(100vh - 2rem);
+  height: calc(var(--app-content-height) - 2rem);
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -5484,9 +5505,9 @@ html[data-theme="dark"] .project-overflow-actions {
 
 .node-activity-page {
   box-sizing: border-box;
-  height: 100vh;
+  height: var(--app-content-height);
   min-height: 0;
-  max-height: 100vh;
+  max-height: var(--app-content-height);
   overflow: hidden;
   gap: 0.85rem;
 }
@@ -8412,11 +8433,14 @@ html[data-theme="dark"] .save-status .saved {
 
 /* Bands Viewer Container */
 .bands-viewer-container {
-  height: 100vh;
+  height: var(--app-content-height);
+  max-height: var(--app-content-height);
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: #f7fafc;
   padding: 0.75rem 1rem;
+  overflow: hidden;
 }
 
 .bands-viewer-header {
@@ -13683,11 +13707,14 @@ html[data-theme="dark"] .epw-warning {
 
 /* Phonon Viewer Container */
 .phonon-viewer-container {
-  height: 100vh;
+  height: var(--app-content-height);
+  max-height: var(--app-content-height);
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: #f7fafc;
   padding: 0.75rem 1rem;
+  overflow: hidden;
 }
 
 .phonon-viewer-header {
