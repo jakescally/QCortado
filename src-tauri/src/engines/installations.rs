@@ -149,12 +149,16 @@ pub fn selectable_engine_manifests(
         manifest.descriptor.calculation_kinds = vec![
             CalculationKind::EngineSetup,
             CalculationKind::Scf,
+            CalculationKind::Soc,
             CalculationKind::Bands,
         ];
         manifest.workflows.retain(|workflow| {
             matches!(
                 workflow.kind,
-                CalculationKind::EngineSetup | CalculationKind::Scf | CalculationKind::Bands
+                CalculationKind::EngineSetup
+                    | CalculationKind::Scf
+                    | CalculationKind::Soc
+                    | CalculationKind::Bands
             )
         });
         manifests.push(manifest);
@@ -508,12 +512,14 @@ mod tests {
             vec![
                 CalculationKind::EngineSetup,
                 CalculationKind::Scf,
+                CalculationKind::Soc,
                 CalculationKind::Bands
             ]
         );
-        assert_eq!(manifest.workflows.len(), 3);
+        assert_eq!(manifest.workflows.len(), 4);
         assert_eq!(manifest.workflows[0].kind, CalculationKind::EngineSetup);
         assert_eq!(manifest.workflows[1].kind, CalculationKind::Scf);
-        assert_eq!(manifest.workflows[2].kind, CalculationKind::Bands);
+        assert_eq!(manifest.workflows[2].kind, CalculationKind::Soc);
+        assert_eq!(manifest.workflows[3].kind, CalculationKind::Bands);
     }
 }

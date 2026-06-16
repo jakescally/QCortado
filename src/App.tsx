@@ -156,7 +156,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "project-browser" | "project-dashboard" | "settings" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "wien2k-soc-wizard" | "project-browser" | "project-dashboard" | "settings" | "node-activity" | "storage-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -546,6 +546,7 @@ function AppInner() {
 
   // Context for running Bands from a project
   const [bandsContext, setBandsContext] = useState<BandsContext | null>(null);
+  const [socContext, setSocContext] = useState<BandsContext | null>(null);
 
   // Context for viewing saved band data
   const [viewBandsData, setViewBandsData] = useState<{
@@ -1679,6 +1680,7 @@ function AppInner() {
       setDeleteConfirmText("");
       setScfContext(null);
       setBandsContext(null);
+      setSocContext(null);
       setDosContext(null);
       setFermiSurfaceContext(null);
       setHubbardLrtContext(null);
@@ -1705,6 +1707,7 @@ function AppInner() {
       scf: "scf",
       bands: "bands",
       wien2k_scf: "scf",
+      wien2k_soc: "soc",
       wien2k_bands: "bands",
       wien2k_fermi_surface: "fermi_surface",
       dos: "dos",
@@ -1719,6 +1722,7 @@ function AppInner() {
       scf: "scf-wizard",
       bands: "bands-wizard",
       wien2k_scf: "wien2k-scf-wizard",
+      wien2k_soc: "wien2k-soc-wizard",
       wien2k_bands: "bands-wizard",
       wien2k_fermi_surface: "fermi-surface-wizard",
       dos: "dos-wizard",
@@ -1757,6 +1761,7 @@ function AppInner() {
         epw: epwContext,
         structureSetup: wien2kStructureContext,
         wien2kScf: scfContext,
+        soc: socContext,
       },
       reconnectTaskId: taskId,
     });
@@ -1802,6 +1807,9 @@ function AppInner() {
         break;
       case "wien2k-scf-wizard":
         setScfContext(null);
+        break;
+      case "wien2k-soc-wizard":
+        setSocContext(null);
         break;
     }
   }
@@ -3350,6 +3358,7 @@ function AppInner() {
     "epw-viewer": "EPW",
     "wien2k-structure-wizard": "WIEN2k Structure Workflow",
     "wien2k-scf-wizard": "WIEN2k SCF Workflow",
+    "wien2k-soc-wizard": "WIEN2k SOC Workflow",
   };
 
   const appChrome = (
@@ -3474,6 +3483,7 @@ function AppInner() {
     epw: epwContext,
     structureSetup: wien2kStructureContext,
     wien2kScf: scfContext,
+    soc: socContext,
   };
 
   if (
@@ -3548,6 +3558,10 @@ function AppInner() {
           onWien2kScfSaved={() => {
             setProjectDashboardRefreshToken((previous) => previous + 1);
             handleWorkflowBack("wien2k-scf-wizard", "project-dashboard");
+          }}
+          onWien2kSocSaved={() => {
+            setProjectDashboardRefreshToken((previous) => previous + 1);
+            handleWorkflowBack("wien2k-soc-wizard", "project-dashboard");
           }}
         />
         {appChrome}
@@ -3977,6 +3991,15 @@ function AppInner() {
               scfCalculations,
             });
             openEngineWorkflow(engineId, "bands", "bands-wizard");
+          }}
+          onRunSoc={(cifId, crystalData, scfCalculations) => {
+            setSocContext({
+              cifId,
+              crystalData,
+              projectId: selectedProjectId,
+              scfCalculations,
+            });
+            openEngineWorkflow("wien2k", "soc", "wien2k-soc-wizard");
           }}
           onViewBands={(bandData, fermiEnergy, calculationParameters, calculationContext) => {
             setViewBandsData({

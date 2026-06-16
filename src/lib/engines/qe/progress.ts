@@ -381,6 +381,7 @@ type ProgressKind =
   | "scf"
   | "bands"
   | "wien2k_scf"
+  | "wien2k_soc"
   | "wien2k_bands"
   | "wien2k_fermi_surface"
   | "dos"
@@ -414,6 +415,14 @@ export function progressReducer(
         return { ...state, status: "running", percent: null, phase: "SCF cycle" };
       }
       return { ...state, status: "running", percent: null, phase: state.phase || "SCF cycle" };
+    case "wien2k_soc":
+      if (line.includes("[saved WIEN2k SOC calculation")) {
+        return { ...state, status: "complete", percent: 100, phase: "Complete" };
+      }
+      if (line.includes("run_lapw") || line.includes("runsp_lapw")) {
+        return { ...state, status: "running", percent: null, phase: "SOC SCF cycle" };
+      }
+      return { ...state, status: "running", percent: null, phase: state.phase || "SOC SCF cycle" };
     case "wien2k_bands":
       if (line.includes("[saved bands calculation")) {
         return { ...state, status: "complete", percent: 100, phase: "Complete" };

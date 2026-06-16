@@ -24,6 +24,7 @@ import {
   setStoredProjectDashboardEngineFilter,
 } from "../lib/projectDashboardSettings";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 import { parseLatestHubbardOccupations } from "../lib/hubbardOccupations";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
@@ -166,6 +167,7 @@ interface ProjectDashboardProps {
   ) => void;
   onRunEngineSetup: (engineId: EngineId, cifId: string, crystalData: CrystalData) => void;
   onRunBands: (engineId: EngineId, cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
+  onRunSoc: (cifId: string, crystalData: CrystalData, scfCalculations: CalculationRun[]) => void;
   onViewBands: (
     bandData: any,
     scfFermiEnergy: number | null,
@@ -549,7 +551,7 @@ function getTagsWithEngine<T extends { label: string; type: CalcTagType }>(
   calc: CalculationRun,
   tags: T[],
 ): Array<{ label: string; type: CalcTagType } | T> {
-  return [getCalculationEngineTag(calc), ...tags];
+  return tags.length > 0 ? tags : [getCalculationEngineTag(calc)];
 }
 
 function asNonNegativeInteger(value: unknown): number | null {
@@ -626,8 +628,20 @@ function getWien2kScfParameters(calc: CalculationRun): Record<string, any> {
   };
 }
 
+function isWien2kSocCalculation(calc: CalculationRun): boolean {
+  return calc.engine_id === "wien2k"
+    && calc.calc_type === "scf"
+    && Boolean(
+      calc.parameters?.spin_orbit
+      || calc.parameters?.spinOrbit
+      || calc.parameters?.soc
+      || calc.tags?.includes("soc"),
+    );
+}
+
 function isContinuableWien2kScf(calc: CalculationRun): boolean {
   if (calc.engine_id !== "wien2k" || calc.calc_type !== "scf") return false;
+  if (isWien2kSocCalculation(calc)) return false;
   if (calc.scf_summary?.convergence !== "not_converged") return false;
   const params = calc.parameters || {};
   return params.native_artifacts_retained_remote === true
@@ -654,6 +668,7 @@ function formatWien2kMeshTag(mesh: unknown): string | null {
 
 // Helper to generate calculation feature tags from parameters
 function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: CalcTagType }[];
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
   const wien2kParams = getWien2kScfParameters(calc);
@@ -672,7 +687,7 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
 
   // Special tags from stored tags array (phonon-ready, structure-optimized).
   if (calc.tags) {
-    for (const tag of calc.tags) {
+    for (const tag of calc.tags ?? []) {
       if (tag === "phonon-ready") {
         if (phononReady) {
           pushTag("Phonon-Ready", "special");
@@ -731,9 +746,12 @@ function getCalculationTags(calc: CalculationRun): { label: string; type: CalcTa
   }
 
   if (calc.engine_id === "wien2k" && calc.calc_type === "scf") {
+    if (isWien2kSocCalculation(calc)) {
+      pushTag("SOC", "feature");
+    }
     const meshTag = formatWien2kMeshTag(wien2kParams.k_mesh ?? wien2kParams.kMesh);
-    if (meshTag) {
-      pushTag(meshTag, "info");
+    if (meshTag != null) {
+      pushTag(meshTag ?? "", "info");
     }
     const rkmax = Number(wien2kParams.rkmax ?? wien2kParams.rkMax);
     if (Number.isFinite(rkmax) && rkmax > 0) {
@@ -776,6 +794,7 @@ function getOptimizationMode(calc: CalculationRun): "relax" | "vcrelax" {
 }
 
 function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcTagType }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: CalcTagType }[];
   const tags: { label: string; type: CalcTagType }[] = [];
   const params = calc.parameters || {};
   if (isFailedCalculation(calc)) {
@@ -808,6 +827,7 @@ function getOptimizationTags(calc: CalculationRun): { label: string; type: CalcT
 
 // Helper to generate bands-specific tags
 function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature") => {
@@ -841,7 +861,7 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
 
   // Orbital projection/fat-band marker
   const hasProjectionTag = Array.isArray(calc.tags)
-    && calc.tags.some((tag) => {
+    && (calc.tags ?? []).some((tag) => {
       const normalized = String(tag).trim().toLowerCase();
       return normalized === "proj" || normalized === "orb";
     });
@@ -859,6 +879,7 @@ function getBandsTags(calc: CalculationRun): { label: string; type: "info" | "fe
 
 // Helper to generate electronic DOS-specific tags
 function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature") => {
@@ -901,6 +922,7 @@ function getDosTags(calc: CalculationRun): { label: string; type: "info" | "feat
 }
 
 function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const issueCounts = getWannierIssueCounts(
@@ -947,6 +969,7 @@ function getWannierTags(calc: CalculationRun): { label: string; type: "info" | "
 }
 
 function getTransportTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature") => {
@@ -986,6 +1009,7 @@ function getTransportTags(calc: CalculationRun): { label: string; type: "info" |
 }
 
 function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature") => {
@@ -1031,6 +1055,7 @@ function getFermiSurfaceTags(calc: CalculationRun): { label: string; type: "info
 
 // Helper to generate phonon-specific tags
 function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
 
@@ -1063,6 +1088,7 @@ function getPhononTags(calc: CalculationRun): { label: string; type: "info" | "f
 }
 
 function getEpwTags(calc: CalculationRun): { label: string; type: "info" | "feature" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" }[];
   const tags: { label: string; type: "info" | "feature" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature") => {
@@ -1511,6 +1537,7 @@ export function ProjectDashboard({
   onContinueWien2kScf,
   onRunEngineSetup,
   onRunBands,
+  onRunSoc,
   onViewBands,
   onRunDos,
   onViewDos,
@@ -3144,6 +3171,13 @@ export function ProjectDashboard({
     onRunBands(activeEngineId, selectedCifId, crystalData, variant.calculations);
   }
 
+  function handleRunSoc() {
+    if (!selectedCifId || !crystalData || !hasSocReadyWien2kScf()) return;
+    const variant = project?.cif_variants.find(v => v.id === selectedCifId);
+    if (!variant) return;
+    onRunSoc(selectedCifId, crystalData, variant.calculations);
+  }
+
   function handleRunDos() {
     if (!selectedCifId || !crystalData) return;
     const variant = project?.cif_variants.find(v => v.id === selectedCifId);
@@ -3657,6 +3691,20 @@ export function ProjectDashboard({
         && calc.scf_summary?.convergence === "converged"
         && typeof calc.parameters?.remote_case_dir === "string"
         && calc.parameters.remote_case_dir.trim().length > 0,
+    );
+  }
+
+  function hasSocReadyWien2kScf(): boolean {
+    const variant = project?.cif_variants.find((v) => v.id === selectedCifId);
+    if (!variant) return false;
+    return variant.calculations.some(
+      (calc) =>
+        calc.engine_id === "wien2k"
+        && calc.calc_type === "scf"
+        && calc.scf_summary?.convergence === "converged"
+        && typeof calc.parameters?.remote_case_dir === "string"
+        && calc.parameters.remote_case_dir.trim().length > 0
+        && !isWien2kSocCalculation(calc),
     );
   }
 
@@ -4497,6 +4545,17 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                     <span className="calc-action-label">WIEN2k SCF</span>
                     <span className="calc-action-hint">
                       {wien2kStructureSourceCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                    </span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={handleRunSoc}
+                    disabled={!hasSocReadyWien2kScf()}
+                  >
+                    <span className="calc-action-icon">SOC</span>
+                    <span className="calc-action-label">WIEN2k SOC</span>
+                    <span className="calc-action-hint">
+                      {hasSocReadyWien2kScf() ? "init_so + self-consistent -so" : "Requires converged scalar SCF"}
                     </span>
                   </button>
                   <button
@@ -5716,8 +5775,15 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           <span className="calc-kpath">{calc.parameters.q_mesh.join("×")}</span>
                         )}
                         <div className="calc-tags">
-                          {isHpcCalculation(calc) && <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>}
-                          {calc.result?.converged && <span className="calc-tag calc-tag-special">Converged</span>}
+                          {getCalculationTags(
+                            calc.result?.converged
+                              ? { ...calc, tags: [...(calc.tags ?? []), "converged"] }
+                              : calc,
+                          ).map((tag, i) => (
+                            <span key={i} className={getCalcTagClass(tag)}>
+                              {tag.label}
+                            </span>
+                          ))}
                         </div>
                       </div>
                       <div className="calculation-meta">

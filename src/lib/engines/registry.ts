@@ -290,6 +290,7 @@ export const QE_FRONTEND_ENGINE_PLUGIN: FrontendEnginePlugin = {
 export const WIEN2K_WORKFLOW_VIEWS: Partial<Record<CalculationKind, EngineWorkflowView>> = {
   engine_setup: "wien2k-structure-wizard",
   scf: "wien2k-scf-wizard",
+  soc: "wien2k-soc-wizard",
   bands: "bands-wizard",
   fermi_surface: "fermi-surface-wizard",
 };

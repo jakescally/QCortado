@@ -49,7 +49,7 @@ test("engine workflow host routes every QE workflow through a supported wizard v
   }
 });
 
-test("installed WIEN2k frontend exposure includes structure setup, SCF, bands, and Fermi surfaces", () => {
+test("installed WIEN2k frontend exposure includes structure setup, SCF, SOC, bands, and Fermi surfaces", () => {
   const plugin = getFrontendEnginePlugin("wien2k");
 
   assert.ok(plugin);
@@ -58,6 +58,8 @@ test("installed WIEN2k frontend exposure includes structure setup, SCF, bands, a
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "engine_setup")?.view, "wien2k-structure-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "scf"), "wien2k-scf-wizard");
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "scf")?.view, "wien2k-scf-wizard");
+  assert.equal(getEngineWorkflowView("wien2k", "soc"), "wien2k-soc-wizard");
+  assert.equal(resolveEngineWorkflowHostRoute("wien2k", "soc")?.view, "wien2k-soc-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "bands"), "bands-wizard");
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "bands")?.view, "bands-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "fermi_surface"), "fermi-surface-wizard");
@@ -71,7 +73,7 @@ test("installed WIEN2k frontend exposure includes structure setup, SCF, bands, a
   assert.deepEqual(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor.executionModes, ["remote"]);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsRemoteOnly, true);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsLocal, false);
-  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup", "scf", "bands", "fermi_surface"]);
+  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup", "scf", "soc", "bands", "fermi_surface"]);
 });
 
 test("Wien2k reserved manifest models case state without QE pseudopotentials", () => {

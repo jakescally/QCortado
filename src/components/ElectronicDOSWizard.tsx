@@ -42,6 +42,7 @@ import {
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import type { EngineId } from "../lib/engines/types";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 
 interface CalculationRun {
   id: string;
@@ -132,6 +133,11 @@ function getCalculationTags(
   calc: CalculationRun,
   downloadedIds?: Set<string>,
 ): { label: string; type: "info" | "feature" | "special" | "geometry" }[] {
+  return getUnifiedCalculationTagBadges(calc, {
+    legacyFallback: true,
+    downloadedIds,
+    calcId: calc.id,
+  }) as { label: string; type: "info" | "feature" | "special" | "geometry" }[];
   const tags: { label: string; type: "info" | "feature" | "special" | "geometry" }[] = [];
   const params = calc.parameters || {};
   const pushTag = (label: string, type: "info" | "feature" | "special" | "geometry") => {

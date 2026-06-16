@@ -19,6 +19,8 @@ interface HpcRunSettingsProps {
   } | null;
   onResourcesChange: (next: SlurmResourceRequest) => void;
   disabled?: boolean;
+  nodesDisabled?: boolean;
+  tasksDisabled?: boolean;
 }
 
 interface ScriptPreviewState {
@@ -58,6 +60,8 @@ export function HpcRunSettings({
   maxTasks = null,
   onResourcesChange,
   disabled = false,
+  nodesDisabled = false,
+  tasksDisabled = false,
 }: HpcRunSettingsProps) {
   const [showAdvanced, setShowAdvanced] = useState(true);
   const [previewState, setPreviewState] = useState<ScriptPreviewState>({
@@ -267,7 +271,7 @@ export function HpcRunSettings({
             min={1}
             value={resources.nodes ?? 1}
             onChange={(event) => update({ nodes: normalizePositiveInt(event.target.value, 1) })}
-            disabled={disabled}
+            disabled={disabled || nodesDisabled}
           />
         </label>
 
@@ -279,7 +283,7 @@ export function HpcRunSettings({
             max={maxTaskCount ?? undefined}
             value={resources.ntasks ?? 1}
             onChange={(event) => update({ ntasks: normalizeTaskCount(event.target.value) })}
-            disabled={disabled}
+            disabled={disabled || tasksDisabled}
           />
         </label>
 

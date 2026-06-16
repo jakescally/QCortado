@@ -43,6 +43,7 @@ export interface Wien2kBandsSession {
   remoteInstallRoot: string;
   hpcProfileId: string;
   spinMode: Wien2kSpinMode;
+  sourceSpinOrbit: boolean;
   fermiEnergyEv?: number | null;
   phase: Wien2kBandsSessionPhase;
   latestPrepare?: Wien2kBandsPrepareSettings | null;

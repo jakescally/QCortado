@@ -32,6 +32,7 @@ import { formatCalculationSourceLabel, getCalculationName } from "../lib/calcula
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
 import type { TransportResult } from "../lib/transport";
 import type { EngineId } from "../lib/engines/types";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 
 interface CalculationRun {
   id: string;
@@ -217,6 +218,7 @@ function sortWannierCalculations(calculations: CalculationRun[], mode: Transport
 }
 
 function getWannierSourceTags(calc: CalculationRun): Array<{ label: string; type: "info" | "feature" | "special" }> {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as Array<{ label: string; type: "info" | "feature" | "special" }>;
   const tags: Array<{ label: string; type: "info" | "feature" | "special" }> = [];
   const issueCounts = getWannierIssueCounts(
     calc.result?.wannier_data ?? null,
@@ -231,7 +233,7 @@ function getWannierSourceTags(calc: CalculationRun): Array<{ label: string; type
 
   const spread = sourceWannierSpread(calc);
   if (spread != null) {
-    pushTag(`Ω ${spread.toFixed(3)}`, "info");
+    pushTag(`Ω ${spread!.toFixed(3)}`, "info");
   }
   const numWann = sourceWannierNumWann(calc);
   if (numWann != null) {

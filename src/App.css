@@ -1201,6 +1201,18 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 .wien2k-control-grid label.checkbox-label {
   align-items: center;
   flex-direction: row;
+  min-width: 0;
+}
+
+.wien2k-control-grid label.checkbox-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  width: auto;
+}
+
+.wien2k-control-grid label.checkbox-label span {
+  min-width: 0;
 }
 
 .wien2k-inline-toggle {
@@ -1236,7 +1248,8 @@ html[data-theme="dark"] .pseudo-querying-spinner {
 .wien2k-control-grid select,
 .wien2k-summary select,
 .wien2k-advanced input,
-.wien2k-site-table input {
+.wien2k-site-table input,
+.wien2k-site-table select {
   border: 1px solid #cbd5e0;
   border-radius: 6px;
   font-size: 0.86rem;
@@ -1479,8 +1492,13 @@ html[data-theme="dark"] .wien2k-section-status {
   text-align: left;
 }
 
-.wien2k-site-table input {
+.wien2k-site-table input,
+.wien2k-site-table select {
   max-width: 110px;
+}
+
+.wien2k-rlo-table .secondary-button {
+  padding: 0.4rem 0.55rem;
 }
 
 .wien2k-validation {

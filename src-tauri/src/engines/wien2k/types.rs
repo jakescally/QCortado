@@ -12,6 +12,14 @@ pub enum Wien2kSpinMode {
     SpinPolarized,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Wien2kParallelMode {
+    #[default]
+    Openmp,
+    Kpoint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Wien2kInitialSpinConfiguration {
@@ -294,6 +302,8 @@ impl Default for Wien2kInitializationSettings {
 #[serde(rename_all = "camelCase")]
 pub struct Wien2kScfRunSettings {
     pub spin_mode: Wien2kSpinMode,
+    #[serde(default)]
+    pub parallel_mode: Wien2kParallelMode,
     pub max_iterations: u16,
     /// WIEN2k `run_lapw -ec`, in Ry.
     pub energy_convergence_ry: f64,
@@ -317,6 +327,7 @@ impl Default for Wien2kScfRunSettings {
     fn default() -> Self {
         Self {
             spin_mode: Wien2kSpinMode::NonSpinPolarized,
+            parallel_mode: Wien2kParallelMode::Openmp,
             max_iterations: 40,
             energy_convergence_ry: 0.0001,
             charge_convergence: 0.0001,

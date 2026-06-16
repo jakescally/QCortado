@@ -69,6 +69,7 @@ import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { getMagneticSpeciesFields } from "../lib/magnetism";
 import { formatCalculationSourceLabel, getCalculationName } from "../lib/calculationNames";
 import { readProjectWizardSettings, writeProjectWizardSettings } from "../lib/projectWizardSettings";
+import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 import type { EngineId } from "../lib/engines/types";
 
 interface CalculationRun {
@@ -486,6 +487,7 @@ function getWannierSourceIssues(calc: CalculationRun): string[] {
 }
 
 function getCalculationTags(calc: CalculationRun): { label: string; type: "info" | "feature" | "special" }[] {
+  return getUnifiedCalculationTagBadges(calc, { legacyFallback: true, calcId: calc.id }) as { label: string; type: "info" | "feature" | "special" }[];
   const tags: { label: string; type: "info" | "feature" | "special" }[] = [];
   const params = calc.parameters || {};
   const issues = getWannierSourceIssues(calc);

@@ -12,6 +12,7 @@ pub mod commands;
 pub mod fermi_surface;
 pub mod plugin;
 pub mod scf;
+pub mod soc;
 pub mod structure;
 pub mod types;
 
@@ -26,5 +27,6 @@ pub use commands::{build_init_lapw_plan, build_scf_run_plan};
 pub use fermi_surface::*;
 pub use plugin::{Wien2kReservedEnginePlugin, WIEN2K_RESERVED_ENGINE_PLUGIN};
 pub use scf::*;
+pub use soc::*;
 pub use structure::*;
 pub use types::*;

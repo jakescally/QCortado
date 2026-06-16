@@ -115,6 +115,8 @@ pub struct AppState {
     pub wien2k_scf_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kScfSession>>,
     /// WIEN2k band sessions staged from a saved converged native SCF case.
     pub wien2k_bands_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kBandsSession>>,
+    /// WIEN2k SOC sessions staged from a saved converged native SCF case.
+    pub wien2k_soc_sessions: Mutex<HashMap<String, engines::wien2k::Wien2kSocSession>>,
     /// Current project directory
     pub project_dir: Mutex<Option<PathBuf>>,
     /// Background process manager
@@ -149,6 +151,7 @@ impl Default for AppState {
             wien2k_structure_sessions: Mutex::new(HashMap::new()),
             wien2k_scf_sessions: Mutex::new(HashMap::new()),
             wien2k_bands_sessions: Mutex::new(HashMap::new()),
+            wien2k_soc_sessions: Mutex::new(HashMap::new()),
             project_dir: Mutex::new(None),
             process_manager: ProcessManager::new(),
             allow_exit: AtomicBool::new(false),
@@ -1483,6 +1486,7 @@ mod hpc_headless_recovery_tests {
             remote_install_root: remote_install_root.to_string(),
             hpc_profile_id: "test".to_string(),
             spin_mode: engines::wien2k::Wien2kSpinMode::NonSpinPolarized,
+            source_spin_orbit: false,
             fermi_energy_ev: Some(5.0),
             phase: engines::wien2k::Wien2kBandsSessionPhase::Prepared,
             latest_prepare: None,
@@ -1620,14 +1624,19 @@ mod hpc_headless_recovery_tests {
             cpus_per_task: Some(4),
             ..hpc::profile::default_cpu_resources()
         };
-        let resources =
-            resolve_wien2k_scf_resources(&profile, Some(requested)).expect("resolved resources");
+        let resources = resolve_wien2k_scf_resources(
+            &profile,
+            Some(requested),
+            engines::wien2k::Wien2kParallelMode::Openmp,
+        )
+        .expect("resolved resources");
         let command = build_wien2k_scf_command(
             &wien2k_test_scf_session(""),
             &profile,
             engines::wien2k::Wien2kCommandProgram::RunLapw,
             &["-i".to_string(), "40".to_string()],
             &resources,
+            engines::wien2k::Wien2kParallelMode::Openmp,
         )
         .expect("scf command");
 
@@ -1651,8 +1660,12 @@ mod hpc_headless_recovery_tests {
             ..hpc::profile::default_gpu_resources()
         };
 
-        let error = resolve_wien2k_scf_resources(&profile, Some(resources))
-            .expect_err("GPU resources should be rejected for WIEN2k SCF");
+        let error = resolve_wien2k_scf_resources(
+            &profile,
+            Some(resources),
+            engines::wien2k::Wien2kParallelMode::Openmp,
+        )
+        .expect_err("GPU resources should be rejected for WIEN2k SCF");
 
         assert!(error.contains("CPU Slurm resources only"));
     }
@@ -1666,12 +1679,19 @@ mod hpc_headless_recovery_tests {
             cpus_per_task: Some(2),
             ..hpc::profile::default_cpu_resources()
         };
-        let resources = resolve_wien2k_scf_resources(&profile, Some(requested)).expect("resources");
+        let resources = resolve_wien2k_scf_resources(
+            &profile,
+            Some(requested),
+            engines::wien2k::Wien2kParallelMode::Openmp,
+        )
+        .expect("resources");
 
         assert_eq!(resources.nodes, Some(1));
         assert_eq!(resources.ntasks, Some(1));
         assert_eq!(resources.cpus_per_task, Some(8));
-        assert!(!wien2k_scf_uses_parallel(&resources));
+        assert!(!wien2k_scf_uses_parallel(
+            engines::wien2k::Wien2kParallelMode::Openmp
+        ));
     }
 
     #[test]
@@ -1682,14 +1702,92 @@ mod hpc_headless_recovery_tests {
             cpus_per_task: Some(8),
             ..hpc::profile::default_cpu_resources()
         };
-        let command = build_wien2k_parallel_setup_command(&resources);
+        let command = build_wien2k_parallel_setup_command(
+            &resources,
+            engines::wien2k::Wien2kParallelMode::Openmp,
+        );
 
-        assert!(!wien2k_scf_uses_parallel(&resources));
+        assert!(!wien2k_scf_uses_parallel(
+            engines::wien2k::Wien2kParallelMode::Openmp
+        ));
         assert!(command.contains("export OMP_NUM_THREADS"));
         assert!(command.contains("${SLURM_CPUS_PER_TASK:-8}"));
         assert!(command.contains("rm -f .machines .processes"));
         assert!(!command.contains("granularity:1"));
         assert!(!command.contains("> .machines"));
+    }
+
+    #[test]
+    fn wien2k_kpoint_resources_preserve_slurm_distribution() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let requested = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            nodes: Some(2),
+            ntasks: Some(8),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let resources = resolve_wien2k_scf_resources(
+            &profile,
+            Some(requested),
+            engines::wien2k::Wien2kParallelMode::Kpoint,
+        )
+        .expect("resources");
+
+        assert_eq!(resources.nodes, Some(2));
+        assert_eq!(resources.ntasks, Some(8));
+        assert_eq!(resources.cpus_per_task, Some(2));
+        assert!(wien2k_scf_uses_parallel(
+            engines::wien2k::Wien2kParallelMode::Kpoint
+        ));
+    }
+
+    #[test]
+    fn wien2k_kpoint_setup_builds_machines_from_slurm_tasks() {
+        let resources = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            nodes: Some(2),
+            ntasks: Some(8),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let command = build_wien2k_parallel_setup_command(
+            &resources,
+            engines::wien2k::Wien2kParallelMode::Kpoint,
+        );
+
+        assert!(command.contains("granularity:1"));
+        assert!(command.contains("srun --nodes="));
+        assert!(command.contains("--ntasks="));
+        assert!(command.contains("hostname"));
+        assert!(command.contains("print \"1:\" $1"));
+        assert!(command.contains("extrafine:1"));
+        assert!(command.contains("${SLURM_CPUS_PER_TASK:-2}"));
+    }
+
+    #[test]
+    fn wien2k_kpoint_command_uses_parallel_switch() {
+        let profile = wien2k_test_profile(hpc::profile::EnginePathMode::Path);
+        let resources = hpc::profile::SlurmResourceRequest {
+            resource_type: hpc::profile::ResourceType::Cpu,
+            nodes: Some(2),
+            ntasks: Some(8),
+            cpus_per_task: Some(2),
+            ..hpc::profile::default_cpu_resources()
+        };
+        let command = build_wien2k_scf_command(
+            &wien2k_test_scf_session("/opt/WIEN2k"),
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::RunLapw,
+            &["-p".to_string(), "-i".to_string(), "40".to_string()],
+            &resources,
+            engines::wien2k::Wien2kParallelMode::Kpoint,
+        )
+        .expect("scf command");
+
+        assert!(command.contains("\"$WIENROOT/run_lapw\""));
+        assert!(command.contains("'-p' '-i' '40'"));
+        assert!(command.contains("granularity:1"));
     }
 
     #[test]
@@ -1750,6 +1848,51 @@ mod hpc_headless_recovery_tests {
         assert!(!command.contains(" '-p'"));
         assert!(!command.contains("[QCortado] --- tail:"));
         assert!(command.contains("Native WIEN2k error marker detected"));
+    }
+
+    #[test]
+    fn wien2k_soc_bands_sequence_runs_lapwso_between_lapw1_and_lapw2() {
+        let commands = wien2k_bands_command_sequence(
+            &engines::wien2k::Wien2kBandsRunSettings {
+                spin_channel: engines::wien2k::Wien2kBandsSpinChannel::Up,
+                run_lapw2_qtl: true,
+                run_irrep: false,
+                spin_orbit: true,
+                diagnostic_log: false,
+            },
+            false,
+        );
+
+        assert_eq!(commands[0], vec!["lapw1", "-band", "-up"]);
+        assert_eq!(commands[1], vec!["lapwso", "-up"]);
+        assert_eq!(commands[2], vec!["lapw2", "-qtl", "-band", "-up", "-so"]);
+        assert_eq!(commands[3], vec!["spaghetti", "-up", "-so"]);
+    }
+
+    #[test]
+    fn wien2k_python_patch_scripts_preserve_block_indentation() {
+        let soc = build_wien2k_soc_prepare_patch_script("Si2Ta1", 5.0);
+        assert!(soc.contains("\nfor suffix in ('in1','in1c'):\n    path=Path"));
+        assert!(soc.contains("\n    if not path.exists():\n        continue"));
+        assert!(soc.contains("\n        if match:\n            lines[index]"));
+        assert!(soc.contains("\nif not found:\n    raise SystemExit"));
+
+        let fermi = build_wien2k_in2_fermi_patch_script("Si2Ta1", "TEMP", 0.002);
+        assert!(fermi.contains("\nfor suffix in ('in2','in2c'):\n    path=Path"));
+        assert!(fermi.contains("\n    if changed:\n        path.write_text"));
+    }
+
+    #[test]
+    fn wien2k_first_soc_run_removes_only_inherited_case_broyd_files() {
+        let command = build_wien2k_soc_initial_mixer_cleanup_command(
+            "/scratch/qcortado/soc/session/Si2Ta1",
+            "Si2Ta1",
+        );
+
+        assert!(command.contains("Removing inherited pre-SOC Broyden history"));
+        assert!(command.contains("find '/scratch/qcortado/soc/session/Si2Ta1' -maxdepth 1"));
+        assert!(command.contains("-name 'Si2Ta1.broyd*' -delete"));
+        assert!(!command.contains("rm *.broyd*"));
     }
 
     #[test]
@@ -3996,9 +4139,13 @@ fn build_wien2k_scf_command(
     program: engines::wien2k::Wien2kCommandProgram,
     argv: &[String],
     resources: &hpc::profile::SlurmResourceRequest,
+    parallel_mode: engines::wien2k::Wien2kParallelMode,
 ) -> Result<String, String> {
     let (mut commands, executable) = build_wien2k_command_parts(session, profile, program)?;
-    commands.push(build_wien2k_parallel_setup_command(resources));
+    commands.push(build_wien2k_parallel_setup_command(
+        resources,
+        parallel_mode,
+    ));
     commands.push(build_wien2k_program_invocation(&executable, argv));
     Ok(commands.join(" && "))
 }
@@ -4008,9 +4155,23 @@ fn build_wien2k_command_parts(
     profile: &hpc::profile::HpcProfile,
     program: engines::wien2k::Wien2kCommandProgram,
 ) -> Result<(Vec<String>, String), String> {
+    build_wien2k_command_parts_for_case(
+        &session.remote_case_dir,
+        &session.remote_install_root,
+        profile,
+        program,
+    )
+}
+
+fn build_wien2k_command_parts_for_case(
+    remote_case_dir: &str,
+    remote_install_root: &str,
+    profile: &hpc::profile::HpcProfile,
+    program: engines::wien2k::Wien2kCommandProgram,
+) -> Result<(Vec<String>, String), String> {
     let mut commands = vec![format!(
         "cd {}",
-        shell_single_quote_local(&session.remote_case_dir)
+        shell_single_quote_local(remote_case_dir)
     )];
     let executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
         if profile
@@ -4025,12 +4186,12 @@ fn build_wien2k_command_parts(
         ));
         program.script_name().to_string()
     } else {
-        if session.remote_install_root.trim().is_empty() {
+        if remote_install_root.trim().is_empty() {
             return Err("WIEN2k WIENROOT is required in path mode.".to_string());
         }
         commands.push(format!(
             "export WIENROOT={}",
-            shell_single_quote_local(&session.remote_install_root)
+            shell_single_quote_local(remote_install_root)
         ));
         commands.push("export PATH=\"$WIENROOT:$PATH\"".to_string());
         format!("\"$WIENROOT/{}\"", program.script_name())
@@ -4052,34 +4213,62 @@ fn build_wien2k_program_invocation(executable: &str, argv: &[String]) -> String 
 fn resolve_wien2k_scf_resources(
     profile: &hpc::profile::HpcProfile,
     resources: Option<hpc::profile::SlurmResourceRequest>,
+    parallel_mode: engines::wien2k::Wien2kParallelMode,
 ) -> Result<hpc::profile::SlurmResourceRequest, String> {
     let mut resolved = resources.unwrap_or_else(|| profile.default_cpu_resources.clone());
     if resolved.resource_type != hpc::profile::ResourceType::Cpu {
         return Err("WIEN2k SCF currently supports CPU Slurm resources only.".to_string());
     }
-    let openmp_threads = resolved
-        .ntasks
-        .unwrap_or(1)
-        .max(1)
-        .saturating_mul(resolved.cpus_per_task.unwrap_or(1).max(1));
     resolved.resource_type = hpc::profile::ResourceType::Cpu;
-    resolved.nodes = Some(1);
-    resolved.ntasks = Some(1);
-    resolved.cpus_per_task = Some(openmp_threads.max(1));
+    match parallel_mode {
+        engines::wien2k::Wien2kParallelMode::Openmp => {
+            let openmp_threads = resolved
+                .ntasks
+                .unwrap_or(1)
+                .max(1)
+                .saturating_mul(resolved.cpus_per_task.unwrap_or(1).max(1));
+            resolved.nodes = Some(1);
+            resolved.ntasks = Some(1);
+            resolved.cpus_per_task = Some(openmp_threads.max(1));
+        }
+        engines::wien2k::Wien2kParallelMode::Kpoint => {
+            let nodes = resolved.nodes.unwrap_or(1).max(1);
+            let ntasks = resolved.ntasks.unwrap_or(1).max(1);
+            if ntasks < nodes {
+                return Err(format!(
+                    "WIEN2k k-point parallelization requires Tasks ({ntasks}) to be at least Nodes ({nodes})."
+                ));
+            }
+            resolved.nodes = Some(nodes);
+            resolved.ntasks = Some(ntasks);
+            resolved.cpus_per_task = Some(resolved.cpus_per_task.unwrap_or(1).max(1));
+        }
+    }
     resolved.gpus = Some(0);
     Ok(resolved)
 }
 
-fn wien2k_scf_uses_parallel(resources: &hpc::profile::SlurmResourceRequest) -> bool {
-    resources.ntasks.unwrap_or(1).max(1) > 1
+fn wien2k_scf_uses_parallel(parallel_mode: engines::wien2k::Wien2kParallelMode) -> bool {
+    parallel_mode == engines::wien2k::Wien2kParallelMode::Kpoint
 }
 
-fn build_wien2k_parallel_setup_command(resources: &hpc::profile::SlurmResourceRequest) -> String {
+fn build_wien2k_parallel_setup_command(
+    resources: &hpc::profile::SlurmResourceRequest,
+    parallel_mode: engines::wien2k::Wien2kParallelMode,
+) -> String {
     let cpus_per_task = resources.cpus_per_task.unwrap_or(1).max(1);
-    format!(
-        "rm -f .machines .processes && export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\" && echo \"[QCortado] WIEN2k OpenMP threads: $OMP_NUM_THREADS\"",
-        cpus_per_task
-    )
+    let openmp_setup = format!(
+        "rm -f .machines .processes && export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\"",
+        cpus_per_task,
+    );
+    match parallel_mode {
+        engines::wien2k::Wien2kParallelMode::Openmp => format!(
+            "{openmp_setup} && echo \"[QCortado] WIEN2k OpenMP threads: $OMP_NUM_THREADS\""
+        ),
+        engines::wien2k::Wien2kParallelMode::Kpoint => format!(
+            "{openmp_setup} && printf 'granularity:1\\n' > .machines && srun --nodes=\"${{SLURM_JOB_NUM_NODES:-1}}\" --ntasks=\"${{SLURM_NTASKS:-1}}\" hostname | awk 'NF {{ print \"1:\" $1 }}' >> .machines && printf 'extrafine:1\\n' >> .machines && echo \"[QCortado] WIEN2k k-point workers: ${{SLURM_NTASKS:-1}}; OpenMP threads per worker: $OMP_NUM_THREADS\" && cat .machines"
+        ),
+    }
 }
 
 async fn collect_remote_wien2k_text_artifacts(
@@ -4594,8 +4783,8 @@ async fn wien2k_run_scf_session_impl(
         project_id: Some(session.project_id.clone()),
         cif_id: Some(session.cif_id.clone()),
     };
-    let resources = resolve_wien2k_scf_resources(&profile, resources)?;
-    let parallel = wien2k_scf_uses_parallel(&resources);
+    let resources = resolve_wien2k_scf_resources(&profile, resources, settings.parallel_mode)?;
+    let parallel = wien2k_scf_uses_parallel(settings.parallel_mode);
     let plan = engines::wien2k::build_scf_run_plan(&case_ref, &settings, continuation);
     prepare_wien2k_scf_input_files(
         &profile,
@@ -4609,7 +4798,14 @@ async fn wien2k_run_scf_session_impl(
     if parallel {
         argv.insert(0, "-p".to_string());
     }
-    let command = build_wien2k_scf_command(&session, &profile, plan.program, &argv, &resources)?;
+    let command = build_wien2k_scf_command(
+        &session,
+        &profile,
+        plan.program,
+        &argv,
+        &resources,
+        settings.parallel_mode,
+    )?;
     let timeout_secs = resources
         .walltime
         .as_deref()
@@ -5035,26 +5231,29 @@ async fn prepare_wien2k_scf_input_files(
 }
 
 fn build_wien2k_in2_fermi_patch_script(case_name: &str, method: &str, value: f64) -> String {
-    format!(
-        "from pathlib import Path\n\
-         case_name={case_name:?}\n\
-         method={method:?}\n\
-         value={value:.8}\n\
-         for suffix in ('in2','in2c'):\n\
-             path=Path(f'{{case_name}}.{{suffix}}')\n\
-             if not path.exists():\n\
-                 continue\n\
-             lines=path.read_text().splitlines()\n\
-             changed=False\n\
-             for index,line in enumerate(lines):\n\
-                 token=line.strip().split()\n\
-                 if token and token[0].upper() in ('TETRA','TEMP','TEMPS','GAUSS','ROOT','ALL'):\n\
-                     lines[index]=f'{{method}} {{value:.8f}}'\n\
-                     changed=True\n\
-                     break\n\
-             if changed:\n\
-                 path.write_text('\\n'.join(lines)+'\\n')\n"
-    )
+    [
+        "from pathlib import Path".to_string(),
+        format!("case_name={case_name:?}"),
+        format!("method={method:?}"),
+        format!("value={value:.8}"),
+        "for suffix in ('in2','in2c'):".to_string(),
+        "    path=Path(f'{case_name}.{suffix}')".to_string(),
+        "    if not path.exists():".to_string(),
+        "        continue".to_string(),
+        "    lines=path.read_text().splitlines()".to_string(),
+        "    changed=False".to_string(),
+        "    for index,line in enumerate(lines):".to_string(),
+        "        token=line.strip().split()".to_string(),
+        "        if token and token[0].upper() in ('TETRA','TEMP','TEMPS','GAUSS','ROOT','ALL'):"
+            .to_string(),
+        "            lines[index]=f'{method} {value:.8f}'".to_string(),
+        "            changed=True".to_string(),
+        "            break".to_string(),
+        "    if changed:".to_string(),
+        "        path.write_text('\\n'.join(lines)+'\\n')".to_string(),
+        String::new(),
+    ]
+    .join("\n")
 }
 
 fn wien2k_bands_command_sequence(
@@ -5066,13 +5265,21 @@ fn wien2k_bands_command_sequence(
     if let Some(spin) = settings.spin_channel.x_arg() {
         lapw1.push(spin.to_string());
     }
-    if settings.spin_orbit {
-        lapw1.push("-so".to_string());
-    }
     if parallel {
         lapw1.push("-p".to_string());
     }
     commands.push(lapw1);
+
+    if settings.spin_orbit {
+        let mut lapwso = vec!["lapwso".to_string()];
+        if settings.spin_channel != engines::wien2k::Wien2kBandsSpinChannel::None {
+            lapwso.push("-up".to_string());
+        }
+        if parallel {
+            lapwso.push("-p".to_string());
+        }
+        commands.push(lapwso);
+    }
 
     if settings.run_lapw2_qtl {
         let mut lapw2 = vec!["lapw2".to_string(), "-qtl".to_string(), "-band".to_string()];
@@ -5173,6 +5380,22 @@ fn wien2k_spin_mode_from_parameters(
     engines::wien2k::Wien2kSpinMode::NonSpinPolarized
 }
 
+fn wien2k_k_mesh_from_parameters(parameters: &serde_json::Value) -> Option<[u32; 3]> {
+    let initialization = parameters.get("initialization")?;
+    let values = initialization
+        .get("kMesh")
+        .or_else(|| initialization.get("k_mesh"))?
+        .as_array()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        u32::try_from(values[0].as_u64()?).ok()?,
+        u32::try_from(values[1].as_u64()?).ok()?,
+        u32::try_from(values[2].as_u64()?).ok()?,
+    ])
+}
+
 #[tauri::command]
 async fn wien2k_start_bands_session(
     app: AppHandle,
@@ -5220,6 +5443,7 @@ async fn wien2k_start_bands_session(
         .unwrap_or_default()
         .to_string();
     let spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
+    let source_spin_orbit = wien2k_is_soc_from_parameters(&source.parameters);
     let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
         return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
@@ -5271,6 +5495,7 @@ async fn wien2k_start_bands_session(
         remote_install_root,
         hpc_profile_id: profile.id.clone(),
         spin_mode,
+        source_spin_orbit,
         fermi_energy_ev,
         phase: engines::wien2k::Wien2kBandsSessionPhase::Staged,
         latest_prepare: None,
@@ -5418,6 +5643,15 @@ async fn wien2k_run_bands_session_impl(
         return Err(
             "Spin-polarized WIEN2k band runs require an up or down spin channel.".to_string(),
         );
+    }
+    if session.source_spin_orbit && !settings.spin_orbit {
+        return Err("A WIEN2k SOC source requires the SOC bands sequence.".to_string());
+    }
+    if settings.spin_orbit
+        && session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+        && settings.spin_channel != engines::wien2k::Wien2kBandsSpinChannel::Up
+    {
+        return Err("Spin-polarized SOC bands use the combined SOC vector and require the up channel.".to_string());
     }
     let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     let resources = resolve_wien2k_bands_resources(&profile, resources)?;
@@ -5653,6 +5887,793 @@ async fn wien2k_discard_bands_session(
     Ok(())
 }
 
+fn wien2k_is_soc_from_parameters(parameters: &serde_json::Value) -> bool {
+    parameters
+        .get("spin_orbit")
+        .or_else(|| parameters.get("spinOrbit"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || parameters.get("soc").is_some()
+}
+
+fn build_wien2k_soc_command(
+    session: &engines::wien2k::Wien2kSocSession,
+    profile: &hpc::profile::HpcProfile,
+    program: engines::wien2k::Wien2kCommandProgram,
+    argv: &[String],
+    resources: Option<&hpc::profile::SlurmResourceRequest>,
+    parallel_mode: engines::wien2k::Wien2kParallelMode,
+) -> Result<String, String> {
+    let (mut commands, executable) = build_wien2k_command_parts_for_case(
+        &session.remote_case_dir,
+        &session.remote_install_root,
+        profile,
+        program,
+    )?;
+    if let Some(resources) = resources {
+        commands.push(build_wien2k_parallel_setup_command(
+            resources,
+            parallel_mode,
+        ));
+    }
+    commands.push(build_wien2k_program_invocation(&executable, argv));
+    Ok(commands.join(" && "))
+}
+
+fn build_wien2k_soc_kgen_command(
+    session: &engines::wien2k::Wien2kSocSession,
+    profile: &hpc::profile::HpcProfile,
+    full_bz_kpoints: u32,
+) -> Result<String, String> {
+    let (mut commands, x_executable) = build_wien2k_command_parts_for_case(
+        &session.remote_case_dir,
+        &session.remote_install_root,
+        profile,
+        engines::wien2k::Wien2kCommandProgram::X,
+    )?;
+    commands.push(build_wien2k_program_invocation(
+        &x_executable,
+        &["kgen".to_string(), "-d".to_string(), "-so".to_string()],
+    ));
+    let kgen_executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
+        "kgen".to_string()
+    } else {
+        "\"$WIENROOT/kgen\"".to_string()
+    };
+    commands.push(format!(
+        "printf '{}\\n1\\n' | {} kgen.def",
+        full_bz_kpoints, kgen_executable
+    ));
+    Ok(commands.join(" && "))
+}
+
+async fn collect_remote_wien2k_soc_artifacts(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kSocSession,
+    suffixes: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut artifacts = std::collections::BTreeMap::new();
+    for suffix in suffixes {
+        let filename = format!("{}.{}", session.case_name, suffix);
+        let path = format!("{}/{}", session.remote_case_dir, filename);
+        if let Ok(contents) = read_remote_wien2k_text(profile, secret, &path).await {
+            if !contents.trim().is_empty() {
+                artifacts.insert(filename, contents);
+            }
+        }
+    }
+    artifacts
+}
+
+fn build_wien2k_soc_prepare_patch_script(case_name: &str, emax_ry: f64) -> String {
+    [
+        "from pathlib import Path".to_string(),
+        "import re, shutil".to_string(),
+        format!("case_name={case_name:?}"),
+        format!("emax={emax_ry:.8}"),
+        "found=False".to_string(),
+        "for suffix in ('in1','in1c'):".to_string(),
+        "    path=Path(f'{case_name}.{suffix}')".to_string(),
+        "    if not path.exists():".to_string(),
+        "        continue".to_string(),
+        "    lines=path.read_text().splitlines()".to_string(),
+        "    changed=False".to_string(),
+        "    for index,line in enumerate(lines):".to_string(),
+        "        if 'K-VECTORS' not in line.upper():".to_string(),
+        "            continue".to_string(),
+        "        match=re.match(r'^(K-VECTORS.*?\\s[-+0-9.EeDd]+\\s+)([-+0-9.EeDd]+)(.*)$', line)"
+            .to_string(),
+        "        if match:".to_string(),
+        "            lines[index]=match.group(1)+f'{emax:.8f}'+match.group(3)".to_string(),
+        "            changed=True".to_string(),
+        "            found=True".to_string(),
+        "            break".to_string(),
+        "    if changed:".to_string(),
+        "        path.write_text('\\n'.join(lines)+'\\n')".to_string(),
+        "in2=Path(f'{case_name}.in2')".to_string(),
+        "in2c=Path(f'{case_name}.in2c')".to_string(),
+        "if in2.exists() and not in2c.exists():".to_string(),
+        "    shutil.copy2(in2,in2c)".to_string(),
+        "if not found:".to_string(),
+        "    raise SystemExit('Could not find K-VECTORS EMAX line in case.in1/c')".to_string(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+fn build_wien2k_soc_initial_mixer_cleanup_command(
+    remote_case_dir: &str,
+    case_name: &str,
+) -> String {
+    format!(
+        "echo '[QCortado] Removing inherited pre-SOC Broyden history.' && find {} -maxdepth 1 -type f -name {} -delete",
+        shell_single_quote_local(remote_case_dir),
+        shell_single_quote_local(&format!("{}.broyd*", case_name)),
+    )
+}
+
+fn wien2k_struct_inequivalent_atom_count(content: &str) -> Option<u32> {
+    let line = content.lines().nth(1)?;
+    line.get(27..30)?.trim().parse().ok()
+}
+
+#[tauri::command]
+async fn wien2k_get_soc_rlo_candidates(
+    app: AppHandle,
+    project_id: String,
+    source_scf_calculation_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<engines::wien2k::Wien2kSocRloCandidate>, String> {
+    let source = projects::get_project_calculation(app, project_id, source_scf_calculation_id)?;
+    if source.engine_id != engines::EngineId::Wien2k || source.calc_type != "scf" {
+        return Err("Select a completed WIEN2k SCF calculation.".to_string());
+    }
+    let case_name = source
+        .parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .and_then(engines::wien2k::normalize_case_name)
+        .ok_or_else(|| "The selected WIEN2k SCF has no valid case name.".to_string())?;
+    let remote_case_dir = source
+        .parameters
+        .get("remote_case_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "The selected WIEN2k SCF has no retained remote case directory.".to_string()
+        })?;
+    let source_hpc_profile_id = source
+        .parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if !source_hpc_profile_id.is_empty() && profile.id != source_hpc_profile_id {
+        return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
+    }
+
+    for suffix in ["in1c", "in1"] {
+        let filename = format!("{}.{}", case_name, suffix);
+        let path = format!("{}/{}", remote_case_dir, filename);
+        if let Ok(content) = read_remote_wien2k_text(&profile, secret.as_deref(), &path).await {
+            if !content.trim().is_empty() {
+                return Ok(engines::wien2k::parse_soc_rlo_candidates(
+                    &content, &filename,
+                ));
+            }
+        }
+    }
+
+    Err("Could not read case.in1c or case.in1 from the selected WIEN2k source.".to_string())
+}
+
+#[tauri::command]
+async fn wien2k_start_soc_session(
+    app: AppHandle,
+    project_id: String,
+    cif_id: String,
+    source_scf_calculation_id: String,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kSocSession, String> {
+    let source = projects::get_project_calculation(
+        app.clone(),
+        project_id.clone(),
+        source_scf_calculation_id.clone(),
+    )?;
+    if source.engine_id != engines::EngineId::Wien2k || source.calc_type != "scf" {
+        return Err("Select a completed WIEN2k SCF calculation.".to_string());
+    }
+    if source
+        .scf_summary
+        .as_ref()
+        .map(|summary| summary.convergence)
+        != Some(engines::ScfConvergenceState::Converged)
+    {
+        return Err("The selected WIEN2k SCF is not converged.".to_string());
+    }
+    if wien2k_is_soc_from_parameters(&source.parameters) {
+        return Err("Select a scalar-relativistic WIEN2k SCF as the SOC source.".to_string());
+    }
+    let case_name = source
+        .parameters
+        .get("case_name")
+        .and_then(|value| value.as_str())
+        .and_then(engines::wien2k::normalize_case_name)
+        .ok_or_else(|| "The selected WIEN2k SCF has no valid case name.".to_string())?;
+    let source_remote_case_dir = source
+        .parameters
+        .get("remote_case_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The selected WIEN2k SCF has no retained remote case directory.".to_string())?
+        .to_string();
+    let source_structure_calculation_id = source
+        .parameters
+        .get("source_structure_calculation_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let hpc_profile_id = source
+        .parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
+    let source_k_mesh = wien2k_k_mesh_from_parameters(&source.parameters);
+    if spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized && source_k_mesh.is_none() {
+        return Err("The selected spin-polarized WIEN2k SCF is missing its source k mesh, which is required to regenerate case.klist with x kgen -so after symmetso.".to_string());
+    }
+    let source_dft_u = source
+        .parameters
+        .get("run")
+        .and_then(|run| run.get("dftU").or_else(|| run.get("dft_u")))
+        .and_then(|dft_u| dft_u.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let (installation, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    if !hpc_profile_id.is_empty() && profile.id != hpc_profile_id {
+        return Err("The WIEN2k SCF source belongs to a different active HPC profile.".to_string());
+    }
+    let root = expand_remote_structure_root(
+        &profile,
+        secret.as_deref(),
+        source
+            .parameters
+            .get("remote_project_path")
+            .and_then(|value| value.as_str())
+            .unwrap_or(&profile.remote_project_root),
+    )
+    .await
+    .unwrap_or_else(|_| profile.remote_project_root.clone());
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let remote_session_dir = format!(
+        "{}/qcortado/{}/wien2k/soc/{}",
+        root.trim_end_matches('/'),
+        project_id,
+        session_id
+    );
+    let remote_case_dir = format!("{}/{}", remote_session_dir, case_name);
+    let copy_command = format!(
+        "mkdir -p {} && cp -a {}/. {}",
+        shell_single_quote_local(&remote_case_dir),
+        shell_single_quote_local(&source_remote_case_dir),
+        shell_single_quote_local(&remote_case_dir)
+    );
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &copy_command, 300).await?;
+    let remote_install_root =
+        wien2k_remote_install_root_from_parameters(&source.parameters, &installation, &profile);
+    let session = engines::wien2k::Wien2kSocSession {
+        session_id: session_id.clone(),
+        project_id,
+        cif_id,
+        source_scf_calculation_id,
+        source_structure_calculation_id,
+        case_name,
+        remote_case_dir,
+        source_remote_case_dir,
+        remote_install_root,
+        hpc_profile_id: profile.id.clone(),
+        spin_mode,
+        source_k_mesh,
+        source_dft_u,
+        phase: engines::wien2k::Wien2kSocSessionPhase::Staged,
+        latest_prepare: None,
+        latest_run: None,
+        latest_calculation_id: None,
+        artifacts: std::collections::BTreeMap::new(),
+        transcript: vec!["Converged WIEN2k SCF case copied for SOC preparation.".to_string()],
+        started_at: now_iso(),
+    };
+    state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session.clone());
+    let _ = app.emit(
+        &format!("wien2k-soc-output:{}", session_id),
+        "Converged WIEN2k SCF case copied for SOC preparation.",
+    );
+    Ok(session)
+}
+
+#[tauri::command]
+async fn wien2k_prepare_soc_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kSocPrepareSettings,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kSocPrepareResult, String> {
+    engines::wien2k::validate_soc_prepare_settings(&settings)?;
+    let session = state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SOC session is no longer available.".to_string())?;
+    if session.phase != engines::wien2k::Wien2kSocSessionPhase::Staged {
+        return Err("Discard or restart the SOC session before changing preparation settings.".to_string());
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let inso = engines::wien2k::build_case_inso(&settings);
+    upload_wien2k_text(
+        &profile,
+        secret.as_deref(),
+        &inso,
+        &format!("{}/{}.inso", session.remote_case_dir, session.case_name),
+        "inso",
+    )
+    .await?;
+    let patch_command = format!(
+        "cd {} && python3 -c {}",
+        shell_single_quote_local(&session.remote_case_dir),
+        shell_single_quote_local(&build_wien2k_soc_prepare_patch_script(
+            &session.case_name,
+            settings.lapw1_emax_ry,
+        ))
+    );
+    let mut commands = vec![patch_command];
+    if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized {
+        commands.push(build_wien2k_soc_command(
+            &session,
+            &profile,
+            engines::wien2k::Wien2kCommandProgram::X,
+            &["symmetso".to_string()],
+            None,
+            engines::wien2k::Wien2kParallelMode::Openmp,
+        )?);
+    }
+    let output = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&format!("wien2k-soc-output:{}", session_id)),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-soc-init",
+        &commands,
+        3600,
+    )
+    .await?
+    .output;
+    let artifacts = collect_remote_wien2k_soc_artifacts(
+        &profile,
+        secret.as_deref(),
+        &session,
+        &[
+            "struct", "struct_so", "inso", "in1", "in1c", "in1_so", "in1c_so", "in2",
+            "in2c", "in2_so", "in2c_so", "inc_so", "ksym", "outsymso", "klist",
+        ],
+    )
+    .await;
+    if session.source_dft_u {
+        let old_count = artifacts
+            .get(&format!("{}.struct", session.case_name))
+            .and_then(|content| wien2k_struct_inequivalent_atom_count(content));
+        let new_count = artifacts
+            .get(&format!("{}.struct_so", session.case_name))
+            .and_then(|content| wien2k_struct_inequivalent_atom_count(content));
+        if old_count.is_some() && new_count.is_some() && old_count != new_count {
+            return Err("SOC symmetry changes the inequivalent atom list for this DFT+U source. WIEN2k requires manual adaptation of case.indmc and case.inorb, which is outside the supported SOC workflow.".to_string());
+        }
+    }
+    let symmetry_review_required =
+        session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized;
+    let phase = if symmetry_review_required {
+        engines::wien2k::Wien2kSocSessionPhase::SymmetryReady
+    } else {
+        engines::wien2k::Wien2kSocSessionPhase::Prepared
+    };
+    let mut updated = session;
+    updated.phase = phase;
+    updated.latest_prepare = Some(settings);
+    updated.artifacts.extend(artifacts.clone());
+    updated.transcript.push(format!("SOC preparation\n{}", output));
+    state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kSocPrepareResult {
+        session_id,
+        phase,
+        symmetry_review_required,
+        native_output: output,
+        diagnostics: Vec::new(),
+        artifacts,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_accept_soc_symmetry(
+    app: AppHandle,
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kSocPrepareResult, String> {
+    let session = state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SOC session is no longer available.".to_string())?;
+    if session.phase != engines::wien2k::Wien2kSocSessionPhase::SymmetryReady {
+        return Err("No pending WIEN2k SOC symmetry proposal is available.".to_string());
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
+    let case = shell_single_quote_local(&session.case_name);
+    let copy_command = format!(
+        "cd {dir} && case_name={case}; \
+         for suffix in struct in1 in1c in2 in2c inc clmsum clmup clmdn vspup vspdn vnsup vnsdn tausum tauup taudn r2v r2vdn; do \
+           if [ -s \"${{case_name}}.${{suffix}}_so\" ]; then cp \"${{case_name}}.${{suffix}}_so\" \"${{case_name}}.${{suffix}}\"; fi; \
+         done; \
+         echo '[QCortado] Accepted symmetso proposal'",
+        dir = shell_single_quote_local(&session.remote_case_dir),
+        case = case,
+    );
+    let mut commands = vec![copy_command];
+    if let Some(k_mesh) = session.source_k_mesh {
+        let full_bz_kpoints = k_mesh[0]
+            .saturating_mul(k_mesh[1])
+            .saturating_mul(k_mesh[2])
+            .max(1);
+        commands.push(build_wien2k_soc_kgen_command(
+            &session,
+            &profile,
+            full_bz_kpoints,
+        )?);
+    }
+    let output = hpc::utility::run_scheduled_utility_operation(
+        Some(&app),
+        Some(&format!("wien2k-soc-output:{}", session_id)),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-soc-accept",
+        &commands,
+        600,
+    )
+    .await?
+    .output;
+    let artifacts = collect_remote_wien2k_soc_artifacts(
+        &profile,
+        secret.as_deref(),
+        &session,
+        &["struct", "struct_so", "inso", "in1", "in1c", "in2c", "inc", "ksym", "outsymso", "klist"],
+    )
+    .await;
+    let mut updated = session;
+    updated.phase = engines::wien2k::Wien2kSocSessionPhase::Prepared;
+    updated.artifacts.extend(artifacts.clone());
+    updated.transcript.push(format!("SOC symmetry accepted\n{}", output));
+    state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kSocPrepareResult {
+        session_id,
+        phase: engines::wien2k::Wien2kSocSessionPhase::Prepared,
+        symmetry_review_required: false,
+        native_output: output,
+        diagnostics: Vec::new(),
+        artifacts,
+    })
+}
+
+async fn prepare_wien2k_soc_run_inputs(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kSocSession,
+    settings: &engines::wien2k::Wien2kSocRunSettings,
+) -> Result<(), String> {
+    upload_wien2k_text(
+        profile,
+        secret,
+        &engines::wien2k::build_case_inm(&settings.scf),
+        &format!("{}/{}.inm", session.remote_case_dir, session.case_name),
+        "soc-inm",
+    )
+    .await?;
+    if let Some(files) = engines::wien2k::build_dft_u_input_files(&settings.scf) {
+        for (suffix, contents) in files {
+            upload_wien2k_text(
+                profile,
+                secret,
+                &contents,
+                &format!("{}/{}.{}", session.remote_case_dir, session.case_name, suffix),
+                &format!("soc-{}", suffix),
+            )
+            .await?;
+            if suffix == "indm" {
+                upload_wien2k_text(
+                    profile,
+                    secret,
+                    &contents,
+                    &format!("{}/{}.indmc", session.remote_case_dir, session.case_name),
+                    "soc-indmc",
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn wien2k_run_soc_session_impl(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kSocRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: &AppState,
+    event_name: String,
+) -> Result<engines::wien2k::Wien2kSocExecutionResult, String> {
+    let session = state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SOC session is no longer available.".to_string())?;
+    engines::wien2k::validate_soc_run_settings(&settings, session.spin_mode)?;
+    if continuation {
+        if session.latest_calculation_id.is_none() {
+            return Err("Only a saved SOC attempt can be continued.".to_string());
+        }
+    } else if session.phase != engines::wien2k::Wien2kSocSessionPhase::Prepared {
+        return Err("Complete SOC preparation and symmetry review before running.".to_string());
+    }
+    let (_, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
+    let resources =
+        resolve_wien2k_scf_resources(&profile, resources, settings.scf.parallel_mode)?;
+    let parallel = wien2k_scf_uses_parallel(settings.scf.parallel_mode);
+    prepare_wien2k_soc_run_inputs(&profile, secret.as_deref(), &session, &settings).await?;
+    let case_ref = engines::wien2k::Wien2kCaseReference {
+        case_name: session.case_name.clone(),
+        remote_case_dir: session.remote_case_dir.clone(),
+        remote_scratch_dir: None,
+        remote_archive_dir: Some(session.remote_case_dir.clone()),
+        local_shadow_dir: None,
+        project_id: Some(session.project_id.clone()),
+        cif_id: Some(session.cif_id.clone()),
+    };
+    let plan = engines::wien2k::build_scf_run_plan(&case_ref, &settings.scf, continuation);
+    let mut argv = plan.argv;
+    argv.insert(0, "-so".to_string());
+    if parallel {
+        argv.insert(0, "-p".to_string());
+    }
+    let mut command = build_wien2k_soc_command(
+        &session,
+        &profile,
+        plan.program,
+        &argv,
+        Some(&resources),
+        settings.scf.parallel_mode,
+    )?;
+    if !continuation {
+        command = format!(
+            "{} && {}",
+            build_wien2k_soc_initial_mixer_cleanup_command(
+                &session.remote_case_dir,
+                &session.case_name,
+            ),
+            command,
+        );
+    }
+    if settings.diagnostic_log {
+        command = format!(
+            "set +e; {}; status=$?; {}; exit $status",
+            command,
+            build_wien2k_bands_log_dump_command(&session.case_name, "SOC SCF")
+        );
+    }
+    let timeout_secs = resources
+        .walltime
+        .as_deref()
+        .and_then(hpc::profile::walltime_seconds)
+        .map(|seconds| seconds.saturating_add(600))
+        .unwrap_or(86_400)
+        .max(3_600);
+    let operation = hpc::utility::run_scheduled_profile_operation(
+        Some(&app),
+        Some(&event_name),
+        &profile,
+        secret.as_deref(),
+        &session.remote_case_dir,
+        "qc-w2k-soc",
+        &[command],
+        resources,
+        timeout_secs,
+    )
+    .await;
+    let (native_output, command_failed) = match operation {
+        Ok(result) => (result.output, false),
+        Err(error) => (error, true),
+    };
+    let mut artifacts = session.artifacts.clone();
+    artifacts.extend(
+        collect_remote_wien2k_soc_artifacts(
+            &profile,
+            secret.as_deref(),
+            &session,
+            &[
+                "struct", "struct_so", "inso", "in0", "in1", "in1c", "in2c", "inc", "inm",
+                "inorb", "indm", "indmc", "klist", "ksym", "outsymso", "outputso", "outputsoup",
+                "outputsodn", "scfso", "scf", "dayfile",
+            ],
+        )
+        .await,
+    );
+    artifacts.insert("soc_execution.log".to_string(), native_output.clone());
+    let scf_output = artifacts
+        .get(&format!("{}.scf", session.case_name))
+        .cloned()
+        .unwrap_or_default();
+    let dayfile = artifacts
+        .get(&format!("{}.dayfile", session.case_name))
+        .cloned()
+        .unwrap_or_default();
+    let summary = engines::wien2k::parse_scf_summary(
+        &session.project_id,
+        &session.cif_id,
+        &session.source_scf_calculation_id,
+        &settings.scf,
+        &scf_output,
+        &dayfile,
+        command_failed,
+    );
+    let diagnostics = summary
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect::<Vec<_>>();
+    let parameters = serde_json::json!({
+        "case_name": session.case_name,
+        "source_scf_calculation_id": session.source_scf_calculation_id,
+        "source_structure_calculation_id": session.source_structure_calculation_id,
+        "parent_calculation_id": parent_calculation_id.or_else(|| if continuation { session.latest_calculation_id.clone() } else { None }),
+        "spin_orbit": true,
+        "soc": session.latest_prepare,
+        "run": settings.scf,
+        "continuation": continuation,
+        "hpc_profile_id": session.hpc_profile_id,
+        "remote_case_dir": session.remote_case_dir,
+        "remote_wienroot": session.remote_install_root,
+        "remote_install_root": session.remote_install_root,
+        "execution_backend": "hpc",
+        "native_artifacts_retained_remote": true,
+    });
+    let saved = projects::save_engine_calculation_artifact(
+        &app,
+        &session.project_id,
+        &session.cif_id,
+        projects::SaveEngineCalculationArtifactData {
+            engine_id: engines::EngineId::Wien2k,
+            calc_type: "scf".to_string(),
+            parameters,
+            result: None,
+            scf_summary: Some(summary.clone()),
+            started_at: session.started_at.clone(),
+            completed_at: now_iso(),
+            tags: vec!["wien2k-native".to_string(), "soc".to_string()],
+            artifacts: artifacts
+                .iter()
+                .map(|(filename, contents)| projects::EngineSetupTextArtifact {
+                    filename: filename.clone(),
+                    contents: contents.clone(),
+                })
+                .collect(),
+        },
+    )?;
+    let phase = if summary.convergence == engines::ScfConvergenceState::Failed {
+        engines::wien2k::Wien2kSocSessionPhase::Failed
+    } else {
+        engines::wien2k::Wien2kSocSessionPhase::SocComplete
+    };
+    let mut updated = session;
+    updated.phase = phase;
+    updated.latest_run = Some(settings);
+    updated.latest_calculation_id = Some(saved.id.clone());
+    updated.artifacts = artifacts;
+    updated.transcript.push(format!("SOC SCF attempt\n{}", native_output));
+    state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), updated);
+    Ok(engines::wien2k::Wien2kSocExecutionResult {
+        session_id,
+        phase,
+        native_output,
+        diagnostics,
+        summary,
+        calculation_id: saved.id,
+        continuation,
+    })
+}
+
+#[tauri::command]
+async fn wien2k_run_soc_session(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kSocRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    state: State<'_, AppState>,
+) -> Result<engines::wien2k::Wien2kSocExecutionResult, String> {
+    wien2k_run_soc_session_impl(
+        app,
+        session_id.clone(),
+        settings,
+        continuation,
+        parent_calculation_id,
+        resources,
+        &state,
+        format!("wien2k-soc-output:{}", session_id),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wien2k_discard_soc_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .remove(&session_id);
+    if let Some(session) = session {
+        if session.latest_calculation_id.is_none() {
+            if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
+                let remote_session_dir = session
+                    .remote_case_dir
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .unwrap_or(session.remote_case_dir.as_str());
+                let cleanup_command =
+                    format!("rm -rf -- {}", shell_single_quote_local(remote_session_dir));
+                let _ = hpc::ssh::run_ssh_command_with_timeout(
+                    &profile,
+                    secret.as_deref(),
+                    &cleanup_command,
+                    20,
+                )
+                .await;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_wien2k_fermi_command(
     case_name: &str,
     remote_case_dir: &str,
@@ -5697,11 +6718,19 @@ fn build_wien2k_fermi_command(
 
     let spin_arg = settings.spin_channel.x_arg().unwrap_or("");
     let spin_orbit_arg = if settings.spin_orbit { " -so" } else { "" };
-    let lapw1_args = ["lapw1", spin_arg, spin_orbit_arg]
+    let lapw1_args = ["lapw1", spin_arg]
         .iter()
         .filter(|arg| !arg.is_empty())
         .map(|arg| arg.trim().to_string())
         .collect::<Vec<_>>();
+    let lapwso_args = [
+        "lapwso",
+        if settings.spin_orbit && !spin_arg.is_empty() { "-up" } else { "" },
+    ]
+    .iter()
+    .filter(|arg| !arg.is_empty())
+    .map(|arg| arg.trim().to_string())
+    .collect::<Vec<_>>();
     let lapw2_args = ["lapw2", "-fermi", spin_arg, spin_orbit_arg]
         .iter()
         .filter(|arg| !arg.is_empty())
@@ -5713,6 +6742,14 @@ fn build_wien2k_fermi_command(
         case_name,
         settings.diagnostic_log,
     ));
+    if settings.spin_orbit {
+        commands.push(build_wien2k_bands_invocation(
+            &x_executable,
+            &lapwso_args,
+            case_name,
+            settings.diagnostic_log,
+        ));
+    }
     commands.push(build_wien2k_bands_invocation(
         &x_executable,
         &lapw2_args,
@@ -5854,10 +6891,20 @@ async fn run_wien2k_fermi_surface_task(
         .unwrap_or_default()
         .to_string();
     let source_spin_mode = wien2k_spin_mode_from_parameters(&source.parameters);
+    let source_has_soc = wien2k_is_soc_from_parameters(&source.parameters);
+    if source_has_soc && !settings.spin_orbit {
+        return Err("A WIEN2k SOC source requires the SOC Fermi-surface sequence.".to_string());
+    }
     if source_spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
         && settings.spin_channel == engines::wien2k::Wien2kBandsSpinChannel::None
     {
         return Err("Spin-polarized WIEN2k Fermi surfaces require an up or down spin channel.".to_string());
+    }
+    if settings.spin_orbit
+        && source_spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+        && settings.spin_channel != engines::wien2k::Wien2kBandsSpinChannel::Up
+    {
+        return Err("Spin-polarized SOC Fermi surfaces use the combined SOC vector and require the up channel.".to_string());
     }
 
     let (installation, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
@@ -12243,6 +13290,91 @@ async fn start_wien2k_bands_calculation(
     Ok(task_id)
 }
 
+/// Starts a WIEN2k self-consistent spin-orbit calculation as a background task.
+#[tauri::command]
+async fn start_wien2k_soc_calculation(
+    app: AppHandle,
+    session_id: String,
+    settings: engines::wien2k::Wien2kSocRunSettings,
+    continuation: bool,
+    parent_calculation_id: Option<String>,
+    resources: Option<hpc::profile::SlurmResourceRequest>,
+    label: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = state
+        .wien2k_soc_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "WIEN2k SOC session is no longer available.".to_string())?;
+
+    let pm = state.process_manager.clone();
+    let (task_id, _cancel_flag) = pm.register("wien2k_soc".to_string(), label).await;
+    pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
+    pm.set_hpc_profile_id(&task_id, Some(session.hpc_profile_id.clone()))
+        .await;
+    pm.set_remote_workdir(&task_id, Some(session.remote_case_dir.clone()))
+        .await;
+
+    let tid = task_id.clone();
+    let app_handle = app.clone();
+    tokio::spawn(async move {
+        let result = {
+            let app_state = app_handle.state::<AppState>();
+            wien2k_run_soc_session_impl(
+                app_handle.clone(),
+                session_id,
+                settings,
+                continuation,
+                parent_calculation_id,
+                resources,
+                &app_state,
+                format!("task-output:{}", tid),
+            )
+            .await
+        };
+
+        match result {
+            Ok(wien2k_result) => {
+                for line in wien2k_result.native_output.lines() {
+                    pm.append_output(&tid, line.to_string()).await;
+                }
+                let saved_line = format!(
+                    "[saved WIEN2k SOC calculation {}: {:?}]",
+                    wien2k_result.calculation_id, wien2k_result.summary.convergence
+                );
+                pm.append_output(&tid, saved_line.clone()).await;
+                let _ = app_handle.emit(&format!("task-output:{}", tid), &saved_line);
+                let json = serde_json::to_value(&wien2k_result).unwrap_or(serde_json::Value::Null);
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.complete(&tid, json).await;
+                    let _ = app_handle.emit(&format!("task-complete:{}", tid), "completed");
+                }
+            }
+            Err(err) => {
+                pm.append_output(&tid, format!("Error: {}", err)).await;
+                if !matches!(
+                    pm.get_task(&tid).await.map(|task| task.status),
+                    Some(process_manager::TaskStatus::Cancelled)
+                ) {
+                    pm.fail(&tid, err.clone()).await;
+                    let _ = app_handle
+                        .emit(&format!("task-status:{}", tid), &format!("failed:{}", err));
+                }
+            }
+        }
+    });
+
+    Ok(task_id)
+}
+
 /// Starts an SCF calculation as a background task. Returns the task_id immediately.
 #[tauri::command]
 async fn start_scf_calculation(
@@ -17851,6 +18983,7 @@ pub fn run() {
                 wien2k_structure_sessions: Mutex::new(HashMap::new()),
                 wien2k_scf_sessions: Mutex::new(HashMap::new()),
                 wien2k_bands_sessions: Mutex::new(HashMap::new()),
+                wien2k_soc_sessions: Mutex::new(HashMap::new()),
                 project_dir: Mutex::new(None),
                 process_manager: ProcessManager::new(),
                 allow_exit: AtomicBool::new(false),
@@ -17938,8 +19071,15 @@ pub fn run() {
         wien2k_prepare_bands_session,
         wien2k_run_bands_session,
         wien2k_discard_bands_session,
+        wien2k_get_soc_rlo_candidates,
+        wien2k_start_soc_session,
+        wien2k_prepare_soc_session,
+        wien2k_accept_soc_symmetry,
+        wien2k_run_soc_session,
+        wien2k_discard_soc_session,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
+        start_wien2k_soc_calculation,
         start_wien2k_fermi_surface_calculation,
         hpc_test_connection,
         hpc_validate_environment,
@@ -18015,8 +19155,15 @@ pub fn run() {
         wien2k_prepare_bands_session,
         wien2k_run_bands_session,
         wien2k_discard_bands_session,
+        wien2k_get_soc_rlo_candidates,
+        wien2k_start_soc_session,
+        wien2k_prepare_soc_session,
+        wien2k_accept_soc_symmetry,
+        wien2k_run_soc_session,
+        wien2k_discard_soc_session,
         start_wien2k_scf_calculation,
         start_wien2k_bands_calculation,
+        start_wien2k_soc_calculation,
         start_wien2k_fermi_surface_calculation,
         hpc_test_connection,
         hpc_validate_environment,

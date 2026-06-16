@@ -30,6 +30,7 @@ export type EngineExecutionMode = "local" | "hpc" | "remote";
  */
 export type CalculationKind =
   | "scf"
+  | "soc"
   | "structure_optimization"
   | "bands"
   | "dos"

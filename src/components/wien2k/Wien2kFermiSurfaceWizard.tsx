@@ -10,6 +10,7 @@ import { RemoteUtilizationPanel } from "../RemoteUtilizationPanel";
 import { Wien2kFieldLabel } from "./Wien2kFieldLabel";
 import { defaultCpuResources } from "../../lib/hpcConfig";
 import { formatCalculationSourceLabel, getCalculationName } from "../../lib/calculationNames";
+import { getCalculationTagBadges, getCalcTagClass } from "../../lib/calculationTags";
 import { useTaskContext } from "../../lib/TaskContext";
 import type { CrystalData, HpcProfile, SlurmResourceRequest } from "../../lib/types";
 import type {
@@ -106,6 +107,15 @@ function sourceSpinMode(calc: CalculationRun | null): "non_spin_polarized" | "sp
   return value === "spin_polarized" ? "spin_polarized" : "non_spin_polarized";
 }
 
+function sourceHasSpinOrbit(calc: CalculationRun | null): boolean {
+  return Boolean(
+    calc?.parameters?.spin_orbit
+    || calc?.parameters?.spinOrbit
+    || calc?.parameters?.soc
+    || calc?.tags?.includes("soc"),
+  );
+}
+
 function parseRemoteJobId(line: string): string | null {
   const match = line.match(/Scheduled (?:utility )?job submitted:\s*(\S+)/);
   return match?.[1] ?? null;
@@ -175,6 +185,7 @@ export function Wien2kFermiSurfaceWizard({
   const taskOutputLineCount = activeTask ? activeTask.outputLineCount : 0;
   const currentStepIndex = STEPS.findIndex((entry) => entry.id === step);
   const selectedSpinMode = sourceSpinMode(selectedScf);
+  const selectedSourceHasSpinOrbit = sourceHasSpinOrbit(selectedScf);
   const fermiEnergy = sourceFermi(selectedScf);
   const totalBytes = displayedResult?.bxsfFiles.reduce((sum, file) => sum + (Number(file.sizeBytes) || 0), 0) ?? 0;
   useViewportScrollLock(step === "run" && runIsActive);
@@ -191,6 +202,12 @@ export function Wien2kFermiSurfaceWizard({
       setSpinChannel("none");
     }
   }, [selectedSpinMode, spinChannel]);
+
+  useEffect(() => {
+    if (!selectedSourceHasSpinOrbit) return;
+    setSpinOrbit(true);
+    setSpinChannel(selectedSpinMode === "spin_polarized" ? "up" : "none");
+  }, [selectedSourceHasSpinOrbit, selectedSpinMode]);
 
   useEffect(() => {
     if (!reconnectTaskId) return;
@@ -230,7 +247,8 @@ export function Wien2kFermiSurfaceWizard({
     return [
       "cd \"$SLURM_SUBMIT_DIR\"",
       `# write case.klist for ${kMesh[0]} ${kMesh[1]} ${kMesh[2]}`,
-      `x lapw1${spinArg}${spinOrbitArg}`,
+      `x lapw1${spinArg}`,
+      ...(spinOrbit ? [`x lapwso${spinChannel === "none" ? "" : " -up"}`] : []),
       `x lapw2 -fermi${spinArg}${spinOrbitArg}`,
       "xcrysden --wien_fermisurface .",
       "find . -maxdepth 3 -iname '*.bxsf'",
@@ -361,8 +379,11 @@ export function Wien2kFermiSurfaceWizard({
                   {summary?.fermiEnergyEv != null && <span>E_F = {summary.fermiEnergyEv.toFixed(3)} eV</span>}
                 </div>
                 <div className="calc-tags">
-                  <span className="calc-tag calc-tag-feature calc-tag-hpc">HPC</span>
-                  <span className="calc-tag calc-tag-special">WIEN2k</span>
+                  {getCalculationTagBadges(scf as any, { legacyFallback: true, calcId: scf.id }).map((tag, i) => (
+                    <span key={`${tag.label}-${i}`} className={getCalcTagClass(tag)}>
+                      {tag.label}
+                    </span>
+                  ))}
                 </div>
               </div>
             );
@@ -437,12 +458,13 @@ export function Wien2kFermiSurfaceWizard({
                   Fermi surface calculation from WIEN2k SCFs relies on xcrysden. <InfoTooltip text="XCrySDen must be in the remote path." />
                 </p>
                 <label className="option-checkbox">
-                  <input type="checkbox" checked={spinOrbit} onChange={(event) => setSpinOrbit(event.target.checked)} />
+                  <input type="checkbox" checked={spinOrbit} disabled={selectedSourceHasSpinOrbit} onChange={(event) => setSpinOrbit(event.target.checked)} />
                   <span>
                     Enable spin-orbit coupling
                     <Wien2kFieldLabel tooltip="Passes -so to the WIEN2k Fermi-surface lapw1/lapw2 steps. Use only when the source case contains the required spin-orbit files."> </Wien2kFieldLabel>
                   </span>
                 </label>
+                {selectedSourceHasSpinOrbit && <p className="wien2k-hint">SOC is required because the selected source is a converged SOC calculation.</p>}
               </>
             ), "BXSF")}
             {renderSection("logging", "Run Logging", (

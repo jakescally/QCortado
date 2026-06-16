@@ -97,6 +97,20 @@ function cloneWien2kCpuResources(profile: HpcProfile | null | undefined): SlurmR
   };
 }
 
+function cloneWien2kKpointResources(profile: HpcProfile | null | undefined): SlurmResourceRequest {
+  const source = profile?.default_cpu_resources ?? defaultCpuResources();
+  const nodes = Math.max(1, source.nodes ?? 1);
+  return {
+    ...source,
+    resource_type: "cpu",
+    nodes,
+    ntasks: Math.max(nodes, source.ntasks ?? 1),
+    cpus_per_task: Math.max(1, source.cpus_per_task ?? 1),
+    gpus: 0,
+    additional_sbatch: [...(source.additional_sbatch ?? [])],
+  };
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -115,8 +129,14 @@ function moduleSetupLines(profile: HpcProfile | null | undefined): string[] {
   return lines;
 }
 
-function buildWien2kMachinesPreview(resources: SlurmResourceRequest): string {
+function buildWien2kParallelPreview(
+  resources: SlurmResourceRequest,
+  parallelMode: Wien2kScfRunSettings["parallelMode"],
+): string {
   const cpusPerTask = Math.max(1, resources.cpus_per_task ?? 1);
+  if (parallelMode === "kpoint") {
+    return `rm -f .machines .processes && export OMP_NUM_THREADS="\${SLURM_CPUS_PER_TASK:-${cpusPerTask}}" && printf 'granularity:1\\n' > .machines && srun --nodes="\${SLURM_JOB_NUM_NODES:-1}" --ntasks="\${SLURM_NTASKS:-1}" hostname | awk 'NF { print "1:" $1 }' >> .machines && printf 'extrafine:1\\n' >> .machines`;
+  }
   return `rm -f .machines .processes && export OMP_NUM_THREADS="\${SLURM_CPUS_PER_TASK:-${cpusPerTask}}"`;
 }
 
@@ -132,6 +152,7 @@ function buildRunPreviewCommand(profile: HpcProfile | null | undefined, settings
     ...(settings.forceMinimization ? ["-min"] : []),
     ...(settings.dispersionCorrection !== "none" ? [`-${settings.dispersionCorrection}`] : []),
     ...(settings.dftU.enabled ? ["-orb"] : []),
+    ...(settings.parallelMode === "kpoint" ? ["-p"] : []),
   ];
   return `${executable} ${args.map(shellQuote).join(" ")}`;
 }
@@ -247,7 +268,7 @@ export function Wien2kScfWizard({
     () => [
       "cd \"$SLURM_SUBMIT_DIR\"",
       ...moduleSetupLines(activeHpcProfile),
-      buildWien2kMachinesPreview(hpcResources),
+      buildWien2kParallelPreview(hpcResources, effectiveRunSettings.parallelMode),
       buildRunPreviewCommand(activeHpcProfile, effectiveRunSettings),
     ],
     [activeHpcProfile, effectiveRunSettings, hpcResources],
@@ -345,8 +366,10 @@ export function Wien2kScfWizard({
   }, [activeTask, taskResult, effectiveRunSettings]);
 
   useEffect(() => {
-    setHpcResources(cloneWien2kCpuResources(activeHpcProfile));
-  }, [activeHpcProfile?.id, activeHpcProfile?.updated_at]);
+    setHpcResources(runSettings.parallelMode === "kpoint"
+      ? cloneWien2kKpointResources(activeHpcProfile)
+      : cloneWien2kCpuResources(activeHpcProfile));
+  }, [activeHpcProfile?.id, activeHpcProfile?.updated_at, runSettings.parallelMode]);
 
   useEffect(() => {
     if (sites.length === 0) return;
@@ -503,6 +526,22 @@ export function Wien2kScfWizard({
       spinMode,
       dftU: spinMode === "spin_polarized" ? current.dftU : { ...current.dftU, enabled: false },
     }));
+  }
+
+  function setParallelMode(parallelMode: Wien2kScfRunSettings["parallelMode"]) {
+    setRunSettings((current) => ({ ...current, parallelMode }));
+    setHpcResources((current) => {
+      if (parallelMode === "kpoint") {
+        return cloneWien2kKpointResources(activeHpcProfile);
+      }
+      const openMpThreads = Math.max(1, current.ntasks ?? 1) * Math.max(1, current.cpus_per_task ?? 1);
+      return {
+        ...current,
+        nodes: 1,
+        ntasks: 1,
+        cpus_per_task: openMpThreads,
+      };
+    });
   }
 
   function enableRecommendedDftU(enabled: boolean) {
@@ -1022,6 +1061,23 @@ export function Wien2kScfWizard({
           ), { locked: !initialized, status: initialized ? undefined : "Locked - run initialization first" })}
 
           {renderSection("hpc", "HPC Run Settings", (
+            <>
+              <div className="wien2k-control-grid">
+                <label>
+                  <span className="wien2k-field-label-row">
+                    Parallelization mode
+                    <InfoTooltip text="OpenMP runs one WIEN2k process on one node and uses CPUs / Task as threads. K-point mode runs WIEN2k with -p, creates .machines from the Slurm allocation, and distributes independent k points across Tasks and Nodes; CPUs / Task controls OpenMP threads within each worker. Speedup is limited by the number of irreducible k points." />
+                  </span>
+                  <select
+                    value={runSettings.parallelMode}
+                    onChange={(event) => setParallelMode(event.target.value === "kpoint" ? "kpoint" : "openmp")}
+                    disabled={isRunning}
+                  >
+                    <option value="openmp">OpenMP (single node)</option>
+                    <option value="kpoint">K-point parallel (-p)</option>
+                  </select>
+                </label>
+              </div>
               <HpcRunSettings
                 profileId={activeHpcProfile?.id ?? null}
                 profileName={activeHpcProfile?.name ?? "Andromeda"}
@@ -1031,21 +1087,29 @@ export function Wien2kScfWizard({
                 resourceMode="cpu_only"
                 defaultCpuResources={activeHpcProfile?.default_cpu_resources ?? null}
                 defaultGpuResources={null}
-                resourceModeMessage="WIEN2k SCF currently uses one CPU Slurm task with OpenMP threads."
+                resourceModeMessage={runSettings.parallelMode === "kpoint"
+                  ? "K-point mode distributes WIEN2k workers across Slurm tasks and nodes using .machines."
+                  : "OpenMP mode uses one CPU Slurm task on one node; CPUs / Task sets the thread count."}
                 lockResourceTypeWhenSingleMode={false}
-                maxTasks={{
+                maxTasks={runSettings.parallelMode === "openmp" ? {
                   value: 1,
-                  reason: "WIEN2k k-point .machines mode requires passwordless compute-node SSH and is not enabled by this wizard yet",
+                  reason: "OpenMP mode uses one Slurm task",
+                } : null}
+                onResourcesChange={(next) => {
+                  const nodes = runSettings.parallelMode === "openmp" ? 1 : Math.max(1, next.nodes ?? 1);
+                  setHpcResources({
+                    ...next,
+                    resource_type: "cpu",
+                    nodes,
+                    ntasks: runSettings.parallelMode === "openmp" ? 1 : Math.max(nodes, next.ntasks ?? 1),
+                    gpus: 0,
+                  });
                 }}
-                onResourcesChange={(next) => setHpcResources({
-                  ...next,
-                  resource_type: "cpu",
-                  nodes: 1,
-                  ntasks: 1,
-                  gpus: 0,
-                })}
                 disabled={isRunning}
+                nodesDisabled={runSettings.parallelMode === "openmp"}
+                tasksDisabled={runSettings.parallelMode === "openmp"}
               />
+            </>
           ), { locked: !initialized, status: initialized ? undefined : "Locked - run initialization first" })}
         </section>
         <section className="wien2k-output-column">
