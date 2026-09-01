@@ -4681,6 +4681,8 @@ async fn wien2k_initialize_scf_session_impl(
     if !diagnostics.is_empty() {
         return Err(diagnostics.join(" "));
     }
+    let lstart_core_leak_suggestion = engines::wien2k::lstart_core_leak_suggestion(&output)
+        .filter(|suggestion| suggestion.suggested_cutoff_ry < settings.lstart_energy_cutoff_ry);
     validate_wien2k_initialization_artifacts(
         &profile,
         secret.as_deref(),
@@ -4729,6 +4731,7 @@ async fn wien2k_initialize_scf_session_impl(
         phase: engines::wien2k::Wien2kScfSessionPhase::Initialized,
         native_output: output,
         diagnostics,
+        lstart_core_leak_suggestion,
         artifacts,
     })
 }

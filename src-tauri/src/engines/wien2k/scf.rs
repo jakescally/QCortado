@@ -19,6 +19,7 @@ use super::{
 
 const RY_TO_EV: f64 = 13.605_693_122_994;
 const SUPPORTED_INITIALIZATION_VXC: [u16; 4] = [5, 11, 13, 19];
+const LSTART_CORE_LEAK_BUFFER_RY: f64 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +64,23 @@ pub struct Wien2kInitializationResult {
     pub phase: Wien2kScfSessionPhase,
     pub native_output: String,
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lstart_core_leak_suggestion: Option<Wien2kLstartCoreLeakSuggestion>,
     pub artifacts: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Wien2kLstartCoreLeakSuggestion {
+    pub suggested_cutoff_ry: f64,
+    pub reference_energy_ry: f64,
+    pub buffer_ry: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orbital: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leak_charge: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +301,70 @@ pub fn initialization_diagnostics(output: &str) -> Vec<String> {
     diagnostics
 }
 
+pub fn lstart_core_leak_suggestion(output: &str) -> Option<Wien2kLstartCoreLeakSuggestion> {
+    let leak_matcher = Regex::new(
+        r"(?i):WARNING:\s+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?)\s+([A-Za-z][A-Za-z0-9]*)\s+CORE electrons leak out of MT-sphere",
+    )
+    .ok()?;
+    let orbital_matcher = Regex::new(
+        r"(?i):WARNING:\s+ORBITAL:\s+(\S+)\s+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?)\s+([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?)",
+    )
+    .ok()?;
+
+    let mut current_leak: Option<(f64, String)> = None;
+    let mut best: Option<Wien2kLstartCoreLeakSuggestion> = None;
+
+    for line in output.lines() {
+        if let Some(captures) = leak_matcher.captures(line) {
+            let leak_charge = parse_numeric_capture(&captures[1]);
+            current_leak = leak_charge.map(|charge| (charge, captures[2].to_string()));
+            continue;
+        }
+
+        let Some(captures) = orbital_matcher.captures(line) else {
+            continue;
+        };
+        let Some((leak_charge, atom)) = current_leak.clone() else {
+            continue;
+        };
+        let Some(up_energy) = parse_numeric_capture(&captures[2]) else {
+            continue;
+        };
+        let Some(down_energy) = parse_numeric_capture(&captures[3]) else {
+            continue;
+        };
+        let reference_energy_ry = up_energy.min(down_energy);
+        if !reference_energy_ry.is_finite() {
+            continue;
+        }
+        let suggested_cutoff_ry = round_ry(reference_energy_ry - LSTART_CORE_LEAK_BUFFER_RY);
+        let candidate = Wien2kLstartCoreLeakSuggestion {
+            suggested_cutoff_ry,
+            reference_energy_ry,
+            buffer_ry: LSTART_CORE_LEAK_BUFFER_RY,
+            atom: Some(atom),
+            orbital: Some(captures[1].to_string()),
+            leak_charge: Some(leak_charge),
+        };
+        if best
+            .as_ref()
+            .is_none_or(|existing| candidate.reference_energy_ry < existing.reference_energy_ry)
+        {
+            best = Some(candidate);
+        }
+    }
+
+    best
+}
+
+fn parse_numeric_capture(value: &str) -> Option<f64> {
+    value.replace(['D', 'd'], "E").parse::<f64>().ok()
+}
+
+fn round_ry(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
 fn initialization_has_error_marker(output: &str) -> bool {
     output.lines().any(|line| {
         let upper = line.trim().to_ascii_uppercase();
@@ -473,6 +554,45 @@ mod tests {
         assert!(initialization_diagnostics(output)
             .iter()
             .any(|diagnostic| diagnostic.contains("reported an error")));
+    }
+
+    #[test]
+    fn lstart_core_leak_suggestion_uses_lowest_warning_orbital_with_buffer() {
+        let output = "\
+:WARNING:     0.004  Ag   CORE electrons leak out of MT-sphere !!!!\n\
+:WARNING: touch .lcore and run scf-cycle with core density superposition\n\
+:WARNING: Or: rerun lstart with lower E-core separation energy \n\
+:WARNING:     ORBITAL:  4S     -6.979    -6.979\n\
+\n\
+:WARNING:     0.005  Co   CORE electrons leak out of MT-sphere !!!!\n\
+:WARNING: touch .lcore and run scf-cycle with core density superposition\n\
+:WARNING: Or: rerun lstart with lower E-core separation energy \n\
+:WARNING:     ORBITAL:  3S     -7.621    -7.378\n";
+
+        let suggestion = lstart_core_leak_suggestion(output).expect("LSTART suggestion");
+
+        assert_eq!(suggestion.suggested_cutoff_ry, -7.671);
+        assert_eq!(suggestion.reference_energy_ry, -7.621);
+        assert_eq!(suggestion.buffer_ry, LSTART_CORE_LEAK_BUFFER_RY);
+        assert_eq!(suggestion.atom.as_deref(), Some("Co"));
+        assert_eq!(suggestion.orbital.as_deref(), Some("3S"));
+        assert_eq!(suggestion.leak_charge, Some(0.005));
+    }
+
+    #[test]
+    fn lstart_core_leak_suggestion_ignores_output_without_orbital_warning() {
+        let output = "\
+:WARNING:     0.005  Co   CORE electrons leak out of MT-sphere !!!!\n\
+init_lapw finished ok\n";
+
+        assert!(lstart_core_leak_suggestion(output).is_none());
+    }
+
+    #[test]
+    fn lstart_core_leak_suggestion_ignores_orbital_warning_without_core_leak() {
+        let output = ":WARNING:     ORBITAL:  3S     -7.621    -7.378\n";
+
+        assert!(lstart_core_leak_suggestion(output).is_none());
     }
 
     #[test]

@@ -36,11 +36,21 @@ export interface Wien2kScfSession {
   startedAt: string;
 }
 
+export interface Wien2kLstartCoreLeakSuggestion {
+  suggestedCutoffRy: number;
+  referenceEnergyRy: number;
+  bufferRy: number;
+  atom?: string | null;
+  orbital?: string | null;
+  leakCharge?: number | null;
+}
+
 export interface Wien2kInitializationResult {
   sessionId: string;
   phase: Wien2kScfSessionPhase;
   nativeOutput: string;
   diagnostics: string[];
+  lstartCoreLeakSuggestion?: Wien2kLstartCoreLeakSuggestion | null;
   artifacts: Record<string, string>;
 }
 

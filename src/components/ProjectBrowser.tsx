@@ -61,6 +61,7 @@ const PROJECT_CALCULATION_TYPE_LABELS: Record<ProjectCalculationType, string> = 
 };
 
 type ProjectFilter = "all" | ProjectCalculationType;
+type ProjectBrowserViewMode = "tiles" | "list";
 
 interface ProjectWithCalculationTypes {
   project: ProjectSummary;
@@ -74,6 +75,31 @@ interface FolderWithProjects {
 }
 
 const PROJECT_FILTER_ORDER: ProjectFilter[] = ["all", ...PROJECT_CALCULATION_TYPE_ORDER];
+const PROJECT_BROWSER_VIEW_MODE_STORAGE_KEY = "qcortado.project-browser.view-mode.v1";
+
+function getStoredProjectBrowserViewMode(): ProjectBrowserViewMode {
+  if (typeof window === "undefined") return "tiles";
+
+  try {
+    const stored = window.localStorage.getItem(PROJECT_BROWSER_VIEW_MODE_STORAGE_KEY);
+    if (stored === "tiles" || stored === "list") {
+      return stored;
+    }
+  } catch {
+    // Ignore persistence failures.
+  }
+  return "tiles";
+}
+
+function setStoredProjectBrowserViewMode(viewMode: ProjectBrowserViewMode): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(PROJECT_BROWSER_VIEW_MODE_STORAGE_KEY, viewMode);
+  } catch {
+    // Ignore persistence failures.
+  }
+}
 
 function createEmptyCalculationTypeCounts(): Record<ProjectCalculationType, number> {
   return {
@@ -233,6 +259,9 @@ export function ProjectBrowser({
   const [isOpeningBandsMultiview, setIsOpeningBandsMultiview] = useState(false);
   const [bandsMultiviewProgress, setBandsMultiviewProgress] =
     useState<BandsMultiviewScanProgress | null>(null);
+  const [projectViewMode, setProjectViewModeState] = useState<ProjectBrowserViewMode>(
+    () => getStoredProjectBrowserViewMode(),
+  );
   const activeExportIdRef = useRef<string | null>(null);
   const activeImportIdRef = useRef<string | null>(null);
   const activeMultiviewScanIdRef = useRef<string | null>(null);
@@ -322,6 +351,11 @@ export function ProjectBrowser({
       }
       return [...currentFilters, filterType];
     });
+  }
+
+  function setProjectViewMode(viewMode: ProjectBrowserViewMode) {
+    setProjectViewModeState(viewMode);
+    setStoredProjectBrowserViewMode(viewMode);
   }
 
   useEffect(() => {
@@ -978,6 +1012,77 @@ export function ProjectBrowser({
     ? projects.filter((project) => project.folder_id === deletingFolder.id).length
     : 0;
 
+  function renderProjectOptionsMenu(project: ProjectSummary) {
+    if (readOnly) return null;
+
+    return (
+      <div className="project-card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
+        <InfoTooltip text="Project options">
+          <button
+            className="project-card-menu-btn"
+            type="button"
+            onClick={() => {
+              setOpenProjectMenuId((current) => (
+                current === project.id ? null : project.id
+              ));
+            }}
+            aria-label={`Open options for ${project.name}`}
+          >
+            ⋮
+          </button>
+        </InfoTooltip>
+        {openProjectMenuId === project.id && (
+          <div className="project-card-menu">
+            <button
+              type="button"
+              className="project-card-menu-item"
+              onClick={() => {
+                openEditProjectDialog(project.id);
+              }}
+            >
+              Edit Project
+            </button>
+            <div className="project-card-menu-divider" />
+            <button
+              type="button"
+              className="project-card-menu-item"
+              onClick={() => {
+                void handleMoveProject(project.id, null);
+              }}
+              disabled={movingProjectId === project.id || !project.folder_id}
+            >
+              Move to Root
+            </button>
+            {folders.map((folder) => (
+              <button
+                key={`${project.id}-${folder.id}`}
+                type="button"
+                className="project-card-menu-item"
+                onClick={() => {
+                  void handleMoveProject(project.id, folder.id);
+                }}
+                disabled={movingProjectId === project.id || project.folder_id === folder.id}
+              >
+                Move to {folder.name}
+              </button>
+            ))}
+            <div className="project-card-menu-divider" />
+            <button
+              type="button"
+              className="project-card-menu-item danger"
+              onClick={() => {
+                void openDeleteProjectDialog(project.id);
+              }}
+              disabled={isDeletingProject}
+            >
+              Delete Project
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className={`browser-container ${isOpeningBandsMultiview ? "browser-container-multiview-loading" : ""}`}>
       {isOpeningBandsMultiview && <div className="browser-multiview-loading-backdrop" />}
@@ -1197,37 +1302,57 @@ export function ProjectBrowser({
             )}
 
             <div className="project-filter-bar">
-              {PROJECT_FILTER_ORDER.map((filterType) => {
-                const filterLabel = filterType === "all"
-                  ? "All"
-                  : PROJECT_CALCULATION_TYPE_LABELS[filterType];
-                const filterCount = filterType === "all"
-                  ? projectsForActiveFolder.length
-                  : calculationTypeProjectCounts[filterType];
-                const variantClass = filterType === "all"
-                  ? "project-filter-tab-all"
-                  : `project-filter-tab-${filterType.replace(/_/g, "-")}`;
-                const isActive = filterType === "all"
-                  ? activeProjectFilters.length === 0
-                  : activeProjectFilters.includes(filterType);
-                return (
-                  <button
-                    key={filterType}
-                    className={`project-filter-tab ${variantClass} ${isActive ? "active" : ""}`}
-                    onClick={() => {
-                      if (filterType === "all") {
-                        setActiveProjectFilters([]);
-                        return;
-                      }
-                      toggleProjectFilter(filterType);
-                    }}
-                    type="button"
-                  >
-                    <span>{filterLabel}</span>
-                    <span className="project-filter-count">{filterCount}</span>
-                  </button>
-                );
-              })}
+              <div className="project-filter-tabs">
+                {PROJECT_FILTER_ORDER.map((filterType) => {
+                  const filterLabel = filterType === "all"
+                    ? "All"
+                    : PROJECT_CALCULATION_TYPE_LABELS[filterType];
+                  const filterCount = filterType === "all"
+                    ? projectsForActiveFolder.length
+                    : calculationTypeProjectCounts[filterType];
+                  const variantClass = filterType === "all"
+                    ? "project-filter-tab-all"
+                    : `project-filter-tab-${filterType.replace(/_/g, "-")}`;
+                  const isActive = filterType === "all"
+                    ? activeProjectFilters.length === 0
+                    : activeProjectFilters.includes(filterType);
+                  return (
+                    <button
+                      key={filterType}
+                      className={`project-filter-tab ${variantClass} ${isActive ? "active" : ""}`}
+                      onClick={() => {
+                        if (filterType === "all") {
+                          setActiveProjectFilters([]);
+                          return;
+                        }
+                        toggleProjectFilter(filterType);
+                      }}
+                      type="button"
+                    >
+                      <span>{filterLabel}</span>
+                      <span className="project-filter-count">{filterCount}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="project-view-mode-toggle engine-switcher" role="group" aria-label="Project layout">
+                <button
+                  type="button"
+                  className={projectViewMode === "tiles" ? "active" : ""}
+                  aria-pressed={projectViewMode === "tiles"}
+                  onClick={() => setProjectViewMode("tiles")}
+                >
+                  Tiles
+                </button>
+                <button
+                  type="button"
+                  className={projectViewMode === "list" ? "active" : ""}
+                  aria-pressed={projectViewMode === "list"}
+                  onClick={() => setProjectViewMode("list")}
+                >
+                  List
+                </button>
+              </div>
             </div>
 
             {filteredProjects.length === 0 ? (
@@ -1273,126 +1398,118 @@ export function ProjectBrowser({
                 )}
               </div>
             ) : (
-              <div className="project-grid">
-                {filteredProjects.map(({ project, calculationTypes }) => (
-                  <div
-                    key={project.id}
-                    className="project-card"
-                    onClick={() => onSelectProject?.(project.id, project.folder_id ?? null)}
-                  >
-                    <div className="project-card-header">
-                      <h3 className="project-name">{project.name}</h3>
-                      {!readOnly && (
-                        <div className="project-card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
-                          <InfoTooltip text="Project options">
-                            <button
-                              className="project-card-menu-btn"
-                              type="button"
-                              onClick={() => {
-                                setOpenProjectMenuId((current) => (
-                                  current === project.id ? null : project.id
-                                ));
-                              }}
-                              aria-label={`Open options for ${project.name}`}
-                            >
-                              ⋮
-                            </button>
-                          </InfoTooltip>
-                          {openProjectMenuId === project.id && (
-                            <div className="project-card-menu">
-                              <button
-                                type="button"
-                                className="project-card-menu-item"
-                                onClick={() => {
-                                  openEditProjectDialog(project.id);
-                                }}
-                              >
-                                Edit Project
-                              </button>
-                              <div className="project-card-menu-divider" />
-                              <button
-                                type="button"
-                                className="project-card-menu-item"
-                                onClick={() => {
-                                  void handleMoveProject(project.id, null);
-                                }}
-                                disabled={movingProjectId === project.id || !project.folder_id}
-                              >
-                                Move to Root
-                              </button>
-                              {folders.map((folder) => (
-                                <button
-                                  key={`${project.id}-${folder.id}`}
-                                  type="button"
-                                  className="project-card-menu-item"
-                                  onClick={() => {
-                                    void handleMoveProject(project.id, folder.id);
-                                  }}
-                                  disabled={movingProjectId === project.id || project.folder_id === folder.id}
-                                >
-                                  Move to {folder.name}
-                                </button>
-                              ))}
-                              <div className="project-card-menu-divider" />
-                              <button
-                                type="button"
-                                className="project-card-menu-item danger"
-                                onClick={() => {
-                                  void openDeleteProjectDialog(project.id);
-                                }}
-                                disabled={isDeletingProject}
-                              >
-                                Delete Project
-                              </button>
-                            </div>
+              projectViewMode === "list" ? (
+                <div className="project-list">
+                  {filteredProjects.map(({ project, calculationTypes }) => (
+                    <div
+                      key={project.id}
+                      className="project-list-row"
+                      onClick={() => onSelectProject?.(project.id, project.folder_id ?? null)}
+                    >
+                      <div className="project-list-row-main">
+                        <div className="project-list-title-line">
+                          <h3 className="project-name project-list-name">{project.name}</h3>
+                          {project.formula && (
+                            <span className="project-formula">{project.formula}</span>
                           )}
                         </div>
-                      )}
-                    </div>
-
-                    {project.description && (
-                      <p className="project-description">{project.description}</p>
-                    )}
-
-                    <div className="project-meta">
-                      {project.formula && (
-                        <span className="project-formula">{project.formula}</span>
-                      )}
-                      <span className="project-folder-pill">
-                        {project.folder_id
-                          ? (folderById.get(project.folder_id)?.name ?? "Unknown folder")
-                          : "Root"}
-                      </span>
-                      <span className="project-stats">
-                        {project.calculation_count} calculation
-                        {project.calculation_count !== 1 ? "s" : ""}
-                      </span>
-                    </div>
-
-                    {calculationTypes.length > 0 && (
-                      <div className="project-calculation-tags">
-                        {calculationTypes.map((calcType) => (
-                          <span
-                            key={calcType}
-                            className={`project-calc-tag project-calc-tag-${calcType.replace(/_/g, "-")}`}
-                          >
-                            {PROJECT_CALCULATION_TYPE_LABELS[calcType]}
+                        {project.description && (
+                          <p className="project-description project-list-description">{project.description}</p>
+                        )}
+                        <div className="project-list-tags">
+                          <span className="project-folder-pill">
+                            {project.folder_id
+                              ? (folderById.get(project.folder_id)?.name ?? "Unknown folder")
+                              : "Root"}
                           </span>
-                        ))}
+                          {calculationTypes.map((calcType) => (
+                            <span
+                              key={calcType}
+                              className={`project-calc-tag project-calc-tag-${calcType.replace(/_/g, "-")}`}
+                            >
+                              {PROJECT_CALCULATION_TYPE_LABELS[calcType]}
+                            </span>
+                          ))}
+                          {calculationTypes.length === 0 && (
+                            <span className="project-list-empty-tags">No tags</span>
+                          )}
+                        </div>
                       </div>
-                    )}
-
-                    <div className="project-footer">
-                      <span className="project-date" title={formatDate(project.created_at)}>
-                        Created {formatDate(project.created_at)}
-                      </span>
-                      <span className="project-activity" title={formatDate(project.last_activity)}>
-                        Active {formatRelativeTime(project.last_activity)}
-                      </span>
+                      <div className="project-list-row-meta">
+                        <span>
+                          {project.calculation_count} calculation
+                          {project.calculation_count !== 1 ? "s" : ""}
+                        </span>
+                        <span title={formatDate(project.last_activity)}>
+                          Active {formatRelativeTime(project.last_activity)}
+                        </span>
+                        <span title={formatDate(project.created_at)}>
+                          Created {formatDate(project.created_at)}
+                        </span>
+                      </div>
+                      <div className="project-list-row-actions">
+                        {renderProjectOptionsMenu(project)}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="project-grid">
+                  {filteredProjects.map(({ project, calculationTypes }) => (
+                    <div
+                      key={project.id}
+                      className="project-card"
+                      onClick={() => onSelectProject?.(project.id, project.folder_id ?? null)}
+                    >
+                      <div className="project-card-header">
+                        <h3 className="project-name">{project.name}</h3>
+                        {renderProjectOptionsMenu(project)}
+                      </div>
+
+                      {project.description && (
+                        <p className="project-description">{project.description}</p>
+                      )}
+
+                      <div className="project-meta">
+                        {project.formula && (
+                          <span className="project-formula">{project.formula}</span>
+                        )}
+                        <span className="project-folder-pill">
+                          {project.folder_id
+                            ? (folderById.get(project.folder_id)?.name ?? "Unknown folder")
+                            : "Root"}
+                        </span>
+                        <span className="project-stats">
+                          {project.calculation_count} calculation
+                          {project.calculation_count !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+
+                      {calculationTypes.length > 0 && (
+                        <div className="project-calculation-tags">
+                          {calculationTypes.map((calcType) => (
+                            <span
+                              key={calcType}
+                              className={`project-calc-tag project-calc-tag-${calcType.replace(/_/g, "-")}`}
+                            >
+                              {PROJECT_CALCULATION_TYPE_LABELS[calcType]}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="project-footer">
+                        <span className="project-date" title={formatDate(project.created_at)}>
+                          Created {formatDate(project.created_at)}
+                        </span>
+                        <span className="project-activity" title={formatDate(project.last_activity)}>
+                          Active {formatRelativeTime(project.last_activity)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
             )}
           </>
         )}

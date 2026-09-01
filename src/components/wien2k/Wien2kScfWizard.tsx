@@ -17,6 +17,7 @@ import type {
   Wien2kHubbardTarget,
   Wien2kInitializationResult,
   Wien2kInitializationSettings,
+  Wien2kLstartCoreLeakSuggestion,
   Wien2kScfExecutionResult,
   Wien2kScfRunSettings,
   Wien2kScfSession,
@@ -167,6 +168,10 @@ function parseRemoteNode(line: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+function formatLstartCutoffRy(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3) : String(value);
+}
+
 export function Wien2kScfWizard({
   projectId,
   cifId,
@@ -210,17 +215,23 @@ export function Wien2kScfWizard({
   const [remoteNode, setRemoteNode] = useState<string | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(reconnectTaskId ?? null);
   const [activeInitializationTaskId, setActiveInitializationTaskId] = useState<string | null>(null);
+  const [lstartSuggestion, setLstartSuggestion] = useState<Wien2kLstartCoreLeakSuggestion | null>(null);
   const [continuationParentCalculationId, setContinuationParentCalculationId] = useState<string | null>(
     continuationCalculationId,
   );
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
+  const ignoredInitializationTaskIdsRef = useRef<Set<string>>(new Set());
   const reconnectTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const activeTask = reconnectTask?.taskType === "wien2k_scf" ? reconnectTask : undefined;
-  const activeInitializationTask = activeInitializationTaskId
+  const candidateInitializationTask = activeInitializationTaskId
     ? taskContext.getTask(activeInitializationTaskId)
     : reconnectTask?.taskType === "wien2k_scf_initialize"
       ? reconnectTask
       : undefined;
+  const activeInitializationTask = candidateInitializationTask
+    && !ignoredInitializationTaskIdsRef.current.has(candidateInitializationTask.taskId)
+    ? candidateInitializationTask
+    : undefined;
   const selectedSource = sources.find((source) => source.id === sourceId) ?? sources[0] ?? null;
   const initError = validateWien2kInitializationSettings(initialization);
   const effectiveRunSettings = useMemo(
@@ -295,6 +306,7 @@ export function Wien2kScfWizard({
   const runRemoteJobId = activeTask?.hpc.remote_job_id ?? remoteJobId;
   const runRemoteNode = activeTask?.hpc.remote_node ?? remoteNode;
   const isContinuationSession = Boolean(continuationParentCalculationId);
+  const pendingLstartSuggestion = Boolean(lstartSuggestion && initialized && !result && !isContinuationSession);
 
   useViewportScrollLock(scfRunStarted && runIsActive);
 
@@ -359,6 +371,7 @@ export function Wien2kScfWizard({
   useEffect(() => {
     if (!reconnectTask) return;
     if (reconnectTask.taskType === "wien2k_scf_initialize") {
+      if (ignoredInitializationTaskIdsRef.current.has(reconnectTask.taskId)) return;
       setActiveInitializationTaskId(reconnectTask.taskId);
       setScfRunStarted(false);
     } else if (reconnectTask.taskType === "wien2k_scf") {
@@ -373,6 +386,7 @@ export function Wien2kScfWizard({
       setIsRunning(false);
       return;
     }
+    setError(null);
     if (activeTask.status !== "completed" || !taskResult) return;
     setResult(taskResult);
     setSession((current) => current ? {
@@ -387,6 +401,7 @@ export function Wien2kScfWizard({
 
   useEffect(() => {
     if (!activeInitializationTask) return;
+    if (ignoredInitializationTaskIdsRef.current.has(activeInitializationTask.taskId)) return;
     const resume = activeInitializationTask.metadata?.wizardResume;
     if (resume?.sourceId) setSourceId(String(resume.sourceId));
     if (resume?.initialization) setInitialization(resume.initialization as Wien2kInitializationSettings);
@@ -394,12 +409,15 @@ export function Wien2kScfWizard({
     if (resume?.session) setSession(resume.session as Wien2kScfSession);
     if (activeInitializationTask.status === "failed" || activeInitializationTask.status === "cancelled") {
       setError(activeInitializationTask.error ?? "WIEN2k initialization failed.");
+      setLstartSuggestion(null);
       setIsInitializing(false);
       return;
     }
+    setError(null);
     if (activeInitializationTask.status !== "completed") return;
     const initResult = activeInitializationTask.result as (Wien2kInitializationResult & { session?: Wien2kScfSession }) | null;
     if (!initResult) return;
+    setLstartSuggestion(initResult.lstartCoreLeakSuggestion ?? null);
     setSession(initResult.session ?? ((current) => current ? {
       ...current,
       phase: initResult.phase,
@@ -458,31 +476,61 @@ export function Wien2kScfWizard({
     });
   }
 
-  async function beginInitialization() {
-    if (!selectedSource || initError) return;
+  async function beginInitialization(settingsOverride?: Wien2kInitializationSettings, restartExisting = false) {
+    const initSettings = settingsOverride ?? initialization;
+    const validationError = validateWien2kInitializationSettings(initSettings);
+    if (!selectedSource || validationError) {
+      if (validationError) setError(validationError);
+      return;
+    }
     setIsInitializing(true);
+    setLstartSuggestion(null);
     setError(null);
     setResult(null);
     try {
-      let activeSession = session;
+      let activeSession = restartExisting ? null : session;
+      if (restartExisting && session) {
+        if (activeInitializationTask) {
+          ignoredInitializationTaskIdsRef.current.add(activeInitializationTask.taskId);
+        }
+        if (activeInitializationTaskId) {
+          ignoredInitializationTaskIdsRef.current.add(activeInitializationTaskId);
+        }
+        if (reconnectTask?.taskType === "wien2k_scf_initialize") {
+          ignoredInitializationTaskIdsRef.current.add(reconnectTask.taskId);
+        }
+        await discardWien2kScfSession(session.sessionId);
+        outputUnlistenRef.current?.();
+        outputUnlistenRef.current = null;
+        setSession(null);
+        setActiveTaskId(null);
+        setActiveInitializationTaskId(null);
+        setScfRunStarted(false);
+        setCalcStartTime(null);
+        setRemoteJobId(null);
+        setRemoteNode(null);
+      }
+      setInitialization(initSettings);
       if (!activeSession) {
         activeSession = await startWien2kScfSession(projectId, cifId, selectedSource.id);
         setSession(activeSession);
-        setOutputLines([`Staged accepted ${activeSession.caseName}.struct in ${activeSession.remoteCaseDir}.`]);
+        setOutputLines([
+          `${restartExisting ? "Restarting initialization for" : "Staged accepted"} ${activeSession.caseName}.struct in ${activeSession.remoteCaseDir}.`,
+        ]);
         await attachOutputListener(activeSession.sessionId);
       }
       const taskId = await taskContext.startTask(
         "wien2k_scf_initialize",
         {
           sessionId: activeSession.sessionId,
-          settings: initialization,
+          settings: initSettings,
           workflowMetadata: {
             wizardResume: {
               view: "wien2k-scf-wizard",
               utility: "initialization",
               context: { projectId, cifId, calculations },
               sourceId: selectedSource.id,
-              initialization,
+              initialization: initSettings,
               runSettings,
               session: activeSession,
             },
@@ -496,6 +544,14 @@ export function Wien2kScfWizard({
     } finally {
       setIsInitializing(false);
     }
+  }
+
+  async function restartInitializationWithSuggestedCutoff() {
+    if (!lstartSuggestion) return;
+    await beginInitialization({
+      ...initialization,
+      lstartEnergyCutoffRy: lstartSuggestion.suggestedCutoffRy,
+    }, true);
   }
 
   async function submitScf(continuation: boolean) {
@@ -536,6 +592,7 @@ export function Wien2kScfWizard({
       outputUnlistenRef.current = null;
       setSession(null);
       setResult(null);
+      setLstartSuggestion(null);
       setOutputLines([]);
       setScfRunStarted(false);
       setCalcStartTime(null);
@@ -678,6 +735,49 @@ export function Wien2kScfWizard({
     );
   }
 
+  function renderLstartSuggestionPrompt() {
+    if (!lstartSuggestion || result || isContinuationSession) return null;
+    const suggestedCutoff = formatLstartCutoffRy(lstartSuggestion.suggestedCutoffRy);
+    const referenceEnergy = formatLstartCutoffRy(lstartSuggestion.referenceEnergyRy);
+    const currentCutoff = formatLstartCutoffRy(initialization.lstartEnergyCutoffRy);
+    const orbitalDetails = [
+      lstartSuggestion.atom,
+      lstartSuggestion.orbital,
+    ].filter(Boolean).join(" ");
+
+    return (
+      <div className="warning-banner wien2k-lstart-advisory">
+        <strong>
+          WIEN2k reported core leakage{orbitalDetails ? ` for ${orbitalDetails}` : ""}.
+        </strong>
+        <p>
+          Would you like to restart initialization with the new suggested cutoff of {suggestedCutoff} Ry?
+        </p>
+        <p>
+          Current LSTART cutoff: {currentCutoff} Ry. The suggestion places a {formatLstartCutoffRy(lstartSuggestion.bufferRy)} Ry buffer below the reported {referenceEnergy} Ry orbital energy.
+        </p>
+        <div className="wien2k-lstart-advisory-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={initializationRunning}
+            onClick={() => void restartInitializationWithSuggestedCutoff()}
+          >
+            Yes, restart initialization
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={initializationRunning}
+            onClick={() => setLstartSuggestion(null)}
+          >
+            No, keep current cutoff
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   function renderRunStep() {
     const progressStatus: "idle" | "running" | "error" | "complete" =
       runHasFailed ? "error" : displayedResult ? "complete" : runIsActive ? "running" : "idle";
@@ -789,6 +889,7 @@ export function Wien2kScfWizard({
       {isPreparingContinuation && (
         <div className="info-banner">Loading saved WIEN2k continuation state...</div>
       )}
+      {renderLstartSuggestionPrompt()}
       <div className="wien2k-structure-content">
         <section className="wien2k-structure-controls">
           {renderSection("source", "Accepted Structure Source", (
@@ -1193,7 +1294,7 @@ export function Wien2kScfWizard({
           <button
             type="button"
             className="primary-button"
-            disabled={Boolean(runError) || isRunning || isPreparingContinuation}
+            disabled={Boolean(runError) || isRunning || isPreparingContinuation || pendingLstartSuggestion}
             onClick={() => void submitScf(isContinuationSession)}
           >
             {isRunning ? (isContinuationSession ? "Continuing..." : "Running SCF...") : isContinuationSession ? "Continue SCF" : "Run SCF"}
