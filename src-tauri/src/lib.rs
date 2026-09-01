@@ -1826,6 +1826,7 @@ mod hpc_headless_recovery_tests {
                 spin_orbit: false,
                 diagnostic_log: false,
             },
+            engines::wien2k::Wien2kSpinMode::NonSpinPolarized,
             false,
         )
         .into_iter()
@@ -1834,7 +1835,7 @@ mod hpc_headless_recovery_tests {
         let command = build_wien2k_bands_command(
             &wien2k_test_bands_session(""),
             &profile,
-            &argv,
+            &argv.argv,
             Some(&resources),
             false,
         )
@@ -1860,13 +1861,57 @@ mod hpc_headless_recovery_tests {
                 spin_orbit: true,
                 diagnostic_log: false,
             },
+            engines::wien2k::Wien2kSpinMode::SpinPolarized,
             false,
         );
 
-        assert_eq!(commands[0], vec!["lapw1", "-band", "-up"]);
-        assert_eq!(commands[1], vec!["lapwso", "-up"]);
-        assert_eq!(commands[2], vec!["lapw2", "-qtl", "-band", "-up", "-so"]);
-        assert_eq!(commands[3], vec!["spaghetti", "-up", "-so"]);
+        assert_eq!(commands[0].argv, vec!["lapw1", "-band", "-up"]);
+        assert_eq!(commands[1].argv, vec!["lapw1", "-band", "-dn"]);
+        assert_eq!(commands[2].argv, vec!["lapwso", "-up"]);
+        assert_eq!(commands[3].argv, vec!["lapw2", "-qtl", "-band", "-up", "-so"]);
+        assert_eq!(commands[4].argv, vec!["spaghetti", "-up", "-so"]);
+    }
+
+    #[test]
+    fn wien2k_collinear_spin_bands_run_and_archive_both_channels() {
+        use engines::wien2k::{Wien2kBandsRunSettings, Wien2kBandsSpinChannel, Wien2kSpinMode};
+
+        let commands = wien2k_bands_command_sequence(
+            &Wien2kBandsRunSettings {
+                spin_channel: Wien2kBandsSpinChannel::Up,
+                run_lapw2_qtl: false,
+                run_irrep: false,
+                spin_orbit: false,
+                diagnostic_log: false,
+            },
+            Wien2kSpinMode::SpinPolarized,
+            false,
+        );
+
+        assert_eq!(commands[0].argv, vec!["lapw1", "-band", "-up"]);
+        assert_eq!(commands[1].argv, vec!["spaghetti", "-up"]);
+        assert_eq!(commands[1].archive_channel, Some(Wien2kBandsSpinChannel::Up));
+        assert_eq!(commands[2].argv, vec!["lapw1", "-band", "-dn"]);
+        assert_eq!(commands[3].argv, vec!["spaghetti", "-dn"]);
+        assert_eq!(commands[3].archive_channel, Some(Wien2kBandsSpinChannel::Down));
+    }
+
+    #[test]
+    fn wien2k_spin_band_archive_command_is_valid_bash() {
+        let command = build_wien2k_bands_archive_command(
+            &wien2k_test_bands_session(""),
+            engines::wien2k::Wien2kBandsSpinChannel::Up,
+        )
+        .expect("archive command");
+
+        let status = std::process::Command::new("bash")
+            .args(["-n", "-c", &command])
+            .status()
+            .expect("bash syntax check");
+
+        assert!(status.success());
+        assert!(command.contains("'bands.agr:bands_'$channel'.agr'"));
+        assert!(command.contains("'spaghetti_ene:spaghetti_ene_'$channel"));
     }
 
     #[test]
@@ -1925,6 +1970,61 @@ mod hpc_headless_recovery_tests {
         assert!(normal.contains("[ $status -eq 0 ]"));
         assert!(diagnostic.contains("[QCortado] --- tail:"));
         assert!(diagnostic.contains("${case_name}.output1up"));
+    }
+
+    #[test]
+    fn wien2k_bands_parser_accepts_singular_agr_name_and_falls_back_between_artifacts() {
+        let mut artifacts = std::collections::BTreeMap::new();
+        artifacts.insert("Er1P1.bands.agr".to_string(), "not band data\n".to_string());
+        artifacts.insert(
+            "Er1P1.band.agr".to_string(),
+            "0.0 -1.0\n1.0 -0.5\n&\n0.0 0.2\n1.0 0.6\n".to_string(),
+        );
+
+        let (name, parsed) = parse_wien2k_spaghetti_artifacts(
+            "Er1P1",
+            &artifacts,
+            5.0,
+            None,
+        )
+        .expect("bands");
+
+        assert_eq!(name, "Er1P1.band.agr");
+        assert_eq!(parsed.n_bands, 2);
+        assert_eq!(parsed.n_kpoints, 2);
+    }
+
+    #[test]
+    fn wien2k_bands_parser_keeps_archived_spin_channels_separate() {
+        use engines::wien2k::Wien2kBandsSpinChannel;
+
+        let mut artifacts = std::collections::BTreeMap::new();
+        artifacts.insert(
+            "Er1P1.bands_up.agr".to_string(),
+            "0.0 -1.0\n1.0 -0.5\n".to_string(),
+        );
+        artifacts.insert(
+            "Er1P1.bands_dn.agr".to_string(),
+            "0.0 0.2\n1.0 0.6\n".to_string(),
+        );
+
+        let (_, up) = parse_wien2k_spaghetti_artifacts(
+            "Er1P1",
+            &artifacts,
+            5.0,
+            Some(Wien2kBandsSpinChannel::Up),
+        )
+        .expect("up bands");
+        let (_, down) = parse_wien2k_spaghetti_artifacts(
+            "Er1P1",
+            &artifacts,
+            5.0,
+            Some(Wien2kBandsSpinChannel::Down),
+        )
+        .expect("down bands");
+
+        assert_eq!(up.energies[0], vec![4.0, 4.5]);
+        assert_eq!(down.energies[0], vec![5.2, 5.6]);
     }
 
     #[test]
@@ -5135,6 +5235,56 @@ fn build_wien2k_bands_log_dump_command(case_name: &str, label: &str) -> String {
     )
 }
 
+fn build_wien2k_bands_archive_command(
+    session: &engines::wien2k::Wien2kBandsSession,
+    channel: engines::wien2k::Wien2kBandsSpinChannel,
+) -> Result<String, String> {
+    let channel_name = match channel {
+        engines::wien2k::Wien2kBandsSpinChannel::Up => "up",
+        engines::wien2k::Wien2kBandsSpinChannel::Down => "dn",
+        engines::wien2k::Wien2kBandsSpinChannel::None => {
+            return Err("Cannot archive a WIEN2k band output without a spin channel.".to_string())
+        }
+    };
+    let case_name = shell_single_quote_local(&session.case_name);
+    Ok(format!(
+        "cd {dir} && case_name={case_name} && channel={channel} && \
+         for pair in 'bands.agr:bands_'$channel'.agr' 'band.agr:band_'$channel'.agr' \
+         'spaghetti_ene:spaghetti_ene_'$channel 'spaghetti_ps:spaghetti_ps_'$channel; do \
+           source_suffix=${{pair%%:*}}; target_suffix=${{pair#*:}}; \
+           source_file=\"${{case_name}}.${{source_suffix}}\"; target_file=\"${{case_name}}.${{target_suffix}}\"; \
+           if [ -s \"$source_file\" ]; then cp -f \"$source_file\" \"$target_file\"; fi; \
+         done && \
+         for program in lapw1 lapw2 irrep spaghetti; do \
+           source_file=\".qcortado-${{program}}.log\"; target_file=\".qcortado-${{program}}-${{channel}}.log\"; \
+           if [ -s \"$source_file\" ]; then cp -f \"$source_file\" \"$target_file\"; fi; \
+         done && echo \"[QCortado] Preserved $channel spin band artifacts\"",
+        dir = shell_single_quote_local(&session.remote_case_dir),
+        channel = shell_single_quote_local(channel_name),
+    ))
+}
+
+fn build_wien2k_bands_step_log_archive_command(
+    session: &engines::wien2k::Wien2kBandsSession,
+    program: &str,
+    channel: engines::wien2k::Wien2kBandsSpinChannel,
+) -> Option<String> {
+    let channel_name = match channel {
+        engines::wien2k::Wien2kBandsSpinChannel::Up => "up",
+        engines::wien2k::Wien2kBandsSpinChannel::Down => "dn",
+        engines::wien2k::Wien2kBandsSpinChannel::None => return None,
+    };
+    Some(format!(
+        "cd {dir} && if [ -s {source} ]; then cp -f {source} {target}; fi",
+        dir = shell_single_quote_local(&session.remote_case_dir),
+        source = shell_single_quote_local(&format!(".qcortado-{}.log", program)),
+        target = shell_single_quote_local(&format!(
+            ".qcortado-{}-{}.log",
+            program, channel_name
+        )),
+    ))
+}
+
 fn build_wien2k_bands_parallel_setup_command(
     resources: &hpc::profile::SlurmResourceRequest,
 ) -> String {
@@ -5179,6 +5329,24 @@ async fn collect_remote_wien2k_bands_artifacts(
         if let Ok(contents) = read_remote_wien2k_text(profile, secret, &path).await {
             if !contents.trim().is_empty() {
                 artifacts.insert(filename, contents);
+            }
+        }
+    }
+    artifacts
+}
+
+async fn collect_remote_wien2k_bands_named_artifacts(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+    session: &engines::wien2k::Wien2kBandsSession,
+    filenames: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut artifacts = std::collections::BTreeMap::new();
+    for filename in filenames {
+        let path = format!("{}/{}", session.remote_case_dir, filename);
+        if let Ok(contents) = read_remote_wien2k_text(profile, secret, &path).await {
+            if !contents.trim().is_empty() {
+                artifacts.insert((*filename).to_string(), contents);
             }
         }
     }
@@ -5280,34 +5448,51 @@ fn build_wien2k_in2_fermi_patch_script(case_name: &str, method: &str, value: f64
     .join("\n")
 }
 
-fn wien2k_bands_command_sequence(
-    settings: &engines::wien2k::Wien2kBandsRunSettings,
-    parallel: bool,
-) -> Vec<Vec<String>> {
-    let mut commands = Vec::new();
-    let mut lapw1 = vec!["lapw1".to_string(), "-band".to_string()];
-    if let Some(spin) = settings.spin_channel.x_arg() {
-        lapw1.push(spin.to_string());
-    }
-    if parallel {
-        lapw1.push("-p".to_string());
-    }
-    commands.push(lapw1);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wien2kBandsCommandStep {
+    argv: Vec<String>,
+    archive_channel: Option<engines::wien2k::Wien2kBandsSpinChannel>,
+}
 
-    if settings.spin_orbit {
+fn wien2k_bands_channel_command_sequence(
+    settings: &engines::wien2k::Wien2kBandsRunSettings,
+    spin_channel: engines::wien2k::Wien2kBandsSpinChannel,
+    include_lapw1: bool,
+    include_lapwso: bool,
+    parallel: bool,
+) -> Vec<Wien2kBandsCommandStep> {
+    let mut commands = Vec::new();
+    if include_lapw1 {
+        let mut lapw1 = vec!["lapw1".to_string(), "-band".to_string()];
+        if let Some(spin) = spin_channel.x_arg() {
+            lapw1.push(spin.to_string());
+        }
+        if parallel {
+            lapw1.push("-p".to_string());
+        }
+        commands.push(Wien2kBandsCommandStep {
+            argv: lapw1,
+            archive_channel: None,
+        });
+    }
+
+    if include_lapwso {
         let mut lapwso = vec!["lapwso".to_string()];
-        if settings.spin_channel != engines::wien2k::Wien2kBandsSpinChannel::None {
+        if spin_channel != engines::wien2k::Wien2kBandsSpinChannel::None {
             lapwso.push("-up".to_string());
         }
         if parallel {
             lapwso.push("-p".to_string());
         }
-        commands.push(lapwso);
+        commands.push(Wien2kBandsCommandStep {
+            argv: lapwso,
+            archive_channel: None,
+        });
     }
 
     if settings.run_lapw2_qtl {
         let mut lapw2 = vec!["lapw2".to_string(), "-qtl".to_string(), "-band".to_string()];
-        if let Some(spin) = settings.spin_channel.x_arg() {
+        if let Some(spin) = spin_channel.x_arg() {
             lapw2.push(spin.to_string());
         }
         if settings.spin_orbit {
@@ -5316,19 +5501,25 @@ fn wien2k_bands_command_sequence(
         if parallel {
             lapw2.push("-p".to_string());
         }
-        commands.push(lapw2);
+        commands.push(Wien2kBandsCommandStep {
+            argv: lapw2,
+            archive_channel: None,
+        });
     }
 
     if settings.run_irrep {
         let mut irrep = vec!["irrep".to_string(), "-band".to_string()];
-        if let Some(spin) = settings.spin_channel.x_arg() {
+        if let Some(spin) = spin_channel.x_arg() {
             irrep.push(spin.to_string());
         }
-        commands.push(irrep);
+        commands.push(Wien2kBandsCommandStep {
+            argv: irrep,
+            archive_channel: None,
+        });
     }
 
     let mut spaghetti = vec!["spaghetti".to_string()];
-    if let Some(spin) = settings.spin_channel.x_arg() {
+    if let Some(spin) = spin_channel.x_arg() {
         spaghetti.push(spin.to_string());
     }
     if settings.spin_orbit {
@@ -5337,26 +5528,155 @@ fn wien2k_bands_command_sequence(
     if parallel {
         spaghetti.push("-p".to_string());
     }
-    commands.push(spaghetti);
+    commands.push(Wien2kBandsCommandStep {
+        argv: spaghetti,
+        archive_channel: None,
+    });
     commands
 }
 
-fn find_wien2k_spaghetti_artifact<'a>(
+fn wien2k_bands_command_sequence(
+    settings: &engines::wien2k::Wien2kBandsRunSettings,
+    spin_mode: engines::wien2k::Wien2kSpinMode,
+    parallel: bool,
+) -> Vec<Wien2kBandsCommandStep> {
+    use engines::wien2k::{Wien2kBandsSpinChannel as Channel, Wien2kSpinMode};
+
+    if spin_mode == Wien2kSpinMode::NonSpinPolarized {
+        return wien2k_bands_channel_command_sequence(
+            settings,
+            Channel::None,
+            true,
+            settings.spin_orbit,
+            parallel,
+        );
+    }
+    if settings.spin_orbit {
+        let mut commands = wien2k_bands_channel_command_sequence(
+            settings,
+            Channel::Up,
+            true,
+            false,
+            parallel,
+        );
+        let mut down_lapw1 = vec!["lapw1".to_string(), "-band".to_string(), "-dn".to_string()];
+        if parallel {
+            down_lapw1.push("-p".to_string());
+        }
+        commands.insert(
+            1,
+            Wien2kBandsCommandStep {
+                argv: down_lapw1,
+                archive_channel: None,
+            },
+        );
+        let lapwso_index = 2;
+        let mut lapwso = vec!["lapwso".to_string(), "-up".to_string()];
+        if parallel {
+            lapwso.push("-p".to_string());
+        }
+        commands.insert(
+            lapwso_index,
+            Wien2kBandsCommandStep {
+                argv: lapwso,
+                archive_channel: None,
+            },
+        );
+        return commands;
+    }
+
+    let mut commands = Vec::new();
+    for channel in [Channel::Up, Channel::Down] {
+        let mut channel_commands = wien2k_bands_channel_command_sequence(
+            settings,
+            channel,
+            true,
+            false,
+            parallel,
+        );
+        if let Some(last) = channel_commands.last_mut() {
+            last.archive_channel = Some(channel);
+        }
+        commands.extend(channel_commands);
+    }
+    commands
+}
+
+fn parse_wien2k_spaghetti_artifacts(
     case_name: &str,
-    artifacts: &'a std::collections::BTreeMap<String, String>,
-) -> Option<(&'a String, &'a String)> {
-    let candidates = [
-        format!("{}.bands.agr", case_name),
-        format!("{}.spaghetti_ene", case_name),
-    ];
-    for candidate in candidates {
-        if let Some(contents) = artifacts.get_key_value(&candidate) {
-            return Some(contents);
+    artifacts: &std::collections::BTreeMap<String, String>,
+    fermi_energy_ev: f64,
+    spin_channel: Option<engines::wien2k::Wien2kBandsSpinChannel>,
+) -> Result<(String, engines::qe::bands::BandData), String> {
+    let mut candidates = Vec::new();
+    let channel_suffix = spin_channel.and_then(|channel| match channel {
+        engines::wien2k::Wien2kBandsSpinChannel::Up => Some("up"),
+        engines::wien2k::Wien2kBandsSpinChannel::Down => Some("dn"),
+        engines::wien2k::Wien2kBandsSpinChannel::None => None,
+    });
+    let preferred_names = if let Some(channel) = channel_suffix {
+        vec![
+            format!("{}.bands_{}.agr", case_name, channel),
+            format!("{}.band_{}.agr", case_name, channel),
+            format!("{}.spaghetti_ene_{}", case_name, channel),
+        ]
+    } else {
+        vec![
+            format!("{}.bands.agr", case_name),
+            format!("{}.band.agr", case_name),
+            format!("{}.spaghetti_ene", case_name),
+            format!("{}.bands_up.agr", case_name),
+            format!("{}.band_up.agr", case_name),
+            format!("{}.spaghetti_ene_up", case_name),
+        ]
+    };
+    for name in preferred_names {
+        if let Some(contents) = artifacts.get(&name) {
+            candidates.push((name, contents));
         }
     }
-    artifacts
-        .iter()
-        .find(|(name, _)| name.ends_with(".agr") || name.ends_with(".spaghetti_ene"))
+    for (name, contents) in artifacts {
+        let matches_channel = channel_suffix
+            .map(|channel| {
+                name.ends_with(&format!("_{}.agr", channel))
+                    || name.ends_with(&format!("_{}", channel))
+            })
+            .unwrap_or_else(|| {
+                name == &format!("{}.bands.agr", case_name)
+                    || name == &format!("{}.band.agr", case_name)
+                    || name == &format!("{}.spaghetti_ene", case_name)
+                    || name == &format!("{}.bands_up.agr", case_name)
+                    || name == &format!("{}.band_up.agr", case_name)
+                    || name == &format!("{}.spaghetti_ene_up", case_name)
+            });
+        if matches_channel
+            && (name.ends_with(".agr") || name.contains(".spaghetti_ene"))
+            && !candidates.iter().any(|(candidate, _)| candidate == name)
+        {
+            candidates.push((name.clone(), contents));
+        }
+    }
+    if candidates.is_empty() {
+        return Err(
+            format!(
+                "WIEN2k spaghetti did not produce the expected {}band output artifact.",
+                channel_suffix
+                    .map(|channel| format!("{}-spin ", channel))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    let mut errors = Vec::new();
+    for (name, contents) in candidates {
+        match engines::wien2k::parse_spaghetti_artifact(&name, contents, fermi_energy_ev) {
+            Ok(data) => return Ok((name, data)),
+            Err(error) => errors.push(format!("{}: {}", name, error)),
+        }
+    }
+    Err(format!(
+        "WIEN2k spaghetti output was found but could not be parsed: {}",
+        errors.join("; ")
+    ))
 }
 
 fn wien2k_remote_install_root_from_parameters(
@@ -5594,7 +5914,10 @@ async fn wien2k_prepare_bands_session_impl(
          {case}.output1 {case}.output1up {case}.output1dn \
          {case}.output2 {case}.output2up {case}.output2dn \
          {case}.outputso {case}.outputsoup {case}.outputsodn \
-         {case}.spaghetti {case}.spaghetti_ene {case}.bands.agr && \
+         {case}.spaghetti {case}.spaghetti_ene {case}.spaghetti_ene_up {case}.spaghetti_ene_dn \
+         {case}.spaghetti_ps {case}.spaghetti_ps_up {case}.spaghetti_ps_dn \
+         {case}.bands.agr {case}.bands_up.agr {case}.bands_dn.agr \
+         {case}.band.agr {case}.band_up.agr {case}.band_dn.agr && \
         echo '[QCortado] Prepared case.klist_band and case.insp'",
         shell_single_quote_local(&session.remote_case_dir),
         case = quoted_case,
@@ -5653,6 +5976,141 @@ async fn wien2k_run_bands_session(
     wien2k_run_bands_session_impl(app, session_id, settings, resources, &state, event_name).await
 }
 
+fn save_wien2k_bands_dataset(
+    app: &AppHandle,
+    session: &engines::wien2k::Wien2kBandsSession,
+    settings: &engines::wien2k::Wien2kBandsRunSettings,
+    artifacts: &std::collections::BTreeMap<String, String>,
+    native_output: &str,
+    command_failed: bool,
+    source_name: &str,
+    band_data: engines::qe::bands::BandData,
+    spin_channel: Option<engines::wien2k::Wien2kBandsSpinChannel>,
+    completed_at: &str,
+) -> Result<engines::wien2k::Wien2kBandsSavedDataset, String> {
+    let placeholder_dataset = engines::wien2k::band_dataset_json(
+        &band_data,
+        spin_channel,
+        settings.spin_orbit,
+        None,
+        &session.project_id,
+        &session.cif_id,
+        &session.source_scf_calculation_id,
+        completed_at,
+    );
+    let k_path = session.latest_prepare.as_ref().and_then(|prepare| {
+        let labels = prepare
+            .k_path
+            .iter()
+            .map(|point| point.label.trim())
+            .filter(|label| !label.is_empty())
+            .collect::<Vec<_>>();
+        (labels.len() >= 2).then(|| labels.join(" → "))
+    });
+    let spin_character = if settings.spin_orbit {
+        "spinor_mixed"
+    } else {
+        match spin_channel {
+            Some(engines::wien2k::Wien2kBandsSpinChannel::Up) => "up",
+            Some(engines::wien2k::Wien2kBandsSpinChannel::Down) => "down",
+            _ => "spin_degenerate",
+        }
+    };
+    let parameters = serde_json::json!({
+        "case_name": session.case_name,
+        "source_scf_id": session.source_scf_calculation_id,
+        "source_scf_calculation_id": session.source_scf_calculation_id,
+        "spin_orbit": settings.spin_orbit,
+        "spin_channel": spin_channel,
+        "spin_character": spin_character,
+        "spin_policy": if settings.spin_orbit { "combined_soc" } else if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized { "both_collinear_channels" } else { "spin_degenerate" },
+        "k_path": k_path,
+        "prepare": session.latest_prepare,
+        "run": settings,
+        "hpc_profile_id": session.hpc_profile_id,
+        "remote_case_dir": session.remote_case_dir,
+        "execution_backend": "hpc",
+        "native_artifacts_retained_remote": true,
+        "parsed_band_artifact": source_name,
+        "run_status": if command_failed { "failed" } else { "completed" },
+        "failure_reason": if command_failed { Some("WIEN2k bands command returned a non-zero status") } else { None },
+        "total_k_points": band_data.n_kpoints,
+        "n_bands": band_data.n_bands,
+    });
+    let result = engines::qe::QEResult {
+        converged: !command_failed,
+        total_energy: None,
+        fermi_energy: session.fermi_energy_ev,
+        total_magnetization: None,
+        atomic_magnetic_moments: None,
+        forces: None,
+        stress: None,
+        n_scf_steps: None,
+        wall_time_seconds: None,
+        eigenvalues: None,
+        raw_output: native_output.to_string(),
+        band_data: Some(serde_json::to_value(&band_data).map_err(|err| err.to_string())?),
+        band_dataset: Some(placeholder_dataset),
+        dos_data: None,
+        phonon_data: None,
+        wannier_data: None,
+        transport_data: None,
+        epw_data: None,
+        hubbard_lrt_data: None,
+    };
+    let mut tags = vec!["wien2k-native".to_string()];
+    if settings.spin_orbit {
+        tags.push("soc".to_string());
+    } else if let Some(channel) = spin_channel {
+        tags.push(match channel {
+            engines::wien2k::Wien2kBandsSpinChannel::Up => "spin-up".to_string(),
+            engines::wien2k::Wien2kBandsSpinChannel::Down => "spin-down".to_string(),
+            engines::wien2k::Wien2kBandsSpinChannel::None => "spin-degenerate".to_string(),
+        });
+    }
+    if command_failed {
+        tags.push("failed".to_string());
+    }
+    let saved = projects::save_engine_calculation_artifact(
+        app,
+        &session.project_id,
+        &session.cif_id,
+        projects::SaveEngineCalculationArtifactData {
+            engine_id: engines::EngineId::Wien2k,
+            calc_type: "bands".to_string(),
+            parameters,
+            result: Some(result),
+            scf_summary: None,
+            started_at: session.started_at.clone(),
+            completed_at: completed_at.to_string(),
+            tags,
+            artifacts: artifacts
+                .iter()
+                .map(|(filename, contents)| projects::EngineSetupTextArtifact {
+                    filename: filename.clone(),
+                    contents: contents.clone(),
+                })
+                .collect(),
+        },
+    )?;
+    let band_dataset = engines::wien2k::band_dataset_json(
+        &band_data,
+        spin_channel,
+        settings.spin_orbit,
+        Some(&saved.id),
+        &session.project_id,
+        &session.cif_id,
+        &session.source_scf_calculation_id,
+        completed_at,
+    );
+    Ok(engines::wien2k::Wien2kBandsSavedDataset {
+        spin_channel,
+        band_data,
+        band_dataset,
+        calculation_id: saved.id,
+    })
+}
+
 async fn wien2k_run_bands_session_impl(
     app: AppHandle,
     session_id: String,
@@ -5671,34 +6129,45 @@ async fn wien2k_run_bands_session_impl(
     if session.phase != engines::wien2k::Wien2kBandsSessionPhase::Prepared {
         return Err("Prepare the WIEN2k band-path files before running bands.".to_string());
     }
-    if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
-        && settings.spin_channel == engines::wien2k::Wien2kBandsSpinChannel::None
-    {
-        return Err(
-            "Spin-polarized WIEN2k band runs require an up or down spin channel.".to_string(),
-        );
-    }
     if session.source_spin_orbit && !settings.spin_orbit {
         return Err("A WIEN2k SOC source requires the SOC bands sequence.".to_string());
     }
-    if settings.spin_orbit
-        && session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
-        && settings.spin_channel != engines::wien2k::Wien2kBandsSpinChannel::Up
-    {
-        return Err("Spin-polarized SOC bands use the combined SOC vector and require the up channel.".to_string());
-    }
     let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     let resources = resolve_wien2k_bands_resources(&profile, resources)?;
-    let commands = wien2k_bands_command_sequence(&settings, false)
+    let commands = wien2k_bands_command_sequence(&settings, session.spin_mode, false)
         .into_iter()
-        .map(|argv| {
-            build_wien2k_bands_command(
+        .map(|step| -> Result<String, String> {
+            let mut command = build_wien2k_bands_command(
                 &session,
                 &profile,
-                &argv,
+                &step.argv,
                 Some(&resources),
                 settings.diagnostic_log,
-            )
+            )?;
+            if settings.spin_orbit
+                && session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+                && step.argv.first().is_some_and(|program| program == "lapw1")
+            {
+                let channel = if step.argv.iter().any(|arg| arg == "-dn") {
+                    engines::wien2k::Wien2kBandsSpinChannel::Down
+                } else {
+                    engines::wien2k::Wien2kBandsSpinChannel::Up
+                };
+                if let Some(archive_log) =
+                    build_wien2k_bands_step_log_archive_command(&session, "lapw1", channel)
+                {
+                    command = format!("{} && {}", command, archive_log);
+                }
+            }
+            if let Some(channel) = step.archive_channel {
+                Ok(format!(
+                    "{} && {}",
+                    command,
+                    build_wien2k_bands_archive_command(&session, channel)?
+                ))
+            } else {
+                Ok(command)
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     let timeout_secs = resources
@@ -5748,46 +6217,166 @@ async fn wien2k_run_bands_session_impl(
                 "irrep",
                 "spaghetti",
                 "spaghetti_ene",
+                "spaghetti_ene_up",
+                "spaghetti_ene_dn",
                 "bands.agr",
+                "bands_up.agr",
+                "bands_dn.agr",
+                "band.agr",
+                "band_up.agr",
+                "band_dn.agr",
+                "spaghetti_ps",
+                "spaghetti_ps_up",
+                "spaghetti_ps_dn",
                 "dayfile",
             ],
         )
         .await,
     );
-    artifacts.insert("bands_execution.log".to_string(), native_output.clone());
-    let (source_name, source_text) = find_wien2k_spaghetti_artifact(&session.case_name, &artifacts)
-        .ok_or_else(|| {
-            "WIEN2k spaghetti did not produce a parseable band output artifact.".to_string()
-        })?;
-    let fermi_energy_ev = session.fermi_energy_ev.unwrap_or(0.0);
-    let mut band_data =
-        engines::wien2k::parse_spaghetti_artifact(source_name, source_text, fermi_energy_ev)?;
-    if let Some(prepare) = &session.latest_prepare {
-        engines::wien2k::add_symmetry_markers(&mut band_data, &prepare.k_path);
-        engines::wien2k::apply_prepare_energy_window(&mut band_data, prepare, fermi_energy_ev);
-    }
-    let completed_at = now_iso();
-    let placeholder_dataset = engines::wien2k::band_dataset_json(
-        &band_data,
-        None,
-        &session.project_id,
-        &session.cif_id,
-        &session.source_scf_calculation_id,
-        &completed_at,
+    artifacts.extend(
+        collect_remote_wien2k_bands_named_artifacts(
+            &profile,
+            secret.as_deref(),
+            &session,
+            &[
+                ".qcortado-lapw1.log",
+                ".qcortado-lapwso.log",
+                ".qcortado-lapw2.log",
+                ".qcortado-irrep.log",
+                ".qcortado-spaghetti.log",
+                ".qcortado-lapw1-up.log",
+                ".qcortado-lapw1-dn.log",
+                ".qcortado-lapw2-up.log",
+                ".qcortado-lapw2-dn.log",
+                ".qcortado-irrep-up.log",
+                ".qcortado-irrep-dn.log",
+                ".qcortado-spaghetti-up.log",
+                ".qcortado-spaghetti-dn.log",
+                "lapw1.error",
+                "lapw2.error",
+                "irrep.error",
+                "spaghetti.error",
+            ],
+        )
+        .await,
     );
-    let k_path = session.latest_prepare.as_ref().and_then(|prepare| {
-        let labels = prepare
-            .k_path
-            .iter()
-            .map(|point| point.label.trim())
-            .filter(|label| !label.is_empty())
-            .collect::<Vec<_>>();
-        if labels.len() >= 2 {
-            Some(labels.join(" → "))
-        } else {
-            None
+    artifacts.insert("bands_execution.log".to_string(), native_output.clone());
+    let fermi_energy_ev = session.fermi_energy_ev.unwrap_or(0.0);
+    let result_channels = if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
+        && !settings.spin_orbit
+    {
+        vec![
+            Some(engines::wien2k::Wien2kBandsSpinChannel::Up),
+            Some(engines::wien2k::Wien2kBandsSpinChannel::Down),
+        ]
+    } else {
+        vec![None]
+    };
+    let parsed_artifacts = result_channels
+        .iter()
+        .map(|channel| {
+            parse_wien2k_spaghetti_artifacts(
+                &session.case_name,
+                &artifacts,
+                fermi_energy_ev,
+                *channel,
+            )
+            .map(|(name, data)| (*channel, name, data))
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let parsed_artifacts = match parsed_artifacts {
+        Ok(parsed) => parsed,
+        Err(parse_error) => {
+            let completed_at = now_iso();
+            artifacts.insert(
+                "bands_parse_error.log".to_string(),
+                format!("{}\n", parse_error),
+            );
+            let parameters = serde_json::json!({
+                "case_name": session.case_name,
+                "source_scf_id": session.source_scf_calculation_id,
+                "source_scf_calculation_id": session.source_scf_calculation_id,
+                "spin_orbit": settings.spin_orbit,
+                "spin_policy": if settings.spin_orbit { "combined_soc" } else if session.spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized { "both_collinear_channels" } else { "spin_degenerate" },
+                "prepare": session.latest_prepare,
+                "run": settings,
+                "hpc_profile_id": session.hpc_profile_id,
+                "remote_case_dir": session.remote_case_dir,
+                "execution_backend": "hpc",
+                "native_artifacts_retained_remote": true,
+                "run_status": "failed",
+                "failure_reason": parse_error,
+                "failed_at": completed_at,
+            });
+            let result = engines::qe::QEResult {
+                converged: false,
+                total_energy: None,
+                fermi_energy: session.fermi_energy_ev,
+                total_magnetization: None,
+                atomic_magnetic_moments: None,
+                forces: None,
+                stress: None,
+                n_scf_steps: None,
+                wall_time_seconds: None,
+                eigenvalues: None,
+                raw_output: native_output.clone(),
+                band_data: None,
+                band_dataset: None,
+                dos_data: None,
+                phonon_data: None,
+                wannier_data: None,
+                transport_data: None,
+                epw_data: None,
+                hubbard_lrt_data: None,
+            };
+            let saved = projects::save_engine_calculation_artifact(
+                &app,
+                &session.project_id,
+                &session.cif_id,
+                projects::SaveEngineCalculationArtifactData {
+                    engine_id: engines::EngineId::Wien2k,
+                    calc_type: "bands".to_string(),
+                    parameters,
+                    result: Some(result),
+                    scf_summary: None,
+                    started_at: session.started_at.clone(),
+                    completed_at,
+                    tags: if settings.spin_orbit {
+                        vec![
+                            "wien2k-native".to_string(),
+                            "soc".to_string(),
+                            "failed".to_string(),
+                        ]
+                    } else {
+                        vec!["wien2k-native".to_string(), "failed".to_string()]
+                    },
+                    artifacts: artifacts
+                        .iter()
+                        .map(|(filename, contents)| projects::EngineSetupTextArtifact {
+                            filename: filename.clone(),
+                            contents: contents.clone(),
+                        })
+                        .collect(),
+                },
+            )?;
+            let mut updated = session;
+            updated.phase = engines::wien2k::Wien2kBandsSessionPhase::Failed;
+            updated.artifacts = artifacts;
+            updated
+                .transcript
+                .push(format!("Bands run\n{}", native_output));
+            state
+                .wien2k_bands_sessions
+                .lock()
+                .unwrap()
+                .insert(session_id, updated);
+            return Err(format!(
+                "{} The failed bands attempt and its logs were saved as calculation {}.",
+                parse_error, saved.id
+            ));
         }
-    });
+    };
+    let completed_at = now_iso();
     let mut diagnostics = Vec::new();
     if command_failed {
         diagnostics.push(
@@ -5795,77 +6384,33 @@ async fn wien2k_run_bands_session_impl(
                 .to_string(),
         );
     }
-    let parameters = serde_json::json!({
-        "case_name": session.case_name,
-        "source_scf_id": session.source_scf_calculation_id,
-        "source_scf_calculation_id": session.source_scf_calculation_id,
-        "spin_orbit": session.source_spin_orbit,
-        "k_path": k_path,
-        "prepare": session.latest_prepare,
-        "run": settings,
-        "hpc_profile_id": session.hpc_profile_id,
-        "remote_case_dir": session.remote_case_dir,
-        "execution_backend": "hpc",
-        "native_artifacts_retained_remote": true,
-        "parsed_band_artifact": source_name,
-        "total_k_points": band_data.n_kpoints,
-        "n_bands": band_data.n_bands,
-    });
-    let result = engines::qe::QEResult {
-        converged: !command_failed,
-        total_energy: None,
-        fermi_energy: session.fermi_energy_ev,
-        total_magnetization: None,
-        atomic_magnetic_moments: None,
-        forces: None,
-        stress: None,
-        n_scf_steps: None,
-        wall_time_seconds: None,
-        eigenvalues: None,
-        raw_output: native_output.clone(),
-        band_data: Some(serde_json::to_value(&band_data).map_err(|err| err.to_string())?),
-        band_dataset: Some(placeholder_dataset.clone()),
-        dos_data: None,
-        phonon_data: None,
-        wannier_data: None,
-        transport_data: None,
-        epw_data: None,
-        hubbard_lrt_data: None,
-    };
-    let saved = projects::save_engine_calculation_artifact(
-        &app,
-        &session.project_id,
-        &session.cif_id,
-        projects::SaveEngineCalculationArtifactData {
-            engine_id: engines::EngineId::Wien2k,
-            calc_type: "bands".to_string(),
-            parameters,
-            result: Some(result),
-            scf_summary: None,
-            started_at: session.started_at.clone(),
-            completed_at: completed_at.clone(),
-            tags: if session.source_spin_orbit {
-                vec!["wien2k-native".to_string(), "soc".to_string()]
-            } else {
-                vec!["wien2k-native".to_string()]
-            },
-            artifacts: artifacts
-                .iter()
-                .map(|(filename, contents)| projects::EngineSetupTextArtifact {
-                    filename: filename.clone(),
-                    contents: contents.clone(),
-                })
-                .collect(),
-        },
-    )?;
-    let band_dataset = engines::wien2k::band_dataset_json(
-        &band_data,
-        Some(&saved.id),
-        &session.project_id,
-        &session.cif_id,
-        &session.source_scf_calculation_id,
-        &completed_at,
-    );
+    let mut saved_datasets = Vec::new();
+    for (spin_channel, source_name, mut band_data) in parsed_artifacts {
+        if let Some(prepare) = &session.latest_prepare {
+            engines::wien2k::add_symmetry_markers(&mut band_data, &prepare.k_path);
+            engines::wien2k::apply_prepare_energy_window(
+                &mut band_data,
+                prepare,
+                fermi_energy_ev,
+            );
+        }
+        saved_datasets.push(save_wien2k_bands_dataset(
+            &app,
+            &session,
+            &settings,
+            &artifacts,
+            &native_output,
+            command_failed,
+            &source_name,
+            band_data,
+            spin_channel,
+            &completed_at,
+        )?);
+    }
+    let primary = saved_datasets
+        .first()
+        .cloned()
+        .ok_or_else(|| "WIEN2k bands produced no saved datasets.".to_string())?;
     let phase = if command_failed {
         engines::wien2k::Wien2kBandsSessionPhase::Failed
     } else {
@@ -5887,9 +6432,10 @@ async fn wien2k_run_bands_session_impl(
         phase,
         native_output,
         diagnostics,
-        band_data,
-        band_dataset,
-        calculation_id: saved.id,
+        band_data: primary.band_data,
+        band_dataset: primary.band_dataset,
+        calculation_id: primary.calculation_id,
+        saved_datasets,
     })
 }
 
@@ -5904,7 +6450,11 @@ async fn wien2k_discard_bands_session(
         .unwrap()
         .remove(&session_id);
     if let Some(session) = session {
-        if session.phase != engines::wien2k::Wien2kBandsSessionPhase::BandsComplete {
+        if matches!(
+            session.phase,
+            engines::wien2k::Wien2kBandsSessionPhase::Staged
+                | engines::wien2k::Wien2kBandsSessionPhase::Prepared
+        ) {
             if let Ok((_, profile, secret)) = resolve_wien2k_structure_runtime(&state).await {
                 let remote_session_dir = session
                     .remote_case_dir
@@ -13595,8 +14145,9 @@ async fn start_wien2k_bands_calculation(
                     pm.append_output(&tid, line.to_string()).await;
                 }
                 let saved_line = format!(
-                    "[saved bands calculation {}: {} bands, {} k-points]",
+                    "[saved bands calculation {}: {} dataset(s), {} bands, {} k-points]",
                     wien2k_result.calculation_id,
+                    wien2k_result.saved_datasets.len(),
                     wien2k_result.band_data.n_bands,
                     wien2k_result.band_data.n_kpoints
                 );

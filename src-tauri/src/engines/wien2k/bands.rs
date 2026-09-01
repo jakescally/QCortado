@@ -137,6 +137,18 @@ pub struct Wien2kBandsExecutionResult {
     pub band_data: BandData,
     pub band_dataset: serde_json::Value,
     pub calculation_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_datasets: Vec<Wien2kBandsSavedDataset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Wien2kBandsSavedDataset {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spin_channel: Option<Wien2kBandsSpinChannel>,
+    pub band_data: BandData,
+    pub band_dataset: serde_json::Value,
+    pub calculation_id: String,
 }
 
 pub fn validate_prepare_settings(settings: &Wien2kBandsPrepareSettings) -> Result<(), String> {
@@ -348,7 +360,7 @@ pub fn parse_spaghetti_artifact(
     content: &str,
     fermi_energy_ev: f64,
 ) -> Result<BandData, String> {
-    if filename.ends_with(".spaghetti_ene") {
+    if filename.contains(".spaghetti_ene") {
         parse_spaghetti_ene(content, fermi_energy_ev)
     } else {
         parse_spaghetti_xy(content, fermi_energy_ev)
@@ -438,6 +450,8 @@ pub fn add_symmetry_markers(data: &mut BandData, path: &[Wien2kKPathPoint]) {
 
 pub fn band_dataset_json(
     band_data: &BandData,
+    spin_channel: Option<Wien2kBandsSpinChannel>,
+    spin_orbit: bool,
     calculation_id: Option<&str>,
     project_id: &str,
     cif_id: &str,
@@ -451,7 +465,11 @@ pub fn band_dataset_json(
         .map(|(index, values)| {
             serde_json::json!({
                 "id": format!("band-{}", index + 1),
-                "label": format!("Band {}", index + 1),
+                "label": match spin_channel {
+                    Some(Wien2kBandsSpinChannel::Up) => format!("Up band {}", index + 1),
+                    Some(Wien2kBandsSpinChannel::Down) => format!("Down band {}", index + 1),
+                    _ => format!("Band {}", index + 1),
+                },
                 "values": values,
                 "unit": "eV",
                 "metadata": { "nativeBandIndex": index }
@@ -494,7 +512,9 @@ pub fn band_dataset_json(
             "nBands": band_data.n_bands,
             "nKpoints": band_data.n_kpoints,
             "energyRangeEv": band_data.energy_range,
-            "sourceFormat": "wien2k-spaghetti"
+            "sourceFormat": "wien2k-spaghetti",
+            "spinChannel": spin_channel,
+            "spinCharacter": if spin_orbit { "spinor_mixed" } else if spin_channel.is_some() { "collinear" } else { "spin_degenerate" }
         }
     })
 }
@@ -681,6 +701,18 @@ mod tests {
         assert_eq!(parsed.energies[0], vec![2.75, 3.5]);
         assert_eq!(parsed.energies[1], vec![4.1, 4.75]);
         assert_eq!(parsed.fermi_energy, 4.0);
+    }
+
+    #[test]
+    fn spaghetti_artifact_parser_recognizes_spin_suffixed_energy_output() {
+        let content = " bandindex: 1\n0.0 0.0 0.0 0.0 -1.0\n1.0 0.0 0.0 1.0 0.5\n";
+
+        let parsed = parse_spaghetti_artifact("Er1P1.spaghetti_ene_up", content, 4.0)
+            .expect("spin-suffixed spaghetti output");
+
+        assert_eq!(parsed.n_bands, 1);
+        assert_eq!(parsed.n_kpoints, 2);
+        assert_eq!(parsed.energies[0], vec![3.0, 4.5]);
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
   type Wien2kBandsPrepareResult,
   type Wien2kBandsExecutionResult,
   type Wien2kBandsRunSettings,
+  type Wien2kBandsSavedDataset,
   type Wien2kBandsSession,
   type Wien2kBandsSpinChannel,
 } from "../../lib/engines/wien2k";
@@ -443,19 +444,36 @@ export function Wien2kBandsWizard({
   }
 
   function bandsCommandLines(): string[] {
-    const spinArg = spinChannel === "none" ? "" : ` -${spinChannel === "up" ? "up" : "dn"}`;
-    const spinOrbitArg = spinOrbit ? " -so" : "";
+    const spinPolarized = selectedSpinMode === "spin_polarized";
+    const nativeSequence = spinOrbit
+      ? [
+          `x lapw1 -band${spinPolarized ? " -up" : ""}`,
+          ...(spinPolarized ? ["x lapw1 -band -dn"] : []),
+          `x lapwso${spinPolarized ? " -up" : ""}`,
+          ...(runLapw2Qtl ? [`x lapw2 -qtl -band${spinPolarized ? " -up" : ""} -so`] : []),
+          ...(runIrrep ? [`x irrep -band${spinPolarized ? " -up" : ""}`] : []),
+          `x spaghetti${spinPolarized ? " -up" : ""} -so`,
+        ]
+      : spinPolarized
+        ? ["up", "dn"].flatMap((channel) => [
+            `x lapw1 -band -${channel}`,
+            ...(runLapw2Qtl ? [`x lapw2 -qtl -band -${channel}`] : []),
+            ...(runIrrep ? [`x irrep -band -${channel}`] : []),
+            `x spaghetti -${channel}`,
+          ])
+        : [
+            "x lapw1 -band",
+            ...(runLapw2Qtl ? ["x lapw2 -qtl -band"] : []),
+            ...(runIrrep ? ["x irrep -band"] : []),
+            "x spaghetti",
+          ];
     return [
       "cd \"$SLURM_SUBMIT_DIR\"",
       ...moduleSetupLines(activeHpcProfile),
       buildWien2kBandsOpenMpPreview(hpcResources),
       "rm -f lapw1.error lapw2.error irrep.error spaghetti.error *.error",
       ...(diagnosticLog ? ["# QCortado diagnostic tails enabled"] : []),
-      `x lapw1 -band${spinArg}`,
-      ...(spinOrbit ? [`x lapwso${spinChannel === "none" ? "" : " -up"}`] : []),
-      ...(runLapw2Qtl ? [`x lapw2 -qtl -band${spinArg}${spinOrbitArg}`] : []),
-      ...(runIrrep ? [`x irrep -band${spinArg}`] : []),
-      `x spaghetti${spinArg}${spinOrbitArg}`,
+      ...nativeSequence,
     ];
   }
 
@@ -540,7 +558,7 @@ export function Wien2kBandsWizard({
     setRemoteNode(null);
     try {
       const runSettings: Wien2kBandsRunSettings = {
-        spinChannel,
+        spinChannel: selectedSpinMode === "spin_polarized" ? "up" : "none",
         runLapw2Qtl,
         runIrrep,
         spinOrbit,
@@ -568,7 +586,10 @@ export function Wien2kBandsWizard({
     void runBands();
   }
 
-  async function leaveWizard(destination: "back" | "view" = "back") {
+  async function leaveWizard(
+    destination: "back" | "view" = "back",
+    viewDataset?: Wien2kBandsSavedDataset,
+  ) {
     setError(null);
     try {
       if (session && !displayedResult && !runIsActive && !prepareIsActive) {
@@ -577,11 +598,12 @@ export function Wien2kBandsWizard({
       outputUnlistenRef.current?.();
       outputUnlistenRef.current = null;
       if (destination === "view" && displayedResult) {
+        const selectedDataset = viewDataset ?? displayedResult;
         onViewBands(
-          displayedResult.bandData,
+          selectedDataset.bandData,
           fermiEnergy,
           { engine_id: "wien2k", source_scf_id: selectedScf?.id ?? null },
-          { projectId, cifId, calcId: displayedResult.calculationId },
+          { projectId, cifId, calcId: selectedDataset.calculationId },
         );
       } else {
         onBack();
@@ -761,7 +783,7 @@ export function Wien2kBandsWizard({
     const totalKPoints = kPath.reduce((sum, point) => sum + point.npoints, 0) + (kPath.length > 0 ? 1 : 0);
     const prepared = session?.phase === "prepared" || session?.phase === "bands_complete";
     const canPrepare = kPath.length >= 2 && energyMinEv < energyMaxEv && characterScale >= 0 && !prepareIsActive;
-    const canRun = prepared && Boolean(session) && !runIsActive && (selectedSpinMode !== "spin_polarized" || spinChannel !== "none");
+    const canRun = prepared && Boolean(session) && !runIsActive;
     return (
       <div className="wizard-container wien2k-structure-wizard wien2k-scf-wizard">
         {renderHeader()}
@@ -792,21 +814,20 @@ export function Wien2kBandsWizard({
                     </Wien2kFieldLabel>
                     <input type="number" step="0.5" value={energyMaxEv} onChange={(event) => setEnergyMaxEv(numberField(event.target.value, energyMaxEv))} />
                   </label>
-                  <label>
-                    <Wien2kFieldLabel tooltip="Spin channel passed to `x lapw1`, `x lapw2`, `x irrep`, and `x spaghetti`. Spin-polarized SCFs usually need separate up/down band runs.">
-                      Spin channel
+                  <div>
+                    <Wien2kFieldLabel tooltip="QCortado automatically runs both independent collinear channels. With SOC it generates both scalar-relativistic inputs, then runs one combined spinor calculation.">
+                      Spin policy
                     </Wien2kFieldLabel>
-                    <select value={spinChannel} onChange={(event) => setSpinChannel(event.target.value as Wien2kBandsSpinChannel)}>
-                      <option value="none" disabled={selectedSpinMode === "spin_polarized"}>None</option>
-                      <option value="up">Up</option>
-                      <option value="down">Down</option>
-                    </select>
-                  </label>
+                    <p className="wien2k-field-summary">
+                      {selectedSpinMode !== "spin_polarized"
+                        ? (spinOrbit ? "One combined SOC dataset" : "One spin-degenerate dataset")
+                        : spinOrbit
+                          ? "Up + down LAPW1 inputs → one combined SOC dataset"
+                          : "Separate up- and down-spin datasets"}
+                    </p>
+                  </div>
                 </div>
                 {energyMinEv >= energyMaxEv && <p className="wien2k-validation">Energy min must be below energy max.</p>}
-                {selectedSpinMode === "spin_polarized" && spinChannel === "none" && (
-                  <p className="wien2k-validation">Spin-polarized WIEN2k sources must run an up or down band channel.</p>
-                )}
               </>
             ), { status: prepared ? "Prepared" : undefined })}
             {renderSection("projections", "Projections", (
@@ -1039,7 +1060,18 @@ export function Wien2kBandsWizard({
             {displayedResult && (
               <div className="wien2k-summary wien2k-scf-results">
                 <h3>Band Result: Complete</h3>
-                <p>Parsed {displayedResult.bandData.n_bands} bands across {displayedResult.bandData.n_kpoints} k-points.</p>
+                <p>
+                  Saved {displayedResult.savedDatasets?.length || 1} band dataset{(displayedResult.savedDatasets?.length || 1) === 1 ? "" : "s"}.
+                </p>
+                {(displayedResult.savedDatasets?.length ? displayedResult.savedDatasets : [{
+                  spinChannel: null,
+                  bandData: displayedResult.bandData,
+                  calculationId: displayedResult.calculationId,
+                }]).map((dataset) => (
+                  <p key={dataset.calculationId}>
+                    {dataset.spinChannel === "up" ? "Up spin" : dataset.spinChannel === "down" ? "Down spin" : spinOrbit ? "Combined SOC" : "Spin-degenerate"}: {dataset.bandData.n_bands} bands across {dataset.bandData.n_kpoints} k-points.
+                  </p>
+                ))}
                 {displayedResult.diagnostics.map((diagnostic) => (
                   <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>
                 ))}
@@ -1057,9 +1089,21 @@ export function Wien2kBandsWizard({
                   <button type="button" className="secondary-button" disabled={runIsActive} onClick={() => void leaveWizard("back")}>
                     Return to Project
                   </button>
-                  <button type="button" className="primary-button" disabled={runIsActive} onClick={() => void leaveWizard("view")}>
-                    View Bands
-                  </button>
+                  {(displayedResult.savedDatasets?.length || 0) > 1 ? displayedResult.savedDatasets.map((dataset) => (
+                    <button
+                      key={dataset.calculationId}
+                      type="button"
+                      className="primary-button"
+                      disabled={runIsActive}
+                      onClick={() => void leaveWizard("view", dataset)}
+                    >
+                      View {dataset.spinChannel === "down" ? "Down" : "Up"}-Spin Bands
+                    </button>
+                  )) : (
+                    <button type="button" className="primary-button" disabled={runIsActive} onClick={() => void leaveWizard("view")}>
+                      View Bands
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -1075,7 +1119,7 @@ export function Wien2kBandsWizard({
         <h3>WIEN2k Bands Complete</h3>
         {displayedResult ? (
           <div className="results-summary">
-            <p>Parsed {displayedResult.bandData.n_bands} bands across {displayedResult.bandData.n_kpoints} k-points.</p>
+            <p>Saved {displayedResult.savedDatasets?.length || 1} band dataset{(displayedResult.savedDatasets?.length || 1) === 1 ? "" : "s"}.</p>
             {displayedResult.diagnostics.map((diagnostic) => <p key={diagnostic} className="wien2k-validation">{diagnostic}</p>)}
           </div>
         ) : (

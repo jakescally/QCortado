@@ -67,6 +67,14 @@ export interface Wien2kBandsExecutionResult {
   bandData: BandData;
   bandDataset: unknown;
   calculationId: string;
+  savedDatasets: Wien2kBandsSavedDataset[];
+}
+
+export interface Wien2kBandsSavedDataset {
+  spinChannel?: Wien2kBandsSpinChannel | null;
+  bandData: BandData;
+  bandDataset: unknown;
+  calculationId: string;
 }
 
 export function startWien2kBandsSession(

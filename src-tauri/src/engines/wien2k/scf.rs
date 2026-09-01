@@ -402,15 +402,20 @@ pub fn parse_scf_summary(
         .copied()
         .map(|value| value * RY_TO_EV);
     let total_magnetization = tagged_values(scf_output, ":MMTOT").last().copied();
-    let combined_upper = format!("{}\n{}", scf_output, dayfile).to_ascii_uppercase();
-    let native_converged = combined_upper.contains("CONVERGED")
+    let combined = format!("{}\n{}", scf_output, dayfile);
+    let combined_upper = combined.to_ascii_uppercase();
+    let native_flag_convergence =
+        native_convergence_flags(&combined).map(|flags| flags.into_iter().all(|flag| flag));
+    let native_text_converged = combined_upper.contains("CONVERGED")
         || combined_upper.contains("CONVERGENCE CRITERIA SATISFIED");
     let threshold_converged = charge_residual
         .is_some_and(|value| value <= settings.charge_convergence)
         && energy_delta.is_some_and(|value| value <= settings.energy_convergence_ry);
+    let scf_converged =
+        native_flag_convergence.unwrap_or(native_text_converged || threshold_converged);
     let convergence = if command_failed || combined_upper.contains("ERROR") {
         ScfConvergenceState::Failed
-    } else if native_converged || threshold_converged {
+    } else if scf_converged {
         ScfConvergenceState::Converged
     } else {
         ScfConvergenceState::NotConverged
@@ -479,6 +484,26 @@ fn tagged_values(content: &str, tag: &str) -> Vec<f64> {
         .filter(|line| line.contains(tag))
         .filter_map(last_numeric_value)
         .collect()
+}
+
+fn native_convergence_flags(content: &str) -> Option<[bool; 4]> {
+    let matcher = Regex::new(
+        r"(?i)^\s*ec\s+cc\s+fc\s+and\s+str_conv\s+([01])\s+([01])\s+([01])\s+([01])\s*$",
+    )
+    .ok()?;
+
+    content
+        .lines()
+        .filter_map(|line| matcher.captures(line))
+        .last()
+        .map(|captures| {
+            [
+                &captures[1] == "1",
+                &captures[2] == "1",
+                &captures[3] == "1",
+                &captures[4] == "1",
+            ]
+        })
 }
 
 fn last_numeric_value(line: &str) -> Option<f64> {
@@ -646,6 +671,58 @@ init_lapw finished ok\n";
         assert_eq!(summary.scf_steps, Some(2));
         assert_eq!(summary.total_energy.expect("energy").value, -10.00055);
         assert!(summary.fermi_energy_ev.expect("fermi") > 3.4);
+    }
+
+    #[test]
+    fn parser_accepts_wien2k_native_four_flag_convergence() {
+        let output = "\
+:ENE  : TOTAL ENERGY IN Ry = -26883.73362465\n\
+:DIS  : CHARGE DISTANCE = 0.0003699\n\
+:ENE  : TOTAL ENERGY IN Ry = -26883.73362703\n\
+:DIS  : CHARGE DISTANCE = 0.0003310\n";
+        let dayfile = "\
+ec cc fc and str_conv 1 0 1 1\n\
+:ENERGY convergence:  1 0.0001 .0000024950000000\n\
+:CHARGE convergence:  1 0.0001 -.0000082\n\
+:STRESS convergence:  0 0.0 0 YY\n\
+ec cc fc and str_conv 1 1 1 1\n\
+\n\
+>   stop\n";
+        let summary = parse_scf_summary(
+            "project",
+            "cif",
+            "struct",
+            &Wien2kScfRunSettings::default(),
+            output,
+            dayfile,
+            false,
+        );
+
+        assert_eq!(summary.convergence, ScfConvergenceState::Converged);
+        assert!(summary.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parser_uses_latest_wien2k_native_convergence_flags() {
+        let output = "\
+:ENE  : TOTAL ENERGY IN Ry = -10.000000\n\
+:DIS  : CHARGE DISTANCE = 0.000001\n\
+:ENE  : TOTAL ENERGY IN Ry = -10.000001\n\
+:DIS  : CHARGE DISTANCE = 0.000001\n";
+        let dayfile = "\
+ec cc fc and str_conv 1 1 1 1\n\
+ec cc fc and str_conv 1 0 1 1\n";
+        let summary = parse_scf_summary(
+            "project",
+            "cif",
+            "struct",
+            &Wien2kScfRunSettings::default(),
+            output,
+            dayfile,
+            false,
+        );
+
+        assert_eq!(summary.convergence, ScfConvergenceState::NotConverged);
     }
 
     #[test]
