@@ -25,7 +25,7 @@ import {
 } from "../lib/projectDashboardSettings";
 import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
-import { parseLatestHubbardOccupations } from "../lib/hubbardOccupations";
+import { parseLatestHubbardOccupations, parseWien2kHubbardOccupations } from "../lib/hubbardOccupations";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
 import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
 import {
@@ -2377,8 +2377,12 @@ export function ProjectDashboard({
 
     try {
       const detailed = await ensureCalculationDetails(calc);
-      const rawOutput = detailed.result?.raw_output || "";
-      const occupations = parseLatestHubbardOccupations(rawOutput);
+      const occupations = calc.engine_id === "wien2k"
+        ? parseWien2kHubbardOccupations(await invoke<CalculationLogFile[]>("get_project_calculation_logs", {
+          projectId,
+          calcId: calc.id,
+        }))
+        : parseLatestHubbardOccupations(detailed.result?.raw_output || "");
       if (!occupations) {
         setOccupationViewer({
           calcId: calc.id,
@@ -2386,7 +2390,9 @@ export function ProjectDashboard({
           atoms: [],
           activeAtomIndex: null,
           loading: false,
-          error: "No Hubbard occupations block was found in this SCF output.",
+          error: calc.engine_id === "wien2k"
+            ? "No WIEN2k DFT+U density-matrix files were found for this SCF calculation."
+            : "No Hubbard occupations block was found in this SCF output.",
         });
         return;
       }

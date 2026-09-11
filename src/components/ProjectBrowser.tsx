@@ -26,6 +26,7 @@ interface ProjectFolder {
   id: string;
   name: string;
   created_at: string;
+  parent_id: string | null;
 }
 
 type ProjectCalculationType =
@@ -276,6 +277,13 @@ export function ProjectBrowser({
     return folderById.get(activeFolderId) ?? null;
   }, [activeFolderId, folderById]);
 
+  const visibleFolders = useMemo(
+    () => folders.filter((folder) => (folder.parent_id ?? null) === activeFolderId),
+    [folders, activeFolderId],
+  );
+
+  const parentFolderId = activeFolder?.parent_id ?? null;
+
   const projectsWithCalculationTypes = useMemo<ProjectWithCalculationTypes[]>(
     () => projects.map((project) => ({
       project,
@@ -316,7 +324,7 @@ export function ProjectBrowser({
       }
     }
 
-    return folders.map((folder) => {
+    return visibleFolders.map((folder) => {
       const folderProjects = [...(projectsByFolderId.get(folder.id) ?? [])].sort((a, b) => (
         b.project.last_activity.localeCompare(a.project.last_activity)
         || a.project.name.localeCompare(b.project.name, undefined, { sensitivity: "base" })
@@ -333,7 +341,7 @@ export function ProjectBrowser({
         calculationTypeCounts,
       };
     });
-  }, [projectsWithCalculationTypes, folders]);
+  }, [projectsWithCalculationTypes, visibleFolders]);
 
   const filteredProjects = useMemo<ProjectWithCalculationTypes[]>(() => {
     if (activeProjectFilters.length === 0) {
@@ -830,10 +838,15 @@ export function ProjectBrowser({
     try {
       const folder = await invoke<ProjectFolder>("create_project_folder", {
         name: newFolderName.trim(),
+        parentId: activeFolderId,
       });
       await loadProjectsAndFolders(false);
       setShowCreateFolderDialog(false);
-      setStatusMessage(`Created folder "${folder.name}".`);
+      setStatusMessage(
+        activeFolder
+          ? `Created folder "${folder.name}" inside "${activeFolder.name}".`
+          : `Created folder "${folder.name}".`,
+      );
     } catch (e) {
       console.error("Failed to create folder:", e);
       setError(String(e));
@@ -883,15 +896,18 @@ export function ProjectBrowser({
       setDeletingFolder(null);
       setDeleteFolderConfirmText("");
       if (activeFolderId === folderId) {
-        setActiveFolderId(null);
+        setActiveFolderId(deletingFolder.parent_id ?? null);
       }
       await loadProjectsAndFolders(false);
       onProjectsChanged?.();
       if (result.moved_projects_to_root > 0) {
+        const destination = deletingFolder.parent_id
+          ? `"${folderById.get(deletingFolder.parent_id)?.name ?? "parent folder"}"`
+          : "root";
         setStatusMessage(
           `Deleted folder "${folderName}". Moved ${result.moved_projects_to_root} project${
             result.moved_projects_to_root !== 1 ? "s" : ""
-          } to root.`,
+          } to ${destination}.`,
         );
       } else {
         setStatusMessage(`Deleted folder "${folderName}".`);
@@ -1010,6 +1026,9 @@ export function ProjectBrowser({
     : 0;
   const deleteFolderProjectCount = deletingFolder
     ? projects.filter((project) => project.folder_id === deletingFolder.id).length
+    : 0;
+  const deleteFolderChildCount = deletingFolder
+    ? folders.filter((folder) => folder.parent_id === deletingFolder.id).length
     : 0;
 
   function renderProjectOptionsMenu(project: ProjectSummary) {
@@ -1192,10 +1211,29 @@ export function ProjectBrowser({
           </div>
         ) : (
           <>
-            {!activeFolder && foldersWithProjects.length > 0 && (
+            {activeFolder && (
+              <div className="folder-browse-bar">
+                <button
+                  className="secondary-project-btn folder-back-btn"
+                  type="button"
+                  onClick={() => setActiveFolderId(parentFolderId)}
+                >
+                  ← {parentFolderId ? (folderById.get(parentFolderId)?.name ?? "Parent Folder") : "All Projects"}
+                </button>
+                <div className="folder-browse-meta">
+                  <h3>{activeFolder.name}</h3>
+                  <span>
+                    {projectsForActiveFolder.length} project
+                    {projectsForActiveFolder.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {foldersWithProjects.length > 0 && (
               <div className="folder-section">
                 <div className="folder-section-header">
-                  <h3>Folders</h3>
+                  <h3>{activeFolder ? "Subfolders" : "Folders"}</h3>
                   <span>
                     {foldersWithProjects.length} folder{foldersWithProjects.length !== 1 ? "s" : ""}
                   </span>
@@ -1282,25 +1320,6 @@ export function ProjectBrowser({
               </div>
             )}
 
-            {activeFolder && (
-              <div className="folder-browse-bar">
-                <button
-                  className="secondary-project-btn folder-back-btn"
-                  type="button"
-                  onClick={() => setActiveFolderId(null)}
-                >
-                  ← All Projects
-                </button>
-                <div className="folder-browse-meta">
-                  <h3>{activeFolder.name}</h3>
-                  <span>
-                    {projectsForActiveFolder.length} project
-                    {projectsForActiveFolder.length !== 1 ? "s" : ""}
-                  </span>
-                </div>
-              </div>
-            )}
-
             <div className="project-filter-bar">
               <div className="project-filter-tabs">
                 {PROJECT_FILTER_ORDER.map((filterType) => {
@@ -1360,11 +1379,11 @@ export function ProjectBrowser({
                 {projectsForActiveFolder.length === 0 && activeFolder ? (
                   <>
                     <h3>No Projects In This Folder</h3>
-                    <p>Move a project into {activeFolder.name} using a project menu.</p>
+                    <p>Create a project or subfolder here, or move a project into {activeFolder.name} using a project menu.</p>
                     <button
                       className="secondary-project-btn"
                       type="button"
-                      onClick={() => setActiveFolderId(null)}
+                      onClick={() => setActiveFolderId(parentFolderId)}
                     >
                       View All Projects
                     </button>
@@ -1608,7 +1627,7 @@ export function ProjectBrowser({
             <div className="dialog-overlay" onClick={closeCreateFolderModal}>
               <div className="dialog-content dialog-small" onClick={(e) => e.stopPropagation()}>
                 <div className="dialog-header">
-                  <h2>New Folder</h2>
+                  <h2>{activeFolder ? `New Folder in ${activeFolder.name}` : "New Folder"}</h2>
                   <button className="dialog-close" onClick={closeCreateFolderModal} disabled={isSavingFolder}>
                     &times;
                   </button>
@@ -1663,8 +1682,14 @@ export function ProjectBrowser({
                     <ul>
                       <li>
                         {deleteFolderProjectCount} project{deleteFolderProjectCount !== 1 ? "s" : ""} will be moved to
-                        root
+                        {deletingFolder.parent_id ? " the parent folder" : " root"}
                       </li>
+                      {deleteFolderChildCount > 0 && (
+                        <li>
+                          {deleteFolderChildCount} subfolder{deleteFolderChildCount !== 1 ? "s" : ""} will be moved to
+                          {deletingFolder.parent_id ? " the parent folder" : " root"}
+                        </li>
+                      )}
                       <li>Folder organization metadata will be removed</li>
                     </ul>
                     <p className="delete-warning-emphasis">

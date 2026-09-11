@@ -182,6 +182,20 @@ function getWien2kScfParameters(calc: TaggableCalculation): Record<string, any> 
   };
 }
 
+function hasDftU(calc: TaggableCalculation): boolean {
+  const params = calc.parameters || {};
+  if (Boolean(params.lda_plus_u)) return true;
+  if (calc.engine_id !== "wien2k") return false;
+
+  const wien2kParams = getWien2kScfParameters(calc);
+  return Boolean(
+    wien2kParams.dftU?.enabled
+    ?? wien2kParams.dft_u?.enabled
+    ?? params.dftU?.enabled
+    ?? params.dft_u?.enabled,
+  );
+}
+
 function isWien2kSocCalculation(calc: TaggableCalculation): boolean {
   return calc.engine_id === "wien2k"
     && calc.calc_type === "scf"
@@ -228,7 +242,7 @@ export function buildCalculationTagList(
     if (params.lspinorb || isWien2kSocCalculation(calc)) pushRawTag(tags, "SOC");
     if (params.nspin === 4) pushRawTag(tags, "Non-collinear");
     if (params.nspin === 2) pushRawTag(tags, "Magnetic");
-    if (params.lda_plus_u) pushRawTag(tags, "DFT+U");
+    if (hasDftU(calc)) pushRawTag(tags, "DFT+U");
     if (params.vdw_corr && params.vdw_corr !== "none") pushRawTag(tags, "vdW");
 
     const wien2kParams = getWien2kScfParameters(calc);

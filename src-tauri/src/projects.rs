@@ -111,6 +111,9 @@ pub struct ProjectFolder {
     pub id: String,
     pub name: String,
     pub created_at: String,
+    /// Optional parent folder. Missing in legacy metadata, which means root.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// Result returned after deleting a project folder.
@@ -2098,6 +2101,8 @@ fn is_calculation_log_file(path: &Path) -> bool {
         || file_name.ends_with(".outputst")
         || file_name.ends_with(".outputkgen")
         || file_name.ends_with(".outputd")
+        || file_name.ends_with(".dmatup")
+        || file_name.ends_with(".dmatdn")
         || file_name.ends_with(".scf")
         || file_name.ends_with(".dayfile")
 }
@@ -4189,14 +4194,28 @@ pub fn list_project_folders(app: AppHandle) -> Result<Vec<ProjectFolder>, String
 
 /// Creates a new project folder.
 #[tauri::command]
-pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFolder, String> {
+pub fn create_project_folder(
+    app: AppHandle,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<ProjectFolder, String> {
     ensure_research_mode()?;
     let normalized_name = normalize_folder_name(&name)?;
     let mut folders = load_project_folders(&app)?;
+    let normalized_parent_id = parent_id
+        .map(|value| value.trim().to_string())
+        .and_then(|value| if value.is_empty() { None } else { Some(value) });
 
-    let name_taken = folders
-        .iter()
-        .any(|folder| folder.name.eq_ignore_ascii_case(&normalized_name));
+    if let Some(parent_id) = normalized_parent_id.as_ref() {
+        if !folders.iter().any(|folder| folder.id == *parent_id) {
+            return Err(format!("Parent folder not found: {}", parent_id));
+        }
+    }
+
+    let name_taken = folders.iter().any(|folder| {
+        folder.parent_id == normalized_parent_id
+            && folder.name.eq_ignore_ascii_case(&normalized_name)
+    });
     if name_taken {
         return Err(format!(
             "A folder named \"{}\" already exists",
@@ -4208,6 +4227,7 @@ pub fn create_project_folder(app: AppHandle, name: String) -> Result<ProjectFold
         id: generate_id(),
         name: normalized_name,
         created_at: now_iso(),
+        parent_id: normalized_parent_id,
     };
     folders.push(folder.clone());
     save_project_folders(&app, &folders)?;
@@ -4228,7 +4248,15 @@ pub fn rename_project_folder(
 
     let duplicate_name = folders
         .iter()
-        .any(|folder| folder.id != folder_id && folder.name.eq_ignore_ascii_case(&normalized_name));
+        .find(|folder| folder.id == folder_id)
+        .map(|target| {
+            folders.iter().any(|folder| {
+                folder.id != folder_id
+                    && folder.parent_id == target.parent_id
+                    && folder.name.eq_ignore_ascii_case(&normalized_name)
+            })
+        })
+        .unwrap_or(false);
     if duplicate_name {
         return Err(format!(
             "A folder named \"{}\" already exists",
@@ -4248,7 +4276,7 @@ pub fn rename_project_folder(
     Ok(updated_folder)
 }
 
-/// Deletes an existing project folder and moves its projects to root.
+/// Deletes an existing project folder and promotes its contents to its parent.
 #[tauri::command]
 pub fn delete_project_folder(
     app: AppHandle,
@@ -4265,7 +4293,13 @@ pub fn delete_project_folder(
         .iter()
         .position(|folder| folder.id == normalized_folder_id)
         .ok_or_else(|| format!("Folder not found: {}", normalized_folder_id))?;
+    let deleted_parent_id = folders[folder_index].parent_id.clone();
     folders.remove(folder_index);
+    for folder in &mut folders {
+        if folder.parent_id.as_deref() == Some(normalized_folder_id) {
+            folder.parent_id = deleted_parent_id.clone();
+        }
+    }
 
     let projects_dir = ensure_projects_dir(&app)?;
     let entries = fs::read_dir(&projects_dir)
@@ -4290,7 +4324,7 @@ pub fn delete_project_folder(
             continue;
         }
 
-        project.folder_id = None;
+        project.folder_id = deleted_parent_id.clone();
         write_project_json_summary(&project_json_path, &project)?;
         moved_projects_to_root += 1;
     }
@@ -7311,12 +7345,12 @@ pub fn get_saved_phonon_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        calculation_can_lighten, hydrate_missing_hubbard_lrt_data,
-        is_calculation_input_file, is_calculation_log_file, is_wavefunction_archive_file,
-        looks_like_completed_phonon_run, parse_q_grid_from_ph_input,
-        path_contains_wavefunction_archives, remove_wavefunction_archives,
-        repair_phonon_calculation_with_workdir, repair_wien2k_band_parameters,
-        summarize_qe_result_for_project, CalculationRun, CifVariant, Project,
+        calculation_can_lighten, hydrate_missing_hubbard_lrt_data, is_calculation_input_file,
+        is_calculation_log_file, is_wavefunction_archive_file, looks_like_completed_phonon_run,
+        parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
+        remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
+        repair_wien2k_band_parameters, summarize_qe_result_for_project, CalculationRun, CifVariant,
+        Project, ProjectFolder,
     };
     use crate::engines::qe::QEResult;
     use crate::engines::EngineId;
@@ -7375,6 +7409,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_project_folder_without_parent_defaults_to_root() {
+        let folder: ProjectFolder = serde_json::from_value(serde_json::json!({
+            "id": "legacy-folder",
+            "name": "Legacy Folder",
+            "created_at": "2026-05-21T00:00:00.000Z"
+        }))
+        .expect("legacy folder should deserialize");
+
+        assert_eq!(folder.parent_id, None);
+    }
+
+    #[test]
     fn wien2k_structure_sources_are_discoverable_as_saved_text_artifacts() {
         assert!(is_calculation_input_file(std::path::Path::new("Si.struct")));
         assert!(is_calculation_input_file(std::path::Path::new("Si.in0")));
@@ -7390,6 +7436,8 @@ mod tests {
         assert!(is_calculation_log_file(std::path::Path::new("Si.outputs")));
         assert!(is_calculation_log_file(std::path::Path::new("Si.scf")));
         assert!(is_calculation_log_file(std::path::Path::new("Si.dayfile")));
+        assert!(is_calculation_log_file(std::path::Path::new("NiO.dmatup")));
+        assert!(is_calculation_log_file(std::path::Path::new("NiO.dmatdn")));
     }
 
     #[test]

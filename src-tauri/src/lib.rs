@@ -1898,20 +1898,41 @@ mod hpc_headless_recovery_tests {
 
     #[test]
     fn wien2k_spin_band_archive_command_is_valid_bash() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "qcortado-wien2k-band-archive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_dir).expect("test directory");
+        std::fs::write(test_dir.join("Er1P1.bandsup.agr"), "0.0 -1.0\n")
+            .expect("native WIEN2k band artifact");
+        let mut session = wien2k_test_bands_session("");
+        session.case_name = "Er1P1".to_string();
+        session.remote_case_dir = test_dir.to_string_lossy().into_owned();
         let command = build_wien2k_bands_archive_command(
-            &wien2k_test_bands_session(""),
+            &session,
             engines::wien2k::Wien2kBandsSpinChannel::Up,
         )
         .expect("archive command");
 
         let status = std::process::Command::new("bash")
-            .args(["-n", "-c", &command])
+            .args(["-c", &command])
             .status()
-            .expect("bash syntax check");
+            .expect("archive command");
 
         assert!(status.success());
-        assert!(command.contains("'bands.agr:bands_'$channel'.agr'"));
-        assert!(command.contains("'spaghetti_ene:spaghetti_ene_'$channel"));
+        assert!(command.contains("bands${channel}.agr:bands_${channel}.agr"));
+        assert!(command.contains("spaghetti${channel}_ene:spaghetti_ene_${channel}"));
+        assert!(command.contains("produced no $channel spin band artifact"));
+        assert_eq!(
+            std::fs::read_to_string(test_dir.join("Er1P1.bands_up.agr"))
+                .expect("archived band artifact"),
+            "0.0 -1.0\n"
+        );
+        std::fs::remove_dir_all(test_dir).expect("remove test directory");
     }
 
     #[test]
@@ -2023,6 +2044,41 @@ mod hpc_headless_recovery_tests {
         )
         .expect("down bands");
 
+        assert_eq!(up.energies[0], vec![4.0, 4.5]);
+        assert_eq!(down.energies[0], vec![5.2, 5.6]);
+    }
+
+    #[test]
+    fn wien2k_bands_parser_accepts_native_wien2k_spin_filenames() {
+        use engines::wien2k::Wien2kBandsSpinChannel;
+
+        let mut artifacts = std::collections::BTreeMap::new();
+        artifacts.insert(
+            "Er1P1.bandsup.agr".to_string(),
+            "0.0 -1.0\n1.0 -0.5\n".to_string(),
+        );
+        artifacts.insert(
+            "Er1P1.bandsdn.agr".to_string(),
+            "0.0 0.2\n1.0 0.6\n".to_string(),
+        );
+
+        let (up_name, up) = parse_wien2k_spaghetti_artifacts(
+            "Er1P1",
+            &artifacts,
+            5.0,
+            Some(Wien2kBandsSpinChannel::Up),
+        )
+        .expect("native up bands");
+        let (down_name, down) = parse_wien2k_spaghetti_artifacts(
+            "Er1P1",
+            &artifacts,
+            5.0,
+            Some(Wien2kBandsSpinChannel::Down),
+        )
+        .expect("native down bands");
+
+        assert_eq!(up_name, "Er1P1.bandsup.agr");
+        assert_eq!(down_name, "Er1P1.bandsdn.agr");
         assert_eq!(up.energies[0], vec![4.0, 4.5]);
         assert_eq!(down.energies[0], vec![5.2, 5.6]);
     }
@@ -4977,6 +5033,8 @@ async fn wien2k_run_scf_session_impl(
                 "outputst",
                 "outputkgen",
                 "outputd",
+                "dmatup",
+                "dmatdn",
                 "scf",
                 "dayfile",
             ],
@@ -5225,7 +5283,8 @@ fn build_wien2k_bands_log_dump_command(case_name: &str, label: &str) -> String {
            \"${{case_name}}.outputso\" \"${{case_name}}.outputsoup\" \"${{case_name}}.outputsodn\" \
            \"${{case_name}}.qtl\" \"${{case_name}}.qtlup\" \"${{case_name}}.qtldn\" \
            \"${{case_name}}.irrep\" \"${{case_name}}.spaghetti\" \"${{case_name}}.spaghetti_ene\" \
-           \"${{case_name}}.bands.agr\" \
+           \"${{case_name}}.spaghettiup_ene\" \"${{case_name}}.spaghettidn_ene\" \
+           \"${{case_name}}.bands.agr\" \"${{case_name}}.bandsup.agr\" \"${{case_name}}.bandsdn.agr\" \
            lapw1.error lapw2.error irrep.error spaghetti.error *.error; do \
            if [ -s \"$f\" ]; then \
              echo \"[QCortado] --- tail: $f ---\"; \
@@ -5248,17 +5307,28 @@ fn build_wien2k_bands_archive_command(
     };
     let case_name = shell_single_quote_local(&session.case_name);
     Ok(format!(
-        "cd {dir} && case_name={case_name} && channel={channel} && \
-         for pair in 'bands.agr:bands_'$channel'.agr' 'band.agr:band_'$channel'.agr' \
-         'spaghetti_ene:spaghetti_ene_'$channel 'spaghetti_ps:spaghetti_ps_'$channel; do \
+        "cd {dir} && case_name={case_name} && channel={channel} && preserved=0 && \
+         for pair in \
+         \"bands${{channel}}.agr:bands_${{channel}}.agr\" \
+         \"band${{channel}}.agr:band_${{channel}}.agr\" \
+         \"spaghetti${{channel}}_ene:spaghetti_ene_${{channel}}\" \
+         \"spaghetti${{channel}}_ps:spaghetti_ps_${{channel}}\" \
+         \"bands.agr:bands_${{channel}}.agr\" \"band.agr:band_${{channel}}.agr\" \
+         \"spaghetti_ene:spaghetti_ene_${{channel}}\" \"spaghetti_ps:spaghetti_ps_${{channel}}\"; do \
            source_suffix=${{pair%%:*}}; target_suffix=${{pair#*:}}; \
            source_file=\"${{case_name}}.${{source_suffix}}\"; target_file=\"${{case_name}}.${{target_suffix}}\"; \
-           if [ -s \"$source_file\" ]; then cp -f \"$source_file\" \"$target_file\"; fi; \
+           if [ ! -s \"$target_file\" ] && [ -s \"$source_file\" ]; then \
+             cp -f \"$source_file\" \"$target_file\"; \
+             case \"$target_suffix\" in *.agr|*spaghetti_ene*) preserved=1;; esac; \
+           fi; \
          done && \
          for program in lapw1 lapw2 irrep spaghetti; do \
            source_file=\".qcortado-${{program}}.log\"; target_file=\".qcortado-${{program}}-${{channel}}.log\"; \
            if [ -s \"$source_file\" ]; then cp -f \"$source_file\" \"$target_file\"; fi; \
-         done && echo \"[QCortado] Preserved $channel spin band artifacts\"",
+         done && \
+         if [ \"$preserved\" -ne 1 ]; then \
+           echo \"[QCortado] WIEN2k spaghetti produced no $channel spin band artifact.\" >&2; exit 1; \
+         fi && echo \"[QCortado] Preserved $channel spin band artifacts\"",
         dir = shell_single_quote_local(&session.remote_case_dir),
         channel = shell_single_quote_local(channel_name),
     ))
@@ -5619,12 +5689,18 @@ fn parse_wien2k_spaghetti_artifacts(
             format!("{}.bands_{}.agr", case_name, channel),
             format!("{}.band_{}.agr", case_name, channel),
             format!("{}.spaghetti_ene_{}", case_name, channel),
+            format!("{}.bands{}.agr", case_name, channel),
+            format!("{}.band{}.agr", case_name, channel),
+            format!("{}.spaghetti{}_ene", case_name, channel),
         ]
     } else {
         vec![
             format!("{}.bands.agr", case_name),
             format!("{}.band.agr", case_name),
             format!("{}.spaghetti_ene", case_name),
+            format!("{}.bandsup.agr", case_name),
+            format!("{}.bandup.agr", case_name),
+            format!("{}.spaghettiup_ene", case_name),
             format!("{}.bands_up.agr", case_name),
             format!("{}.band_up.agr", case_name),
             format!("{}.spaghetti_ene_up", case_name),
@@ -5640,17 +5716,26 @@ fn parse_wien2k_spaghetti_artifacts(
             .map(|channel| {
                 name.ends_with(&format!("_{}.agr", channel))
                     || name.ends_with(&format!("_{}", channel))
+                    || name == &format!("{}.bands{}.agr", case_name, channel)
+                    || name == &format!("{}.band{}.agr", case_name, channel)
+                    || name == &format!("{}.spaghetti{}_ene", case_name, channel)
             })
             .unwrap_or_else(|| {
                 name == &format!("{}.bands.agr", case_name)
                     || name == &format!("{}.band.agr", case_name)
                     || name == &format!("{}.spaghetti_ene", case_name)
+                    || name == &format!("{}.bandsup.agr", case_name)
+                    || name == &format!("{}.bandup.agr", case_name)
+                    || name == &format!("{}.spaghettiup_ene", case_name)
                     || name == &format!("{}.bands_up.agr", case_name)
                     || name == &format!("{}.band_up.agr", case_name)
                     || name == &format!("{}.spaghetti_ene_up", case_name)
             });
         if matches_channel
-            && (name.ends_with(".agr") || name.contains(".spaghetti_ene"))
+            && (name.ends_with(".agr")
+                || name.contains(".spaghetti_ene")
+                || name.contains(".spaghettiup_ene")
+                || name.contains(".spaghettidn_ene"))
             && !candidates.iter().any(|(candidate, _)| candidate == name)
         {
             candidates.push((name.clone(), contents));
@@ -5914,9 +5999,12 @@ async fn wien2k_prepare_bands_session_impl(
          {case}.output1 {case}.output1up {case}.output1dn \
          {case}.output2 {case}.output2up {case}.output2dn \
          {case}.outputso {case}.outputsoup {case}.outputsodn \
-         {case}.spaghetti {case}.spaghetti_ene {case}.spaghetti_ene_up {case}.spaghetti_ene_dn \
-         {case}.spaghetti_ps {case}.spaghetti_ps_up {case}.spaghetti_ps_dn \
-         {case}.bands.agr {case}.bands_up.agr {case}.bands_dn.agr \
+         {case}.spaghetti {case}.spaghetti_ene {case}.spaghettiup_ene {case}.spaghettidn_ene \
+         {case}.spaghetti_ene_up {case}.spaghetti_ene_dn \
+         {case}.spaghetti_ps {case}.spaghettiup_ps {case}.spaghettidn_ps \
+         {case}.spaghetti_ps_up {case}.spaghetti_ps_dn \
+         {case}.bands.agr {case}.bandsup.agr {case}.bandsdn.agr \
+         {case}.bands_up.agr {case}.bands_dn.agr \
          {case}.band.agr {case}.band_up.agr {case}.band_dn.agr && \
         echo '[QCortado] Prepared case.klist_band and case.insp'",
         shell_single_quote_local(&session.remote_case_dir),
@@ -6217,15 +6305,21 @@ async fn wien2k_run_bands_session_impl(
                 "irrep",
                 "spaghetti",
                 "spaghetti_ene",
+                "spaghettiup_ene",
+                "spaghettidn_ene",
                 "spaghetti_ene_up",
                 "spaghetti_ene_dn",
                 "bands.agr",
+                "bandsup.agr",
+                "bandsdn.agr",
                 "bands_up.agr",
                 "bands_dn.agr",
                 "band.agr",
                 "band_up.agr",
                 "band_dn.agr",
                 "spaghetti_ps",
+                "spaghettiup_ps",
+                "spaghettidn_ps",
                 "spaghetti_ps_up",
                 "spaghetti_ps_dn",
                 "dayfile",
@@ -7114,7 +7208,7 @@ async fn wien2k_run_soc_session_impl(
             &[
                 "struct", "struct_so", "inso", "in0", "in1", "in1c", "in2c", "inc", "inm",
                 "inorb", "indm", "indmc", "klist", "ksym", "outsymso", "outputso", "outputsoup",
-                "outputsodn", "scfso", "scf", "dayfile",
+                "outputsodn", "dmatup", "dmatdn", "scfso", "scf", "dayfile",
             ],
         )
         .await,

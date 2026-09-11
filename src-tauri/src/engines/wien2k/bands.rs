@@ -360,7 +360,9 @@ pub fn parse_spaghetti_artifact(
     content: &str,
     fermi_energy_ev: f64,
 ) -> Result<BandData, String> {
-    if filename.contains(".spaghetti_ene") {
+    if filename.contains(".spaghetti_ene")
+        || (filename.contains(".spaghetti") && filename.ends_with("_ene"))
+    {
         parse_spaghetti_ene(content, fermi_energy_ev)
     } else {
         parse_spaghetti_xy(content, fermi_energy_ev)
@@ -709,6 +711,18 @@ mod tests {
 
         let parsed = parse_spaghetti_artifact("Er1P1.spaghetti_ene_up", content, 4.0)
             .expect("spin-suffixed spaghetti output");
+
+        assert_eq!(parsed.n_bands, 1);
+        assert_eq!(parsed.n_kpoints, 2);
+        assert_eq!(parsed.energies[0], vec![3.0, 4.5]);
+    }
+
+    #[test]
+    fn spaghetti_artifact_parser_recognizes_native_wien2k_spin_energy_output() {
+        let content = " bandindex: 1\n0.0 0.0 0.0 0.0 -1.0\n1.0 0.0 0.0 1.0 0.5\n";
+
+        let parsed = parse_spaghetti_artifact("Er1P1.spaghettiup_ene", content, 4.0)
+            .expect("native WIEN2k spin output");
 
         assert_eq!(parsed.n_bands, 1);
         assert_eq!(parsed.n_kpoints, 2);
