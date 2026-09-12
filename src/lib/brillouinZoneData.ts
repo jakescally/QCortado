@@ -15,6 +15,8 @@ import {
   conventionalToPrimitive,
   magnitude,
   dot,
+  scale,
+  fractionalToCartesian,
 } from "./reciprocalLattice";
 
 export type RhombohedralConvention = "sc_primitive" | "bilbao_hex";
@@ -873,33 +875,62 @@ export function getMonoclinicBaseCenteredBZ(
   beta: number,
   gamma: number,
 ): BrillouinZoneData {
-  // Convert conventional mC vectors to primitive vectors so branch logic
-  // and point formulas use the correct primitive metric.
+  // SC Appendix A.13 uses a unique-a conventional cell with acute alpha.
+  // CIF/spglib C-centered monoclinic cells normally use unique b and obtuse
+  // beta instead. Change axes before evaluating the tables, then express the
+  // resulting k-vectors in the ORIGINAL cell's canonical primitive basis so
+  // the viewer and calculation exporters share the same coordinate contract.
   const conventional = realSpaceLatticeVectors(a, b, c, alpha, beta, gamma);
-  const primitive = conventionalToPrimitive(conventional, "C");
-  const aP = magnitude(primitive[0]);
-  const bP = magnitude(primitive[1]);
-  const cP = magnitude(primitive[2]);
-  const alphaP = angleDegrees(primitive[1], primitive[2]);
-  const alphaRad = (alphaP * Math.PI) / 180;
+  const inputPrimitive = conventionalToPrimitive(conventional, "C");
+  const [aSC, bSC, cInput] = Math.abs(beta - 90) > Math.abs(alpha - 90)
+    ? [conventional[1], conventional[0], conventional[2]]
+    : conventional;
+  const cSC = dot(bSC, cInput) < 0 ? scale(cInput, -1) : cInput;
+  const scConventional: [Vec3, Vec3, Vec3] = [aSC, bSC, cSC];
+  const scReciprocal = reciprocalLatticeVectors(conventionalToPrimitive(scConventional, "C"));
+  const data = getMonoclinicBaseCenteredSC(
+    magnitude(aSC), magnitude(bSC), magnitude(cSC), angleDegrees(bSC, cSC),
+  );
+  return {
+    ...data,
+    points: data.points.map((point) => {
+      const cartesian = fractionalToCartesian(point.coords, scReciprocal);
+      return {
+        ...point,
+        coords: inputPrimitive.map((vector) => dot(cartesian, vector) / (2 * Math.PI)) as Vec3,
+      };
+    }),
+  };
+}
+
+/** SC Tables 17–19: lengths and alpha are CONVENTIONAL, kGamma is primitive reciprocal. */
+function getMonoclinicBaseCenteredSC(
+  a: number,
+  b: number,
+  c: number,
+  alpha: number,
+): BrillouinZoneData {
+  const alphaRad = (alpha * Math.PI) / 180;
   const sinAlpha = Math.sin(alphaRad);
   const cosAlpha = Math.cos(alphaRad);
 
-  const primitiveReciprocal = reciprocalLatticeVectors(primitive);
+  const primitiveReciprocal = reciprocalLatticeVectors(conventionalToPrimitive(
+    realSpaceLatticeVectors(a, b, c, alpha, 90, 90), "C",
+  ));
   const kGamma = angleDegrees(primitiveReciprocal[0], primitiveReciprocal[1]);
   const criterion =
-    (bP * cosAlpha) / cP + ((bP * bP) * (sinAlpha * sinAlpha)) / (aP * aP);
+    (b * cosAlpha) / c + ((b * b) * (sinAlpha * sinAlpha)) / (a * a);
 
   const isKGamma90 = nearlyEqual(kGamma, 90, 1e-7);
   const isCriterion1 = nearlyEqual(criterion, 1, 1e-7);
 
-  if (kGamma > 90 && !isKGamma90) {
-    if (criterion < 1 && !isCriterion1) {
+  if (kGamma > 90 || isKGamma90) {
+    if (!isKGamma90) {
       // mC1
-      const zeta = (2 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
-      const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
-      const psi = 0.75 - (aP * aP) / (4 * bP * bP * sinAlpha * sinAlpha);
-      const phi = psi + (0.75 - psi) * ((bP * cosAlpha) / cP);
+      const zeta = (2 - (b * cosAlpha) / c) / (4 * sinAlpha * sinAlpha);
+      const eta = 0.5 + (2 * zeta * c * cosAlpha) / b;
+      const psi = 0.75 - (a * a) / (4 * b * b * sinAlpha * sinAlpha);
+      const phi = psi + (0.75 - psi) * ((b * cosAlpha) / c);
       return {
         latticeType: "mC1",
         name: "Monoclinic (Base-Centered, mC1)",
@@ -909,7 +940,7 @@ export function getMonoclinicBaseCenteredBZ(
           { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
           { label: "F", coords: [1 - zeta, 1 - zeta, 1 - eta], description: "Face point" },
           { label: "F₁", coords: [zeta, zeta, eta], description: "Face point" },
-          { label: "F₂", coords: [zeta, zeta - 1, eta], description: "Face point" },
+          { label: "F₂", coords: [-zeta, -zeta, 1 - eta], description: "Face point" },
           { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
           { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
           { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
@@ -933,12 +964,12 @@ export function getMonoclinicBaseCenteredBZ(
       };
     }
 
-    if (isCriterion1) {
+    {
       // mC2
-      const zeta = (2 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
-      const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
-      const psi = 0.75 - (aP * aP) / (4 * bP * bP * sinAlpha * sinAlpha);
-      const phi = psi + (0.75 - psi) * ((bP * cosAlpha) / cP);
+      const zeta = (2 - (b * cosAlpha) / c) / (4 * sinAlpha * sinAlpha);
+      const eta = 0.5 + (2 * zeta * c * cosAlpha) / b;
+      const psi = 0.75 - (a * a) / (4 * b * b * sinAlpha * sinAlpha);
+      const phi = psi + (0.75 - psi) * ((b * cosAlpha) / c);
       return {
         latticeType: "mC2",
         name: "Monoclinic (Base-Centered, mC2)",
@@ -948,7 +979,7 @@ export function getMonoclinicBaseCenteredBZ(
           { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
           { label: "F", coords: [1 - zeta, 1 - zeta, 1 - eta], description: "Face point" },
           { label: "F₁", coords: [zeta, zeta, eta], description: "Face point" },
-          { label: "F₂", coords: [zeta, zeta - 1, eta], description: "Face point" },
+          { label: "F₂", coords: [-zeta, -zeta, 1 - eta], description: "Face point" },
           { label: "F₃", coords: [1 - zeta, -zeta, 1 - eta], description: "Face point" },
           { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
           { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
@@ -969,19 +1000,22 @@ export function getMonoclinicBaseCenteredBZ(
       };
     }
 
-    // mC3
-    const mu = (1 + (bP * bP) / (aP * aP)) / 4;
-    const delta = (bP * cP * cosAlpha) / (2 * aP * aP);
+  }
+
+  if (criterion < 1 || isCriterion1) {
+    // mC3 and mC4 share Table 18; mC4 has degenerate I = F.
+    const mu = (1 + (b * b) / (a * a)) / 4;
+    const delta = (b * c * cosAlpha) / (2 * a * a);
     const zeta =
       mu -
       0.25 +
-      (1 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
-    const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
+      (1 - (b * cosAlpha) / c) / (4 * sinAlpha * sinAlpha);
+    const eta = 0.5 + (2 * zeta * c * cosAlpha) / b;
     const phi = 1 + zeta - 2 * mu;
     const psi = eta - 2 * delta;
     return {
-      latticeType: "mC3",
-      name: "Monoclinic (Base-Centered, mC3)",
+      latticeType: isCriterion1 ? "mC4" : "mC3",
+      name: `Monoclinic (Base-Centered, ${isCriterion1 ? "mC4" : "mC3"})`,
       points: [
         { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
         { label: "F", coords: [1 - phi, 1 - phi, 1 - psi], description: "Face point" },
@@ -991,53 +1025,6 @@ export function getMonoclinicBaseCenteredBZ(
         { label: "H₁", coords: [1 - zeta, -zeta, 1 - eta], description: "Edge point" },
         { label: "H₂", coords: [-zeta, -zeta, 1 - eta], description: "Edge point" },
         { label: "I", coords: [0.5, -0.5, 0.5], description: "Edge center" },
-        { label: "I₁", coords: [0.5, 0.5, -0.5], description: "Edge center" },
-        { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
-        { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
-        { label: "N", coords: [0.5, 0, 0], description: "Face center" },
-        { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
-        { label: "X", coords: [0.5, -0.5, 0], description: "Edge center" },
-        { label: "Y", coords: [mu, mu, delta], description: "Edge point" },
-        { label: "Y₁", coords: [1 - mu, -mu, -delta], description: "Edge point" },
-        { label: "Y₂", coords: [-mu, -mu, -delta], description: "Edge point" },
-        { label: "Y₃", coords: [mu, mu - 1, delta], description: "Edge point" },
-        { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
-      ],
-      recommendedPath: [
-        ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"], ["I", "F₁"],
-        ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
-        ["M", "Γ"],
-      ],
-      vertices: [],
-      edges: [],
-    };
-  }
-
-  if (isKGamma90) {
-    // mC4
-    const mu = (1 + (bP * bP) / (aP * aP)) / 4;
-    const delta = (bP * cP * cosAlpha) / (2 * aP * aP);
-    const zeta =
-      mu -
-      0.25 +
-      (1 - (bP * cosAlpha) / cP) / (4 * sinAlpha * sinAlpha);
-    const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
-    const phi = 1 + zeta - 2 * mu;
-    const psi = eta - 2 * delta;
-    return {
-      latticeType: "mC4",
-      name: "Monoclinic (Base-Centered, mC4)",
-      points: [
-        { label: "Γ", coords: [0, 0, 0], description: "Zone center" },
-        { label: "F", coords: [1 - phi, 1 - phi, 1 - psi], description: "Face point" },
-        { label: "F₁", coords: [phi, phi - 1, psi], description: "Face point" },
-        { label: "F₂", coords: [1 - phi, -phi, 1 - psi], description: "Face point" },
-        { label: "H", coords: [zeta, zeta, eta], description: "Edge point" },
-        { label: "H₁", coords: [1 - zeta, -zeta, 1 - eta], description: "Edge point" },
-        { label: "H₂", coords: [-zeta, -zeta, 1 - eta], description: "Edge point" },
-        { label: "I", coords: [phi, 1 - phi, 0.5], description: "Edge point" },
-        { label: "I₁", coords: [1 - phi, phi - 1, 0.5], description: "Edge point" },
-        { label: "L", coords: [0.5, 0.5, 0.5], description: "Corner" },
         { label: "M", coords: [0.5, 0, 0.5], description: "Edge center" },
         { label: "N", coords: [0.5, 0, 0], description: "Face center" },
         { label: "N₁", coords: [0, -0.5, 0], description: "Face center" },
@@ -1050,7 +1037,8 @@ export function getMonoclinicBaseCenteredBZ(
       ],
       recommendedPath: [
         ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"],
-        ["F₁", "H₁"], ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
+        ...(isCriterion1 ? [] : [["I", "F₁"] as [string, string]]),
+        ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
         ["M", "Γ"],
       ],
       vertices: [],
@@ -1058,17 +1046,17 @@ export function getMonoclinicBaseCenteredBZ(
     };
   }
 
-  // mC5: kGamma < 90
+  // mC5: kGamma < 90 and criterion > 1
   const zeta =
-    ((bP * bP) / (aP * aP) + (1 - (bP * cosAlpha) / cP) / (sinAlpha * sinAlpha)) / 4;
-  const eta = 0.5 + (2 * zeta * cP * cosAlpha) / bP;
-  const mu = eta / 2 + (bP * bP) / (4 * aP * aP) - (bP * cP * cosAlpha) / (2 * aP * aP);
+    ((b * b) / (a * a) + (1 - (b * cosAlpha) / c) / (sinAlpha * sinAlpha)) / 4;
+  const eta = 0.5 + (2 * zeta * c * cosAlpha) / b;
+  const mu = eta / 2 + (b * b) / (4 * a * a) - (b * c * cosAlpha) / (2 * a * a);
   const nu = 2 * mu - zeta;
-  const rho = 1 - (zeta * aP * aP) / (bP * bP);
+  const rho = 1 - (zeta * a * a) / (b * b);
   const omega =
-    ((4 * nu - 1 - ((bP * bP) * (sinAlpha * sinAlpha)) / (aP * aP)) * cP) /
-    (2 * bP * cosAlpha);
-  const delta = (zeta * cP * cosAlpha) / bP + omega / 2 - 0.25;
+    ((4 * nu - 1 - ((b * b) * (sinAlpha * sinAlpha)) / (a * a)) * c) /
+    (2 * b * cosAlpha);
+  const delta = (zeta * c * cosAlpha) / b + omega / 2 - 0.25;
 
   return {
     latticeType: "mC5",
@@ -1095,7 +1083,8 @@ export function getMonoclinicBaseCenteredBZ(
       { label: "Z", coords: [0, 0, 0.5], description: "Face center" },
     ],
     recommendedPath: [
-      ["Γ", "Y"], ["Y", "F"], ["F", "H"], ["H", "Z"], ["Z", "I"], ["I", "F₁"],
+      ["Γ", "Y"], ["Y", "F"], ["F", "L"], ["L", "I"],
+      ["I₁", "Z"], ["Z", "H"], ["H", "F₁"],
       ["H₁", "Y₁"], ["Y₁", "X"], ["X", "Γ"], ["Γ", "N"],
       ["M", "Γ"],
     ],

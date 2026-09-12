@@ -69,6 +69,8 @@ function crystalSystemRankFromSpaceGroup(spaceGroupNumber: number): number {
 export interface PathTransformContext {
   centering: CenteringType;
   rhombohedralSetting?: RhombohedralSetting;
+  /** mC data uses p1=(a+b)/2, p2=(-a+b)/2 in the input cell's frame. */
+  monoclinicC?: boolean;
 }
 
 export function resolvePathTransformContext(
@@ -132,6 +134,7 @@ export function resolvePathTransformContext(
   return {
     centering,
     rhombohedralSetting,
+    monoclinicC: bravaisType === "monoclinic-C",
   };
 }
 
@@ -158,6 +161,11 @@ export function createPathCoordinateConverters(
   symmetryTransform: SymmetryTransformResult | null,
 ): PathCoordinateConverters {
   const toInputConventionalCoords = (coords: Vec3): Vec3 => {
+    if (context.monoclinicC) {
+      // Inverse transpose of the mC direct-basis transform. The legacy C
+      // exporter uses the orthorhombic table's different primitive ordering.
+      return roundVec3([coords[0] - coords[1], coords[0] + coords[1], coords[2]]);
+    }
     return roundVec3(
       kPointPrimitiveToConventional(
         coords,

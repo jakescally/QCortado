@@ -1,8 +1,7 @@
 import type { CrystalData } from "./types";
 import type { KPathPoint } from "../components/BrillouinZoneViewer";
 import { getLeadingElementSymbol } from "./elements";
-import { resolvePathTransformContext, roundVec3 } from "./kPathTransforms";
-import { kPointPrimitiveToConventional } from "./reciprocalLattice";
+import { createPathCoordinateConverters, resolvePathTransformContext, roundVec3 } from "./kPathTransforms";
 
 export type Wien2kBandProjectionKind = "all" | "atom" | "orbital";
 
@@ -101,6 +100,7 @@ export function transformWien2kKPathForKlistBand(
   crystalData: CrystalData,
 ): KPathPoint[] {
   const context = resolvePathTransformContext(crystalData, null);
+  const converters = createPathCoordinateConverters(context, null);
 
   return path.map((point) => ({
     ...point,
@@ -108,7 +108,7 @@ export function transformWien2kKPathForKlistBand(
     // non-R lattices, while R band paths are supplied in primitive reciprocal coordinates.
     coords: context.centering === "R"
       ? roundVec3(point.coords)
-      : roundVec3(kPointPrimitiveToConventional(point.coords, context.centering)),
+      : converters.toInputConventionalCoords(point.coords),
   }));
 }
 

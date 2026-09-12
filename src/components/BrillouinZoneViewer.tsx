@@ -14,12 +14,10 @@ import {
   Vec3,
   dot,
   magnitude,
-  realSpaceLatticeVectors,
   reciprocalLatticeVectors,
   fractionalToCartesian,
   calculateBrillouinZone,
   BrillouinZoneGeometry,
-  conventionalToPrimitive,
   CenteringType,
   RhombohedralSetting,
   detectRhombohedralSettingFromLattice,
@@ -37,6 +35,7 @@ import {
 } from "../lib/brillouinZoneData";
 import { detectBravaisLattice, BravaisLattice } from "../lib/brillouinZone";
 import { SymmetryTransformResult } from "../lib/symmetryTransform";
+import { getBrillouinZoneLattices } from "../lib/brillouinZoneLattice";
 
 // ============================================================================
 // Types
@@ -680,28 +679,18 @@ export function BrillouinZoneViewer({
     };
 
     const useSymmetryTransform = bravaisInfo.useSymmetryTransform && symmetryTransform != null;
-    const conventionalLattice = useSymmetryTransform
-      ? symmetryTransform.standardizedConventionalLattice
-      : realSpaceLatticeVectors(
-          crystalData.cell_length_a.value,
-          crystalData.cell_length_b.value,
-          crystalData.cell_length_c.value,
-          crystalData.cell_angle_alpha.value,
-          crystalData.cell_angle_beta.value,
-          crystalData.cell_angle_gamma.value,
-        );
-
-    // Convert to primitive cell for BZ calculation unless backend provided one.
-    const primitiveLattice = useSymmetryTransform
-      ? symmetryTransform.standardizedPrimitiveLattice
-      : conventionalToPrimitive(conventionalLattice, bravaisInfo.centering);
+    const { conventionalLattice, primitiveLattice } = getBrillouinZoneLattices(
+      crystalData,
+      bravaisInfo.centering,
+      bravaisInfo.latticeType === "mC",
+      useSymmetryTransform ? symmetryTransform : null,
+    );
     const primitiveAlpha = angleDegrees(primitiveLattice[1], primitiveLattice[2]);
 
     // Reciprocal lattice of the PRIMITIVE cell (for BZ calculation)
     const primitiveRecipLattice = reciprocalLatticeVectors(primitiveLattice);
 
-    // Reciprocal lattice of the CONVENTIONAL cell (for k-point coordinates)
-    // Standard k-point tables use conventional reciprocal lattice coordinates
+    // Reciprocal lattice of the conventional cell (for coordinate conversion).
     const conventionalRecipLattice = reciprocalLatticeVectors(conventionalLattice);
 
     const a = magnitude(conventionalLattice[0]);
@@ -723,7 +712,7 @@ export function BrillouinZoneViewer({
       rhombohedralSetting,
       a, b, c, alpha, beta, gamma,
     };
-  }, [crystalData, bravaisInfo.centering, bravaisInfo.useSymmetryTransform, symmetryTransform]);
+  }, [crystalData, bravaisInfo.centering, bravaisInfo.latticeType, bravaisInfo.useSymmetryTransform, symmetryTransform]);
 
   const isRhombohedral = bravaisInfo.latticeType === "hR";
   const defaultRhombohedralConvention = useMemo(
@@ -746,7 +735,7 @@ export function BrillouinZoneViewer({
     onRhombohedralConventionChange?.(convention);
   }, [isRhombohedral, onRhombohedralConventionChange]);
 
-  // Get BZ high-symmetry point data (uses conventional coordinates)
+  // Get high-symmetry coordinates in the selected primitive basis.
   const bzData = useMemo(() => {
     const alphaForPath =
       bravaisInfo.latticeType === "hR"
@@ -774,12 +763,17 @@ export function BrillouinZoneViewer({
   useEffect(() => {
     const { path: remappedPath, droppedCount } = remapPathToData(initialPath, bzData);
     setPath((currentPath) => (pathsEqual(currentPath, remappedPath) ? currentPath : remappedPath));
+    // Keep the wizard's submitted path in sync when a corrected table changes
+    // coordinates or removes labels from a previously selected path.
+    if (!pathsEqual(initialPath, remappedPath)) {
+      onPathChange(remappedPath);
+    }
     if (droppedCount > 0) {
       setPathRemapNotice(`Dropped ${droppedCount} path point${droppedCount === 1 ? "" : "s"} that are not valid in this convention.`);
     } else {
       setPathRemapNotice(null);
     }
-  }, [initialPath, bzData]);
+  }, [initialPath, bzData, onPathChange]);
 
   useEffect(() => {
     const { path: remappedPath, droppedCount } = remapPathToData(path, bzData);
@@ -960,9 +954,10 @@ export function BrillouinZoneViewer({
           <p className="bz-convention-note">
             Detected input setting: {detectedRhombohedralSettingDescription}. Coordinates stay in canonical primitive reciprocal basis for export.
           </p>
-          {pathRemapNotice && <p className="bz-convention-warning">{pathRemapNotice}</p>}
         </div>
       )}
+
+      {pathRemapNotice && <p className="bz-convention-warning">{pathRemapNotice}</p>}
 
       <div className="bz-viewer-canvas">
         <Canvas style={{ background: "#1a1a2e" }}>

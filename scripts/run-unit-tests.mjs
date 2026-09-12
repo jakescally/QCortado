@@ -17,6 +17,7 @@ const testEntries = [
   "tests/qeBravais/qeBravaisInference.test.ts",
   "tests/kPathTransforms/sourceScfUsesPrimitiveCell.test.ts",
   "tests/brillouinZoneData/tetragonalBodyCentered.test.ts",
+  "tests/brillouinZoneData/monoclinicBaseCentered.test.ts",
   "tests/hpcBandLimits/hpcBandLimits.test.ts",
   "tests/hpcProfileAdapter/hpcProfileAdapter.test.ts",
   "tests/hpcUtilization/hpcUtilization.test.ts",
