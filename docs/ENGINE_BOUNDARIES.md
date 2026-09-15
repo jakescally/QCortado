@@ -88,7 +88,6 @@ Current QE-owned candidates:
   - `src/lib/engines/qe/hubbard.ts`
   - `src/lib/engines/qe/wannierQuality.ts`
   - `src/lib/engines/qe/epw.ts`
-  - `src/lib/engines/qe/scfRunSettingsClipboard.ts`
   - `src/lib/engines/qe/scfSorting.ts`
   - `src/lib/engines/qe/phononReady.ts`
   - `src/lib/engines/qe/hpc.ts`

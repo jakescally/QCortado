@@ -884,8 +884,10 @@ pub fn read_bands_gnu_file(path: &Path, fermi_energy: f64) -> Result<BandData, S
 /// Add high-symmetry point markers to band data
 ///
 /// The k-path defines segments like: L(20) -> Γ(20) -> X(20) -> U(0)
-/// where each npoints value indicates how many k-points in the segment TO that point.
+/// where each npoints value counts intervals AFTER that point.
 /// High-symmetry points occur at cumulative indices: 0, 20, 40, 60.
+/// An internal zero starts a disconnected segment: QE still emits its first
+/// point, so the next marker advances by one sample even at a path break.
 /// We read the actual k-distance from the parsed band data at those indices.
 pub fn add_symmetry_markers(data: &mut BandData, k_path: &[KPathPoint]) {
     if k_path.is_empty() || data.k_points.is_empty() {
@@ -912,16 +914,226 @@ pub fn add_symmetry_markers(data: &mut BandData, k_path: &[KPathPoint]) {
         // Move to the next high-symmetry point index
         // npoints indicates how many points in the segment AFTER this point
         if i < k_path.len() - 1 {
-            k_index += point.npoints as usize;
+            k_index = k_index.saturating_add(point.npoints.max(1) as usize);
         }
     }
 
     data.high_symmetry_points = markers;
 }
 
+/// Recover segment counts from an explicit QE line-mode card in a saved input.
+/// Labels are recovered from the saved plot, not guessed from coordinates.
+pub fn parse_saved_band_path_counts(input: &str) -> Option<Vec<u32>> {
+    let mut lines = input
+        .lines()
+        .map(|line| line.split('!').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty());
+    let card = lines.find(|line| line.to_ascii_lowercase().starts_with("k_points"))?;
+    let card = card.to_ascii_lowercase();
+    if !card.contains("crystal_b") && !card.contains("tpiba_b") {
+        return None;
+    }
+    let count: usize = lines.next()?.parse().ok()?;
+    if count < 2 {
+        return None;
+    }
+    let mut counts = Vec::new();
+    for _ in 0..count {
+        let fields: Vec<_> = lines.next()?.split_whitespace().collect();
+        if fields.len() != 4 {
+            return None;
+        }
+        for value in &fields[..3] {
+            if !value.parse::<f64>().ok()?.is_finite() {
+                return None;
+            }
+        }
+        counts.push(fields[3].parse().ok()?);
+    }
+    Some(counts)
+}
+
+/// Correct old saved markers without changing energies, x coordinates or labels.
+/// Only accept complete data whose sample count matches the saved explicit path.
+pub fn repair_saved_band_markers(data: &mut serde_json::Value, counts: &[u32]) -> bool {
+    if counts.len() < 2 || !counts[..counts.len() - 1].contains(&0) {
+        return false;
+    }
+    let (x_key, markers_key, marker_x_key) = if data.get("k_points").is_some() {
+        ("k_points", "high_symmetry_points", "k_distance")
+    } else {
+        ("x", "markers", "x")
+    };
+    let Some(xs) = data.get(x_key).and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let Some(markers) = data.get(markers_key).and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let expected_count = counts[..counts.len() - 1]
+        .iter()
+        .try_fold(1_usize, |sum, n| sum.checked_add((*n).max(1) as usize));
+    if expected_count != Some(xs.len()) || markers.len() != counts.len() {
+        return false;
+    }
+    let mut repaired = markers.clone();
+    let mut index = 0;
+    for (marker, count) in repaired.iter_mut().zip(counts) {
+        if !marker.is_object()
+            || marker.get("label").and_then(|v| v.as_str()).is_none()
+            || xs[index].as_f64().filter(|x| x.is_finite()).is_none()
+        {
+            return false;
+        }
+        marker[marker_x_key] = xs[index].clone();
+        index += (*count).max(1) as usize;
+    }
+    if repaired == *markers {
+        return false;
+    }
+    data[markers_key] = serde_json::Value::Array(repaired);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_band_markers_are_repaired_without_changing_samples() {
+        let counts = vec![2, 0, 2, 0];
+        // X and L share a plotted distance, but occupy separate sample rows.
+        let xs = serde_json::json!([0, 0.5, 1, 1, 1.5, 2]);
+        for (x_key, markers_key, marker_x_key) in [
+            ("k_points", "high_symmetry_points", "k_distance"),
+            ("x", "markers", "x"),
+        ] {
+            let mut data =
+                serde_json::json!({"energies": [[3, 2, 1, 4, 5, 6]], "metadata": {"keep": true}});
+            data[x_key] = xs.clone();
+            data[markers_key] = serde_json::Value::Array(
+                [("G", 0.0), ("X", 1.0), ("L", 1.0), ("W", 1.5)]
+                    .iter()
+                    .map(|(label, x)| {
+                        let mut marker = serde_json::json!({"label": label, "extra": "preserve"});
+                        marker[marker_x_key] = serde_json::json!(x);
+                        marker
+                    })
+                    .collect(),
+            );
+            let original = data.clone();
+            assert!(repair_saved_band_markers(&mut data, &counts));
+            assert_eq!(data[markers_key][3][marker_x_key], 2);
+            assert_eq!(data[markers_key][3]["extra"], "preserve");
+            assert_eq!(data[x_key], original[x_key]);
+            assert_eq!(data["energies"], original["energies"]);
+            assert_eq!(data["metadata"], original["metadata"]);
+            assert!(!repair_saved_band_markers(&mut data, &counts));
+            let mut incomplete = original.clone();
+            incomplete[x_key].as_array_mut().unwrap().pop();
+            let before = incomplete.clone();
+            assert!(!repair_saved_band_markers(&mut incomplete, &counts));
+            assert_eq!(incomplete, before);
+        }
+    }
+
+    #[test]
+    fn recover_only_explicit_line_mode_counts_from_saved_qe_input() {
+        let input = "&SYSTEM\n ibrav=0\n/\nK_POINTS {crystal_b}\n4\n0 0 0 2 ! G\n0.5 0 0 0\n0.5 0.5 0.5 3\n0 0 0 0\nCELL_PARAMETERS angstrom\n";
+        assert_eq!(parse_saved_band_path_counts(input), Some(vec![2, 0, 3, 0]));
+        assert_eq!(
+            parse_saved_band_path_counts(&input.replace("crystal_b", "tpiba_b")),
+            Some(vec![2, 0, 3, 0])
+        );
+        assert!(parse_saved_band_path_counts(&input.replace("crystal_b", "crystal")).is_none());
+        assert!(parse_saved_band_path_counts("K_POINTS automatic\n4 4 4 0 0 0").is_none());
+        assert!(parse_saved_band_path_counts("K_POINTS crystal_b\n2\n0 0 0 2").is_none());
+    }
+
+    #[test]
+    fn symmetry_markers_retain_samples_at_tap2_and_nbp2_breaks() {
+        for fixture in [
+            include_str!("../../../../tests/kPathTransforms/fixtures/TaP2-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/NbP2-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/TaP2-recent-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/NbP2-recent-path.json"),
+        ] {
+            let fixture: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            let path: Vec<KPathPoint> = serde_json::from_value(fixture["path"].clone()).unwrap();
+            let count = fixture["expandedCount"].as_u64().unwrap() as usize;
+            let expected: Vec<usize> =
+                serde_json::from_value(fixture["expectedIndices"].clone()).unwrap();
+            // Distinct, nonuniform distances expose an index error even when a
+            // collapsed discontinuity would hide it at the first break marker.
+            let distances: Vec<f64> = fixture
+                .get("distances")
+                .map(|v| serde_json::from_value(v.clone()).unwrap())
+                .unwrap_or_else(|| (0..count).map(|i| (i as f64).powi(2) / 1000.0).collect());
+            let gnu = distances
+                .iter()
+                .enumerate()
+                .map(|(i, x)| format!("{} {}\n", x, i))
+                .collect::<String>();
+            let mut data = parse_bands_gnu(&gnu, 0.0).unwrap();
+            let energies = data.energies.clone();
+            add_symmetry_markers(&mut data, &path);
+            for ((marker, point), index) in
+                data.high_symmetry_points.iter().zip(&path).zip(expected)
+            {
+                assert_eq!(marker.label, point.label);
+                assert_eq!(
+                    marker.k_distance, data.k_points[index],
+                    "{}: {}",
+                    fixture["source"], point.label
+                );
+            }
+            assert_eq!(data.energies, energies);
+            if let Some(legacy) = fixture.get("legacyMarkers") {
+                let mut saved =
+                    serde_json::json!({"k_points": distances, "high_symmetry_points": legacy});
+                let counts: Vec<_> = path.iter().map(|p| p.npoints).collect();
+                assert!(repair_saved_band_markers(&mut saved, &counts));
+                assert_eq!(
+                    saved["high_symmetry_points"],
+                    serde_json::to_value(&data.high_symmetry_points).unwrap()
+                );
+            }
+            assert_eq!(
+                data.high_symmetry_points.last().unwrap().k_distance,
+                *data.k_points.last().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn symmetry_markers_on_connected_paths_keep_original_indices() {
+        let path = vec![
+            KPathPoint {
+                label: "G".into(),
+                coords: [0.0; 3],
+                npoints: 2,
+            },
+            KPathPoint {
+                label: "X".into(),
+                coords: [0.5, 0.0, 0.0],
+                npoints: 3,
+            },
+            KPathPoint {
+                label: "M".into(),
+                coords: [0.5, 0.5, 0.0],
+                npoints: 0,
+            },
+        ];
+        let mut data = parse_bands_gnu("0 0\n1 0\n2 0\n3 0\n4 0\n5 0\n", 0.0).unwrap();
+        add_symmetry_markers(&mut data, &path);
+        assert_eq!(
+            data.high_symmetry_points
+                .iter()
+                .map(|m| m.k_distance)
+                .collect::<Vec<_>>(),
+            vec![0.0, 2.0, 5.0]
+        );
+    }
 
     #[test]
     fn test_generate_bands_x_input() {

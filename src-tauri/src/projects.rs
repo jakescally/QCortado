@@ -1969,8 +1969,48 @@ fn load_full_calculation_from_disk(
 
     let content = fs::read_to_string(&calc_json_path)
         .map_err(|e| format!("Failed to read calc.json: {}", e))?;
-    let calculation =
+    let mut calculation: CalculationRun =
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse calc.json: {}", e))?;
+    // Repair display-only marker positions on read, including older band runs.
+    // Keep the stored calculation and all calculated samples untouched.
+    if normalize_summary_calc_type(&calculation.calc_type) == Some("bands") {
+        let point_counts = calculation
+            .parameters
+            .get("k_path_points")
+            .or_else(|| calculation.parameters.pointer("/prepare/kPath"))
+            .or_else(|| calculation.parameters.pointer("/prepare/k_path"))
+            .and_then(|v| v.as_array())
+            .and_then(|points| {
+                points
+                    .iter()
+                    .map(|p| {
+                        p.get("npoints")?
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                    })
+                    .collect::<Option<Vec<_>>>()
+            });
+        let counts = point_counts.or_else(|| {
+            if calculation.engine_id != EngineId::Qe {
+                return None;
+            }
+            let directory = calc_json_path.parent()?;
+            [directory.join("pw.in"), directory.join("tmp/bands.in")]
+                .iter()
+                .find_map(|path| {
+                    let input = fs::read_to_string(path).ok()?;
+                    crate::engines::qe::bands::parse_saved_band_path_counts(&input)
+                })
+        });
+        if let (Some(counts), Some(result)) = (counts, calculation.result.as_mut()) {
+            if let Some(data) = result.band_data.as_mut() {
+                crate::engines::qe::bands::repair_saved_band_markers(data, &counts);
+            }
+            if let Some(data) = result.band_dataset.as_mut() {
+                crate::engines::qe::bands::repair_saved_band_markers(data, &counts);
+            }
+        }
+    }
     Ok(Some(calculation))
 }
 
@@ -7371,6 +7411,46 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("failed to create temp test directory");
         dir
+    }
+
+    #[test]
+    fn saved_bands_reopen_with_correct_markers_without_rewriting_disk() {
+        let project_dir = make_temp_test_dir("band_markers");
+        for engine in [EngineId::Qe, EngineId::Wien2k] {
+            let calc_id = format!("{:?}", engine);
+            let calc_dir = project_dir.join("calculations").join(&calc_id);
+            fs::create_dir_all(&calc_dir).unwrap();
+            let data = serde_json::json!({
+                "k_points": [0, 0.5, 1, 1, 1.5, 2],
+                "energies": [[0, 1, 2, 3, 4, 5]],
+                "high_symmetry_points": [
+                    {"label":"G","k_distance":0}, {"label":"X","k_distance":1},
+                    {"label":"L","k_distance":1}, {"label":"W","k_distance":1.5}
+                ]
+            });
+            let parameters = if engine == EngineId::Wien2k {
+                serde_json::json!({"prepare": {"kPath": [
+                    {"npoints":2}, {"npoints":0}, {"npoints":2}, {"npoints":0}
+                ]}})
+            } else {
+                fs::write(calc_dir.join("pw.in"), "K_POINTS {crystal_b}\n4\n0 0 0 2\n0.5 0 0 0\n0.5 0.5 0.5 2\n0 0 0 0\n").unwrap();
+                serde_json::json!({"k_path":"G → X → L → W"})
+            };
+            let run = CalculationRun {
+                id: calc_id.clone(), engine_id: engine, name: None, calc_type: "bands".into(),
+                parameters, result: Some(QEResult { band_data: Some(data.clone()), ..QEResult::default() }),
+                scf_summary: None, started_at: "2026-09-14T00:00:00Z".into(), completed_at: None,
+                tags: vec![], storage_bytes: None,
+            };
+            let original = serde_json::to_string(&run).unwrap();
+            fs::write(calc_dir.join("calc.json"), &original).unwrap();
+            let loaded = super::load_full_calculation_from_disk(&project_dir, &calc_id).unwrap().unwrap();
+            let corrected = loaded.result.unwrap().band_data.unwrap();
+            assert_eq!(corrected["high_symmetry_points"][3]["k_distance"], 2);
+            assert_eq!(corrected["energies"], data["energies"]);
+            assert_eq!(fs::read_to_string(calc_dir.join("calc.json")).unwrap(), original);
+        }
+        fs::remove_dir_all(project_dir).unwrap();
     }
 
     #[test]

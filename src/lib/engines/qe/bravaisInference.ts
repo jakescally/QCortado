@@ -1,6 +1,6 @@
 import { BravaisLattice, detectBravaisLattice } from "../../brillouinZone";
 import { Matrix3x3, Vec3 } from "../../reciprocalLattice";
-import { SymmetryTransformResult } from "../../symmetryTransform";
+import { SymmetryTransformResult, multiplyMatrixVector } from "../../symmetryTransform";
 import { CrystalData } from "../../types";
 
 const BOHR_TO_ANGSTROM = 0.529177210903;
@@ -49,6 +49,16 @@ export interface InferredQeBravaisCell {
   ibrav: QeBravaisIbrav;
   celldm: [number, number, number, number, number, number];
   atoms: PrimitiveAtom[];
+  /** k_QE = primitiveToQeReciprocal * k_spglib (fractional reciprocal coordinates). */
+  primitiveToQeReciprocal: Matrix3x3;
+}
+
+/** Match k-points to the same ibrav basis used for the cell and atomic positions. */
+export function transformKPointToQeBasis(
+  coords: Vec3,
+  cell: InferredQeBravaisCell | null,
+): Vec3 {
+  return cell ? multiplyMatrixVector(cell.primitiveToQeReciprocal, coords) : coords;
 }
 
 function coerceSpaceGroupNumber(value: unknown): number | null {
@@ -495,5 +505,8 @@ export function inferQeBravaisCellFromCif(
     ibrav: qeIbrav.ibrav,
     celldm,
     atoms,
+    // A_QE = T A_spglib for row-wise direct lattice vectors. Reciprocal
+    // fractional columns therefore transform by T, not its inverse/transpose.
+    primitiveToQeReciprocal: transform,
   };
 }

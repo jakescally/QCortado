@@ -1,0 +1,158 @@
+{
+  "source": "NbP2.cif",
+  "path": [
+    {
+      "label": "Γ",
+      "coords": [
+        0,
+        0,
+        0
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "Y",
+      "coords": [
+        1,
+        0,
+        0
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "F",
+      "coords": [
+        1.065579668742,
+        0,
+        -0.114247633066
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "L",
+      "coords": [
+        1,
+        0,
+        -0.5
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "I",
+      "coords": [
+        1,
+        0.462223225433,
+        -0.5
+      ],
+      "npoints": 0
+    },
+    {
+      "label": "I₁",
+      "coords": [
+        0,
+        0.537776774567,
+        -0.5
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "Z",
+      "coords": [
+        0,
+        0,
+        -0.5
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "F₁",
+      "coords": [
+        0.934420331258,
+        0,
+        -0.885752366934
+      ],
+      "npoints": 0
+    },
+    {
+      "label": "Y",
+      "coords": [
+        1,
+        0,
+        0
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "X₁",
+      "coords": [
+        1,
+        0.411319342425,
+        0
+      ],
+      "npoints": 0
+    },
+    {
+      "label": "X",
+      "coords": [
+        0,
+        0.588680657575,
+        0
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "Γ",
+      "coords": [
+        0,
+        0,
+        0
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "N",
+      "coords": [
+        0.5,
+        0.5,
+        0
+      ],
+      "npoints": 0
+    },
+    {
+      "label": "M",
+      "coords": [
+        0.5,
+        0.5,
+        -0.5
+      ],
+      "npoints": 20
+    },
+    {
+      "label": "Γ",
+      "coords": [
+        0,
+        0,
+        0
+      ],
+      "npoints": 0
+    }
+  ],
+  "expectedIndices": [
+    0,
+    20,
+    40,
+    60,
+    80,
+    81,
+    101,
+    121,
+    122,
+    142,
+    143,
+    163,
+    183,
+    184,
+    204
+  ],
+  "expandedCount": 205
+}

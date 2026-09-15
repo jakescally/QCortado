@@ -444,7 +444,8 @@ pub fn add_symmetry_markers(data: &mut BandData, path: &[Wien2kKPathPoint]) {
             label: point.label.clone(),
         });
         if index < path.len() - 1 {
-            k_index = k_index.saturating_add(point.npoints as usize);
+            // expand_k_path retains both endpoints of a disconnected jump.
+            k_index = k_index.saturating_add(point.npoints.max(1) as usize);
         }
     }
     data.high_symmetry_points = markers;
@@ -579,6 +580,45 @@ fn calculate_band_gap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symmetry_markers_match_expanded_tap2_and_nbp2_endpoints() {
+        for fixture in [
+            include_str!("../../../../tests/kPathTransforms/fixtures/TaP2-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/NbP2-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/TaP2-recent-path.json"),
+            include_str!("../../../../tests/kPathTransforms/fixtures/NbP2-recent-path.json"),
+        ] {
+            let fixture: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            let path: Vec<Wien2kKPathPoint> =
+                serde_json::from_value(fixture["path"].clone()).unwrap();
+            let expected: Vec<usize> =
+                serde_json::from_value(fixture["expectedIndices"].clone()).unwrap();
+            let expanded = expand_k_path(&path);
+            assert_eq!(
+                expanded.len(),
+                fixture["expandedCount"].as_u64().unwrap() as usize
+            );
+            let xy = expanded
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("{} {}\n", (i as f64).powi(2) / 1000.0, i))
+                .collect::<String>();
+            let mut data = parse_spaghetti_xy(&xy, 0.0).unwrap();
+            add_symmetry_markers(&mut data, &path);
+            for ((marker, point), index) in
+                data.high_symmetry_points.iter().zip(&path).zip(expected)
+            {
+                assert_eq!(expanded[index].coords, point.coords);
+                assert_eq!(marker.label, point.label);
+                assert_eq!(
+                    marker.k_distance, data.k_points[index],
+                    "{}: {}",
+                    fixture["source"], point.label
+                );
+            }
+        }
+    }
 
     #[test]
     fn klist_band_expands_segments_and_writes_end() {

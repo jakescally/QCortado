@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inferQeBravaisCellFromCif } from "../../src/lib/engines/qe/bravaisInference";
-import { Matrix3x3, Vec3 } from "../../src/lib/reciprocalLattice";
+import { inferQeBravaisCellFromCif, transformKPointToQeBasis } from "../../src/lib/engines/qe/bravaisInference";
+import { Matrix3x3, Vec3, reciprocalLatticeVectors, fractionalToCartesian } from "../../src/lib/reciprocalLattice";
 import { SymmetryTransformResult } from "../../src/lib/symmetryTransform";
 import { CrystalData } from "../../src/lib/types";
 
@@ -329,4 +329,49 @@ test("handles common monoclinic unique-b conventional setting via axis remapping
   assert.equal(inferred.ibrav, "monoclinic_p");
   almostEqual(inferred.celldm[1], c / a, 1e-10);
   almostEqual(inferred.celldm[2], b / a, 1e-10);
+});
+
+// Independent direct-vector definitions from QE's latgen (positive ibrav),
+// compared against spglib's primitive cells in a fixed Cartesian frame.
+const centeredQeCases = [
+  { name: "fcc", sg: 225, a: 4, b: 4, c: 4, source: [[0, 1, 1], [1, 0, 1], [1, 1, 0]], target: [[-1, 0, 1], [0, 1, 1], [-1, 1, 0]] },
+  { name: "bcc", sg: 229, a: 4, b: 4, c: 4, source: [[-1, 1, 1], [1, -1, 1], [1, 1, -1]], target: [[1, 1, 1], [-1, 1, 1], [-1, -1, 1]] },
+  { name: "tI1", sg: 139, a: 4, b: 4, c: 2.5, source: [[-1, 1, 1], [1, -1, 1], [1, 1, -1]], target: [[1, -1, 1], [1, 1, 1], [-1, -1, 1]] },
+  { name: "Sr2RuO4 tI2", sg: 139, a: 3.871, b: 3.871, c: 12.702, source: [[-1, 1, 1], [1, -1, 1], [1, 1, -1]], target: [[1, -1, 1], [1, 1, 1], [-1, -1, 1]] },
+  { name: "oC", sg: 65, a: 3, b: 4, c: 5, source: [[1, -1, 0], [1, 1, 0], [0, 0, 2]], target: [[1, 1, 0], [-1, 1, 0], [0, 0, 2]] },
+  { name: "oI", sg: 71, a: 3, b: 4, c: 5, source: [[-1, 1, 1], [1, -1, 1], [1, 1, -1]], target: [[1, 1, 1], [-1, 1, 1], [-1, -1, 1]] },
+  { name: "oF", sg: 69, a: 3, b: 4, c: 5, source: [[0, 1, 1], [1, 0, 1], [1, 1, 0]], target: [[1, 0, 1], [1, 1, 0], [0, 1, 1]] },
+];
+for (const fixture of centeredQeCases) {
+  test(`${fixture.name}: exported k-points preserve Cartesian positions throughout segments`, () => {
+    const lengths = [fixture.a, fixture.b, fixture.c];
+    const basis = (rows: number[][]) => rows.map(row => row.map((v, i) => v * lengths[i] / 2)) as Matrix3x3;
+    const conventional: Matrix3x3 = [[fixture.a, 0, 0], [0, fixture.b, 0], [0, 0, fixture.c]];
+    const source = basis(fixture.source);
+    const target = basis(fixture.target);
+    const crystal = createCrystalData({ space_group_IT_number: fixture.sg });
+    const symmetry = createSymmetryResult(fixture.sg, conventional, source, [{ symbol: "Si", position: [0, 0, 0] }]);
+    const cell = inferQeBravaisCellFromCif(crystal, symmetry);
+    assert.ok(cell);
+    const sourceReciprocal = reciprocalLatticeVectors(source);
+    const targetReciprocal = reciprocalLatticeVectors(target);
+    const endpoints: Vec3[] = [[0, 0, 0], [0.5, 0.5, -0.5], [0, 0, 0.5], [0.25, 0.25, 0.25], [-0.23, 0.42, 0.71]];
+    for (const endpoint of endpoints) {
+      // Include interior points: equivalent endpoints alone cannot certify a path.
+      for (const t of [0, 0.17, 0.5, 0.83, 1]) {
+        const q = endpoint.map(v => v * t) as Vec3;
+        const expected = fractionalToCartesian(q, sourceReciprocal);
+        const actual = fractionalToCartesian(transformKPointToQeBasis(q, cell), targetReciprocal);
+        actual.forEach((v, i) => assert.ok(Math.abs(v - expected[i]) < 1e-10, `${fixture.name}: ${q}, ${actual} != ${expected}`));
+      }
+    }
+    if (fixture.name === "Sr2RuO4 tI2") {
+      assert.deepEqual(transformKPointToQeBasis([0.5, 0.5, -0.5], cell), [0.5, 0.5, 0.5]);
+    }
+  });
+}
+
+test("explicit spglib cell needs no additional QE basis conversion", () => {
+  const q: Vec3 = [-0.4, 0.2, 0.3];
+  assert.deepEqual(transformKPointToQeBasis(q, null), q);
 });

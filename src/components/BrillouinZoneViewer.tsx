@@ -586,6 +586,9 @@ export function BrillouinZoneViewer({
   onRhombohedralConventionChange,
 }: BrillouinZoneViewerProps) {
   const [path, setPath] = useState<KPathPoint[]>(initialPath);
+  // The final point already has npoints=0, so keep an explicit pending break
+  // until another point is appended. Persisted breaks use npoints=0 as usual.
+  const [pendingBreak, setPendingBreak] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState<HighSymmetryPoint | null>(null);
   const [useOrthographic, setUseOrthographic] = useState(true);
   const [pathRemapNotice, setPathRemapNotice] = useState<string | null>(null);
@@ -804,7 +807,7 @@ export function BrillouinZoneViewer({
       const pointId = getHighSymmetryPointId(point);
 
       // Check if point is already last in path
-      if (path.length > 0 && getPathPointId(path[path.length - 1]) === pointId) {
+      if (!pendingBreak && path.length > 0 && getPathPointId(path[path.length - 1]) === pointId) {
         return;
       }
 
@@ -818,21 +821,37 @@ export function BrillouinZoneViewer({
         npoints: 0,  // New point is last, so no segment after it
       };
 
-      // Update previous last point to have pointsPerSegment (now has a segment after it)
+      // Preserve the previous endpoint's zero count when starting a new segment.
       const newPath = path.map((p, i) =>
-        i === path.length - 1 ? { ...p, npoints: pointsPerSegment } : p
+        i === path.length - 1 ? { ...p, npoints: pendingBreak ? 0 : pointsPerSegment } : p
       );
       newPath.push(newPoint);
 
+      setPendingBreak(false);
       setPath(newPath);
       onPathChange(newPath);
     },
-    [path, pointsPerSegment, onPathChange]
+    [path, pendingBreak, pointsPerSegment, onPathChange]
   );
 
-  // Remove last point from path
+  // Changing the lattice/convention or externally clearing the path cancels
+  // an unfinished break.
+  useEffect(() => {
+    setPendingBreak(false);
+  }, [bzData]);
+  useEffect(() => {
+    if (path.length === 0) setPendingBreak(false);
+  }, [path.length]);
+
+  // Undo the pending separator first; undoing a new segment's first point
+  // restores its separator so the next selection still starts that segment.
   const handleUndo = useCallback(() => {
+    if (pendingBreak) {
+      setPendingBreak(false);
+      return;
+    }
     if (path.length > 0) {
+      setPendingBreak(path.length > 1 && path[path.length - 2].npoints === 0);
       const newPath = path.slice(0, -1).map((point, i, points) =>
         i === points.length - 1 ? { ...point, npoints: 0 } : point
       );
@@ -840,10 +859,11 @@ export function BrillouinZoneViewer({
       onPathChange(newPath);
       setSelectedPoint(null);
     }
-  }, [path, onPathChange]);
+  }, [path, pendingBreak, onPathChange]);
 
   // Clear entire path
   const handleClear = useCallback(() => {
+    setPendingBreak(false);
     setPath([]);
     onPathChange([]);
     setSelectedPoint(null);
@@ -851,6 +871,7 @@ export function BrillouinZoneViewer({
 
   // Use recommended path
   const handleUseRecommended = useCallback(() => {
+    setPendingBreak(false);
     const recommendedPath: KPathPoint[] = [];
 
     for (const [fromLabel, toLabel] of bzData.recommendedPath) {
@@ -911,8 +932,8 @@ export function BrillouinZoneViewer({
       const separator = path[i - 1].npoints === 0 ? " | " : " → ";
       result += `${separator}${formatLabelForDisplay(path[i].label)}`;
     }
-    return result;
-  }, [path]);
+    return pendingBreak ? `${result} |` : result;
+  }, [path, pendingBreak]);
 
   const conventionDescription = isRhombohedral
     ? (effectiveRhombohedralConvention === "bilbao_hex"
@@ -984,6 +1005,15 @@ export function BrillouinZoneViewer({
         <div className="bz-viewer-buttons">
           <button onClick={handleUseRecommended} className="bz-btn recommended">
             Use Recommended Path
+          </button>
+          <button
+            type="button"
+            onClick={() => setPendingBreak(true)}
+            disabled={path.length === 0 || pendingBreak}
+            className="bz-btn"
+            title="Start a disconnected segment with the next selected point"
+          >
+            Insert Break
           </button>
           <button onClick={handleUndo} disabled={path.length === 0} className="bz-btn">
             Undo

@@ -20,7 +20,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
+import { inferQeBravaisCellFromCif, transformKPointToQeBasis } from "../lib/engines/qe/bravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -1241,7 +1241,9 @@ export function BandStructureWizard({
         etot_conv_thr: null,
         verbosity: nscfVerbosity,
       };
-      transformedKPath = mapPathCoordinates(kPath, converters.toSymmetryPrimitiveCoords).map((point) => ({
+      transformedKPath = mapPathCoordinates(kPath, (coords) => roundVec3(
+        transformKPointToQeBasis(converters.toSymmetryPrimitiveCoords(coords), inferredBravais),
+      )).map((point) => ({
         label: point.label,
         coords: point.coords as Vec3,
         npoints: point.npoints,
@@ -1338,6 +1340,7 @@ export function BandStructureWizard({
     const saveParameters = {
       source_scf_id: selectedScf.id,
       k_path: pathString,
+      k_path_points: transformedKPath,
       k_path_sampling_mode: "total",
       total_k_points_target: totalKPoints,
       total_k_points: null,

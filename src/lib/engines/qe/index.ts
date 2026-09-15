@@ -8,6 +8,5 @@ export * from "./phononReady";
 export * from "./progress";
 export * from "./pseudopotentialCutoffs";
 export * from "./pseudopotentialMetadataCache";
-export * from "./scfRunSettingsClipboard";
 export * from "./scfSorting";
 export * from "./wannierQuality";

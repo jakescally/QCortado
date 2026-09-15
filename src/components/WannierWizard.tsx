@@ -22,7 +22,7 @@ import {
   buildConventionalLatticeFromCrystalData,
   SymmetryTransformResult,
 } from "../lib/symmetryTransform";
-import { inferQeBravaisCellFromCif } from "../lib/engines/qe/bravaisInference";
+import { inferQeBravaisCellFromCif, transformKPointToQeBasis } from "../lib/engines/qe/bravaisInference";
 import {
   createPathCoordinateConverters,
   mapPathCoordinates,
@@ -1755,7 +1755,9 @@ export function WannierWizard({
       };
       transformedPath = mapPathCoordinates(
         kPath,
-        converters.toSymmetryPrimitiveCoords,
+        (coords) => roundVec3(transformKPointToQeBasis(
+          converters.toSymmetryPrimitiveCoords(coords), inferredBravais,
+        )),
       ).map((point) => ({
         label: point.label,
         coords: point.coords,
