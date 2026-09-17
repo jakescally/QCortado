@@ -2004,9 +2004,15 @@ fn load_full_calculation_from_disk(
         });
         if let (Some(counts), Some(result)) = (counts, calculation.result.as_mut()) {
             if let Some(data) = result.band_data.as_mut() {
+                if calculation.engine_id == EngineId::Wien2k {
+                    crate::engines::wien2k::repair_saved_path_break_distances(data, &counts);
+                }
                 crate::engines::qe::bands::repair_saved_band_markers(data, &counts);
             }
             if let Some(data) = result.band_dataset.as_mut() {
+                if calculation.engine_id == EngineId::Wien2k {
+                    crate::engines::wien2k::repair_saved_path_break_distances(data, &counts);
+                }
                 crate::engines::qe::bands::repair_saved_band_markers(data, &counts);
             }
         }
@@ -7420,8 +7426,13 @@ mod tests {
             let calc_id = format!("{:?}", engine);
             let calc_dir = project_dir.join("calculations").join(&calc_id);
             fs::create_dir_all(&calc_dir).unwrap();
+            let k_points = if engine == EngineId::Wien2k {
+                serde_json::json!([0, 0.5, 1, 1.8, 2.3, 2.8])
+            } else {
+                serde_json::json!([0, 0.5, 1, 1, 1.5, 2])
+            };
             let data = serde_json::json!({
-                "k_points": [0, 0.5, 1, 1, 1.5, 2],
+                "k_points": k_points,
                 "energies": [[0, 1, 2, 3, 4, 5]],
                 "high_symmetry_points": [
                     {"label":"G","k_distance":0}, {"label":"X","k_distance":1},
@@ -7446,7 +7457,17 @@ mod tests {
             fs::write(calc_dir.join("calc.json"), &original).unwrap();
             let loaded = super::load_full_calculation_from_disk(&project_dir, &calc_id).unwrap().unwrap();
             let corrected = loaded.result.unwrap().band_data.unwrap();
-            assert_eq!(corrected["high_symmetry_points"][3]["k_distance"], 2);
+            let corrected_points = corrected["k_points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(corrected_points, vec![0.0, 0.5, 1.0, 1.0, 1.5, 2.0]);
+            assert_eq!(
+                corrected["high_symmetry_points"][3]["k_distance"].as_f64(),
+                Some(2.0)
+            );
             assert_eq!(corrected["energies"], data["energies"]);
             assert_eq!(fs::read_to_string(calc_dir.join("calc.json")).unwrap(), original);
         }

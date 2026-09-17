@@ -5,6 +5,7 @@ import {
   calculateDisplayedBandGap,
   calculateDisplayedBandGapFromSelectedValenceBand,
   getDefaultBandPlotEnergyRange,
+  mergeCoincidentSymmetryMarkers,
   normalizeBandPlotData,
   resolveBandPlotEnergyReference,
 } from "../../src/components/BandPlot";
@@ -37,6 +38,20 @@ const metallicBands: BandData = {
   ],
   energy_range: [-0.4, 1.0],
 };
+
+test("coincident path-break markers render as one combined symmetry label", () => {
+  assert.deepEqual(
+    mergeCoincidentSymmetryMarkers([
+      { label: "X₁", k_distance: 1.25 },
+      { label: "Z", k_distance: 1.25 },
+      { label: "I₁", k_distance: 2.0 },
+    ]),
+    [
+      { label: "X₁ | Z", k_distance: 1.25 },
+      { label: "I₁", k_distance: 2.0 },
+    ],
+  );
+});
 
 test("VBM zero mode shifts the plot zero while keeping the Fermi line offset", () => {
   const resolved = resolveBandPlotEnergyReference(

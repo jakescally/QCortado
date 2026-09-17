@@ -221,6 +221,8 @@ export function Wien2kScfWizard({
   );
   const outputUnlistenRef = useRef<UnlistenFn | null>(null);
   const ignoredInitializationTaskIdsRef = useRef<Set<string>>(new Set());
+  const hydratedInitializationTaskIdsRef = useRef<Set<string>>(new Set());
+  const handledInitializationTaskIdsRef = useRef<Set<string>>(new Set());
   const reconnectTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
   const activeTask = reconnectTask?.taskType === "wien2k_scf" ? reconnectTask : undefined;
   const candidateInitializationTask = activeInitializationTaskId
@@ -403,11 +405,19 @@ export function Wien2kScfWizard({
     if (!activeInitializationTask) return;
     if (ignoredInitializationTaskIdsRef.current.has(activeInitializationTask.taskId)) return;
     const resume = activeInitializationTask.metadata?.wizardResume;
-    if (resume?.sourceId) setSourceId(String(resume.sourceId));
-    if (resume?.initialization) setInitialization(resume.initialization as Wien2kInitializationSettings);
-    if (resume?.runSettings) setRunSettings(resume.runSettings as Wien2kScfRunSettings);
-    if (resume?.session) setSession(resume.session as Wien2kScfSession);
+    if (!hydratedInitializationTaskIdsRef.current.has(activeInitializationTask.taskId)) {
+      hydratedInitializationTaskIdsRef.current.add(activeInitializationTask.taskId);
+      if (resume?.sourceId) setSourceId(String(resume.sourceId));
+      if (resume?.initialization) setInitialization(resume.initialization as Wien2kInitializationSettings);
+      if (resume?.runSettings) setRunSettings(resume.runSettings as Wien2kScfRunSettings);
+      if (resume?.session) setSession(resume.session as Wien2kScfSession);
+    }
+    if (
+      activeInitializationTask.status !== "running"
+      && handledInitializationTaskIdsRef.current.has(activeInitializationTask.taskId)
+    ) return;
     if (activeInitializationTask.status === "failed" || activeInitializationTask.status === "cancelled") {
+      handledInitializationTaskIdsRef.current.add(activeInitializationTask.taskId);
       setError(activeInitializationTask.error ?? "WIEN2k initialization failed.");
       setLstartSuggestion(null);
       setIsInitializing(false);
@@ -417,11 +427,14 @@ export function Wien2kScfWizard({
     if (activeInitializationTask.status !== "completed") return;
     const initResult = activeInitializationTask.result as (Wien2kInitializationResult & { session?: Wien2kScfSession }) | null;
     if (!initResult) return;
+    handledInitializationTaskIdsRef.current.add(activeInitializationTask.taskId);
+    const completedInitialization = resume?.initialization as Wien2kInitializationSettings | undefined;
+    const completedRunSettings = resume?.runSettings as Wien2kScfRunSettings | undefined;
     setLstartSuggestion(initResult.lstartCoreLeakSuggestion ?? null);
     setSession(initResult.session ?? ((current) => current ? {
       ...current,
       phase: initResult.phase,
-      initialization,
+      initialization: completedInitialization ?? current.initialization,
       artifacts: { ...current.artifacts, ...initResult.artifacts },
     } : current));
     setOutputLines(activeInitializationTask.output);
@@ -430,13 +443,13 @@ export function Wien2kScfWizard({
       radii: false,
       initialization: false,
       magnetism: false,
-      dftu: runSettings.dftU.enabled,
+      dftu: completedRunSettings?.dftU.enabled ?? false,
       scf: true,
       advanced: false,
       hpc: true,
     });
     setIsInitializing(false);
-  }, [activeInitializationTask, initialization, runSettings]);
+  }, [activeInitializationTask]);
 
   useEffect(() => {
     setHpcResources(runSettings.parallelMode === "kpoint"

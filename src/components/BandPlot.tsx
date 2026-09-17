@@ -311,6 +311,25 @@ function formatLabel(label: string): string {
   return greekMap[label] || label;
 }
 
+export function mergeCoincidentSymmetryMarkers(
+  markers: HighSymmetryMarker[],
+  tolerance = 1e-9,
+): HighSymmetryMarker[] {
+  const merged: HighSymmetryMarker[] = [];
+  for (const marker of markers) {
+    const previous = merged[merged.length - 1];
+    if (previous && Math.abs(previous.k_distance - marker.k_distance) <= tolerance) {
+      const labels = previous.label.split("|").map((label) => label.trim());
+      if (!labels.includes(marker.label.trim())) {
+        previous.label = `${previous.label} | ${marker.label}`;
+      }
+    } else {
+      merged.push({ ...marker });
+    }
+  }
+  return merged;
+}
+
 function clamp01(value: number): number {
   if (value <= 0) return 0;
   if (value >= 1) return 1;
@@ -1183,6 +1202,10 @@ export function BandPlot({
 }: BandPlotProps) {
   const { isDark } = useTheme();
   const data = useMemo(() => normalizeBandPlotData(inputData), [inputData]);
+  const displayHighSymmetryPoints = useMemo(
+    () => mergeCoincidentSymmetryMarkers(data.high_symmetry_points),
+    [data.high_symmetry_points],
+  );
   const colors = useMemo(() => isDark
     ? { bg: "#1e1e2e", axis: "#718096", grid: "#4a5568", text: "#e2e8f0", tooltip: "#2d3748", tooltipBorder: "#4a5568", tooltipText: "#e2e8f0" }
     : { bg: "#ffffff", axis: "#333", grid: "#999", text: "#000", tooltip: "#fff", tooltipBorder: "#ccc", tooltipText: "#333" },
@@ -2790,7 +2813,7 @@ export function BandPlot({
               )}
 
               {/* High-symmetry point vertical lines */}
-              {data.high_symmetry_points.map((point, i) => (
+              {displayHighSymmetryPoints.map((point, i) => (
                 <g key={i}>
                   <line
                     x1={scales.xScale(point.k_distance)}

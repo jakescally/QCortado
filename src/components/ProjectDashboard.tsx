@@ -4496,17 +4496,6 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                       {hasCompletedWien2kScf() ? "lapw1 + spaghetti" : "Requires completed WIEN2k SCF"}
                     </span>
                   </button>
-                  <button
-                    className="calc-action-btn"
-                    onClick={handleRunFermiSurface}
-                    disabled={!hasCompletedWien2kScf()}
-                  >
-                    <span className="calc-action-icon">FS</span>
-                    <span className="calc-action-label">WIEN2k Fermi Surface</span>
-                    <span className="calc-action-hint">
-                      {hasCompletedWien2kScf() ? "XCrySDen BXSF" : "Requires completed WIEN2k SCF"}
-                    </span>
-                  </button>
                 </>
               ) : (
                 <>

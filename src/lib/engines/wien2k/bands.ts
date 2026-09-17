@@ -5,6 +5,7 @@ import type { Wien2kSpinMode } from "./types";
 
 export type Wien2kBandsSessionPhase = "staged" | "prepared" | "bands_complete" | "failed";
 export type Wien2kBandsSpinChannel = "none" | "up" | "down";
+export type Wien2kKPathBasis = "wien2k_native" | "standardized_conventional";
 
 export interface Wien2kBandsKPathPoint {
   label: string;
@@ -14,6 +15,7 @@ export interface Wien2kBandsKPathPoint {
 
 export interface Wien2kBandsPrepareSettings {
   kPath: Wien2kBandsKPathPoint[];
+  kPathBasis: Wien2kKPathBasis;
   energyMinEv: number;
   energyMaxEv: number;
   characterAtom: number;
@@ -43,6 +45,12 @@ export interface Wien2kBandsSession {
   remoteInstallRoot: string;
   hpcProfileId: string;
   spinMode: Wien2kSpinMode;
+  kPathInputBasis: Wien2kKPathBasis;
+  standardizedConventionalToWien2k?: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ] | null;
   sourceSpinOrbit: boolean;
   fermiEnergyEv?: number | null;
   phase: Wien2kBandsSessionPhase;

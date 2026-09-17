@@ -2,6 +2,7 @@ import type { CrystalData } from "./types";
 import type { KPathPoint } from "../components/BrillouinZoneViewer";
 import { getLeadingElementSymbol } from "./elements";
 import { createPathCoordinateConverters, resolvePathTransformContext, roundVec3 } from "./kPathTransforms";
+import { multiplyMatrixVector, type SymmetryTransformResult } from "./symmetryTransform";
 
 export type Wien2kBandProjectionKind = "all" | "atom" | "orbital";
 
@@ -110,6 +111,31 @@ export function transformWien2kKPathForKlistBand(
       ? roundVec3(point.coords)
       : converters.toInputConventionalCoords(point.coords),
   }));
+}
+
+/**
+ * Converts viewer primitive-reciprocal coordinates to the standardized
+ * conventional reciprocal basis used by the WIEN2k draft structure. The
+ * backend completes the handoff using SGROUP's accepted basis change.
+ */
+export function transformWien2kKPathForAcceptedStructure(
+  path: KPathPoint[],
+  crystalData: CrystalData,
+  symmetryTransform: SymmetryTransformResult,
+): KPathPoint[] {
+  const context = resolvePathTransformContext(crystalData, symmetryTransform);
+  const converters = createPathCoordinateConverters(context, symmetryTransform);
+
+  return path.map((point) => {
+    const standardizedPrimitive = converters.toSymmetryPrimitiveCoords(point.coords);
+    return {
+      ...point,
+      coords: roundVec3(multiplyMatrixVector(
+        symmetryTransform.primitiveToStandardizedConventionalReciprocal,
+        standardizedPrimitive,
+      )),
+    };
+  });
 }
 
 function normalizeElementLabel(value: string): string {

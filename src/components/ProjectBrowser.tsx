@@ -71,6 +71,7 @@ interface ProjectWithCalculationTypes {
 
 interface FolderWithProjects {
   folder: ProjectFolder;
+  childFolders: ProjectFolder[];
   projects: ProjectWithCalculationTypes[];
   calculationTypeCounts: Record<ProjectCalculationType, number>;
 }
@@ -337,11 +338,12 @@ export function ProjectBrowser({
       }
       return {
         folder,
+        childFolders: folders.filter((candidate) => candidate.parent_id === folder.id),
         projects: folderProjects,
         calculationTypeCounts,
       };
     });
-  }, [projectsWithCalculationTypes, visibleFolders]);
+  }, [projectsWithCalculationTypes, visibleFolders, folders]);
 
   const filteredProjects = useMemo<ProjectWithCalculationTypes[]>(() => {
     if (activeProjectFilters.length === 0) {
@@ -1239,7 +1241,12 @@ export function ProjectBrowser({
                   </span>
                 </div>
                 <div className="folder-grid">
-                  {foldersWithProjects.map(({ folder, projects: folderProjects, calculationTypeCounts }) => (
+                  {foldersWithProjects.map(({
+                    folder,
+                    childFolders,
+                    projects: folderProjects,
+                    calculationTypeCounts,
+                  }) => (
                     <div
                       key={folder.id}
                       className={`folder-card ${activeFolderId === folder.id ? "active" : ""}`}
@@ -1287,10 +1294,16 @@ export function ProjectBrowser({
                         )}
                       </div>
 
-                      {folderProjects.length === 0 ? (
-                        <p className="folder-empty-text">No projects in this folder yet.</p>
+                      {childFolders.length === 0 && folderProjects.length === 0 ? (
+                        <p className="folder-empty-text">No projects or subfolders yet.</p>
                       ) : (
                         <div className="folder-project-list">
+                          {childFolders.map((childFolder) => (
+                            <span key={childFolder.id} className="folder-child-title">
+                              <span aria-hidden="true">▰</span>
+                              {childFolder.name}
+                            </span>
+                          ))}
                           {folderProjects.map(({ project }) => (
                             <span key={project.id} className="folder-project-title">
                               {project.name}

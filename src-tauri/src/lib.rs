@@ -1486,6 +1486,8 @@ mod hpc_headless_recovery_tests {
             remote_install_root: remote_install_root.to_string(),
             hpc_profile_id: "test".to_string(),
             spin_mode: engines::wien2k::Wien2kSpinMode::NonSpinPolarized,
+            k_path_input_basis: engines::wien2k::Wien2kKPathBasis::Wien2kNative,
+            standardized_conventional_to_wien2k: None,
             source_spin_orbit: false,
             fermi_energy_ev: Some(5.0),
             phase: engines::wien2k::Wien2kBandsSessionPhase::Prepared,
@@ -5855,6 +5857,33 @@ async fn wien2k_start_bands_session(
         .and_then(|value| value.as_str())
         .and_then(engines::wien2k::normalize_case_name)
         .ok_or_else(|| "The selected WIEN2k SCF has no valid case name.".to_string())?;
+    let source_structure_calculation_id = source
+        .parameters
+        .get("source_structure_calculation_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The selected WIEN2k SCF has no source structure metadata.".to_string())?;
+    let accepted_struct = projects::read_engine_text_artifact(
+        &app,
+        &project_id,
+        source_structure_calculation_id,
+        &format!("{}.struct", case_name),
+    )?;
+    let outputsgroup = projects::read_engine_text_artifact(
+        &app,
+        &project_id,
+        source_structure_calculation_id,
+        &format!("{}.outputsgroup", case_name),
+    )?;
+    let accepted_summary = engines::wien2k::parse_struct_summary(&accepted_struct)?;
+    let final_over_input_direct = engines::wien2k::parse_sgroup_basis_decomposition(&outputsgroup)?;
+    let (k_path_input_basis, standardized_conventional_to_wien2k) =
+        engines::wien2k::resolve_k_path_handoff(
+            &accepted_summary.lattice_type,
+            accepted_summary.spacegroup_number,
+            final_over_input_direct,
+        )?;
     let source_remote_case_dir = source
         .parameters
         .get("remote_case_dir")
@@ -5924,12 +5953,17 @@ async fn wien2k_start_bands_session(
         remote_install_root,
         hpc_profile_id: profile.id.clone(),
         spin_mode,
+        k_path_input_basis,
+        standardized_conventional_to_wien2k,
         source_spin_orbit,
         fermi_energy_ev,
         phase: engines::wien2k::Wien2kBandsSessionPhase::Staged,
         latest_prepare: None,
         artifacts: std::collections::BTreeMap::new(),
-        transcript: vec!["Converged WIEN2k SCF case copied for bands.".to_string()],
+        transcript: vec![format!(
+            "Converged WIEN2k SCF case copied for bands; k-path handoff basis: {:?}.",
+            k_path_input_basis
+        )],
         started_at: now_iso(),
     };
     state
@@ -5970,8 +6004,24 @@ async fn wien2k_prepare_bands_session_impl(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
+    if settings.k_path_basis != session.k_path_input_basis {
+        return Err(format!(
+            "The k-path basis does not match this WIEN2k session (expected {:?}, received {:?}).",
+            session.k_path_input_basis, settings.k_path_basis
+        ));
+    }
+    let native_k_path = match settings.k_path_basis {
+        engines::wien2k::Wien2kKPathBasis::Wien2kNative => settings.k_path.clone(),
+        engines::wien2k::Wien2kKPathBasis::StandardizedConventional => {
+            let transform = session.standardized_conventional_to_wien2k.ok_or_else(|| {
+                "This WIEN2k session is missing its accepted-structure k-path transform."
+                    .to_string()
+            })?;
+            engines::wien2k::transform_k_path(&settings.k_path, transform)
+        }
+    };
     let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
-    let klist = engines::wien2k::build_klist_band(&session.case_name, &settings.k_path);
+    let klist = engines::wien2k::build_klist_band(&session.case_name, &native_k_path);
     let insp = engines::wien2k::build_insp(&session.case_name, &settings, session.fermi_energy_ev);
     upload_wien2k_text(
         &profile,

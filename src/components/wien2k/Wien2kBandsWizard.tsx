@@ -23,6 +23,7 @@ import {
   applyWien2kBandsTotalKPoints,
   getWien2kBandProjectionOptions,
   getWien2kBandProjectionOptionsFromSites,
+  transformWien2kKPathForAcceptedStructure,
   transformWien2kKPathForKlistBand,
   type Wien2kBandProjectionOption,
   type Wien2kBandProjectionSite,
@@ -33,6 +34,7 @@ import { useViewportScrollLock } from "../../lib/useViewportScrollLock";
 import { formatCalculationSourceLabel, getCalculationName } from "../../lib/calculationNames";
 import { getCalculationTagBadges, getCalcTagClass } from "../../lib/calculationTags";
 import { useTaskContext } from "../../lib/TaskContext";
+import { analyzeCrystalSymmetryStrict } from "../../lib/symmetryTransform";
 
 interface CalculationRun {
   id: string;
@@ -495,13 +497,20 @@ export function Wien2kBandsWizard({
     setError(null);
     try {
       const activeSession = await ensureSession();
-      const klistPath = transformWien2kKPathForKlistBand(kPath, crystalData);
+      const klistPath = activeSession.kPathInputBasis === "standardized_conventional"
+        ? transformWien2kKPathForAcceptedStructure(
+            kPath,
+            crystalData,
+            await analyzeCrystalSymmetryStrict(crystalData),
+          )
+        : transformWien2kKPathForKlistBand(kPath, crystalData);
       const prepareSettings = {
         kPath: klistPath.map((point) => ({
           label: point.label,
           coords: point.coords,
           npoints: point.npoints,
         })),
+        kPathBasis: activeSession.kPathInputBasis,
         energyMinEv,
         energyMaxEv,
         characterAtom,

@@ -7,7 +7,10 @@ import {
   reciprocalLatticeVectors, type Matrix3x3, type Vec3,
 } from "../../src/lib/reciprocalLattice";
 import { createPathCoordinateConverters, resolvePathTransformContext } from "../../src/lib/kPathTransforms";
-import { transformWien2kKPathForKlistBand } from "../../src/lib/wien2kBandsWizard";
+import {
+  transformWien2kKPathForAcceptedStructure,
+  transformWien2kKPathForKlistBand,
+} from "../../src/lib/wien2kBandsWizard";
 import type { CrystalData } from "../../src/lib/types";
 import type { SymmetryTransformResult } from "../../src/lib/symmetryTransform";
 
@@ -136,6 +139,8 @@ test("TaP2 displayed points and QE/WIEN2k exports have identical Cartesian k-vec
   assertInside(data.points, basis);
   const path = data.points.map(p => ({ ...p, npoints: 20 }));
   const wienPath = transformWien2kKPathForKlistBand(path, c);
+  const acceptedStructurePath = transformWien2kKPathForAcceptedStructure(path, c, symmetry);
+  assert.deepEqual(acceptedStructurePath, wienPath);
   for (const backend of [null, symmetry]) {
     const converters = createPathCoordinateConverters(resolvePathTransformContext(c, backend), backend);
     for (const [i, point] of data.points.entries()) {

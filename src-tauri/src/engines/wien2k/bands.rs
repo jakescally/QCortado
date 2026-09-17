@@ -53,10 +53,23 @@ pub struct Wien2kKPathPoint {
     pub npoints: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Wien2kKPathBasis {
+    /// Coordinates are already in the convention consumed by `lapw1 -band`.
+    #[default]
+    Wien2kNative,
+    /// Coordinates are reciprocal coefficients of the standardized conventional
+    /// cell used to create the pre-SGROUP draft structure.
+    StandardizedConventional,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Wien2kBandsPrepareSettings {
     pub k_path: Vec<Wien2kKPathPoint>,
+    #[serde(default)]
+    pub k_path_basis: Wien2kKPathBasis,
     pub energy_min_ev: f64,
     pub energy_max_ev: f64,
     #[serde(default)]
@@ -105,6 +118,10 @@ pub struct Wien2kBandsSession {
     pub hpc_profile_id: String,
     pub spin_mode: Wien2kSpinMode,
     #[serde(default)]
+    pub k_path_input_basis: Wien2kKPathBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standardized_conventional_to_wien2k: Option<[[f64; 3]; 3]>,
+    #[serde(default)]
     pub source_spin_orbit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fermi_energy_ev: Option<f64>,
@@ -116,6 +133,141 @@ pub struct Wien2kBandsSession {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
     pub started_at: String,
+}
+
+/// Parses SGROUP's exact final-direct-basis decomposition. Each returned row
+/// contains one final conventional direct vector in the input standardized
+/// conventional direct basis.
+pub fn parse_sgroup_basis_decomposition(content: &str) -> Result<[[f64; 3]; 3], String> {
+    const MARKER: &str = "Decomposition of new basis vectors over input basis";
+    let mut rows = Vec::with_capacity(3);
+    let mut in_block = false;
+    for line in content.lines() {
+        if !in_block {
+            in_block = line.contains(MARKER);
+            continue;
+        }
+        if line.trim().is_empty() {
+            if rows.is_empty() {
+                continue;
+            }
+            break;
+        }
+        let values = line
+            .split_whitespace()
+            .take(3)
+            .map(|token| token.parse::<f64>())
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(values) = values else {
+            if rows.is_empty() {
+                continue;
+            }
+            break;
+        };
+        if values.len() != 3 {
+            continue;
+        }
+        rows.push([values[0], values[1], values[2]]);
+        if rows.len() == 3 {
+            break;
+        }
+    }
+    rows.try_into().map_err(|_| {
+        "SGROUP output does not contain a complete three-vector basis decomposition.".to_string()
+    })
+}
+
+fn multiply_matrix3(left: [[f64; 3]; 3], right: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut result = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for column in 0..3 {
+            result[row][column] = (0..3)
+                .map(|index| left[row][index] * right[index][column])
+                .sum();
+        }
+    }
+    result
+}
+
+fn wien2k_primitive_direct_coefficients(lattice_type: &str) -> Result<[[f64; 3]; 3], String> {
+    match lattice_type.trim().to_ascii_uppercase().as_str() {
+        "P" => Ok([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        "CXZ" => Ok([
+            [0.5, 0.0, -0.5],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.0, 0.5],
+        ]),
+        "CXY" => Ok([
+            [0.5, -0.5, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.0, 1.0],
+        ]),
+        "CYZ" => Ok([
+            [1.0, 0.0, 0.0],
+            [0.0, -0.5, 0.5],
+            [0.0, 0.5, 0.5],
+        ]),
+        other => Err(format!(
+            "Unsupported WIEN2k monoclinic/triclinic lattice type `{other}` for band-path conversion."
+        )),
+    }
+}
+
+/// Resolves the handoff contract from the accepted WIEN2k structure. For
+/// orthogonal systems WIEN2k consumes final conventional Cartesian-scaled
+/// coefficients. For monoclinic/triclinic systems it consumes coefficients in
+/// the WIEN primitive reciprocal basis, so the primitive direct transformation
+/// is composed with SGROUP's final-vs-input transformation.
+pub fn resolve_k_path_handoff(
+    lattice_type: &str,
+    spacegroup_number: Option<i32>,
+    final_over_input_direct: [[f64; 3]; 3],
+) -> Result<(Wien2kKPathBasis, Option<[[f64; 3]; 3]>), String> {
+    let lattice = lattice_type.trim().to_ascii_uppercase();
+    if lattice == "H" || lattice == "R" {
+        // These settings use additional WIEN-specific axis conventions. Keep
+        // their already-established native handoff until that convention is
+        // independently verified.
+        return Ok((Wien2kKPathBasis::Wien2kNative, None));
+    }
+
+    let crystal_system_uses_internal =
+        spacegroup_number.is_some_and(|number| (1..=15).contains(&number));
+    let transform = if crystal_system_uses_internal {
+        multiply_matrix3(
+            wien2k_primitive_direct_coefficients(&lattice)?,
+            final_over_input_direct,
+        )
+    } else {
+        final_over_input_direct
+    };
+    Ok((Wien2kKPathBasis::StandardizedConventional, Some(transform)))
+}
+
+pub fn transform_k_path(
+    path: &[Wien2kKPathPoint],
+    transform: [[f64; 3]; 3],
+) -> Vec<Wien2kKPathPoint> {
+    path.iter()
+        .map(|point| {
+            let coords = [
+                transform[0][0] * point.coords[0]
+                    + transform[0][1] * point.coords[1]
+                    + transform[0][2] * point.coords[2],
+                transform[1][0] * point.coords[0]
+                    + transform[1][1] * point.coords[1]
+                    + transform[1][2] * point.coords[2],
+                transform[2][0] * point.coords[0]
+                    + transform[2][1] * point.coords[1]
+                    + transform[2][2] * point.coords[2],
+            ];
+            Wien2kKPathPoint {
+                label: point.label.clone(),
+                coords,
+                npoints: point.npoints,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +583,7 @@ pub fn add_symmetry_markers(data: &mut BandData, path: &[Wien2kKPathPoint]) {
     if path.is_empty() || data.k_points.is_empty() {
         return;
     }
+    collapse_path_break_distances(&mut data.k_points, path);
     let mut markers = Vec::new();
     let mut k_index = 0_usize;
     for (index, point) in path.iter().enumerate() {
@@ -449,6 +602,69 @@ pub fn add_symmetry_markers(data: &mut BandData, path: &[Wien2kKPathPoint]) {
         }
     }
     data.high_symmetry_points = markers;
+}
+
+fn collapse_path_break_distances(k_points: &mut [f64], path: &[Wien2kKPathPoint]) -> bool {
+    if path.len() < 2 || k_points.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    let mut current_index = 0_usize;
+    for point in path.iter().take(path.len() - 1) {
+        let next_index = current_index.saturating_add(point.npoints.max(1) as usize);
+        if next_index >= k_points.len() {
+            break;
+        }
+        if point.npoints == 0 {
+            let gap = k_points[next_index] - k_points[current_index];
+            if gap.abs() > 1e-12 {
+                for value in &mut k_points[next_index..] {
+                    *value = ((*value - gap) * 1e12).round() / 1e12;
+                }
+                changed = true;
+            }
+        }
+        current_index = next_index;
+    }
+    changed
+}
+
+/// Repairs saved WIEN2k band plots without touching energies or samples. WIEN2k
+/// assigns a small positive x increment between the two endpoints of a path
+/// break; plot conventions require those endpoint samples to share one x value.
+pub fn repair_saved_path_break_distances(data: &mut serde_json::Value, counts: &[u32]) -> bool {
+    let x_key = if data.get("k_points").is_some() {
+        "k_points"
+    } else if data.get("x").is_some() {
+        "x"
+    } else {
+        return false;
+    };
+    let Some(values) = data.get(x_key).and_then(|value| value.as_array()) else {
+        return false;
+    };
+    let Some(mut k_points) = values
+        .iter()
+        .map(|value| value.as_f64())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let path = counts
+        .iter()
+        .enumerate()
+        .map(|(index, npoints)| Wien2kKPathPoint {
+            label: index.to_string(),
+            coords: [0.0; 3],
+            npoints: *npoints,
+        })
+        .collect::<Vec<_>>();
+    if !collapse_path_break_distances(&mut k_points, &path) {
+        return false;
+    }
+    data[x_key] =
+        serde_json::Value::Array(k_points.into_iter().map(serde_json::Value::from).collect());
+    true
 }
 
 pub fn band_dataset_json(
@@ -582,6 +798,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tap2_sgroup_handoff_maps_standardized_z_to_final_cxz_internal_basis() {
+        let outputsgroup = "\
+===== Decomposition of new basis vectors over input basis =====\n\
+-1.000000   0.000000  0.000000  <--- 1\n\
+ 1.000000   0.000000  1.000000  <--- 2\n\
+ 0.000000   1.000000  0.000000  <--- 3\n";
+        let decomposition =
+            parse_sgroup_basis_decomposition(outputsgroup).expect("TaP2 SGROUP basis");
+        assert_eq!(
+            decomposition,
+            [[-1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+        );
+
+        let (basis, transform) =
+            resolve_k_path_handoff("CXZ", Some(12), decomposition).expect("CXZ handoff");
+        assert_eq!(basis, Wien2kKPathBasis::StandardizedConventional);
+        assert_eq!(
+            transform,
+            Some([[-0.5, -0.5, 0.0], [1.0, 0.0, 1.0], [-0.5, 0.5, 0.0],])
+        );
+
+        let transformed = transform_k_path(
+            &[Wien2kKPathPoint {
+                label: "Z".to_string(),
+                coords: [0.0, 0.0, -0.5],
+                npoints: 20,
+            }],
+            transform.expect("transform"),
+        );
+        assert_eq!(transformed[0].coords, [0.0, -0.5, 0.0]);
+        let klist = build_klist_band("P2Ta1", &transformed);
+        assert_eq!(
+            klist.lines().next(),
+            Some("Z             0-5000    010000  2.0")
+        );
+    }
+
+    #[test]
+    fn orthogonal_handoff_uses_final_conventional_basis_not_centered_primitive_basis() {
+        let decomposition = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let (basis, transform) =
+            resolve_k_path_handoff("CXY", Some(65), decomposition).expect("CXY handoff");
+
+        assert_eq!(basis, Wien2kKPathBasis::StandardizedConventional);
+        assert_eq!(transform, Some(decomposition));
+    }
+
+    #[test]
+    fn hexagonal_and_rhombohedral_handoffs_remain_native_until_verified() {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        for lattice in ["H", "R"] {
+            assert_eq!(
+                resolve_k_path_handoff(lattice, Some(166), identity).expect("native handoff"),
+                (Wien2kKPathBasis::Wien2kNative, None)
+            );
+        }
+    }
+
+    #[test]
+    fn path_break_endpoints_share_one_plot_position_without_dropping_samples() {
+        let path = vec![
+            Wien2kKPathPoint {
+                label: "A".to_string(),
+                coords: [0.0; 3],
+                npoints: 2,
+            },
+            Wien2kKPathPoint {
+                label: "B".to_string(),
+                coords: [0.0; 3],
+                npoints: 0,
+            },
+            Wien2kKPathPoint {
+                label: "C".to_string(),
+                coords: [0.0; 3],
+                npoints: 2,
+            },
+            Wien2kKPathPoint {
+                label: "D".to_string(),
+                coords: [0.0; 3],
+                npoints: 0,
+            },
+        ];
+        let mut data = parse_spaghetti_xy("0.0 -1\n0.5 -1\n1.0 -1\n1.8 -1\n2.3 -1\n2.8 -1\n", 0.0)
+            .expect("band data");
+
+        add_symmetry_markers(&mut data, &path);
+
+        assert_eq!(data.n_kpoints, 6);
+        assert_eq!(data.energies[0], vec![-1.0; 6]);
+        assert_eq!(data.k_points, vec![0.0, 0.5, 1.0, 1.0, 1.5, 2.0]);
+        assert_eq!(
+            data.high_symmetry_points
+                .iter()
+                .map(|marker| (marker.label.as_str(), marker.k_distance))
+                .collect::<Vec<_>>(),
+            vec![("A", 0.0), ("B", 1.0), ("C", 1.0), ("D", 2.0)]
+        );
+    }
+
+    #[test]
+    fn saved_legacy_and_dataset_paths_collapse_wien2k_break_gaps() {
+        for (mut data, x_key) in [
+            (
+                serde_json::json!({ "k_points": [0.0, 0.5, 1.0, 1.8, 2.3, 2.8] }),
+                "k_points",
+            ),
+            (
+                serde_json::json!({ "x": [0.0, 0.5, 1.0, 1.8, 2.3, 2.8] }),
+                "x",
+            ),
+        ] {
+            assert!(repair_saved_path_break_distances(&mut data, &[2, 0, 2, 0]));
+            assert_eq!(
+                data[x_key],
+                serde_json::json!([0.0, 0.5, 1.0, 1.0, 1.5, 2.0])
+            );
+            assert!(!repair_saved_path_break_distances(&mut data, &[2, 0, 2, 0]));
+        }
+    }
+
+    #[test]
     fn symmetry_markers_match_expanded_tap2_and_nbp2_endpoints() {
         for fixture in [
             include_str!("../../../../tests/kPathTransforms/fixtures/TaP2-path.json"),
@@ -657,6 +994,7 @@ mod tests {
                     npoints: 0,
                 },
             ],
+            k_path_basis: Wien2kKPathBasis::Wien2kNative,
             energy_min_ev: -8.0,
             energy_max_ev: 6.0,
             character_atom: 0,
@@ -696,6 +1034,7 @@ mod tests {
                     npoints: 0,
                 },
             ],
+            k_path_basis: Wien2kKPathBasis::Wien2kNative,
             energy_min_ev: -8.0,
             energy_max_ev: 6.0,
             character_atom: 1,
@@ -787,6 +1126,7 @@ mod tests {
                     npoints: 0,
                 },
             ],
+            k_path_basis: Wien2kKPathBasis::Wien2kNative,
             energy_min_ev: -8.0,
             energy_max_ev: 6.0,
             character_atom: 0,

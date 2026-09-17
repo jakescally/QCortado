@@ -3193,6 +3193,29 @@ html[data-theme="dark"] {
   white-space: nowrap;
 }
 
+.folder-child-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid #c4b5fd;
+  border-radius: 999px;
+  background: #f5f3ff;
+  color: #6b46c1;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.22rem 0.58rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-child-title > span {
+  color: #8b5cf6;
+  font-size: 0.65rem;
+  flex: 0 0 auto;
+}
+
 .folder-browse-bar {
   display: flex;
   align-items: center;
@@ -4032,6 +4055,16 @@ html[data-theme="dark"] {
     background: #2d3748;
     border-color: #4a5568;
     color: #90cdf4;
+  }
+
+  .folder-child-title {
+    background: #352f55;
+    border-color: #6d5cae;
+    color: #d6bcfa;
+  }
+
+  .folder-child-title > span {
+    color: #b794f4;
   }
 
   .folder-browse-bar {

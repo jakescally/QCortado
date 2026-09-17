@@ -204,6 +204,19 @@ export async function analyzeCrystalSymmetry(
   return pending;
 }
 
+/** Runs exactly one symmetry analysis at the requested tolerance. Use this
+ * when coordinates must match a previously generated standardized artifact,
+ * rather than selecting a relaxed result for display convenience. */
+export function analyzeCrystalSymmetryStrict(
+  crystalData: CrystalData,
+  symprec = 1e-5,
+  angleTolerance = -1,
+): Promise<SymmetryTransformResult> {
+  return invoke<SymmetryTransformResult>("analyze_structure_symmetry", {
+    input: buildSymmetryRequestFromCrystalData(crystalData, symprec, angleTolerance),
+  });
+}
+
 export function multiplyMatrixVector(matrix: Matrix3x3, vector: Vec3): Vec3 {
   return [
     matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
