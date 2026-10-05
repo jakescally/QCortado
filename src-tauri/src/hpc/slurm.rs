@@ -36,6 +36,15 @@ pub fn merge_resources(
     };
 
     if let Some(request) = override_resources {
+        base.qe_kpoint_pools = request.qe_kpoint_pools;
+        base.qe_qpoint_images = request.qe_qpoint_images;
+        if request.qe_parallel_mode.as_deref() == Some("auto") {
+            // Auto owns placement; None intentionally clears a profile's
+            // per-node limit when the allocation is uneven across nodes.
+            base.ntasks_per_node = request.ntasks_per_node;
+        }
+        base.qe_parallel_mode = request.qe_parallel_mode;
+        base.qe_total_cpus = request.qe_total_cpus;
         base.resource_type = request.resource_type;
         if request.partition.is_some() {
             base.partition = request.partition;
@@ -49,8 +58,17 @@ pub fn merge_resources(
         if request.ntasks.is_some() {
             base.ntasks = request.ntasks;
         }
+        if request.ntasks_per_node.is_some() {
+            base.ntasks_per_node = request.ntasks_per_node;
+        }
         if request.cpus_per_task.is_some() {
             base.cpus_per_task = request.cpus_per_task;
+        }
+        if request.contiguous.is_some() {
+            base.contiguous = request.contiguous;
+        }
+        if request.pencil_decomposition.is_some() {
+            base.pencil_decomposition = request.pencil_decomposition;
         }
         if request.memory_gb.is_some() {
             base.memory_gb = request.memory_gb;
@@ -111,6 +129,7 @@ pub fn build_slurm_script(
 ) -> SlurmScript {
     let resources = merge_resources(profile, override_resources);
     let mut validation = validate_andromeda_resources(&resources);
+    let point_commands = super::qe_parallel::commands(job_name, script_body_commands, &resources, &mut validation);
     if !profile.supports_resource_type(resources.resource_type) {
         let requested = match resources.resource_type {
             ResourceType::Cpu => "CPU",
@@ -146,8 +165,17 @@ pub fn build_slurm_script(
     if let Some(ntasks) = resources.ntasks {
         header.push(format!("#SBATCH --ntasks={}", ntasks.max(1)));
     }
+    if let Some(ntasks_per_node) = resources.ntasks_per_node {
+        header.push(format!(
+            "#SBATCH --ntasks-per-node={}",
+            ntasks_per_node.max(1)
+        ));
+    }
     if let Some(cpus_per_task) = resources.cpus_per_task {
         header.push(format!("#SBATCH --cpus-per-task={}", cpus_per_task.max(1)));
+    }
+    if resources.contiguous == Some(true) {
+        header.push("#SBATCH --contiguous".to_string());
     }
     if let Some(memory_gb) = resources.memory_gb {
         header.push(format!("#SBATCH --mem={}G", memory_gb.max(1)));
@@ -201,7 +229,12 @@ pub fn build_slurm_script(
 
     script_lines.push(String::new());
     script_lines.push("# Calculation commands".to_string());
-    for cmd in script_body_commands {
+    if resources.qe_parallel_mode.as_deref() == Some("auto") {
+        script_lines.push(format!("export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\"", resources.cpus_per_task.unwrap_or(1)));
+        script_lines.push("export OMP_PLACES=\"${OMP_PLACES:-cores}\"".into());
+        script_lines.push("export OMP_PROC_BIND=\"${OMP_PROC_BIND:-close}\"".into());
+    }
+    for cmd in &point_commands {
         script_lines.push(cmd.to_string());
     }
 
@@ -209,12 +242,21 @@ pub fn build_slurm_script(
     script_lines.push("echo \"[QCortado] Job finished on $(date -u)\"".to_string());
 
     let preview = format!(
-        "sbatch --partition={} --time={} --nodes={} --ntasks={} --cpus-per-task={}{} run.sbatch",
+        "sbatch --partition={} --time={} --nodes={} --ntasks={}{} --cpus-per-task={}{}{} run.sbatch",
         resources.partition.as_deref().unwrap_or("short"),
         resources.walltime.as_deref().unwrap_or("02:00:00"),
         resources.nodes.unwrap_or(1),
         resources.ntasks.unwrap_or(1),
+        resources
+            .ntasks_per_node
+            .map(|value| format!(" --ntasks-per-node={}", value.max(1)))
+            .unwrap_or_default(),
         resources.cpus_per_task.unwrap_or(1),
+        if resources.contiguous == Some(true) {
+            " --contiguous"
+        } else {
+            ""
+        },
         if matches!(resources.resource_type, ResourceType::Gpu) {
             format!(" --gres=gpu:{}", resources.gpus.unwrap_or(1))
         } else {
@@ -227,6 +269,104 @@ pub fn build_slurm_script(
         sbatch_preview: preview,
         effective_resources: resources,
         validation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_profile() -> HpcProfile {
+        serde_json::from_value(serde_json::json!({
+            "id": "profile",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado",
+            "remote_project_root": "/project/qcortado"
+        }))
+        .expect("profile")
+    }
+
+    #[test]
+    fn contiguous_request_can_be_enabled_and_overridden() {
+        let mut profile = test_profile();
+        let command = ["echo ready".to_string()];
+
+        let requested = SlurmResourceRequest {
+            contiguous: Some(true),
+            ..super::super::profile::default_cpu_resources()
+        };
+        let enabled = build_slurm_script(&profile, "test", &command, Some(requested));
+        assert!(enabled.script.contains("#SBATCH --contiguous"));
+        assert!(enabled.sbatch_preview.contains("--contiguous"));
+
+        profile.default_cpu_resources.contiguous = Some(true);
+        let inherited = build_slurm_script(&profile, "test", &command, None);
+        assert!(inherited.script.contains("#SBATCH --contiguous"));
+
+        let requested = SlurmResourceRequest {
+            contiguous: Some(false),
+            ..SlurmResourceRequest::default()
+        };
+        let disabled = build_slurm_script(&profile, "test", &command, Some(requested));
+        assert!(!disabled.script.contains("#SBATCH --contiguous"));
+        assert!(!disabled.sbatch_preview.contains("--contiguous"));
+    }
+
+    #[test]
+    fn tasks_per_node_is_written_to_script_and_preview() {
+        let profile = test_profile();
+        let command = ["echo ready".to_string()];
+        let requested = SlurmResourceRequest {
+            ntasks: Some(8),
+            ntasks_per_node: Some(4),
+            ..super::super::profile::default_cpu_resources()
+        };
+
+        let script = build_slurm_script(&profile, "test", &command, Some(requested));
+        assert!(script.script.contains("#SBATCH --ntasks-per-node=4"));
+        assert!(script.sbatch_preview.contains("--ntasks-per-node=4"));
+    }
+
+    #[test]
+    fn auto_allocation_preserves_cpu_budget_and_clears_inherited_placement() {
+        let mut profile = test_profile();
+        profile.default_cpu_resources.ntasks_per_node = Some(4);
+        let requested = SlurmResourceRequest {
+            nodes: Some(3),
+            ntasks: Some(25),
+            cpus_per_task: Some(2),
+            ntasks_per_node: None,
+            qe_parallel_mode: Some("auto".into()),
+            qe_total_cpus: Some(50),
+            ..super::super::profile::default_cpu_resources()
+        };
+        let script = build_slurm_script(&profile, "test", &["echo ready".into()], Some(requested));
+        assert!(script.validation.errors.is_empty(), "{:?}", script.validation.errors);
+        assert!(script.script.contains("#SBATCH --nodes=3"));
+        assert!(script.script.contains("#SBATCH --ntasks=25"));
+        assert!(script.script.contains("#SBATCH --cpus-per-task=2"));
+        assert!(!script.script.contains("--ntasks-per-node"));
+        assert!(script.script.contains("export OMP_NUM_THREADS=\"${SLURM_CPUS_PER_TASK:-2}\""));
+        assert!(script.script.contains("export OMP_PLACES=\"${OMP_PLACES:-cores}\""));
+        assert!(script.script.contains("export OMP_PROC_BIND=\"${OMP_PROC_BIND:-close}\""));
+        assert_eq!(script.effective_resources.qe_total_cpus, Some(50));
+    }
+
+    #[test]
+    fn auto_allocation_rejects_stale_cpu_budget() {
+        let requested = SlurmResourceRequest {
+            ntasks: Some(8),
+            cpus_per_task: Some(1),
+            qe_parallel_mode: Some("auto".into()),
+            qe_total_cpus: Some(32),
+            ..super::super::profile::default_cpu_resources()
+        };
+        let script = build_slurm_script(&test_profile(), "test", &["echo ready".into()], Some(requested));
+        assert!(script.validation.errors.iter().any(|error| error.contains("Auto CPU allocation is incomplete")));
     }
 }
 

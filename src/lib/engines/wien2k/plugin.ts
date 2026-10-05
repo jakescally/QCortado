@@ -73,7 +73,7 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
     label: "WIEN2k",
     status: "reserved",
     executionModes: ["remote"],
-    calculationKinds: ["engine_setup", "scf", "soc", "bands", "fermi_surface", "dos"],
+    calculationKinds: ["engine_setup", "scf", "structure_optimization", "soc", "bands", "fermi_surface", "dos"],
   },
   hpc: {
     supportsLocal: false,
@@ -115,6 +115,24 @@ export const WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
         requirement("cif_content", "CIF content"),
         requirement("engine_runtime_profile", "Wien2k remote runtime profile"),
         requirement("engine_case_state", "Wien2k remote case state", false),
+      ],
+      produces: ["scf_summary", "native_artifacts"],
+    },
+    {
+      kind: "structure_optimization",
+      label: "Wien2k relaxation",
+      routeKey: "wien2k.relax",
+      executionModes: ["remote"],
+      sharedPanels: structurePanels,
+      enginePanels: [
+        enginePanel("wien2k-relax-case", "Structure source", "wien2k.relax.case", 30, true, "Reviewed or previously relaxed case.struct used as the starting geometry."),
+        enginePanel("wien2k-relax-basis", "Basis and k mesh", "wien2k.relax.basis", 40, true, "WIEN2k initialization controls for the relaxation case."),
+        enginePanel("wien2k-relax-cycle", "Internal positions", "wien2k.relax.cycle", 50, true, "Symmetry-preserving internal-coordinate relaxation with run_lapw/runsp_lapw -min and force convergence."),
+      ],
+      inputRequirements: [
+        requirement("crystal_structure", "Crystal structure"),
+        requirement("engine_runtime_profile", "Wien2k remote runtime profile"),
+        requirement("engine_case_state", "Wien2k structure source"),
       ],
       produces: ["scf_summary", "native_artifacts"],
     },
@@ -200,9 +218,9 @@ export const WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST: EnginePluginManifest = {
   descriptor: {
     ...WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor,
     status: "configured",
-    calculationKinds: ["engine_setup", "scf", "soc", "bands", "fermi_surface"],
+    calculationKinds: ["engine_setup", "scf", "structure_optimization", "soc", "bands", "fermi_surface"],
   },
   workflows: WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.workflows.filter(
-    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "soc" || workflow.kind === "bands" || workflow.kind === "fermi_surface",
+    (workflow) => workflow.kind === "engine_setup" || workflow.kind === "scf" || workflow.kind === "structure_optimization" || workflow.kind === "soc" || workflow.kind === "bands" || workflow.kind === "fermi_surface",
   ),
 };

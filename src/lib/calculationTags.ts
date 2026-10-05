@@ -227,7 +227,9 @@ export function buildCalculationTagList(
 
   if (calc.calc_type === "optimization" || calc.calc_type === "relax" || calc.calc_type === "vcrelax") {
     pushRawTag(tags, "geometry");
-    pushRawTag(tags, params.optimization_mode === "relax" || calc.calc_type === "relax" ? "Relax" : "VC-Relax");
+    pushRawTag(tags, params.optimization_mode === "internal_positions"
+      ? "Internal positions"
+      : params.optimization_mode === "relax" || calc.calc_type === "relax" ? "Relax" : "VC-Relax");
     pushRawTag(tags, formatGrid(params.kgrid));
     const forceConv = formatThreshold(params.forc_conv_thr);
     if (forceConv) pushRawTag(tags, `F ${forceConv}`);

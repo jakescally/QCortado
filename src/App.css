@@ -13455,6 +13455,88 @@ html[data-theme="dark"] .option-section {
   font-size: 1rem;
 }
 
+.option-section.qe-point-parallelization {
+  padding: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.qe-point-parallelization h4 {
+  margin-bottom: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.qe-point-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.qe-point-fields .qe-point-label {
+  white-space: nowrap;
+}
+
+.qe-point-label > .tooltip-container,
+.qe-point-summary > .tooltip-container {
+  margin-left: 0;
+  flex-shrink: 0;
+}
+
+.qe-point-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0.25rem 0;
+}
+
+.qe-point-fields {
+  margin-top: 0.4rem;
+  gap: 0.45rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.qe-point-balanced {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  padding-top: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.qe-point-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.qe-point-counts .qe-point-count {
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  border-radius: 5px;
+}
+
+.qe-point-count[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 1px currentColor;
+  font-weight: 600;
+}
+
+.qe-auto-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.8rem;
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.qe-point-parallelization > p:last-child {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+}
+
 html[data-theme="dark"] .option-section h4 {
   color: #cdd6f4;
 }
@@ -14802,6 +14884,28 @@ html[data-theme="dark"] .phonon-plot-wrapper {
   color: #2d3748;
 }
 
+.hpc-grid label.hpc-checkbox-label,
+.hpc-advanced-grid label.hpc-checkbox-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.hpc-grid .hpc-checkbox-label input[type="checkbox"],
+.hpc-advanced-grid .hpc-checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.hpc-checkbox-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .hpc-grid input,
 .hpc-grid select,
 .hpc-advanced-grid input,
@@ -15713,6 +15817,21 @@ html[data-theme="dark"] .hpc-activity-log {
   padding: 0.65rem 0.75rem;
 }
 
+.backup-entry-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.backup-entry-row .dialog-btn,
+.storage-manager-header > .dialog-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.backup-summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .storage-entry-row.selected {
   border-color: #90cdf4;
   box-shadow: 0 0 0 1px rgba(66, 153, 225, 0.15);
@@ -16160,4 +16279,10 @@ html[data-theme="dark"] .task-status-pill-shell .task-status-count {
   .app-dynamic-header.wizard-header .step-indicator {
     max-width: 42vw;
   }
+}
+.calc-remote-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
 }

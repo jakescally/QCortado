@@ -39,6 +39,8 @@ import {
   listRemotePseudopotentials,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
+import { usePointMeshEstimate, usePointStructure } from "../lib/qePointEstimate";
+import { PointEstimateSummary } from "./QePointParallelization";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import type { EngineId } from "../lib/engines/types";
@@ -263,6 +265,10 @@ export function ElectronicDOSWizard({
   }, []);
 
   const [dosKGrid, setDosKGrid] = useState<[number, number, number]>(() => storedWizardSettings?.dosKGrid ?? [16, 16, 16]);
+  const estimateScfParams = selectedScf?.parameters ?? {};
+  const pointStructure = usePointStructure(crystalData, null, sourceScfUsesPrimitiveCell(estimateScfParams), resolveSavedScfStructure(estimateScfParams));
+  const kPointEstimate = usePointMeshEstimate(pointStructure, selectedScf ? dosKGrid : null, [0, 0, 0],
+    Boolean(estimateScfParams.noncolin || estimateScfParams.lspinorb || estimateScfParams.nspin === 4));
   const [deltaEInput, setDeltaEInput] = useState(() => storedWizardSettings?.deltaEInput ?? "0.02");
   const [degaussInput, setDegaussInput] = useState(() => storedWizardSettings?.degaussInput ?? "0.02");
   const [eminInput, setEminInput] = useState(() => storedWizardSettings?.eminInput ?? "");
@@ -1006,6 +1012,7 @@ export function ElectronicDOSWizard({
             NSCF Sampling Grid
             <InfoTooltip text="Dense k-point sampling controls DOS quality. Denser grids reduce numerical noise and improve peak positions, but increase NSCF runtime and memory use." />
           </h4>
+          <PointEstimateSummary estimate={kPointEstimate} label="k-points" />
           <div className="qgrid-inputs">
             <input
               type="number"
@@ -1132,6 +1139,7 @@ export function ElectronicDOSWizard({
           <HpcRunSettings
             profileId={activeHpcProfile?.id ?? null}
             profileName={activeHpcProfile?.name ?? "Andromeda"}
+            pointEstimates={{ k: kPointEstimate }}
             taskKind="dos"
             commandLines={hpcCommandLines}
             resources={hpcResources}

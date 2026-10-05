@@ -917,6 +917,10 @@ pub struct PhononHighSymmetryMarker {
 pub struct PhononDispersion {
     /// Q-point distances along the path
     pub q_points: Vec<f64>,
+    /// Sample indices at which a disconnected path segment begins.
+    /// Also records that the matdyn distance jumps have been removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_break_indices: Vec<usize>,
     /// Frequencies for each mode at each q-point: [mode_index][q_index]
     pub frequencies: Vec<Vec<f64>>,
     /// High-symmetry point markers

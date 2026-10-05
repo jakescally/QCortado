@@ -170,6 +170,9 @@ export function validateWien2kScfRunSettings(settings: Wien2kScfRunSettings): st
     && (!Number.isFinite(settings.forceConvergenceMryBohr) || settings.forceConvergenceMryBohr <= 0)) {
     return "Force convergence must be positive when set.";
   }
+  if (settings.forceMinimization && settings.forceConvergenceMryBohr == null) {
+    return "WIEN2k relaxation requires a positive force-convergence threshold.";
+  }
   if (settings.dftU.enabled) {
     if (settings.spinMode !== "spin_polarized") return "WIEN2k DFT+U requires spin-polarized SCF.";
     if (!["amf", "sic", "hmf"].includes(settings.dftU.doubleCounting)) return "DFT+U double-counting mode is not supported.";

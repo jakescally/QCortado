@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
+import { applyQeAutoPlan, planQeAutoAllocation } from "../lib/qeAutoParallelization";
 import { normalizeCliDashText, previewSlurmScript } from "../lib/hpcConfig";
 import { HpcResourceMode, SlurmResourceRequest } from "../lib/types";
+import { InfoTooltip } from "./InfoTooltip";
+import type { QePointEstimates } from "../lib/qePointEstimate";
+import { QePointParallelization } from "./QePointParallelization";
 
 interface HpcRunSettingsProps {
   profileId: string | null;
   profileName?: string | null;
   taskKind: string;
+  pointEstimates?: QePointEstimates;
   commandLines: string[];
   resources: SlurmResourceRequest;
   resourceMode?: HpcResourceMode | null;
@@ -50,6 +55,7 @@ export function HpcRunSettings({
   profileId,
   profileName,
   taskKind,
+  pointEstimates,
   commandLines,
   resources,
   resourceMode = "both",
@@ -63,7 +69,7 @@ export function HpcRunSettings({
   nodesDisabled = false,
   tasksDisabled = false,
 }: HpcRunSettingsProps) {
-  const [showAdvanced, setShowAdvanced] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [previewState, setPreviewState] = useState<ScriptPreviewState>({
     script: "",
     sbatch: "",
@@ -93,6 +99,49 @@ export function HpcRunSettings({
     || (lockResourceTypeWhenSingleMode && (!allowCpu || !allowGpu));
 
   const commandLinesKey = useMemo(() => commandLines.join("\n"), [commandLines]);
+  const pointParallelizationAvailable = ["scf", "bands", "dos", "phonon"].includes(taskKind) && /(?:pw|ph)\.x/.test(commandLinesKey);
+  const autoAvailable = pointParallelizationAvailable && resources.resource_type === "cpu" && !nodesDisabled && !tasksDisabled;
+  const defaultParallelMode = (resources.qe_kpoint_pools ?? 1) > 1 || (resources.qe_qpoint_images ?? 1) > 1 || (resources.cpus_per_task ?? 1) > 1 ? "manual" : "auto";
+  const autoActive = autoAvailable && (resources.qe_parallel_mode ?? defaultParallelMode) === "auto";
+  const totalCpus = resources.qe_total_cpus ?? taskCount * Math.max(1, resources.cpus_per_task ?? 1);
+  const autoState = useMemo(() => {
+    if (!autoActive) return { plan: null, error: null };
+    try {
+      return { plan: planQeAutoAllocation({
+        nodes: resources.nodes ?? 1,
+        totalCpus,
+        phonon: taskKind === "phonon",
+        kPoints: pointEstimates?.k.conservative ? null : pointEstimates?.k.result?.irreduciblePoints,
+        qPoints: pointEstimates?.q?.conservative ? null : pointEstimates?.q?.result?.irreduciblePoints,
+        maxRanks: maxTaskCount,
+        sourceLayout: pointEstimates?.sourceLayout,
+      }), error: null };
+    } catch (error) {
+      return { plan: null, error: String(error) };
+    }
+  }, [autoActive, resources.nodes, totalCpus, taskKind, maxTaskCount,
+    pointEstimates?.k.conservative, pointEstimates?.k.result?.irreduciblePoints,
+    pointEstimates?.q?.conservative, pointEstimates?.q?.result?.irreduciblePoints,
+    pointEstimates?.sourceLayout?.ranks, pointEstimates?.sourceLayout?.pools]);
+
+  useEffect(() => {
+    if (disabled || !autoState.plan) return;
+    const next = applyQeAutoPlan(resources, autoState.plan);
+    if (next.ntasks !== resources.ntasks || next.cpus_per_task !== resources.cpus_per_task
+      || next.ntasks_per_node !== resources.ntasks_per_node || next.qe_kpoint_pools !== resources.qe_kpoint_pools
+      || next.qe_qpoint_images !== resources.qe_qpoint_images || next.qe_parallel_mode !== resources.qe_parallel_mode
+      || next.qe_total_cpus !== resources.qe_total_cpus || next.pencil_decomposition !== resources.pencil_decomposition) {
+      onResourcesChange(next);
+    }
+  }, [autoState.plan, disabled, resources, onResourcesChange]);
+
+  const pencilDecompositionAvailable = /(^|\s)-pd\s+\.true\.(?=\s|$)/im.test(commandLinesKey);
+  const previewCommandLines = useMemo(
+    () => autoActive || resources.pencil_decomposition === false
+      ? commandLines.map((line) => line.replace(/\s+-pd\s+\.true\./gi, ""))
+      : commandLines,
+    [commandLines, commandLinesKey, resources.pencil_decomposition, autoActive],
+  );
 
   useEffect(() => {
     if (allowCpu && allowGpu) {
@@ -143,7 +192,8 @@ export function HpcRunSettings({
       setLoadingPreview(true);
       setPreviewError(null);
       try {
-        const result = await previewSlurmScript(taskKind, commandLines, resources, profileId);
+        const previewResources = autoState.plan ? applyQeAutoPlan(resources, autoState.plan) : resources;
+        const result = await previewSlurmScript(taskKind, previewCommandLines, previewResources, profileId);
         if (cancelled) return;
         setPreviewState({
           script: result.script,
@@ -170,7 +220,7 @@ export function HpcRunSettings({
     return () => {
       cancelled = true;
     };
-  }, [profileId, taskKind, resources, commandLines, commandLinesKey]);
+  }, [profileId, taskKind, resources, previewCommandLines, commandLinesKey, autoState.plan]);
 
   const update = (patch: Partial<SlurmResourceRequest>) => {
     onResourcesChange({
@@ -235,6 +285,12 @@ export function HpcRunSettings({
               } else {
                 next.gpus = 0;
               }
+              next.qe_parallel_mode = resources.qe_parallel_mode;
+              next.qe_total_cpus = (next.ntasks ?? 1) * (next.cpus_per_task ?? 1);
+              next.qe_kpoint_pools = resources.qe_kpoint_pools;
+              next.qe_qpoint_images = resources.qe_qpoint_images;
+              next.pencil_decomposition = resources.pencil_decomposition ?? true;
+              next.ntasks_per_node = resources.ntasks_per_node ?? null;
               onResourcesChange(next);
             }}
             disabled={resourceTypeSelectDisabled}
@@ -264,17 +320,40 @@ export function HpcRunSettings({
           />
         </label>
 
+        {autoAvailable && <label>
+          <span className="hpc-checkbox-text">Parallelization <InfoTooltip text="Auto chooses MPI ranks, OpenMP threads, phonon images and electronic pools together. Large allocations favor modest thread groups to reduce MPI communication; available point counts guide images and pools. It aims for roughly eight ranks per electronic pool and preserves a compatible source SCF layout where possible. This is a starting heuristic; use Manual for cluster-specific tuning." /></span>
+          <select value={autoActive ? "auto" : "manual"} disabled={disabled}
+            onChange={(event) => update({ qe_parallel_mode: event.target.value === "auto" ? "auto" : "manual", qe_total_cpus: taskCount * Math.max(1, resources.cpus_per_task ?? 1) })}>
+            <option value="auto">Auto</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>}
+
         <label>
           Nodes
           <input
             type="number"
             min={1}
             value={resources.nodes ?? 1}
-            onChange={(event) => update({ nodes: normalizePositiveInt(event.target.value, 1) })}
+            max={autoActive ? (maxTaskCount ?? 4294967295) : undefined}
+            onChange={(event) => {
+              const nodes = normalizePositiveInt(event.target.value, 1);
+              if (autoActive) {
+                const allocationNodes = Math.min(nodes, maxTaskCount ?? 4294967295);
+                update({ nodes: allocationNodes, qe_total_cpus: Math.max(totalCpus, allocationNodes) });
+              } else {
+                update({ nodes });
+              }
+            }}
             disabled={disabled || nodesDisabled}
           />
         </label>
 
+        {autoActive ? <label>
+          <span className="hpc-checkbox-text">Total allocated CPUs <InfoTooltip text="Total CPU cores across all requested nodes, not CPUs per node. Auto balances MPI ranks with OpenMP threads based on allocation size and available point parallelism. Slurm receives the displayed ranks × CPUs per rank, preserving your full CPU allocation." /></span>
+          <input type="number" min={resources.nodes ?? 1} max={4294967295} step={1} value={totalCpus}
+            disabled={disabled} onChange={(event) => update({ qe_total_cpus: Math.max(resources.nodes ?? 1, Math.min(4294967295, normalizePositiveInt(event.target.value, 1))) })} />
+        </label> : <>
         <label>
           Tasks
           <input
@@ -299,9 +378,10 @@ export function HpcRunSettings({
             disabled={disabled}
           />
         </label>
+        </>}
 
         <label>
-          Memory (GB)
+          Memory per node (GiB)
           <input
             type="number"
             min={1}
@@ -325,18 +405,73 @@ export function HpcRunSettings({
         )}
       </div>
 
+      {autoState.error && <p className="hpc-script-error">{autoState.error}</p>}
+      {pointParallelizationAvailable && (
+        <QePointParallelization ranks={autoState.plan?.ranks ?? taskCount} pools={autoState.plan?.pools ?? resources.qe_kpoint_pools ?? 1}
+          estimates={pointEstimates} images={autoState.plan?.images ?? resources.qe_qpoint_images ?? 1}
+          autoPlan={autoActive ? autoState.plan ?? undefined : undefined}
+          phonon={taskKind === "phonon"} disabled={disabled || autoActive}
+          onChange={(pools, images) => update({ qe_parallel_mode: "manual", qe_kpoint_pools: pools, qe_qpoint_images: images })} />
+      )}
+
       <button
         type="button"
         className="hpc-advanced-toggle"
         onClick={() => setShowAdvanced((prev) => !prev)}
+        aria-expanded={showAdvanced}
+        aria-controls="hpc-advanced-slurm-fields"
       >
         {showAdvanced
           ? "Hide Advanced Slurm Fields"
-          : "Show Advanced Slurm Fields (qos/account/constraint/module preamble)"}
+          : "Show Advanced Slurm Fields"}
       </button>
 
       {showAdvanced && (
-        <div className="hpc-advanced-grid">
+        <div className="hpc-advanced-grid" id="hpc-advanced-slurm-fields">
+          <label>
+            <span className="hpc-checkbox-text">
+              Tasks / Node
+              <InfoTooltip text="Slurm `--ntasks-per-node`. Limits how many MPI tasks are placed on each node; leave blank to let Slurm distribute the total task count." />
+            </span>
+            <input
+              type="number"
+              min={1}
+              value={resources.ntasks_per_node ?? ""}
+              onChange={(event) => update({
+                ntasks_per_node: event.target.value === ""
+                  ? null
+                  : normalizePositiveInt(event.target.value, 1),
+              })}
+              placeholder="Optional"
+              disabled={disabled || autoActive}
+            />
+          </label>
+          <label className="hpc-checkbox-label">
+            <input
+              type="checkbox"
+              checked={resources.contiguous ?? false}
+              onChange={(event) => update({ contiguous: event.target.checked })}
+              disabled={disabled}
+            />
+            <span className="hpc-checkbox-text">
+              Contiguous nodes
+              <InfoTooltip text="Adds Slurm `--contiguous` to request a contiguous set of compute nodes." />
+            </span>
+          </label>
+          {pencilDecompositionAvailable && (
+            <label className="hpc-checkbox-label">
+              <input
+                type="checkbox"
+                checked={!autoActive && (resources.pencil_decomposition ?? true)}
+                onChange={(event) => update({ pencil_decomposition: event.target.checked })}
+                disabled={disabled || autoActive}
+              />
+              <span className="hpc-checkbox-text">
+                Pencil decomposition
+                <InfoTooltip text="Adds Quantum ESPRESSO's `-pd .true.` option to supported MPI commands. Disabled in Auto mode for reliability across multiple nodes. Switch to Manual to enable it if your QE build and cluster MPI setup support it reliably." />
+              </span>
+            </label>
+          )}
           <label>
             QoS
             <input

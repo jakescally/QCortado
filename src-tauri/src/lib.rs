@@ -25,6 +25,7 @@ pub mod process_manager;
 pub mod projects;
 pub mod qe;
 pub mod symmetry;
+mod point_mesh;
 
 use process_manager::ProcessManager;
 
@@ -775,6 +776,7 @@ fn sanitize_hpc_profile(
         normalize_hpc_text(&profile.remote_workspace_root, "Remote workspace root")?;
     profile.remote_project_root =
         normalize_hpc_text(&profile.remote_project_root, "Remote project root")?;
+    profile.remote_backup_root = sanitize_optional_hpc_field(profile.remote_backup_root);
     profile.launcher_extra_args = sanitize_optional_hpc_cli_field(profile.launcher_extra_args);
     profile.launcher_cpu_extra_args =
         sanitize_optional_hpc_cli_field(profile.launcher_cpu_extra_args);
@@ -1335,6 +1337,29 @@ mod hpc_headless_recovery_tests {
     }
 
     #[test]
+    fn allocation_setting_can_disable_pencil_decomposition() {
+        let mut resources = hpc::profile::default_cpu_resources();
+        resources.pencil_decomposition = Some(false);
+        let commands = apply_pencil_decomposition_setting(
+            vec!["srun pw.x -pd .true. -in pw.in".to_string()],
+            Some(&resources),
+        );
+
+        assert_eq!(commands, vec!["srun pw.x -in pw.in"]);
+    }
+
+    #[test]
+    fn auto_overrides_enabled_pencil_decomposition() {
+        let mut resources = hpc::profile::default_cpu_resources();
+        resources.qe_parallel_mode = Some("auto".into());
+        resources.pencil_decomposition = Some(true);
+        let commands = vec!["srun ph.x -pd .true. -in ph.in".to_string()];
+        assert_eq!(apply_pencil_decomposition_setting(commands.clone(), Some(&resources)), vec!["srun ph.x -in ph.in"]);
+        resources.qe_parallel_mode = Some("manual".into());
+        assert_eq!(apply_pencil_decomposition_setting(commands.clone(), Some(&resources)), commands);
+    }
+
+    #[test]
     fn hp_uses_serial_diagonalization_for_hpc_launches() {
         assert_eq!(qe_executable_default_extra_args("hp.x"), Some("-ndiag 1"));
         assert_eq!(
@@ -1870,7 +1895,10 @@ mod hpc_headless_recovery_tests {
         assert_eq!(commands[0].argv, vec!["lapw1", "-band", "-up"]);
         assert_eq!(commands[1].argv, vec!["lapw1", "-band", "-dn"]);
         assert_eq!(commands[2].argv, vec!["lapwso", "-up"]);
-        assert_eq!(commands[3].argv, vec!["lapw2", "-qtl", "-band", "-up", "-so"]);
+        assert_eq!(
+            commands[3].argv,
+            vec!["lapw2", "-qtl", "-band", "-up", "-so"]
+        );
         assert_eq!(commands[4].argv, vec!["spaghetti", "-up", "-so"]);
     }
 
@@ -1892,10 +1920,16 @@ mod hpc_headless_recovery_tests {
 
         assert_eq!(commands[0].argv, vec!["lapw1", "-band", "-up"]);
         assert_eq!(commands[1].argv, vec!["spaghetti", "-up"]);
-        assert_eq!(commands[1].archive_channel, Some(Wien2kBandsSpinChannel::Up));
+        assert_eq!(
+            commands[1].archive_channel,
+            Some(Wien2kBandsSpinChannel::Up)
+        );
         assert_eq!(commands[2].argv, vec!["lapw1", "-band", "-dn"]);
         assert_eq!(commands[3].argv, vec!["spaghetti", "-dn"]);
-        assert_eq!(commands[3].archive_channel, Some(Wien2kBandsSpinChannel::Down));
+        assert_eq!(
+            commands[3].archive_channel,
+            Some(Wien2kBandsSpinChannel::Down)
+        );
     }
 
     #[test]
@@ -2004,13 +2038,8 @@ mod hpc_headless_recovery_tests {
             "0.0 -1.0\n1.0 -0.5\n&\n0.0 0.2\n1.0 0.6\n".to_string(),
         );
 
-        let (name, parsed) = parse_wien2k_spaghetti_artifacts(
-            "Er1P1",
-            &artifacts,
-            5.0,
-            None,
-        )
-        .expect("bands");
+        let (name, parsed) =
+            parse_wien2k_spaghetti_artifacts("Er1P1", &artifacts, 5.0, None).expect("bands");
 
         assert_eq!(name, "Er1P1.band.agr");
         assert_eq!(parsed.n_bands, 2);
@@ -2779,6 +2808,58 @@ struct HpcRemoteOrphanCleanupResult {
     failed_paths: Vec<String>,
 }
 
+const HPC_CALCULATION_BACKUP_VERSION: u32 = 1;
+const HPC_CALCULATION_BACKUP_MANIFEST: &str = ".qcortado_backup.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HpcCalculationBackupManifest {
+    schema_version: u32,
+    backup_id: String,
+    profile_id: String,
+    project_id: String,
+    project_name: String,
+    cif_id: String,
+    cif_label: String,
+    source_calc_id: String,
+    calc_type: String,
+    created_at: String,
+    remote_backup_path: String,
+    calculation: projects::CalculationRun,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct HpcCalculationBackupSummary {
+    backup_id: String,
+    profile_id: String,
+    project_id: String,
+    project_name: String,
+    cif_id: String,
+    cif_label: String,
+    source_calc_id: String,
+    calc_type: String,
+    created_at: String,
+    remote_backup_path: String,
+    bytes: u64,
+}
+
+impl HpcCalculationBackupManifest {
+    fn summary(&self, bytes: u64) -> HpcCalculationBackupSummary {
+        HpcCalculationBackupSummary {
+            backup_id: self.backup_id.clone(),
+            profile_id: self.profile_id.clone(),
+            project_id: self.project_id.clone(),
+            project_name: self.project_name.clone(),
+            cif_id: self.cif_id.clone(),
+            cif_label: self.cif_label.clone(),
+            source_calc_id: self.source_calc_id.clone(),
+            calc_type: self.calc_type.clone(),
+            created_at: self.created_at.clone(),
+            remote_backup_path: self.remote_backup_path.clone(),
+            bytes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct HpcRecoverableRemotePhononRun {
     profile_id: String,
@@ -2909,6 +2990,8 @@ struct HpcPresetBundleProfile {
     remote_gpu_pseudo_dir: Option<String>,
     remote_workspace_root: String,
     remote_project_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_backup_root: Option<String>,
     #[serde(default)]
     resource_mode: hpc::profile::HpcResourceMode,
     #[serde(default)]
@@ -3168,6 +3251,7 @@ fn hpc_export_preset_bundle(
                 remote_gpu_pseudo_dir: profile.remote_gpu_pseudo_dir,
                 remote_workspace_root: profile.remote_workspace_root,
                 remote_project_root: profile.remote_project_root,
+                remote_backup_root: profile.remote_backup_root,
                 resource_mode: profile.resource_mode,
                 launcher: profile.launcher,
                 launcher_cpu_extra_args: profile.launcher_cpu_extra_args,
@@ -3323,6 +3407,7 @@ fn hpc_import_preset_bundle(
                 remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
                 remote_workspace_root: imported_profile.remote_workspace_root,
                 remote_project_root: imported_profile.remote_project_root,
+                remote_backup_root: imported_profile.remote_backup_root,
                 resource_mode: imported_profile.resource_mode,
                 launcher: imported_profile.launcher,
                 launcher_cpu_extra_args: imported_profile.launcher_cpu_extra_args,
@@ -3384,6 +3469,7 @@ fn hpc_import_preset_bundle(
             remote_gpu_pseudo_dir: imported_profile.remote_gpu_pseudo_dir,
             remote_workspace_root: imported_profile.remote_workspace_root,
             remote_project_root: imported_profile.remote_project_root,
+            remote_backup_root: imported_profile.remote_backup_root,
             resource_mode: imported_profile.resource_mode,
             launcher: imported_profile.launcher,
             launcher_cpu_extra_args: imported_profile.launcher_cpu_extra_args,
@@ -4338,10 +4424,7 @@ fn build_wien2k_command_parts_for_case(
     profile: &hpc::profile::HpcProfile,
     program: engines::wien2k::Wien2kCommandProgram,
 ) -> Result<(Vec<String>, String), String> {
-    let mut commands = vec![format!(
-        "cd {}",
-        shell_single_quote_local(remote_case_dir)
-    )];
+    let mut commands = vec![format!("cd {}", shell_single_quote_local(remote_case_dir))];
     let executable = if profile.wien2k_path_mode == hpc::profile::EnginePathMode::Module {
         if profile
             .engine_module_load(engines::EngineId::Wien2k)
@@ -4506,13 +4589,20 @@ async fn wien2k_start_scf_session(
         project_id.clone(),
         structure_calculation_id.clone(),
     )?;
-    let is_source = source.engine_id == engines::EngineId::Wien2k
-        && source.calc_type == "engine_setup"
+    let reviewed_source = source.calc_type == "engine_setup"
         && source
             .parameters
             .get("setup_kind")
             .and_then(|value| value.as_str())
-            == Some("structure")
+            == Some("structure");
+    let relaxed_source = source.calc_type == "optimization"
+        && source
+            .parameters
+            .get("optimization_mode")
+            .and_then(|value| value.as_str())
+            == Some("internal_positions");
+    let is_source = source.engine_id == engines::EngineId::Wien2k
+        && (reviewed_source || relaxed_source)
         && source
             .parameters
             .get("structure_source_ready")
@@ -4706,7 +4796,10 @@ async fn wien2k_start_scf_continuation_session(
         .ok_or_else(|| "The saved WIEN2k SCF is missing initialization settings.".to_string())
         .and_then(|value| {
             serde_json::from_value(value).map_err(|err| {
-                format!("The saved WIEN2k initialization settings are invalid: {}", err)
+                format!(
+                    "The saved WIEN2k initialization settings are invalid: {}",
+                    err
+                )
             })
         })?;
     let latest_run: engines::wien2k::Wien2kScfRunSettings = parameters
@@ -4743,7 +4836,12 @@ async fn wien2k_start_scf_continuation_session(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| profile.remote_wien2k_install_root.clone().unwrap_or_default());
+        .unwrap_or_else(|| {
+            profile
+                .remote_wien2k_install_root
+                .clone()
+                .unwrap_or_default()
+        });
     let session = engines::wien2k::Wien2kScfSession {
         session_id: session_id.clone(),
         project_id,
@@ -5029,6 +5127,9 @@ async fn wien2k_run_scf_session_impl(
                 "inst",
                 "inorb",
                 "indm",
+                "inM",
+                "tmpM",
+                "outputM",
                 "klist",
                 "outputnn",
                 "outputs",
@@ -5039,6 +5140,8 @@ async fn wien2k_run_scf_session_impl(
                 "dmatdn",
                 "scf",
                 "dayfile",
+                "struct1",
+                "struct2",
             ],
         )
         .await,
@@ -5068,7 +5171,9 @@ async fn wien2k_run_scf_session_impl(
         .collect::<Vec<_>>();
     let parameters = serde_json::json!({
         "case_name": session.case_name.clone(),
+        "source_cif_id": session.cif_id.clone(),
         "source_structure_calculation_id": session.source_structure_calculation_id.clone(),
+        "source_calculation_ids": [session.source_structure_calculation_id.clone()],
         "source_structure_sites": session.source_structure_sites.clone(),
         "parent_calculation_id": parent_calculation_id.or_else(|| if continuation { session.latest_calculation_id.clone() } else { None }),
         "initialization": initialization.clone(),
@@ -5081,19 +5186,105 @@ async fn wien2k_run_scf_session_impl(
         "execution_backend": "hpc",
         "native_artifacts_retained_remote": true,
     });
+    let is_relaxation = settings.force_minimization;
+    let final_max_force_mry_bohr = engines::wien2k::parse_final_max_force_mry_bohr(&scf_output);
+    let geometry_steps =
+        engines::wien2k::parse_geometry_step_count(&format!("{}\n{}", scf_output, dayfile));
+    let relaxed_struct = artifacts
+        .get(&format!("{}.struct", session.case_name))
+        .cloned();
+    let relaxed_summary = relaxed_struct
+        .as_deref()
+        .and_then(|content| engines::wien2k::parse_struct_summary(content).ok());
+    let relaxed_sites = relaxed_struct.as_deref().and_then(|content| {
+        engines::wien2k::update_sites_from_struct(&session.source_structure_sites, content).ok()
+    });
+    let force_converged = settings
+        .force_convergence_mry_bohr
+        .zip(final_max_force_mry_bohr)
+        .map(|(limit, force)| force <= limit)
+        .unwrap_or(!is_relaxation);
+    let structure_source_ready = is_relaxation
+        && !command_failed
+        && summary.convergence == engines::ScfConvergenceState::Converged
+        && relaxed_summary.is_some()
+        && relaxed_sites.is_some()
+        && force_converged;
+    let mut parameters = parameters;
+    if let Some(object) = parameters.as_object_mut() {
+        object.insert(
+            "optimization_mode".to_string(),
+            serde_json::json!(if is_relaxation {
+                Some("internal_positions")
+            } else {
+                None::<&str>
+            }),
+        );
+        object.insert(
+            "structure_source_ready".to_string(),
+            serde_json::json!(structure_source_ready),
+        );
+        object.insert(
+            "final_max_force_mry_bohr".to_string(),
+            serde_json::json!(final_max_force_mry_bohr),
+        );
+        object.insert(
+            "geometry_steps".to_string(),
+            serde_json::json!(geometry_steps),
+        );
+        object.insert(
+            "final_structure_summary".to_string(),
+            serde_json::to_value(relaxed_summary).unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "sites".to_string(),
+            serde_json::to_value(
+                relaxed_sites
+                    .as_ref()
+                    .unwrap_or(&session.source_structure_sites),
+            )
+            .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if is_relaxation {
+        if let Ok(outputsgroup) = projects::read_engine_text_artifact(
+            &app,
+            &session.project_id,
+            &session.source_structure_calculation_id,
+            &format!("{}.outputsgroup", session.case_name),
+        ) {
+            artifacts.insert(format!("{}.outputsgroup", session.case_name), outputsgroup);
+        }
+    }
     let saved = projects::save_engine_calculation_artifact(
         &app,
         &session.project_id,
         &session.cif_id,
         projects::SaveEngineCalculationArtifactData {
             engine_id: engines::EngineId::Wien2k,
-            calc_type: "scf".to_string(),
+            calc_type: if is_relaxation {
+                "optimization".to_string()
+            } else {
+                "scf".to_string()
+            },
             parameters,
             result: None,
             scf_summary: Some(summary.clone()),
             started_at: session.started_at.clone(),
             completed_at: now_iso(),
-            tags: vec!["wien2k-native".to_string()],
+            tags: if is_relaxation {
+                let mut tags = vec![
+                    "geometry".to_string(),
+                    "structure-optimized".to_string(),
+                    "wien2k-native".to_string(),
+                ];
+                if !structure_source_ready {
+                    tags.push("failed".to_string());
+                }
+                tags
+            } else {
+                vec!["wien2k-native".to_string()]
+            },
             artifacts: artifacts
                 .iter()
                 .map(|(filename, contents)| projects::EngineSetupTextArtifact {
@@ -5129,6 +5320,9 @@ async fn wien2k_run_scf_session_impl(
         summary,
         calculation_id: saved.id,
         continuation,
+        final_max_force_mry_bohr,
+        geometry_steps,
+        structure_source_ready,
     })
 }
 
@@ -5350,10 +5544,7 @@ fn build_wien2k_bands_step_log_archive_command(
         "cd {dir} && if [ -s {source} ]; then cp -f {source} {target}; fi",
         dir = shell_single_quote_local(&session.remote_case_dir),
         source = shell_single_quote_local(&format!(".qcortado-{}.log", program)),
-        target = shell_single_quote_local(&format!(
-            ".qcortado-{}-{}.log",
-            program, channel_name
-        )),
+        target = shell_single_quote_local(&format!(".qcortado-{}-{}.log", program, channel_name)),
     ))
 }
 
@@ -5624,13 +5815,8 @@ fn wien2k_bands_command_sequence(
         );
     }
     if settings.spin_orbit {
-        let mut commands = wien2k_bands_channel_command_sequence(
-            settings,
-            Channel::Up,
-            true,
-            false,
-            parallel,
-        );
+        let mut commands =
+            wien2k_bands_channel_command_sequence(settings, Channel::Up, true, false, parallel);
         let mut down_lapw1 = vec!["lapw1".to_string(), "-band".to_string(), "-dn".to_string()];
         if parallel {
             down_lapw1.push("-p".to_string());
@@ -5659,13 +5845,8 @@ fn wien2k_bands_command_sequence(
 
     let mut commands = Vec::new();
     for channel in [Channel::Up, Channel::Down] {
-        let mut channel_commands = wien2k_bands_channel_command_sequence(
-            settings,
-            channel,
-            true,
-            false,
-            parallel,
-        );
+        let mut channel_commands =
+            wien2k_bands_channel_command_sequence(settings, channel, true, false, parallel);
         if let Some(last) = channel_commands.last_mut() {
             last.archive_channel = Some(channel);
         }
@@ -5744,14 +5925,12 @@ fn parse_wien2k_spaghetti_artifacts(
         }
     }
     if candidates.is_empty() {
-        return Err(
-            format!(
-                "WIEN2k spaghetti did not produce the expected {}band output artifact.",
-                channel_suffix
-                    .map(|channel| format!("{}-spin ", channel))
-                    .unwrap_or_default()
-            ),
-        );
+        return Err(format!(
+            "WIEN2k spaghetti did not produce the expected {}band output artifact.",
+            channel_suffix
+                .map(|channel| format!("{}-spin ", channel))
+                .unwrap_or_default()
+        ));
     }
     let mut errors = Vec::new();
     for (name, contents) in candidates {
@@ -6532,11 +6711,7 @@ async fn wien2k_run_bands_session_impl(
     for (spin_channel, source_name, mut band_data) in parsed_artifacts {
         if let Some(prepare) = &session.latest_prepare {
             engines::wien2k::add_symmetry_markers(&mut band_data, &prepare.k_path);
-            engines::wien2k::apply_prepare_energy_window(
-                &mut band_data,
-                prepare,
-                fermi_energy_ev,
-            );
+            engines::wien2k::apply_prepare_energy_window(&mut band_data, prepare, fermi_energy_ev);
         }
         saved_datasets.push(save_wien2k_bands_dataset(
             &app,
@@ -6841,7 +7016,9 @@ async fn wien2k_start_soc_session(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "The selected WIEN2k SCF has no retained remote case directory.".to_string())?
+        .ok_or_else(|| {
+            "The selected WIEN2k SCF has no retained remote case directory.".to_string()
+        })?
         .to_string();
     let source_structure_calculation_id = source
         .parameters
@@ -6949,7 +7126,9 @@ async fn wien2k_prepare_soc_session(
         .cloned()
         .ok_or_else(|| "WIEN2k SOC session is no longer available.".to_string())?;
     if session.phase != engines::wien2k::Wien2kSocSessionPhase::Staged {
-        return Err("Discard or restart the SOC session before changing preparation settings.".to_string());
+        return Err(
+            "Discard or restart the SOC session before changing preparation settings.".to_string(),
+        );
     }
     let (_, profile, secret) = resolve_wien2k_structure_runtime(&state).await?;
     let inso = engines::wien2k::build_case_inso(&settings);
@@ -6997,8 +7176,21 @@ async fn wien2k_prepare_soc_session(
         secret.as_deref(),
         &session,
         &[
-            "struct", "struct_so", "inso", "in1", "in1c", "in1_so", "in1c_so", "in2",
-            "in2c", "in2_so", "in2c_so", "inc_so", "ksym", "outsymso", "klist",
+            "struct",
+            "struct_so",
+            "inso",
+            "in1",
+            "in1c",
+            "in1_so",
+            "in1c_so",
+            "in2",
+            "in2c",
+            "in2_so",
+            "in2c_so",
+            "inc_so",
+            "ksym",
+            "outsymso",
+            "klist",
         ],
     )
     .await;
@@ -7024,7 +7216,9 @@ async fn wien2k_prepare_soc_session(
     updated.phase = phase;
     updated.latest_prepare = Some(settings);
     updated.artifacts.extend(artifacts.clone());
-    updated.transcript.push(format!("SOC preparation\n{}", output));
+    updated
+        .transcript
+        .push(format!("SOC preparation\n{}", output));
     state
         .wien2k_soc_sessions
         .lock()
@@ -7095,13 +7289,26 @@ async fn wien2k_accept_soc_symmetry(
         &profile,
         secret.as_deref(),
         &session,
-        &["struct", "struct_so", "inso", "in1", "in1c", "in2c", "inc", "ksym", "outsymso", "klist"],
+        &[
+            "struct",
+            "struct_so",
+            "inso",
+            "in1",
+            "in1c",
+            "in2c",
+            "inc",
+            "ksym",
+            "outsymso",
+            "klist",
+        ],
     )
     .await;
     let mut updated = session;
     updated.phase = engines::wien2k::Wien2kSocSessionPhase::Prepared;
     updated.artifacts.extend(artifacts.clone());
-    updated.transcript.push(format!("SOC symmetry accepted\n{}", output));
+    updated
+        .transcript
+        .push(format!("SOC symmetry accepted\n{}", output));
     state
         .wien2k_soc_sessions
         .lock()
@@ -7137,7 +7344,10 @@ async fn prepare_wien2k_soc_run_inputs(
                 profile,
                 secret,
                 &contents,
-                &format!("{}/{}.{}", session.remote_case_dir, session.case_name, suffix),
+                &format!(
+                    "{}/{}.{}",
+                    session.remote_case_dir, session.case_name, suffix
+                ),
                 &format!("soc-{}", suffix),
             )
             .await?;
@@ -7182,8 +7392,7 @@ async fn wien2k_run_soc_session_impl(
         return Err("Complete SOC preparation and symmetry review before running.".to_string());
     }
     let (_, profile, secret) = resolve_wien2k_structure_runtime(state).await?;
-    let resources =
-        resolve_wien2k_scf_resources(&profile, resources, settings.scf.parallel_mode)?;
+    let resources = resolve_wien2k_scf_resources(&profile, resources, settings.scf.parallel_mode)?;
     let parallel = wien2k_scf_uses_parallel(settings.scf.parallel_mode);
     prepare_wien2k_soc_run_inputs(&profile, secret.as_deref(), &session, &settings).await?;
     let case_ref = engines::wien2k::Wien2kCaseReference {
@@ -7256,9 +7465,29 @@ async fn wien2k_run_soc_session_impl(
             secret.as_deref(),
             &session,
             &[
-                "struct", "struct_so", "inso", "in0", "in1", "in1c", "in2c", "inc", "inm",
-                "inorb", "indm", "indmc", "klist", "ksym", "outsymso", "outputso", "outputsoup",
-                "outputsodn", "dmatup", "dmatdn", "scfso", "scf", "dayfile",
+                "struct",
+                "struct_so",
+                "inso",
+                "in0",
+                "in1",
+                "in1c",
+                "in2c",
+                "inc",
+                "inm",
+                "inorb",
+                "indm",
+                "indmc",
+                "klist",
+                "ksym",
+                "outsymso",
+                "outputso",
+                "outputsoup",
+                "outputsodn",
+                "dmatup",
+                "dmatdn",
+                "scfso",
+                "scf",
+                "dayfile",
             ],
         )
         .await,
@@ -7334,7 +7563,9 @@ async fn wien2k_run_soc_session_impl(
     updated.latest_run = Some(settings);
     updated.latest_calculation_id = Some(saved.id.clone());
     updated.artifacts = artifacts;
-    updated.transcript.push(format!("SOC SCF attempt\n{}", native_output));
+    updated
+        .transcript
+        .push(format!("SOC SCF attempt\n{}", native_output));
     state
         .wien2k_soc_sessions
         .lock()
@@ -7458,7 +7689,11 @@ fn build_wien2k_fermi_command(
         .collect::<Vec<_>>();
     let lapwso_args = [
         "lapwso",
-        if settings.spin_orbit && !spin_arg.is_empty() { "-up" } else { "" },
+        if settings.spin_orbit && !spin_arg.is_empty() {
+            "-up"
+        } else {
+            ""
+        },
     ]
     .iter()
     .filter(|arg| !arg.is_empty())
@@ -7548,14 +7783,21 @@ async fn download_wien2k_bxsf_files(
         hpc::ssh::run_ssh_command_with_timeout(profile, secret, &manifest_command, 120).await?;
     let files = parse_remote_surface_manifest(&manifest);
     for file in &files {
-        let remote_path = format!("{}/{}", remote_case_dir.trim_end_matches('/'), file.file_name);
+        let remote_path = format!(
+            "{}/{}",
+            remote_case_dir.trim_end_matches('/'),
+            file.file_name
+        );
         let local_path = local_dir.join(&file.file_name);
         hpc::ssh::download_file(profile, secret, &remote_path, &local_path).await?;
     }
     Ok(files)
 }
 
-fn preferred_bxsf_file(files: &[engines::wien2k::Wien2kSurfaceFileData], case_name: &str) -> String {
+fn preferred_bxsf_file(
+    files: &[engines::wien2k::Wien2kSurfaceFileData],
+    case_name: &str,
+) -> String {
     files
         .iter()
         .find(|file| {
@@ -7631,7 +7873,9 @@ async fn run_wien2k_fermi_surface_task(
     if source_spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
         && settings.spin_channel == engines::wien2k::Wien2kBandsSpinChannel::None
     {
-        return Err("Spin-polarized WIEN2k Fermi surfaces require an up or down spin channel.".to_string());
+        return Err(
+            "Spin-polarized WIEN2k Fermi surfaces require an up or down spin channel.".to_string(),
+        );
     }
     if settings.spin_orbit
         && source_spin_mode == engines::wien2k::Wien2kSpinMode::SpinPolarized
@@ -7742,21 +7986,25 @@ async fn run_wien2k_fermi_surface_task(
     std::fs::write(staging_dir.join("wien2k_fermi_surface.out"), &native_output)
         .map_err(|err| format!("Failed to write local Fermi-surface log: {}", err))?;
 
-    let bxsf_files = download_wien2k_bxsf_files(
-        &profile,
-        secret.as_deref(),
-        &remote_case_dir,
-        &staging_dir,
-    )
-    .await?;
+    let bxsf_files =
+        download_wien2k_bxsf_files(&profile, secret.as_deref(), &remote_case_dir, &staging_dir)
+            .await?;
     if bxsf_files.is_empty() {
         let _ = std::fs::remove_dir_all(&staging_dir);
-        return Err("XCrySDen did not produce any BXSF files for the WIEN2k Fermi surface.".to_string());
+        return Err(
+            "XCrySDen did not produce any BXSF files for the WIEN2k Fermi surface.".to_string(),
+        );
     }
     let primary_file = preferred_bxsf_file(&bxsf_files, &case_name);
     let fermi_energy = extract_fermi_energy_from_text(&native_output)
-        .or(source.scf_summary.as_ref().and_then(|summary| summary.fermi_energy_ev))
-        .or(source.result.as_ref().and_then(|result| result.fermi_energy));
+        .or(source
+            .scf_summary
+            .as_ref()
+            .and_then(|summary| summary.fermi_energy_ev))
+        .or(source
+            .result
+            .as_ref()
+            .and_then(|result| result.fermi_energy));
     let started_at = now_iso();
     let completed_at = now_iso();
     let source_scf_id_for_parameters = source_scf_calculation_id.clone();
@@ -7854,7 +8102,8 @@ async fn start_wien2k_fermi_surface_calculation(
     let pm = state.process_manager.clone();
     let (task_id, _cancel_flag) = pm.register("wien2k_fermi_surface".to_string(), label).await;
     pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
-    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string())).await;
+    pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
+        .await;
 
     let tid = task_id.clone();
     let app_handle = app.clone();
@@ -8925,6 +9174,24 @@ cat \"$sssp_file\"",
         })
 }
 
+fn apply_pencil_decomposition_setting(
+    command_lines: Vec<String>,
+    resources: Option<&hpc::profile::SlurmResourceRequest>,
+) -> Vec<String> {
+    let auto_parallel = resources
+        .and_then(|request| request.qe_parallel_mode.as_deref()) == Some("auto");
+    if !auto_parallel && resources
+        .and_then(|request| request.pencil_decomposition)
+        .unwrap_or(true)
+    {
+        return command_lines;
+    }
+    command_lines
+        .into_iter()
+        .map(|line| line.replace(" -pd .true.", ""))
+        .collect()
+}
+
 /// Generates a preview Slurm script for the active profile/resources.
 #[tauri::command]
 fn hpc_preview_slurm_script(
@@ -8940,6 +9207,7 @@ fn hpc_preview_slurm_script(
     } else {
         command_lines
     };
+    let commands = apply_pencil_decomposition_setting(commands, resources.as_ref());
     let script = hpc::slurm::build_slurm_script(
         &profile,
         &format!("qcortado-{}", task_kind.trim().to_ascii_lowercase()),
@@ -9644,6 +9912,313 @@ async fn hpc_download_calculation_artifacts(
     Ok(report)
 }
 
+async fn load_hpc_calculation_backup_manifests(
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
+) -> Result<Vec<(HpcCalculationBackupManifest, u64)>, String> {
+    let backup_root =
+        resolve_remote_cleanup_path(profile, secret, &profile.resolved_remote_backup_root())
+            .await?
+            .trim_end_matches('/')
+            .to_string();
+    let list_command = format!(
+        "if [ -d {root} ]; then find {root} -mindepth 3 -maxdepth 3 -type f -name {manifest} -print; fi",
+        root = shell_single_quote_local(&backup_root),
+        manifest = shell_single_quote_local(HPC_CALCULATION_BACKUP_MANIFEST),
+    );
+    let listing =
+        hpc::ssh::run_ssh_command_with_timeout(profile, secret, &list_command, 60).await?;
+    let mut backups = Vec::new();
+    for manifest_path in listing
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !remote_path_is_under(manifest_path, std::slice::from_ref(&backup_root)) {
+            continue;
+        }
+        let content = hpc::ssh::run_ssh_command_with_timeout(
+            profile,
+            secret,
+            &format!("cat {}", shell_single_quote_local(manifest_path)),
+            30,
+        )
+        .await?;
+        let manifest: HpcCalculationBackupManifest = match serde_json::from_str(&content) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if !remote_path_is_under(
+            &manifest.remote_backup_path,
+            std::slice::from_ref(&backup_root),
+        ) {
+            continue;
+        }
+        let size_output = hpc::ssh::run_ssh_command_with_timeout(
+            profile,
+            secret,
+            &format!(
+                "du -sk {} 2>/dev/null | awk '{{print $1 * 1024}}'",
+                shell_single_quote_local(&manifest.remote_backup_path)
+            ),
+            60,
+        )
+        .await
+        .unwrap_or_default();
+        backups.push((manifest, size_output.trim().parse::<u64>().unwrap_or(0)));
+    }
+    backups.sort_by(|left, right| right.0.created_at.cmp(&left.0.created_at));
+    Ok(backups)
+}
+
+#[tauri::command]
+async fn hpc_create_calculation_backup(
+    app: AppHandle,
+    project_id: String,
+    calc_id: String,
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<HpcCalculationBackupSummary, String> {
+    let project = projects::get_project(app.clone(), project_id.clone())?;
+    let variant = project
+        .cif_variants
+        .iter()
+        .find(|variant| variant.calculations.iter().any(|calc| calc.id == calc_id))
+        .ok_or_else(|| format!("Calculation not found in project: {}", calc_id))?;
+    let calculation =
+        projects::get_project_calculation(app.clone(), project_id.clone(), calc_id.clone())?;
+    let parameters = calculation
+        .parameters
+        .as_object()
+        .ok_or_else(|| "Calculation parameters are unavailable.".to_string())?;
+    let remote_source = parameters
+        .get("remote_project_path")
+        .or_else(|| parameters.get("remote_workdir"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "This calculation has no remote artifacts to back up.".to_string())?
+        .to_string();
+    let saved_profile_id = parameters
+        .get("hpc_profile_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let profile = resolve_hpc_profile_from_state(&state, profile_id.or(saved_profile_id))?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let source_probe = hpc::ssh::run_ssh_command_with_timeout(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "if [ -d {path} ]; then printf ok; else printf missing; fi",
+            path = shell_single_quote_local(&remote_source)
+        ),
+        30,
+    )
+    .await?;
+    if source_probe.trim() != "ok" {
+        return Err(format!(
+            "Remote calculation directory is missing: {}",
+            remote_source
+        ));
+    }
+
+    let backup_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        &profile.resolved_remote_backup_root(),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let backup_id = uuid::Uuid::new_v4().to_string();
+    let backup_path = format!("{}/{}/{}", backup_root, project_id, backup_id);
+    let partial_path = format!("{}.partial", backup_path);
+    let created_at = now_iso();
+    let manifest = HpcCalculationBackupManifest {
+        schema_version: HPC_CALCULATION_BACKUP_VERSION,
+        backup_id: backup_id.clone(),
+        profile_id: profile.id.clone(),
+        project_id: project_id.clone(),
+        project_name: project.name.clone(),
+        cif_id: variant.id.clone(),
+        cif_label: if variant.formula.trim().is_empty() {
+            variant.filename.clone()
+        } else {
+            variant.formula.clone()
+        },
+        source_calc_id: calc_id.clone(),
+        calc_type: calculation.calc_type.clone(),
+        created_at: created_at.clone(),
+        remote_backup_path: backup_path.clone(),
+        calculation,
+    };
+    let prepare_command = format!(
+        "set -e; if [ -e {dest} ] || [ -e {partial} ]; then exit 42; fi; mkdir -p {partial}; cp -a {source}/. {partial}/",
+        dest = shell_single_quote_local(&backup_path),
+        partial = shell_single_quote_local(&partial_path),
+        source = shell_single_quote_local(&remote_source),
+    );
+    hpc::ssh::run_ssh_command_with_timeout(&profile, secret.as_deref(), &prepare_command, 3600)
+        .await?;
+
+    let local_manifest = std::env::temp_dir().join(format!("qcortado_backup_{}.json", backup_id));
+    std::fs::write(
+        &local_manifest,
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| format!("Failed to serialize backup manifest: {}", e))?,
+    )
+    .map_err(|e| format!("Failed to stage backup manifest: {}", e))?;
+    let remote_manifest = format!("{}/{}", partial_path, HPC_CALCULATION_BACKUP_MANIFEST);
+    let upload_result = hpc::ssh::upload_file(
+        &profile,
+        secret.as_deref(),
+        &local_manifest,
+        &remote_manifest,
+    )
+    .await;
+    let _ = std::fs::remove_file(&local_manifest);
+    upload_result?;
+    let finalize_output = hpc::ssh::run_ssh_command_with_timeout(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "set -e; mv {partial} {dest}; chmod -R a-w {dest}; du -sk {dest} | awk '{{print $1 * 1024}}'",
+            partial = shell_single_quote_local(&partial_path),
+            dest = shell_single_quote_local(&backup_path),
+        ),
+        3600,
+    )
+    .await?;
+    let bytes = finalize_output.trim().parse::<u64>().unwrap_or(0);
+    projects::record_calculation_backup_metadata(
+        &app,
+        &project_id,
+        &calc_id,
+        &backup_id,
+        &backup_path,
+        &created_at,
+    )?;
+    Ok(manifest.summary(bytes))
+}
+
+#[tauri::command]
+async fn hpc_list_calculation_backups(
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<HpcCalculationBackupSummary>, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    Ok(
+        load_hpc_calculation_backup_manifests(&profile, secret.as_deref())
+            .await?
+            .into_iter()
+            .map(|(manifest, bytes)| manifest.summary(bytes))
+            .collect(),
+    )
+}
+
+#[tauri::command]
+async fn hpc_restore_calculation_backup(
+    app: AppHandle,
+    backup_id: String,
+    profile_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<projects::CalculationRun, String> {
+    let profile = resolve_hpc_profile_from_state(&state, profile_id)?;
+    let secret = hpc::credentials::resolve_secret(
+        &profile.id,
+        &profile.username,
+        &profile.host,
+        profile.credential_persisted,
+    )?;
+    let manifest = load_hpc_calculation_backup_manifests(&profile, secret.as_deref())
+        .await?
+        .into_iter()
+        .find(|(manifest, _)| manifest.backup_id == backup_id)
+        .map(|(manifest, _)| manifest)
+        .ok_or_else(|| format!("Backup not found: {}", backup_id))?;
+    let project = projects::get_project(app.clone(), manifest.project_id.clone())?;
+    if !project
+        .cif_variants
+        .iter()
+        .any(|variant| variant.id == manifest.cif_id)
+    {
+        return Err(format!(
+            "The original structure is no longer present in project '{}'.",
+            manifest.project_name
+        ));
+    }
+
+    let project_root = resolve_remote_cleanup_path(
+        &profile,
+        secret.as_deref(),
+        profile.remote_project_root.trim_end_matches('/'),
+    )
+    .await?
+    .trim_end_matches('/')
+    .to_string();
+    let restore_run_id = uuid::Uuid::new_v4().to_string();
+    let restored_remote_path = format!(
+        "{}/{}/{}",
+        project_root,
+        manifest.calc_type.trim().to_ascii_lowercase(),
+        restore_run_id
+    );
+    hpc::ssh::run_ssh_command_with_timeout(
+        &profile,
+        secret.as_deref(),
+        &format!(
+            "set -e; if [ -e {dest} ]; then exit 42; fi; mkdir -p {dest}; cp -a {source}/. {dest}/; chmod -R u+rwX {dest}",
+            source = shell_single_quote_local(&manifest.remote_backup_path),
+            dest = shell_single_quote_local(&restored_remote_path),
+        ),
+        3600,
+    )
+    .await?;
+
+    let staging_dir = std::env::temp_dir().join(format!("qcortado_backup_restore_{}", backup_id));
+    prepare_working_directory(&staging_dir, false)?;
+    let restore_result = async {
+        hpc::runner::sync_remote_artifacts(
+            &app,
+            &state.process_manager,
+            hpc::runner::HpcArtifactSyncRequest {
+                task_id: format!("backup_restore_{}", backup_id),
+                task_kind: manifest.calc_type.clone(),
+                profile: profile.clone(),
+                secret: secret.clone(),
+                remote_workdir: restored_remote_path.clone(),
+                local_sync_dir: staging_dir.clone(),
+                mode: hpc::runner::ArtifactSyncMode::Full,
+            },
+        )
+        .await?;
+        projects::restore_calculation_from_backup(
+            &app,
+            &manifest.project_id,
+            &manifest.cif_id,
+            &manifest.calculation,
+            &staging_dir,
+            &restored_remote_path,
+            &manifest.backup_id,
+            &manifest.remote_backup_path,
+        )
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    restore_result
+}
+
 /// Lists finished remote phonon directories that look recoverable.
 #[tauri::command]
 async fn hpc_list_recoverable_remote_phonon_runs(
@@ -10026,6 +10601,12 @@ fn analyze_structure_symmetry(
     symmetry::analyze_structure(input)
 }
 
+#[tauri::command]
+async fn estimate_point_mesh(input: point_mesh::PointMeshInput) -> Result<point_mesh::PointMeshResult, String> {
+    tokio::task::spawn_blocking(move || point_mesh::estimate(input))
+        .await.map_err(|error| error.to_string())?
+}
+
 /// Generates a pw.x input file from a calculation configuration.
 #[tauri::command]
 fn generate_input(calculation: QECalculation) -> Result<String, String> {
@@ -10158,6 +10739,58 @@ pub struct MpiConfig {
     pub enabled: bool,
     /// Number of MPI processes
     pub nprocs: u32,
+    #[serde(default)]
+    pub kpoint_pools: Option<u32>,
+    #[serde(default)]
+    pub qpoint_images: Option<u32>,
+}
+
+impl MpiConfig {
+    fn point_args(&self, phonon: bool) -> Result<Vec<String>, String> {
+        let pools = self.kpoint_pools.unwrap_or(1);
+        let images = self.qpoint_images.unwrap_or(1);
+        hpc::qe_parallel::validate(if self.enabled { self.nprocs } else { 1 }, pools, images)?;
+        if !phonon && images != 1 {
+            return Err("QE images are supported only in the phonon workflow.".into());
+        }
+        let mut args = Vec::new();
+        if pools > 1 {
+            args.extend(["-nk".into(), pools.to_string()]);
+        }
+        if phonon && images > 1 {
+            args.extend(["-nimage".into(), images.to_string()]);
+        }
+        Ok(args)
+    }
+}
+
+#[cfg(test)]
+mod local_point_parallelization_tests {
+    use super::MpiConfig;
+
+    #[test]
+    fn old_mpi_requests_keep_the_default_point_layout() {
+        let mpi: MpiConfig = serde_json::from_str(r#"{"enabled":true,"nprocs":8}"#).unwrap();
+        assert!(mpi.point_args(false).unwrap().is_empty());
+        assert!(mpi.point_args(true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn images_require_phonons_and_a_valid_mpi_decomposition() {
+        let mut mpi = MpiConfig {
+            enabled: true,
+            nprocs: 64,
+            kpoint_pools: Some(2),
+            qpoint_images: Some(8),
+        };
+        assert_eq!(mpi.point_args(true).unwrap(), ["-nk", "2", "-nimage", "8"]);
+        assert!(mpi.point_args(false).is_err());
+        mpi.enabled = false;
+        assert!(mpi.point_args(true).is_err());
+        mpi.enabled = true;
+        mpi.nprocs = 63;
+        assert!(mpi.point_args(true).is_err());
+    }
 }
 
 /// Runs a pw.x calculation with streaming output via events.
@@ -10190,6 +10823,7 @@ async fn run_calculation_streaming(
     }
 
     // Build the command - with or without MPI
+    let point_args = mpi_config.as_ref().map(|mpi| mpi.point_args(false)).transpose()?.unwrap_or_default();
     let mut child = if let Some(ref mpi) = mpi_config {
         if mpi.enabled && mpi.nprocs > 1 {
             // Use MPI
@@ -10200,6 +10834,7 @@ async fn run_calculation_streaming(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(&point_args)
                 .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
@@ -10627,10 +11262,12 @@ fn build_remote_scf_hydration_commands(remote_scf_dir: &str) -> Vec<String> {
     ]
 }
 
-fn resolve_hpc_scf_dependency_stage(
+async fn resolve_hpc_scf_dependency_stage(
     app: &AppHandle,
     project_id: Option<&str>,
     scf_calc_id: Option<&str>,
+    profile: &hpc::profile::HpcProfile,
+    secret: Option<&str>,
 ) -> Result<HpcScfDependencyStage, String> {
     let project_id = project_id.map(str::trim).filter(|value| !value.is_empty());
     let scf_calc_id = scf_calc_id.map(str::trim).filter(|value| !value.is_empty());
@@ -10663,10 +11300,44 @@ fn resolve_hpc_scf_dependency_stage(
         })?;
 
     if let Some(remote_source) = source_calc_remote_dependency_path(source_calc) {
-        return Ok(HpcScfDependencyStage {
-            local_bundle_copy: None,
-            remote_hydration_commands: build_remote_scf_hydration_commands(&remote_source),
-        });
+        let probe_command = format!(
+            "if [ ! -d {root} ]; then printf missing_root; \
+             elif [ ! -d {root}/tmp ]; then printf missing_tmp; \
+             elif [ -z \"$(find {root}/tmp -maxdepth 2 -type d -name '*.save' -print -quit)\" ]; then printf missing_save; \
+             else printf ok; fi",
+            root = shell_single_quote_local(&remote_source),
+        );
+        let probe = hpc::ssh::run_ssh_command_with_timeout(profile, secret, &probe_command, 30)
+            .await
+            .map_err(|err| {
+                format!(
+                    "Could not verify the source SCF dependency on the HPC login node: {}",
+                    err
+                )
+            })?;
+        if probe.trim() == "ok" {
+            return Ok(HpcScfDependencyStage {
+                local_bundle_copy: None,
+                remote_hydration_commands: build_remote_scf_hydration_commands(&remote_source),
+            });
+        }
+
+        if local_has_save_payload {
+            return Ok(HpcScfDependencyStage {
+                local_bundle_copy: Some(scf_tmp_dir),
+                remote_hydration_commands: Vec::new(),
+            });
+        }
+
+        let detail = match probe.trim() {
+            "missing_tmp" => "its tmp directory is missing",
+            "missing_save" => "its QE .save directory is missing",
+            _ => "the archived calculation directory is missing",
+        };
+        return Err(format!(
+            "Source SCF dependency preflight failed on the HPC login node: {} ({}). Restore a backup or rerun/download the SCF before submitting this workflow.",
+            remote_source, detail
+        ));
     }
 
     if local_has_save_payload {
@@ -11886,6 +12557,8 @@ async fn run_phonon_calculation(
     };
     let execution_prefix = state.execution_prefix.lock().unwrap().clone();
 
+    let point_args = mpi_config.as_ref().map(|mpi| mpi.point_args(true)).transpose()?.unwrap_or_default();
+    let images = mpi_config.as_ref().and_then(|mpi| mpi.qpoint_images).unwrap_or(1);
     let work_path = PathBuf::from(&working_dir);
 
     // Keep existing scratch only when explicit recover mode is enabled.
@@ -11954,6 +12627,7 @@ async fn run_phonon_calculation(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&ph_exe)
+                .args(&point_args)
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -12028,6 +12702,30 @@ async fn run_phonon_calculation(
         "qe-output-line",
         format!("ph.x completed: {} q-points calculated", n_qpoints),
     );
+
+    if images > 1 {
+        let mut recover_phonon = config.phonon.clone();
+        recover_phonon.recover = true;
+        let recover_input = generate_ph_input(&recover_phonon);
+        std::fs::write(work_path.join("ph_collect.in"), &recover_input).map_err(|e| e.to_string())?;
+        let mpi = mpi_config.as_ref().ok_or("Phonon images require MPI")?;
+        let per_image = mpi.nprocs / images;
+        let mut command = if per_image > 1 {
+            let mut command = tokio_command_with_prefix("mpirun", execution_prefix.as_deref());
+            command.args(["-np", &per_image.to_string()]).arg(&ph_exe);
+            command
+        } else {
+            tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
+        };
+        let output = command.args(["-nk", &mpi.kpoint_pools.unwrap_or(1).to_string(), "-nimage", "1", "-in", "ph_collect.in"])
+            .current_dir(&work_path).output().await.map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() || !parse_ph_output(&stdout).0 {
+            return Err(format!("Phonon image collection failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        full_output.push_str(&stdout);
+        let _ = app.emit("qe-output-line", stdout.as_ref());
+    }
 
     // ========================================================================
     // Step 2: Run q2r.x
@@ -12494,6 +13192,7 @@ async fn run_hpc_bundle_task(
 
     let bundle_dir = hpc::sync::create_local_bundle_dir(task_id)?;
     let slurm_job_name = format!("qcortado-{}", task_kind);
+    let command_lines = apply_pencil_decomposition_setting(command_lines, resources.as_ref());
     let script =
         hpc::slurm::build_slurm_script(&profile, &slurm_job_name, &command_lines, resources);
     let effective_resource_type = match script.effective_resources.resource_type {
@@ -13976,10 +14675,18 @@ async fn start_wien2k_scf_initialization_task(
         .cloned()
         .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
 
+    let task_type = if workflow_metadata
+        .as_ref()
+        .and_then(|value| value.pointer("/wizardResume/view"))
+        .and_then(|value| value.as_str())
+        == Some("wien2k-relax-wizard")
+    {
+        "wien2k_relax_initialize"
+    } else {
+        "wien2k_scf_initialize"
+    };
     let pm = state.process_manager.clone();
-    let (task_id, _cancel_flag) = pm
-        .register("wien2k_scf_initialize".to_string(), label)
-        .await;
+    let (task_id, _cancel_flag) = pm.register(task_type.to_string(), label).await;
     pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
     pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
         .await;
@@ -14076,9 +14783,7 @@ async fn start_wien2k_bands_prepare_task(
         .ok_or_else(|| "WIEN2k bands session is no longer available.".to_string())?;
 
     let pm = state.process_manager.clone();
-    let (task_id, _cancel_flag) = pm
-        .register("wien2k_bands_prepare".to_string(), label)
-        .await;
+    let (task_id, _cancel_flag) = pm.register("wien2k_bands_prepare".to_string(), label).await;
     pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
     pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
         .await;
@@ -14173,8 +14878,13 @@ async fn start_wien2k_scf_calculation(
         .cloned()
         .ok_or_else(|| "WIEN2k SCF session is no longer available.".to_string())?;
 
+    let task_type = if settings.force_minimization {
+        "wien2k_relax"
+    } else {
+        "wien2k_scf"
+    };
     let pm = state.process_manager.clone();
-    let (task_id, _cancel_flag) = pm.register("wien2k_scf".to_string(), label).await;
+    let (task_id, _cancel_flag) = pm.register(task_type.to_string(), label).await;
     pm.set_task_backend(&task_id, Some("hpc".to_string())).await;
     pm.set_hpc_resource_type(&task_id, Some("cpu".to_string()))
         .await;
@@ -14600,6 +15310,7 @@ async fn run_scf_background(
         return Err("pw.x not found".to_string());
     }
 
+    let point_args = mpi_config.as_ref().map(|mpi| mpi.point_args(false)).transpose()?.unwrap_or_default();
     let mut child = if let Some(ref mpi) = mpi_config {
         if mpi.enabled && mpi.nprocs > 1 {
             let line = format!("Starting pw.x with MPI ({} processes)...", mpi.nprocs);
@@ -14608,6 +15319,7 @@ async fn run_scf_background(
             tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
                 .args(["-np", &mpi.nprocs.to_string()])
                 .arg(&exe_path)
+                .args(&point_args)
                 .args(["-pd", ".true."])
                 .current_dir(&work_path)
                 .stdin(Stdio::piped())
@@ -14877,7 +15589,10 @@ async fn run_bands_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
     let has_remote_hydration = !dependency_stage.remote_hydration_commands.is_empty();
     if has_remote_hydration {
         let hydrate_line =
@@ -15916,7 +16631,10 @@ async fn run_wannier_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
 
     let qe_bin_dir = resolve_hpc_qe_bin_dir_for_resources(&profile, resources.as_ref());
     let pre_cmd = format!(
@@ -17448,7 +18166,10 @@ async fn run_dos_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
 
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
     if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
@@ -17990,7 +18711,10 @@ async fn run_fermi_surface_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
 
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
     if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy {
@@ -18553,7 +19277,10 @@ async fn run_hubbard_lrt_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
 
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
     if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy.clone() {
@@ -18862,7 +19589,10 @@ async fn run_phonon_hpc_background(
         &app,
         config.project_id.as_deref(),
         config.scf_calc_id.as_deref(),
-    )?;
+        &profile,
+        secret.as_deref(),
+    )
+    .await?;
 
     let mut bundle_copies: Vec<(PathBuf, String)> = Vec::new();
     if let Some(local_scf_tmp_dir) = dependency_stage.local_bundle_copy.clone() {
@@ -19079,6 +19809,8 @@ async fn run_phonon_background(
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let point_args = mpi_config.as_ref().map(|mpi| mpi.point_args(true)).transpose()?.unwrap_or_default();
+    let images = mpi_config.as_ref().and_then(|mpi| mpi.qpoint_images).unwrap_or(1);
     let work_path = PathBuf::from(&working_dir);
     // Keep existing scratch only when explicit recover mode is enabled.
     prepare_working_directory(&work_path, config.phonon.recover)?;
@@ -19141,82 +19873,61 @@ async fn run_phonon_background(
     std::fs::write(work_path.join("ph.in"), &ph_input)
         .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
 
-    let mut ph_child = if let Some(ref mpi) = mpi_config {
-        if mpi.enabled && mpi.nprocs > 1 {
-            emit_line!(format!("Using MPI with {} processes", mpi.nprocs));
-            tokio_command_with_prefix("mpirun", execution_prefix.as_deref())
-                .args(["-np", &mpi.nprocs.to_string()])
-                .arg(&ph_exe)
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start mpirun: {}", e))?
-        } else {
-            tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
-                .current_dir(&work_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("Failed to start ph.x: {}", e))?
-        }
-    } else {
-        tokio_command_with_prefix(&ph_exe, execution_prefix.as_deref())
-            .current_dir(&work_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to start ph.x: {}", e))?
-    };
-
-    if let Some(pid) = ph_child.id() {
-        pm.set_child_id(task_id, pid).await;
-    }
-
-    if let Some(mut stdin) = ph_child.stdin.take() {
-        stdin
-            .write_all(ph_input.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write ph.x input: {}", e))?;
-    }
-
-    let ph_stdout = ph_child
-        .stdout
-        .take()
-        .ok_or("Failed to capture ph.x stdout")?;
-    let mut ph_reader = BufReader::new(ph_stdout).lines();
-
-    while let Some(line) = ph_reader.next_line().await.map_err(|e| e.to_string())? {
-        check_cancel!();
-        full_output.push_str(&line);
-        full_output.push('\n');
-        emit_line!(line);
-    }
-
-    let ph_status = ph_child.wait().await.map_err(|e| e.to_string())?;
+    let mut ph_args: Vec<&str> = point_args.iter().map(String::as_str).collect();
+    ph_args.extend(["-in", "ph.in"]);
+    let streams = run_local_stage_capture_streams(
+        &app,
+        &pm,
+        task_id,
+        &work_path,
+        &ph_exe,
+        &ph_args,
+        None,
+        execution_prefix.as_deref(),
+        mpi_config.as_ref(),
+        true,
+    )
+    .await?;
     check_cancel!();
-
+    full_output.push_str(&streams.stdout);
+    std::fs::write(work_path.join("ph.out"), &full_output).map_err(|e| e.to_string())?;
     let (converged, n_qpoints) = parse_ph_output(&full_output);
-    if !ph_status.success() {
-        if converged {
-            emit_line!(format!(
-                "Warning: ph.x exited with code {:?} but output contains JOB DONE. Continuing with recovery mode.",
-                ph_status.code()
-            ));
-        } else {
-            return Err(format!(
-                "ph.x failed with exit code: {:?}",
-                ph_status.code()
-            ));
-        }
-    }
     if !converged {
         return Err("ph.x did not converge successfully".to_string());
     }
     emit_line!(format!("ph.x completed: {} q-points calculated", n_qpoints));
+
+    if images > 1 {
+        check_cancel!();
+        emit_line!("Collecting dynamical matrices from phonon images.".to_string());
+        let mut recover_phonon = config.phonon.clone();
+        recover_phonon.recover = true;
+        let recover_input = generate_ph_input(&recover_phonon);
+        std::fs::write(work_path.join("ph_collect.in"), &recover_input).map_err(|e| e.to_string())?;
+        let mut collect_mpi = mpi_config.clone().ok_or("Phonon images require MPI")?;
+        collect_mpi.nprocs /= images;
+        collect_mpi.qpoint_images = Some(1);
+        let pool = collect_mpi.kpoint_pools.unwrap_or(1).to_string();
+        let streams = run_local_stage_capture_streams(
+            &app,
+            &pm,
+            task_id,
+            &work_path,
+            &ph_exe,
+            &["-nk", &pool, "-nimage", "1", "-in", "ph_collect.in"],
+            None,
+            execution_prefix.as_deref(),
+            Some(&collect_mpi),
+            true,
+        )
+        .await?;
+        check_cancel!();
+        if !parse_ph_output(&streams.stdout).0 {
+            return Err("Phonon image collection did not finish successfully".into());
+        }
+        full_output.push_str(&streams.stdout);
+        std::fs::write(work_path.join("ph.out"), &full_output).map_err(|e| e.to_string())?;
+    }
 
     // Step 2: q2r.x
     emit_line!("".to_string());
@@ -20220,6 +20931,9 @@ pub fn run() {
         hpc_open_activity_window,
         hpc_download_task_artifacts,
         hpc_download_calculation_artifacts,
+        hpc_create_calculation_backup,
+        hpc_list_calculation_backups,
+        hpc_restore_calculation_backup,
         hpc_list_recoverable_remote_phonon_runs,
         hpc_debug_remote_phonon_recovery,
         hpc_recover_remote_phonon_calculation,
@@ -20230,6 +20944,7 @@ pub fn run() {
         export_wannier_for_ludwig,
         check_qe_executables,
         analyze_structure_symmetry,
+        estimate_point_mesh,
         generate_input,
         validate_calculation,
         parse_output,

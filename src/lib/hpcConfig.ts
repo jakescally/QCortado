@@ -162,6 +162,20 @@ export interface HpcArtifactSyncReport {
   skipped_bytes: number;
 }
 
+export interface HpcCalculationBackupSummary {
+  backup_id: string;
+  profile_id: string;
+  project_id: string;
+  project_name: string;
+  cif_id: string;
+  cif_label: string;
+  source_calc_id: string;
+  calc_type: string;
+  created_at: string;
+  remote_backup_path: string;
+  bytes: number;
+}
+
 export interface HpcHeadlessJobCandidate {
   profile_id: string;
   remote_job_id: string;
@@ -222,6 +236,8 @@ export function defaultCpuResources(): SlurmResourceRequest {
     nodes: 1,
     ntasks: 4,
     cpus_per_task: 1,
+    contiguous: false,
+    pencil_decomposition: true,
     memory_gb: 16,
     gpus: 0,
     additional_sbatch: [],
@@ -236,6 +252,8 @@ export function defaultGpuResources(): SlurmResourceRequest {
     nodes: 1,
     ntasks: 1,
     cpus_per_task: 8,
+    contiguous: false,
+    pencil_decomposition: true,
     memory_gb: 32,
     gpus: 1,
     additional_sbatch: [],
@@ -250,6 +268,8 @@ export function defaultUtilityResources(): SlurmResourceRequest {
     nodes: 1,
     ntasks: 1,
     cpus_per_task: 1,
+    contiguous: false,
+    pencil_decomposition: true,
     memory_gb: 2,
     gpus: 0,
     additional_sbatch: [],
@@ -459,6 +479,7 @@ export function buildHpcQeInputCommandLine(
   outputFile: string,
   extraArgs?: string,
   resourceType?: HpcResourceType | null,
+  pencilDecomposition = true,
 ): string {
   const launcher = buildHpcLauncherCommand(profile, resourceType);
   const args = (extraArgs || "").trim();
@@ -466,7 +487,7 @@ export function buildHpcQeInputCommandLine(
   const defaultArgs = qeExecutableDefaultExtraArgs(executable);
   const defaultArgSegment = defaultArgs.length > 0 ? ` ${defaultArgs}` : "";
   const hasPencilDecomposition = commandArgsIncludePencilDecomposition(args);
-  const pdSegment = qeExecutableUsesPencilDecomposition(executable) && !hasPencilDecomposition
+  const pdSegment = pencilDecomposition && qeExecutableUsesPencilDecomposition(executable) && !hasPencilDecomposition
     ? " -pd .true."
     : "";
   const executableCommand = qeEngineUsesModuleMode(profile)
@@ -711,6 +732,36 @@ export async function downloadHpcCalculationArtifacts(
     calcId,
     profileId: profileId ?? null,
     full,
+  });
+}
+
+export async function createHpcCalculationBackup(
+  projectId: string,
+  calcId: string,
+  profileId?: string | null,
+): Promise<HpcCalculationBackupSummary> {
+  return invoke<HpcCalculationBackupSummary>("hpc_create_calculation_backup", {
+    projectId,
+    calcId,
+    profileId: profileId ?? null,
+  });
+}
+
+export async function listHpcCalculationBackups(
+  profileId?: string | null,
+): Promise<HpcCalculationBackupSummary[]> {
+  return invoke<HpcCalculationBackupSummary[]>("hpc_list_calculation_backups", {
+    profileId: profileId ?? null,
+  });
+}
+
+export async function restoreHpcCalculationBackup<T = unknown>(
+  backupId: string,
+  profileId?: string | null,
+): Promise<T> {
+  return invoke<T>("hpc_restore_calculation_backup", {
+    backupId,
+    profileId: profileId ?? null,
   });
 }
 

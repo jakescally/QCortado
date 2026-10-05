@@ -425,6 +425,78 @@ pub fn update_site_rmts_from_struct(
     updated
 }
 
+/// Refresh fractional positions and muffin-tin radii from a native struct file
+/// while preserving the accepted inequivalent-site identity and radial mesh.
+pub fn update_sites_from_struct(
+    sites: &[Wien2kStructureSite],
+    struct_content: &str,
+) -> Result<Vec<Wien2kStructureSite>, String> {
+    fn coordinate(line: &str, marker: &str, next: &str) -> Option<f64> {
+        let value = line.split(marker).nth(1)?.split(next).next()?.trim();
+        value.parse().ok()
+    }
+    let positions = struct_content
+        .lines()
+        .filter_map(|line| {
+            Some([
+                coordinate(line, "X=", "Y=")?,
+                coordinate(line, "Y=", "Z=")?,
+                line.split("Z=")
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()?
+                    .trim()
+                    .parse()
+                    .ok()?,
+            ])
+        })
+        .collect::<Vec<_>>();
+    let multiplicities = struct_content
+        .lines()
+        .filter_map(|line| {
+            line.split("MULT=")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    if multiplicities.len() != sites.len() || multiplicities.iter().any(|value| *value == 0) {
+        return Err(format!(
+            "WIEN2k relaxed structure contains {} valid multiplicities; expected {}.",
+            multiplicities.len(),
+            sites.len()
+        ));
+    }
+    let expected = multiplicities.iter().sum::<usize>();
+    if positions.len() != expected {
+        return Err(format!(
+            "WIEN2k relaxed structure contains {} positions; expected {}.",
+            positions.len(),
+            expected
+        ));
+    }
+    let rmt_count = struct_content
+        .lines()
+        .filter(|line| line.contains("RMT="))
+        .count();
+    if rmt_count != sites.len() {
+        return Err(format!(
+            "WIEN2k relaxed structure contains {} muffin-tin radii; expected {}.",
+            rmt_count,
+            sites.len()
+        ));
+    }
+    let mut updated = update_site_rmts_from_struct(sites, struct_content);
+    let mut offset = 0;
+    for (site, count) in updated.iter_mut().zip(multiplicities) {
+        site.positions = positions[offset..offset + count].to_vec();
+        offset += count;
+    }
+    Ok(updated)
+}
+
 pub fn parse_struct_summary(struct_content: &str) -> Result<Wien2kStructurePreviewSummary, String> {
     let mut lines = struct_content.lines();
     let _title = lines
@@ -996,5 +1068,35 @@ mod tests {
         assert_eq!(summary.spacegroup_number, Some(225));
         assert_eq!(summary.spacegroup_symbol.as_deref(), Some("Fm-3m"));
         assert!((summary.cell_parameters[0] - 5.4579).abs() < 0.001);
+    }
+
+    #[test]
+    fn relaxed_struct_refreshes_all_positions_and_preserves_site_metadata() {
+        let struct_content = concat!(
+            "relaxed\n",
+            "P   LATTICE,NONEQUIV. ATOMS: 1  1 P1\n",
+            "MODE OF CALC=RELA unit=bohr\n",
+            " 10.000000 10.000000 10.000000 90.000000 90.000000 90.000000\n",
+            "ATOM  -1: X=0.01000000 Y=0.02000000 Z=0.03000000\n",
+            "          MULT= 2          ISPLIT= 8\n",
+            "      -1: X=0.26000000 Y=0.27000000 Z=0.28000000\n",
+            "Si         NPT=  781  R0=0.00010000 RMT= 2.15000   Z: 14.0\n",
+        );
+
+        let updated = update_sites_from_struct(&[silicon_site()], struct_content)
+            .expect("relaxed structure should parse");
+        assert_eq!(
+            updated[0].positions,
+            vec![[0.01, 0.02, 0.03], [0.26, 0.27, 0.28]]
+        );
+        assert_eq!(updated[0].rmt, 2.15);
+        assert_eq!(updated[0].npt, DEFAULT_NPT);
+        assert_eq!(updated[0].site_index, 1);
+    }
+
+    #[test]
+    fn relaxed_struct_rejects_incomplete_native_site_blocks() {
+        let incomplete = "ATOM -1: X=0.0 Y=0.0 Z=0.0\n          MULT= 2 ISPLIT= 8\n";
+        assert!(update_sites_from_struct(&[silicon_site()], incomplete).is_err());
     }
 }

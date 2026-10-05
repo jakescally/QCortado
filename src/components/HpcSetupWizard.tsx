@@ -83,6 +83,7 @@ function makeDefaultProfile(): HpcProfile {
     remote_gpu_pseudo_dir: "~/qe-gpu/pseudo",
     remote_workspace_root: "~/qcortado/work",
     remote_project_root: "~/qcortado/projects",
+    remote_backup_root: "~/qcortado/backups",
     resource_mode: "both",
     launcher: "srun",
     launcher_cpu_extra_args: null,

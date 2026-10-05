@@ -110,6 +110,7 @@ async fn run_with_optional_askpass(
 ) -> Result<std::process::Output, String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
+    cmd.kill_on_drop(true);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -124,11 +125,11 @@ async fn run_with_optional_askpass(
         None
     };
 
-    let output_result =
-        tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), cmd.output())
-            .await
-            .map_err(|_| format!("{} command timed out", program))?;
-    let output = output_result.map_err(|e| format!("Failed to execute {}: {}", program, e));
+    let output =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs.max(1)), cmd.output()).await {
+            Ok(result) => result.map_err(|e| format!("Failed to execute {}: {}", program, e)),
+            Err(_) => Err(format!("{} command timed out", program)),
+        };
 
     if let Some(path) = askpass_path {
         let _ = fs::remove_file(path);

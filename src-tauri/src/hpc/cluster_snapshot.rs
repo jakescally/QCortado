@@ -671,6 +671,7 @@ mod tests {
             remote_gpu_pseudo_dir: Some("~/qe-gpu/pseudo".to_string()),
             remote_workspace_root: "~/qcortado/work".to_string(),
             remote_project_root: "~/qcortado/projects".to_string(),
+            remote_backup_root: None,
             resource_mode: HpcResourceMode::Both,
             launcher: HpcLauncher::Srun,
             launcher_cpu_extra_args: None,

@@ -9,7 +9,7 @@ import { HpcTaskMeta } from "./types";
 import type { BandDataset } from "./viewers/bands";
 
 export type TaskStatus = "running" | "completed" | "failed" | "cancelled";
-export type TaskType = "scf" | "bands" | "wien2k_structure_stage" | "wien2k_scf_initialize" | "wien2k_scf" | "wien2k_soc" | "wien2k_bands_prepare" | "wien2k_bands" | "wien2k_fermi_surface" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
+export type TaskType = "scf" | "bands" | "wien2k_structure_stage" | "wien2k_scf_initialize" | "wien2k_scf" | "wien2k_relax_initialize" | "wien2k_relax" | "wien2k_soc" | "wien2k_bands_prepare" | "wien2k_bands" | "wien2k_fermi_surface" | "dos" | "fermi_surface" | "hubbard_lrt" | "phonon" | "epw" | "wannier" | "transport";
 export type QueueItemStatus = "queued" | "running" | "saving" | "completed" | "failed" | "cancelled";
 
 export interface TaskState {
@@ -148,6 +148,8 @@ const COMMAND_MAP: Record<TaskType, string> = {
   wien2k_structure_stage: "start_wien2k_structure_stage_task",
   wien2k_scf_initialize: "start_wien2k_scf_initialization_task",
   wien2k_scf: "start_wien2k_scf_calculation",
+  wien2k_relax_initialize: "start_wien2k_scf_initialization_task",
+  wien2k_relax: "start_wien2k_scf_calculation",
   wien2k_soc: "start_wien2k_soc_calculation",
   wien2k_bands_prepare: "start_wien2k_bands_prepare_task",
   wien2k_bands: "start_wien2k_bands_calculation",
@@ -183,7 +185,7 @@ function isHpcStartParams(params: Record<string, any>): boolean {
 }
 
 function normalizeTaskType(taskType: string): TaskType {
-  if (taskType === "scf" || taskType === "bands" || taskType === "wien2k_structure_stage" || taskType === "wien2k_scf_initialize" || taskType === "wien2k_scf" || taskType === "wien2k_soc" || taskType === "wien2k_bands_prepare" || taskType === "wien2k_bands" || taskType === "wien2k_fermi_surface" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
+  if (taskType === "scf" || taskType === "bands" || taskType === "wien2k_structure_stage" || taskType === "wien2k_scf_initialize" || taskType === "wien2k_scf" || taskType === "wien2k_relax_initialize" || taskType === "wien2k_relax" || taskType === "wien2k_soc" || taskType === "wien2k_bands_prepare" || taskType === "wien2k_bands" || taskType === "wien2k_fermi_surface" || taskType === "dos" || taskType === "fermi_surface" || taskType === "hubbard_lrt" || taskType === "phonon" || taskType === "epw" || taskType === "wannier" || taskType === "transport") {
     return taskType;
   }
   return "scf";
@@ -1588,7 +1590,7 @@ export function TaskProvider({ children }: { children: React.ReactNode }) {
       label: string,
       saveSpec?: QueueSaveSpec | null,
     ): Promise<string> => {
-      if (isHpcStartParams(params) || type === "wien2k_structure_stage" || type === "wien2k_scf_initialize" || type === "wien2k_scf" || type === "wien2k_soc" || type === "wien2k_bands_prepare" || type === "wien2k_bands" || type === "wien2k_fermi_surface") {
+      if (isHpcStartParams(params) || type === "wien2k_structure_stage" || type === "wien2k_scf_initialize" || type === "wien2k_scf" || type === "wien2k_relax_initialize" || type === "wien2k_relax" || type === "wien2k_soc" || type === "wien2k_bands_prepare" || type === "wien2k_bands" || type === "wien2k_fermi_surface") {
         return startTaskInternal(type, params, label, saveSpec ?? null);
       }
       const queueItemId = enqueueTaskInternal(type, params, label, saveSpec ?? null);

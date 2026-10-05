@@ -383,6 +383,8 @@ type ProgressKind =
   | "wien2k_structure_stage"
   | "wien2k_scf_initialize"
   | "wien2k_scf"
+  | "wien2k_relax_initialize"
+  | "wien2k_relax"
   | "wien2k_soc"
   | "wien2k_bands_prepare"
   | "wien2k_bands"
@@ -422,11 +424,13 @@ export function progressReducer(
       }
       return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k structure" };
     case "wien2k_scf_initialize":
+    case "wien2k_relax_initialize":
       if (line.includes("init_lapw")) {
         return { ...state, status: "running", percent: null, phase: "Initialization" };
       }
       return { ...state, status: "running", percent: null, phase: state.phase || "WIEN2k initialization" };
     case "wien2k_scf":
+    case "wien2k_relax":
       if (line.includes("[saved calculation")) {
         return { ...state, status: "complete", percent: 100, phase: "Complete" };
       }

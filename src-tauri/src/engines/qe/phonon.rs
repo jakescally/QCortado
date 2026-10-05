@@ -178,6 +178,7 @@ pub fn parse_phonon_dispersion(content: &str) -> Result<PhononDispersion, String
 
         return Ok(PhononDispersion {
             q_points,
+            path_break_indices: Vec::new(),
             frequencies,
             high_symmetry_points: Vec::new(),
             n_modes,
@@ -267,6 +268,7 @@ pub fn parse_phonon_dispersion(content: &str) -> Result<PhononDispersion, String
 
     Ok(PhononDispersion {
         q_points,
+        path_break_indices: Vec::new(),
         frequencies,
         high_symmetry_points: Vec::new(),
         n_modes,
@@ -277,38 +279,58 @@ pub fn parse_phonon_dispersion(content: &str) -> Result<PhononDispersion, String
 
 /// Add high-symmetry point markers to phonon dispersion data
 ///
-/// Uses the same logic as band structure markers:
-/// - q_path defines segments like: Γ(20) -> X(20) -> L(0)
-/// - High-symmetry points occur at cumulative indices
+/// Matdyn emits one extra sample at every zero-count path break. Its `.gp`
+/// distance column also includes the spatial jump between disconnected lines,
+/// so remove that jump from the plot axis while retaining every q sample.
 pub fn add_phonon_symmetry_markers(data: &mut PhononDispersion, q_path: &[QPathPoint]) {
-    if q_path.is_empty() || data.q_points.is_empty() {
+    if q_path.len() < 2 || data.q_points.is_empty() {
         return;
     }
 
-    let mut markers = Vec::new();
-    let mut q_index: usize = 0;
-
-    for (i, point) in q_path.iter().enumerate() {
-        // Get the actual q-distance from the dispersion data at this index
-        let q_distance = if q_index < data.q_points.len() {
-            data.q_points[q_index]
-        } else {
-            // Fallback to last q-point if we're past the end
-            data.q_points.last().copied().unwrap_or(0.0)
-        };
-
-        markers.push(PhononHighSymmetryMarker {
-            q_distance,
-            label: point.label.clone(),
-        });
-
-        // Move to the next high-symmetry point index
-        if i < q_path.len() - 1 {
-            q_index += point.npoints as usize;
+    let mut indices = vec![0usize];
+    let mut breaks = Vec::new();
+    for point in &q_path[..q_path.len() - 1] {
+        let next = indices
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(point.npoints.max(1) as usize);
+        if point.npoints == 0 {
+            breaks.push(next);
         }
+        indices.push(next);
+    }
+    // A mismatch means the file and path metadata do not describe the same
+    // samples; leave the data untouched instead of placing misleading markers.
+    if indices.last().copied().unwrap_or(0) + 1 != data.q_points.len() {
+        return;
     }
 
-    data.high_symmetry_points = markers;
+    if data.path_break_indices != breaks {
+        let mut removed_distance = 0.0;
+        let mut previous_break = 0;
+        for &break_index in &breaks {
+            let jump = data.q_points[break_index] - data.q_points[break_index - 1];
+            for distance in &mut data.q_points[previous_break..break_index] {
+                *distance -= removed_distance;
+            }
+            removed_distance += jump;
+            previous_break = break_index;
+        }
+        for distance in &mut data.q_points[previous_break..] {
+            *distance -= removed_distance;
+        }
+        data.path_break_indices = breaks;
+    }
+
+    data.high_symmetry_points = q_path
+        .iter()
+        .zip(indices)
+        .map(|(point, index)| PhononHighSymmetryMarker {
+            q_distance: data.q_points[index],
+            label: point.label.clone(),
+        })
+        .collect();
 }
 
 /// Read phonon DOS file from disk
@@ -424,11 +446,12 @@ mod tests {
     #[test]
     fn test_add_phonon_symmetry_markers() {
         let mut data = PhononDispersion {
-            q_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
-            frequencies: vec![vec![0.0; 6], vec![100.0; 6]],
+            q_points: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            path_break_indices: Vec::new(),
+            frequencies: vec![vec![0.0; 7], vec![100.0; 7]],
             high_symmetry_points: Vec::new(),
             n_modes: 2,
-            n_qpoints: 6,
+            n_qpoints: 7,
             frequency_range: [0.0, 100.0],
         };
 
@@ -456,5 +479,55 @@ mod tests {
         assert_eq!(data.high_symmetry_points[0].label, "Γ");
         assert_eq!(data.high_symmetry_points[1].label, "X");
         assert_eq!(data.high_symmetry_points[2].label, "L");
+    }
+
+    #[test]
+    fn tap2_phonon_breaks_match_matdyn_samples_and_collapse_plot_gaps() {
+        let q_points = include_str!("../../../../tests/fixtures/tap2_phonon_q_distances.txt")
+            .lines()
+            .map(|line| line.parse::<f64>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(q_points.len(), 503);
+        let mut data = PhononDispersion {
+            q_points,
+            path_break_indices: Vec::new(),
+            frequencies: vec![vec![0.0; 503]],
+            high_symmetry_points: Vec::new(),
+            n_modes: 1,
+            n_qpoints: 503,
+            frequency_range: [0.0, 0.0],
+        };
+        let labels = [
+            "Γ", "Z", "F₁", "Γ", "L", "F", "Γ", "Y", "X₁", "Z", "I₁", "L", "I",
+        ];
+        let counts = [41, 63, 90, 71, 32, 62, 58, 24, 0, 32, 0, 27, 0];
+        let path = labels
+            .iter()
+            .zip(counts)
+            .map(|(label, npoints)| QPathPoint {
+                label: (*label).to_string(),
+                coords: [0.0; 3],
+                npoints,
+            })
+            .collect::<Vec<_>>();
+
+        add_phonon_symmetry_markers(&mut data, &path);
+
+        assert_eq!(data.path_break_indices, vec![442, 475]);
+        assert!((data.q_points[441] - data.q_points[442]).abs() < 1e-9);
+        assert!((data.q_points[474] - data.q_points[475]).abs() < 1e-9);
+        assert!((data.q_points[502] - 5.572068).abs() < 1e-6);
+        assert_eq!(data.high_symmetry_points[8].label, "X₁");
+        assert_eq!(data.high_symmetry_points[9].label, "Z");
+        assert!((data.high_symmetry_points[9].q_distance - 4.130038).abs() < 1e-6);
+        assert_eq!(data.high_symmetry_points[10].label, "I₁");
+        assert_eq!(data.high_symmetry_points[11].label, "L");
+        assert!((data.high_symmetry_points[11].q_distance - 4.905073).abs() < 1e-6);
+        assert_eq!(data.n_qpoints, 503);
+        assert_eq!(data.frequencies[0].len(), 503);
+
+        let once = serde_json::to_value(&data).unwrap();
+        add_phonon_symmetry_markers(&mut data, &path);
+        assert_eq!(serde_json::to_value(&data).unwrap(), once);
     }
 }

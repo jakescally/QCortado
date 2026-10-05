@@ -111,6 +111,7 @@ test("WIEN2k SCF command plans expose DFT+U and advanced run flags", () => {
     spinMode: "spin_polarized",
     iterativeDiagonalization: true,
     forceMinimization: true,
+    forceConvergenceMryBohr: 1,
     dispersionCorrection: "dftd3",
     dftU: {
       enabled: true,
@@ -131,6 +132,10 @@ test("WIEN2k SCF command plans expose DFT+U and advanced run flags", () => {
   assert.ok(scfPlan.argv.includes("-dftd3"));
   assert.ok(scfPlan.argv.includes("-it"));
   assert.ok(scfPlan.argv.includes("-min"));
+  assert.deepEqual(
+    scfPlan.argv.slice(scfPlan.argv.indexOf("-fc"), scfPlan.argv.indexOf("-fc") + 2),
+    ["-fc", "1"],
+  );
   assert.equal(validateWien2kScfRunSettings({
     ...DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
     dftU: {
@@ -146,6 +151,23 @@ test("WIEN2k SCF command plans expose DFT+U and advanced run flags", () => {
       }],
     },
   })?.includes("requires spin-polarized"), true);
+});
+
+test("WIEN2k relaxation command plan supports non-spin runs and requires force convergence", () => {
+  const settings = {
+    ...DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
+    forceMinimization: true,
+    forceConvergenceMryBohr: 0.5,
+  };
+  const plan = buildWien2kScfCommandPlan(caseRef, settings);
+
+  assert.equal(plan.program, "run_lapw");
+  assert.ok(plan.argv.includes("-min"));
+  assert.deepEqual(plan.argv.slice(plan.argv.indexOf("-fc"), plan.argv.indexOf("-fc") + 2), ["-fc", "0.5"]);
+  assert.match(
+    validateWien2kScfRunSettings({ ...settings, forceConvergenceMryBohr: null }) ?? "",
+    /requires a positive force-convergence threshold/,
+  );
 });
 
 test("Wien2k terminal phases are explicit", () => {
@@ -179,14 +201,16 @@ test("WIEN2k structure controls validate native refinement limits", () => {
   );
 });
 
-test("WIEN2k structure source adapter selects saved setup artifacts only", () => {
+test("WIEN2k structure source adapter selects reviewed and successful relaxed structures", () => {
   const sources = listWien2kStructureSources([
     { id: "source", engine_id: "wien2k", calc_type: "engine_setup", parameters: { setup_kind: "structure" } },
+    { id: "relaxed", engine_id: "wien2k", calc_type: "optimization", parameters: { optimization_mode: "internal_positions", structure_source_ready: true } },
+    { id: "failed-relax", engine_id: "wien2k", calc_type: "optimization", parameters: { optimization_mode: "internal_positions", structure_source_ready: false } },
     { id: "qe", engine_id: "qe", calc_type: "engine_setup", parameters: { setup_kind: "structure" } },
     { id: "future-scf", engine_id: "wien2k", calc_type: "scf", parameters: {} },
   ]);
 
-  assert.deepEqual(sources.map((source) => source.id), ["source"]);
+  assert.deepEqual(sources.map((source) => source.id), ["relaxed", "source"]);
 });
 
 test("WIEN2k bands helper redistributes total k-points along the path", () => {

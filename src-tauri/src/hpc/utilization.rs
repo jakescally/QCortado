@@ -242,6 +242,9 @@ pub fn parse_utilization_output(raw: &str, resource_type: ResourceType) -> Parse
         let total_cpu_seconds = steps
             .iter()
             .filter_map(|step| {
+                if step.job_step.ends_with(".extern") {
+                    return None;
+                }
                 let cpu_seconds = step.average_cpu_seconds?;
                 let tasks = step.n_tasks.unwrap_or(1).max(1) as f64;
                 Some(cpu_seconds * tasks)
@@ -330,7 +333,7 @@ fn parse_squeue_section(lines: &[String]) -> Option<HpcSchedulerTelemetry> {
     let state = clean_optional(parts.next());
     let node = clean_optional(parts.next());
     let allocated_cpus = parts.next().and_then(parse_u32);
-    let requested_memory_bytes = parts.next().and_then(parse_slurm_memory_to_bytes);
+    let requested_memory_bytes = parts.next().and_then(parse_scheduler_memory_to_bytes);
     let nodes = parts.next().and_then(parse_u32);
     let elapsed = clean_optional(parts.next());
     let time_limit = clean_optional(parts.next());
@@ -370,7 +373,7 @@ fn merge_scontrol_section(scheduler: &mut Option<HpcSchedulerTelemetry>, lines: 
             }
             "Reason" if target.reason.is_none() => target.reason = clean_optional(Some(value)),
             "MinMemoryNode" | "MinMemoryCPU" if target.requested_memory_bytes.is_none() => {
-                target.requested_memory_bytes = parse_slurm_memory_to_bytes(value);
+                target.requested_memory_bytes = parse_scheduler_memory_to_bytes(value);
             }
             _ => {}
         }
@@ -394,7 +397,11 @@ fn parse_sstat_steps(lines: &[String]) -> Vec<HpcCpuStepTelemetry> {
                 job_step: parts[0].trim().to_string(),
                 n_tasks: parse_u32(parts[1]),
                 average_cpu_seconds,
-                average_cpu_display: ave_cpu_display,
+                average_cpu_display: if average_cpu_seconds.is_some() {
+                    ave_cpu_display
+                } else {
+                    None
+                },
                 average_rss_bytes: parse_slurm_memory_to_bytes(parts[3]),
                 peak_rss_bytes: parse_slurm_memory_to_bytes(parts[4]),
                 average_vm_bytes: parse_slurm_memory_to_bytes(parts[5]),
@@ -530,6 +537,16 @@ fn sum_optional_u64(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
     found.then_some(total)
 }
 
+// Scheduler memory fields default to MiB; sstat RSS/VM fields default to bytes.
+fn parse_scheduler_memory_to_bytes(value: &str) -> Option<u64> {
+    let raw = value.trim().trim_end_matches(['n', 'N', 'c', 'C']);
+    if raw.chars().last().is_some_and(|ch| ch.is_ascii_digit()) {
+        parse_slurm_memory_to_bytes(&format!("{}M", raw))
+    } else {
+        parse_slurm_memory_to_bytes(raw)
+    }
+}
+
 pub fn parse_slurm_memory_to_bytes(value: &str) -> Option<u64> {
     let mut trimmed = value.trim();
     if trimmed.is_empty()
@@ -548,14 +565,22 @@ pub fn parse_slurm_memory_to_bytes(value: &str) -> Option<u64> {
         trimmed
     };
     let number = normalize_numeric(numeric)?.parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
     let multiplier = match unit.map(|ch| ch.to_ascii_uppercase()) {
         Some('T') => 1024f64.powi(4),
         Some('G') => 1024f64.powi(3),
         Some('M') => 1024f64.powi(2),
-        Some('K') | None => 1024f64,
+        Some('K') => 1024f64,
+        None => 1.0,
         _ => return None,
     };
-    Some((number * multiplier).round() as u64)
+    let bytes = number * multiplier;
+    if !bytes.is_finite() || bytes >= u64::MAX as f64 {
+        return None;
+    }
+    Some(bytes.round() as u64)
 }
 
 pub fn parse_slurm_cpu_time_seconds(value: &str) -> Option<f64> {
@@ -581,7 +606,13 @@ pub fn parse_slurm_cpu_time_seconds(value: &str) -> Option<f64> {
         }
         _ => return None,
     };
-    Some(days * 86_400.0 + seconds)
+    let total = days * 86_400.0 + seconds;
+    // Slurm's unavailable uint64 counter can leak through its milliseconds conversion.
+    if !total.is_finite() || total < 0.0 || total >= (u64::MAX / 1000) as f64 {
+        None
+    } else {
+        Some(total)
+    }
 }
 
 fn normalize_numeric(value: &str) -> Option<&str> {
@@ -645,9 +676,42 @@ mod tests {
         assert_eq!(parse_slurm_memory_to_bytes("1M"), Some(1_048_576));
         assert_eq!(parse_slurm_memory_to_bytes("1G"), Some(1_073_741_824));
         assert_eq!(parse_slurm_memory_to_bytes("1T"), Some(1_099_511_627_776));
-        assert_eq!(parse_slurm_memory_to_bytes("1024"), Some(1_048_576));
+        assert_eq!(parse_slurm_memory_to_bytes("1024"), Some(1024));
         assert_eq!(parse_slurm_memory_to_bytes(""), None);
         assert_eq!(parse_slurm_memory_to_bytes("0"), None);
+    }
+
+    #[test]
+    fn incident_accounting_uses_bytes_and_rejects_unavailable_cpu() {
+        let steps = parse_sstat_steps(&[
+            "3019491.extern|6|213503982334-14:25:51||||".into(),
+            "3019491.0|6|01:09:25|1184861525|3295704K|0|0".into(),
+        ]);
+        assert_eq!(steps[0].average_cpu_seconds, None);
+        assert_eq!(steps[1].average_cpu_seconds, Some(4165.0));
+        assert_eq!(steps[1].average_rss_bytes, Some(1_184_861_525));
+        assert_eq!(
+            parse_scheduler_memory_to_bytes("32768"),
+            Some(32 * 1024_u64.pow(3))
+        );
+        assert_eq!(
+            parse_scheduler_memory_to_bytes("32Gn"),
+            Some(32 * 1024_u64.pow(3))
+        );
+        assert_eq!(parse_slurm_cpu_time_seconds("NaN"), None);
+        assert_eq!(parse_slurm_cpu_time_seconds("-1"), None);
+    }
+
+    #[test]
+    fn incident_sample_excludes_extern_and_preserves_memory_scope() {
+        let raw = "__QCORTADO_SQUEUE_BEGIN__\nRUNNING|c[002-006,025]|48|32768|6|00:08:33|02:00:00|None\n__QCORTADO_SQUEUE_END__\n__QCORTADO_SSTAT_BEGIN__\n3019491.extern|6|213503982334-14:25:51||||\n3019491.batch|1|00:00:00|17756K|19892K|0|0\n3019491.0|6|01:09:25|1184861525|3295704K|0|0\n__QCORTADO_SSTAT_END__";
+        let sample = parse_utilization_output(raw, super::ResourceType::Cpu);
+        let cpu = sample.cpu.unwrap();
+        assert_eq!(cpu.total_cpu_seconds, Some(24990.0));
+        assert_eq!(cpu.steps[0].average_cpu_display, None);
+        let memory = sample.memory.unwrap();
+        assert_eq!(memory.current_rss_bytes, Some(1_184_861_525));
+        assert_eq!(memory.requested_bytes, Some(32 * 1024_u64.pow(3)));
     }
 
     #[test]

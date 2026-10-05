@@ -20,6 +20,7 @@ export const ENGINE_WORKFLOW_VIEWS: readonly EngineWorkflowView[] = [
   "transport-wizard",
   "wien2k-structure-wizard",
   "wien2k-scf-wizard",
+  "wien2k-relax-wizard",
 ];
 
 export function isEngineWorkflowView(view: string): view is EngineWorkflowView {

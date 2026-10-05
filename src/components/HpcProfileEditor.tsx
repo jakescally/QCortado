@@ -70,6 +70,7 @@ function utilityResourcesForProfile(profile: HpcProfile): SlurmResourceRequest {
     qos: profile.default_cpu_resources.qos,
     account: profile.default_cpu_resources.account,
     constraint: profile.default_cpu_resources.constraint,
+    contiguous: profile.default_cpu_resources.contiguous,
     module_preamble: profile.default_cpu_resources.module_preamble,
     additional_sbatch: [...(profile.default_cpu_resources.additional_sbatch ?? [])],
   };
@@ -227,8 +228,12 @@ export function HpcProfileEditor({ profile, installations, onSaved, onDirtyChang
             CPUs / Task
             <input type="number" min={1} value={resources.cpus_per_task ?? 1} onChange={(event) => updateResource(resourceType, { cpus_per_task: positiveInt(event.target.value, 1) })} />
           </label>
+          <label className="hpc-checkbox-label" title="Ask Slurm to allocate a contiguous set of nodes.">
+            <input type="checkbox" checked={resources.contiguous ?? false} onChange={(event) => updateResource(resourceType, { contiguous: event.target.checked })} />
+            Contiguous nodes
+          </label>
           <label>
-            Memory (GB)
+            Memory per node (GiB)
             <input type="number" min={1} value={resources.memory_gb ?? 16} onChange={(event) => updateResource(resourceType, { memory_gb: positiveInt(event.target.value, 16) })} />
           </label>
           {resourceType === "gpu" && (
@@ -340,7 +345,19 @@ export function HpcProfileEditor({ profile, installations, onSaved, onDirtyChang
             Remote Project Root
             <input className="settings-menu-input" value={draft.remote_project_root} onChange={(event) => setDraft((current) => ({ ...current, remote_project_root: event.target.value }))} />
           </label>
+          <label>
+            Remote Backup Root
+            <input
+              className="settings-menu-input"
+              value={draft.remote_backup_root ?? ""}
+              placeholder="Derived beside the project root"
+              onChange={(event) => setDraft((current) => ({ ...current, remote_backup_root: optionalText(event.target.value) }))}
+            />
+          </label>
         </div>
+        <p className="settings-menu-hint">
+          Empty defaults to a sibling of the project directory named <code>backups</code>. Backup contents are made read-only after creation.
+        </p>
       </div>
 
       <div className="settings-menu-section settings-profile-engines">

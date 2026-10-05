@@ -150,7 +150,7 @@ export function canRenderEngineWorkflowHost({
 }: Pick<EngineWorkflowHostProps, "route" | "runtime" | "contexts" | "reconnectTaskId">): boolean {
   if (route.engineId === "wien2k") {
     if (route.view === "wien2k-structure-wizard") return Boolean(contexts.structureSetup);
-    if (route.view === "wien2k-scf-wizard") return Boolean(contexts.wien2kScf);
+    if (route.view === "wien2k-scf-wizard" || route.view === "wien2k-relax-wizard") return Boolean(contexts.wien2kScf);
     if (route.view === "wien2k-soc-wizard") return Boolean(contexts.soc || reconnectTaskId);
     if (route.view === "bands-wizard") return Boolean(contexts.bands);
     if (route.view === "fermi-surface-wizard") return Boolean(contexts.fermiSurface);
@@ -224,6 +224,22 @@ export function EngineWorkflowHost(props: EngineWorkflowHostProps) {
           activeHpcProfile={runtime.activeHpcProfile}
           reconnectTaskId={reconnectTaskIdValue}
           continuationCalculationId={context.continuationCalculationId}
+          onBack={() => onBack(route.view, "project-dashboard")}
+          onSaved={props.onWien2kScfSaved}
+        />
+      );
+    }
+    case "wien2k-relax-wizard": {
+      const context = contexts.wien2kScf;
+      if (!context) return null;
+      return (
+        <Wien2kScfWizard
+          projectId={context.projectId}
+          cifId={context.cifId}
+          calculations={context.calculations ?? []}
+          activeHpcProfile={runtime.activeHpcProfile}
+          reconnectTaskId={reconnectTaskIdValue}
+          relaxationMode
           onBack={() => onBack(route.view, "project-dashboard")}
           onSaved={props.onWien2kScfSaved}
         />

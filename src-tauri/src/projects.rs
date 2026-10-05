@@ -250,7 +250,9 @@ fn json_grid_tag(value: Option<&serde_json::Value>, suffix: &str) -> Option<Stri
     }
     let mut parts = Vec::with_capacity(3);
     for value in values {
-        let number = value.as_f64().or_else(|| value.as_str()?.parse::<f64>().ok())?;
+        let number = value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())?;
         if !number.is_finite() || number <= 0.0 {
             return None;
         }
@@ -292,7 +294,9 @@ fn calculation_uses_hpc_value(parameters: &serde_json::Value, result: Option<&QE
         return true;
     }
     result
-        .map(|result| result.raw_output.contains("HPC_STAGE|") || result.raw_output.contains("HPC_CMD|"))
+        .map(|result| {
+            result.raw_output.contains("HPC_STAGE|") || result.raw_output.contains("HPC_CMD|")
+        })
         .unwrap_or(false)
 }
 
@@ -309,7 +313,10 @@ fn calculation_artifacts_downloaded(parameters: &serde_json::Value) -> bool {
 
 fn uses_optimized_structure(parameters: &serde_json::Value, tags: &[String]) -> bool {
     let structure_source = parameters.get("structure_source");
-    if matches!(structure_source.and_then(|value| value.as_str()), Some("optimization")) {
+    if matches!(
+        structure_source.and_then(|value| value.as_str()),
+        Some("optimization")
+    ) {
         return true;
     }
     if structure_source
@@ -322,6 +329,106 @@ fn uses_optimized_structure(parameters: &serde_json::Value, tags: &[String]) -> 
     }
     tags.iter()
         .any(|tag| tag == "geometry" || tag == "structure-optimized")
+}
+
+fn source_calculation_ids(parameters: &serde_json::Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(values) = parameters
+        .get("source_calculation_ids")
+        .and_then(|value| value.as_array())
+    {
+        ids.extend(
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(ToString::to_string),
+        );
+    }
+    for key in [
+        "source_scf_id",
+        "source_scf_calculation_id",
+        "source_structure_calculation_id",
+        "source_scf_calc_id",
+        "source_wannier_calc_id",
+        "source_wannier_calculation_id",
+        "source_phonon_calc_id",
+        "source_phonon_calculation_id",
+        "source_bands_calc_id",
+        "source_bands_calculation_id",
+        "source_calc_id",
+        "parent_calculation_id",
+    ] {
+        if let Some(id) = parameters.get(key).and_then(|value| value.as_str()) {
+            ids.push(id.to_string());
+        }
+    }
+    if let Some(id) = parameters
+        .get("structure_source")
+        .and_then(|value| value.get("calc_id"))
+        .and_then(|value| value.as_str())
+    {
+        ids.push(id.to_string());
+    }
+    ids.retain(|id| !id.trim().is_empty());
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    ids
+}
+
+fn ensure_canonical_source_ids(parameters: &mut serde_json::Value) {
+    let ids = source_calculation_ids(parameters);
+    if ids.is_empty() {
+        return;
+    }
+    if let Some(object) = parameters.as_object_mut() {
+        object.insert("source_calculation_ids".to_string(), serde_json::json!(ids));
+    }
+}
+
+fn inherits_geometry(variant: &CifVariant, parameters: &serde_json::Value) -> bool {
+    fn visit(
+        variant: &CifVariant,
+        id: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visited.insert(id.to_string()) {
+            return false;
+        }
+        let Some(calculation) = variant
+            .calculations
+            .iter()
+            .find(|calculation| calculation.id == id)
+        else {
+            return false;
+        };
+        if calculation.tags.iter().any(|tag| {
+            tag.eq_ignore_ascii_case("geometry") || tag.eq_ignore_ascii_case("structure-optimized")
+        }) {
+            return true;
+        }
+        source_calculation_ids(&calculation.parameters)
+            .iter()
+            .any(|source_id| visit(variant, source_id, visited))
+    }
+    let mut visited = std::collections::HashSet::new();
+    source_calculation_ids(parameters)
+        .iter()
+        .any(|id| visit(variant, id, &mut visited))
+}
+
+fn tags_with_geometry_lineage(
+    variant: &CifVariant,
+    parameters: &serde_json::Value,
+    source_tags: &[String],
+) -> Vec<String> {
+    let mut tags = Vec::new();
+    if inherits_geometry(variant, parameters) {
+        push_calculation_tag(&mut tags, "geometry");
+    }
+    for tag in source_tags {
+        push_calculation_tag(&mut tags, tag);
+    }
+    tags
 }
 
 fn is_phonon_ready_scf(parameters: &serde_json::Value, tags: &[String]) -> bool {
@@ -392,7 +499,11 @@ fn normalize_calculation_tags(
                 .unwrap_or(calc_type);
             push_calculation_tag(
                 &mut tags,
-                if mode == "relax" { "Relax" } else { "VC-Relax" },
+                match mode {
+                    "relax" => "Relax",
+                    "internal_positions" => "Internal positions",
+                    _ => "VC-Relax",
+                },
             );
             if let Some(tag) = json_grid_tag(parameters.get("kgrid"), "") {
                 push_calculation_tag(&mut tags, tag);
@@ -543,7 +654,11 @@ fn normalize_calculation_tags(
         if json_bool(parameters.get(feature)) {
             push_calculation_tag(
                 &mut tags,
-                if feature == "lspinorb" { "SOC" } else { "DFT+U" },
+                if feature == "lspinorb" {
+                    "SOC"
+                } else {
+                    "DFT+U"
+                },
             );
         }
     }
@@ -1756,7 +1871,25 @@ fn calculation_json_path(project_dir: &Path, calc_id: &str) -> PathBuf {
 fn read_project_json(project_json_path: &Path) -> Result<Project, String> {
     let content = fs::read_to_string(project_json_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
-    serde_json::from_str(&content).map_err(|e| format!("Failed to parse project.json: {}", e))
+    let mut project: Project = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+    // Idempotent legacy normalization: derive geometry lineage from existing
+    // source links without trusting cross-variant or missing references.
+    for variant in &mut project.cif_variants {
+        let snapshot = variant.clone();
+        for calculation in &mut variant.calculations {
+            ensure_canonical_source_ids(&mut calculation.parameters);
+            if inherits_geometry(&snapshot, &calculation.parameters)
+                && !calculation
+                    .tags
+                    .iter()
+                    .any(|tag| tag.eq_ignore_ascii_case("geometry"))
+            {
+                calculation.tags.insert(0, "geometry".to_string());
+            }
+        }
+    }
+    Ok(project)
 }
 
 fn calculation_has_embedded_project_detail(calc: &CalculationRun) -> bool {
@@ -1813,7 +1946,12 @@ fn build_wien2k_soc_lookup(project: &Project) -> HashMap<String, bool> {
         .cif_variants
         .iter()
         .flat_map(|variant| variant.calculations.iter())
-        .map(|calculation| (calculation.id.clone(), wien2k_calculation_has_soc(calculation)))
+        .map(|calculation| {
+            (
+                calculation.id.clone(),
+                wien2k_calculation_has_soc(calculation),
+            )
+        })
         .collect()
 }
 
@@ -2494,19 +2632,19 @@ fn repair_phonon_dispersion_markers(
     if !dispersion_value.is_object() {
         return Ok(false);
     }
-    let has_markers = dispersion_value
-        .get("high_symmetry_points")
-        .and_then(|entry| entry.as_array())
-        .is_some_and(|entries| !entries.is_empty());
-    if has_markers || q_path_points.len() < 2 {
+    if q_path_points.len() < 2 {
         return Ok(false);
     }
 
     let mut dispersion = serde_json::from_value::<PhononDispersion>(dispersion_value.clone())
         .map_err(|e| format!("Failed to parse saved phonon dispersion: {}", e))?;
     add_phonon_symmetry_markers(&mut dispersion, q_path_points);
-    *dispersion_value = serde_json::to_value(dispersion)
+    let repaired = serde_json::to_value(dispersion)
         .map_err(|e| format!("Failed to serialize repaired phonon dispersion: {}", e))?;
+    if *dispersion_value == repaired {
+        return Ok(false);
+    }
+    *dispersion_value = repaired;
     Ok(true)
 }
 
@@ -4447,10 +4585,10 @@ pub fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
         let hydrated_hubbard_lrt_data = hydrate_missing_hubbard_lrt_data(&mut project, &path)?;
         if hydrated_hubbard_lrt_data
             || project
-            .cif_variants
-            .iter()
-            .flat_map(|variant| variant.calculations.iter())
-            .any(calculation_has_embedded_project_detail)
+                .cif_variants
+                .iter()
+                .flat_map(|variant| variant.calculations.iter())
+                .any(calculation_has_embedded_project_detail)
         {
             write_project_json_summary(&project_json, &project)?;
             project = summarize_project_for_storage(&project);
@@ -5099,6 +5237,39 @@ pub fn refresh_calculation_artifact_metadata(
     Ok(local_storage_bytes)
 }
 
+pub fn record_calculation_backup_metadata(
+    app: &AppHandle,
+    project_id: &str,
+    calc_id: &str,
+    backup_id: &str,
+    backup_path: &str,
+    created_at: &str,
+) -> Result<(), String> {
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let calculation = project
+        .cif_variants
+        .iter_mut()
+        .flat_map(|variant| variant.calculations.iter_mut())
+        .find(|calc| calc.id == calc_id)
+        .ok_or_else(|| format!("Calculation not found: {}", calc_id))?;
+    let parameters = calculation
+        .parameters
+        .as_object_mut()
+        .ok_or_else(|| "Calculation parameters are unavailable.".to_string())?;
+    parameters.insert("backup_id".to_string(), serde_json::json!(backup_id));
+    parameters.insert("backup_path".to_string(), serde_json::json!(backup_path));
+    parameters.insert("backed_up_at".to_string(), serde_json::json!(created_at));
+    push_calculation_tag(&mut calculation.tags, "Backed up");
+    let updated = calculation.clone();
+    write_project_json_summary(&project_json_path, &project)?;
+    write_calculation_json(&project_dir, &updated)?;
+    queue_viewer_library_publish(app);
+    Ok(())
+}
+
 /// Updates a project's editable metadata fields.
 #[tauri::command]
 pub fn update_project_metadata(
@@ -5393,6 +5564,7 @@ pub fn save_calculation(
     // Copy working directory contents if provided (includes .save directory, etc.)
     let mut copied_work_path: Option<PathBuf> = None;
     let mut calculation_parameters = calc_data.parameters.clone();
+    ensure_canonical_source_ids(&mut calculation_parameters);
     let phonon_save_policy = if calc_data.calc_type == "phonon" {
         Some(ensure_phonon_save_policy(&mut calculation_parameters))
     } else {
@@ -5480,12 +5652,14 @@ pub fn save_calculation(
     let storage_bytes = Some(calculate_directory_size(&calc_dir)?);
 
     // Create calculation run record
+    let lineage_tags =
+        tags_with_geometry_lineage(variant, &calculation_parameters, &calc_data.tags);
     let tags = normalize_calculation_tags(
         calc_data.engine_id,
         &calc_data.calc_type,
         &calculation_parameters,
         Some(&calc_data.result),
-        &calc_data.tags,
+        &lineage_tags,
     );
 
     let calc_run = CalculationRun {
@@ -5516,6 +5690,95 @@ pub fn save_calculation(
 
     queue_viewer_library_publish(&app);
     Ok(calc_run)
+}
+
+/// Recreates a saved calculation entry from a fully downloaded remote backup.
+/// The source record is preserved, while identity and remote artifact paths are
+/// replaced so the restored calculation behaves like a normal current entry.
+pub fn restore_calculation_from_backup(
+    app: &AppHandle,
+    project_id: &str,
+    cif_id: &str,
+    source: &CalculationRun,
+    restored_artifacts: &Path,
+    remote_project_path: &str,
+    backup_id: &str,
+    backup_path: &str,
+) -> Result<CalculationRun, String> {
+    ensure_research_mode()?;
+    if !restored_artifacts.is_dir() {
+        return Err(format!(
+            "Restored artifact directory not found: {}",
+            restored_artifacts.display()
+        ));
+    }
+
+    let projects_dir = ensure_projects_dir(app)?;
+    let project_dir = projects_dir.join(project_id);
+    let project_json_path = project_dir.join("project.json");
+    let mut project = read_project_json(&project_json_path)?;
+    let variant = project
+        .cif_variants
+        .iter_mut()
+        .find(|variant| variant.id == cif_id)
+        .ok_or_else(|| format!("CIF variant not found: {}", cif_id))?;
+
+    let calc_id = generate_id();
+    let calc_dir = project_dir.join("calculations").join(&calc_id);
+    let tmp_dir = calc_dir.join("tmp");
+    fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create restored calculation directory: {}", e))?;
+    copy_dir_recursive(&restored_artifacts.to_path_buf(), &tmp_dir)?;
+
+    for filename in [
+        "pw.in",
+        "pw.out",
+        "phonon_pipeline.out",
+        "phonon_freq",
+        "phonon_freq.gp",
+        "phonon_dos",
+    ] {
+        let source_file = restored_artifacts.join(filename);
+        if source_file.is_file() {
+            fs::copy(&source_file, calc_dir.join(filename))
+                .map_err(|e| format!("Failed to restore {}: {}", filename, e))?;
+        }
+    }
+
+    let mut restored = source.clone();
+    restored.id = calc_id.clone();
+    let parameters = restored
+        .parameters
+        .as_object_mut()
+        .ok_or_else(|| "Backup calculation parameters are unavailable.".to_string())?;
+    parameters.insert(
+        "remote_project_path".to_string(),
+        serde_json::Value::String(remote_project_path.to_string()),
+    );
+    parameters.insert(
+        "remote_workdir".to_string(),
+        serde_json::Value::String(remote_project_path.to_string()),
+    );
+    parameters.insert("execution_backend".to_string(), serde_json::json!("hpc"));
+    parameters.insert("restored_from_backup".to_string(), serde_json::json!(true));
+    parameters.insert("backup_id".to_string(), serde_json::json!(backup_id));
+    parameters.insert("backup_path".to_string(), serde_json::json!(backup_path));
+    parameters.insert("restored_at".to_string(), serde_json::json!(now_iso()));
+    restored.storage_bytes = Some(calculate_directory_size(&calc_dir)?);
+    push_calculation_tag(&mut restored.tags, "Restored");
+
+    fs::write(
+        calc_dir.join("calc.json"),
+        serde_json::to_string_pretty(&restored)
+            .map_err(|e| format!("Failed to serialize restored calculation: {}", e))?,
+    )
+    .map_err(|e| format!("Failed to write restored calculation metadata: {}", e))?;
+    variant
+        .calculations
+        .push(summarize_calculation_for_project(&restored));
+    write_project_json_summary(&project_json_path, &project)?;
+    queue_viewer_library_publish(app);
+    Ok(restored)
 }
 
 /// Saves an accepted engine-owned setup artifact, such as a WIEN2k
@@ -5627,6 +5890,8 @@ pub fn save_engine_calculation_artifact(
         write_safe_engine_artifact(&calc_dir, artifact)?;
     }
 
+    let mut parameters = calc_data.parameters;
+    ensure_canonical_source_ids(&mut parameters);
     let mut result = calc_data.result;
     if let Some(result) = result.as_mut() {
         if let Some(dataset) = result.band_dataset.as_mut() {
@@ -5642,19 +5907,20 @@ pub fn save_engine_calculation_artifact(
         }
     }
 
+    let lineage_tags = tags_with_geometry_lineage(variant, &parameters, &calc_data.tags);
     let tags = normalize_calculation_tags(
         calc_data.engine_id,
         &calc_data.calc_type,
-        &calc_data.parameters,
+        &parameters,
         result.as_ref(),
-        &calc_data.tags,
+        &lineage_tags,
     );
     let calc_run = CalculationRun {
         id: calc_id,
         engine_id: calc_data.engine_id,
         name: None,
         calc_type: calc_data.calc_type,
-        parameters: calc_data.parameters,
+        parameters,
         result,
         scf_summary: calc_data.scf_summary,
         started_at: calc_data.started_at,
@@ -7395,10 +7661,11 @@ mod tests {
         is_calculation_log_file, is_wavefunction_archive_file, looks_like_completed_phonon_run,
         parse_q_grid_from_ph_input, path_contains_wavefunction_archives,
         remove_wavefunction_archives, repair_phonon_calculation_with_workdir,
-        repair_wien2k_band_parameters, summarize_qe_result_for_project, CalculationRun, CifVariant,
+        repair_phonon_dispersion_markers, repair_wien2k_band_parameters, source_calculation_ids,
+        summarize_qe_result_for_project, tags_with_geometry_lineage, CalculationRun, CifVariant,
         Project, ProjectFolder,
     };
-    use crate::engines::qe::QEResult;
+    use crate::engines::qe::{QEResult, QPathPoint};
     use crate::engines::EngineId;
     use std::fs;
     use std::path::PathBuf;
@@ -7417,6 +7684,71 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("failed to create temp test directory");
         dir
+    }
+
+    fn lineage_calculation(id: &str, source_id: Option<&str>, tags: &[&str]) -> CalculationRun {
+        CalculationRun {
+            id: id.to_string(),
+            engine_id: EngineId::Qe,
+            name: None,
+            calc_type: "test".to_string(),
+            parameters: source_id
+                .map(|source| serde_json::json!({ "source_calc_id": source }))
+                .unwrap_or_else(|| serde_json::json!({})),
+            result: None,
+            scf_summary: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: Some("2026-01-01T00:01:00Z".to_string()),
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+            storage_bytes: None,
+        }
+    }
+
+    #[test]
+    fn geometry_lineage_is_transitive_ordered_and_cycle_safe() {
+        let variant = CifVariant {
+            id: "variant".to_string(),
+            filename: "test.cif".to_string(),
+            formula: "Si".to_string(),
+            added_at: "2026-01-01T00:00:00Z".to_string(),
+            calculations: vec![
+                lineage_calculation("optimized", None, &["geometry", "structure-optimized"]),
+                lineage_calculation("scf", Some("optimized"), &["scf"]),
+                lineage_calculation("wannier", Some("scf"), &["wannier"]),
+                lineage_calculation("cycle-a", Some("cycle-b"), &[]),
+                lineage_calculation("cycle-b", Some("cycle-a"), &[]),
+            ],
+        };
+
+        assert_eq!(
+            tags_with_geometry_lineage(
+                &variant,
+                &serde_json::json!({ "source_wannier_calc_id": "wannier" }),
+                &["transport".to_string(), "geometry".to_string()],
+            ),
+            vec!["geometry", "transport"]
+        );
+        assert_eq!(
+            tags_with_geometry_lineage(
+                &variant,
+                &serde_json::json!({ "source_calc_id": "cycle-a" }),
+                &["bands".to_string()],
+            ),
+            vec!["bands"]
+        );
+    }
+
+    #[test]
+    fn canonical_source_ids_preserve_declared_order_and_legacy_epw_sources() {
+        assert_eq!(
+            source_calculation_ids(&serde_json::json!({
+                "source_calculation_ids": ["phonon", "wannier"],
+                "source_phonon_calc_id": "phonon",
+                "source_wannier_calc_id": "wannier",
+                "source_scf_calc_id": "scf"
+            })),
+            vec!["phonon", "wannier", "scf"]
+        );
     }
 
     #[test]
@@ -7444,18 +7776,34 @@ mod tests {
                     {"npoints":2}, {"npoints":0}, {"npoints":2}, {"npoints":0}
                 ]}})
             } else {
-                fs::write(calc_dir.join("pw.in"), "K_POINTS {crystal_b}\n4\n0 0 0 2\n0.5 0 0 0\n0.5 0.5 0.5 2\n0 0 0 0\n").unwrap();
+                fs::write(
+                    calc_dir.join("pw.in"),
+                    "K_POINTS {crystal_b}\n4\n0 0 0 2\n0.5 0 0 0\n0.5 0.5 0.5 2\n0 0 0 0\n",
+                )
+                .unwrap();
                 serde_json::json!({"k_path":"G → X → L → W"})
             };
             let run = CalculationRun {
-                id: calc_id.clone(), engine_id: engine, name: None, calc_type: "bands".into(),
-                parameters, result: Some(QEResult { band_data: Some(data.clone()), ..QEResult::default() }),
-                scf_summary: None, started_at: "2026-09-14T00:00:00Z".into(), completed_at: None,
-                tags: vec![], storage_bytes: None,
+                id: calc_id.clone(),
+                engine_id: engine,
+                name: None,
+                calc_type: "bands".into(),
+                parameters,
+                result: Some(QEResult {
+                    band_data: Some(data.clone()),
+                    ..QEResult::default()
+                }),
+                scf_summary: None,
+                started_at: "2026-09-14T00:00:00Z".into(),
+                completed_at: None,
+                tags: vec![],
+                storage_bytes: None,
             };
             let original = serde_json::to_string(&run).unwrap();
             fs::write(calc_dir.join("calc.json"), &original).unwrap();
-            let loaded = super::load_full_calculation_from_disk(&project_dir, &calc_id).unwrap().unwrap();
+            let loaded = super::load_full_calculation_from_disk(&project_dir, &calc_id)
+                .unwrap()
+                .unwrap();
             let corrected = loaded.result.unwrap().band_data.unwrap();
             let corrected_points = corrected["k_points"]
                 .as_array()
@@ -7469,7 +7817,10 @@ mod tests {
                 Some(2.0)
             );
             assert_eq!(corrected["energies"], data["energies"]);
-            assert_eq!(fs::read_to_string(calc_dir.join("calc.json")).unwrap(), original);
+            assert_eq!(
+                fs::read_to_string(calc_dir.join("calc.json")).unwrap(),
+                original
+            );
         }
         fs::remove_dir_all(project_dir).unwrap();
     }
@@ -7687,8 +8038,8 @@ mod tests {
         )
         .expect("failed to write calc.json");
 
-        let mut loaded_project = super::read_project_json(&project_json_path)
-            .expect("failed to read project.json");
+        let mut loaded_project =
+            super::read_project_json(&project_json_path).expect("failed to read project.json");
         let changed = hydrate_missing_hubbard_lrt_data(&mut loaded_project, &project_dir)
             .expect("hydration should succeed");
         assert!(changed);
@@ -7698,7 +8049,10 @@ mod tests {
             .as_ref()
             .and_then(|result| result.hubbard_lrt_data.as_ref())
             .expect("summary should now contain Hubbard LRT data");
-        assert_eq!(hydrated.pointer("/u_values/0/target"), Some(&serde_json::json!("Er-4f")));
+        assert_eq!(
+            hydrated.pointer("/u_values/0/target"),
+            Some(&serde_json::json!("Er-4f"))
+        );
 
         let _ = fs::remove_dir_all(&project_dir);
     }
@@ -7845,6 +8199,38 @@ mod tests {
     }
 
     #[test]
+    fn repair_existing_phonon_markers_and_break_spacing_once() {
+        let path = [("Γ", 2), ("X", 2), ("Y", 0), ("Z", 1), ("L", 0)]
+            .into_iter()
+            .map(|(label, npoints)| QPathPoint {
+                label: label.to_string(),
+                coords: [0.0; 3],
+                npoints,
+            })
+            .collect::<Vec<_>>();
+        let mut saved = serde_json::json!({
+            "q_points": [0.0, 1.0, 2.0, 3.0, 4.0, 9.0, 10.0],
+            "frequencies": [[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]],
+            "high_symmetry_points": [{"label": "Z", "q_distance": 4.0}],
+            "n_modes": 1,
+            "n_qpoints": 7,
+            "frequency_range": [10.0, 16.0]
+        });
+
+        assert!(repair_phonon_dispersion_markers(&mut saved, &path).unwrap());
+        assert_eq!(saved["path_break_indices"], serde_json::json!([5]));
+        assert_eq!(
+            saved["q_points"],
+            serde_json::json!([0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 5.0])
+        );
+        assert_eq!(
+            saved["high_symmetry_points"][3]["q_distance"],
+            serde_json::json!(4.0)
+        );
+        assert!(!repair_phonon_dispersion_markers(&mut saved, &path).unwrap());
+    }
+
+    #[test]
     fn repair_wien2k_band_parameters_backfills_k_path_string() {
         let mut calculation = CalculationRun {
             id: "test_band_calc".to_string(),
@@ -7905,7 +8291,10 @@ mod tests {
         source_soc_by_id.insert("source-scf".to_string(), true);
 
         let changed = repair_wien2k_band_parameters(&source_soc_by_id, &mut calculation);
-        assert!(changed, "expected WIEN2k band metadata repair to inherit SOC");
+        assert!(
+            changed,
+            "expected WIEN2k band metadata repair to inherit SOC"
+        );
         assert_eq!(
             calculation.parameters.get("spin_orbit"),
             Some(&serde_json::json!(true))

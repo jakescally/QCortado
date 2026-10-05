@@ -46,6 +46,10 @@ import {
   buildHpcQeRuntimeSetupLines,
 } from "../lib/engines/qe/hpc";
 import type { EngineId } from "../lib/engines/types";
+import { sourceScfLayout } from "../lib/qeAutoParallelization";
+import { usePointMeshEstimate, usePointStructure } from "../lib/qePointEstimate";
+import { resolveSavedScfStructure } from "../lib/optimizedStructure";
+import { PointEstimateSummary, QePointParallelization } from "./QePointParallelization";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
@@ -331,6 +335,8 @@ type PhononSavePolicy = "plot-only" | "epw-ready" | "full-archive";
 const PHONON_WIZARD_SETTINGS_ID = "phonon";
 
 interface StoredPhononWizardSettings {
+  pointPools?: number;
+  pointImages?: number;
   qGrid: [number, number, number];
   tr2PhInput: string;
   asr: "none" | "simple" | "crystal" | "one-dim" | "zero-dim";
@@ -548,6 +554,16 @@ export function PhononWizard({
   // MPI settings
   const [mpiEnabled, setMpiEnabled] = useState(false);
   const [mpiProcs, setMpiProcs] = useState(1);
+  const [pointPools, setPointPools] = useState(() => storedWizardSettings?.pointPools ?? 1);
+  const [pointImages, setPointImages] = useState(() => storedWizardSettings?.pointImages ?? 1);
+  const estimateScfParams = selectedScf?.parameters ?? {};
+  const pointStructure = usePointStructure(crystalData, symmetryTransform,
+    sourceScfUsesPrimitiveCell(estimateScfParams, crystalData?.atom_sites.length ?? 0), resolveSavedScfStructure(estimateScfParams));
+  const conservativeEstimate = Boolean(estimateScfParams.noncolin || estimateScfParams.lspinorb || estimateScfParams.nspin === 4);
+  const kPointEstimate = usePointMeshEstimate(pointStructure, estimateScfParams.kgrid ?? null, estimateScfParams.kgrid_offset ?? [0, 0, 0], conservativeEstimate);
+  const qPointEstimate = usePointMeshEstimate(pointStructure, qGrid, [0, 0, 0], conservativeEstimate);
+  const pointEstimates = { sourceLayout: sourceScfLayout(estimateScfParams), k: kPointEstimate, q: qPointEstimate, kLabel: "source SCF k-points" };
+
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
@@ -578,6 +594,8 @@ export function PhononWizard({
 
   useEffect(() => {
     writeProjectWizardSettings(projectId, PHONON_WIZARD_SETTINGS_ID, {
+      pointPools,
+      pointImages,
       qGrid,
       tr2PhInput,
       asr,
@@ -608,6 +626,8 @@ export function PhononWizard({
       totalQPointsInput,
     });
   }, [
+    pointPools,
+    pointImages,
     projectId,
     qGrid,
     tr2PhInput,
@@ -777,6 +797,10 @@ export function PhononWizard({
   }, [minimumTotalQPoints, totalQPointsInput, totalQPointsTarget]);
 
   async function buildPhononTaskPlan(): Promise<PhononTaskPlan> {
+    if (!isHpcMode && mpiEnabled && (!Number.isInteger(pointPools) || !Number.isInteger(pointImages)
+      || pointPools < 1 || pointImages < 1 || mpiProcs % (pointPools * pointImages) !== 0)) {
+      throw new Error("MPI processes must be divisible by k-point pools × phonon images.");
+    }
     if (!selectedScf?.result) {
       throw new Error("No source SCF calculation selected");
     }
@@ -931,7 +955,7 @@ export function PhononWizard({
     const taskParams = {
       config: phononConfig,
       workingDir: PHONON_WORK_DIR,
-      mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+      mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs, kpoint_pools: pointPools, qpoint_images: pointImages } : null,
       executionTarget: buildExecutionTarget(
         executionMode,
         activeHpcProfile?.id ?? null,
@@ -941,6 +965,11 @@ export function PhononWizard({
     };
     const pathString = shouldCalculateDispersion ? qPath.map((point) => point.label).join(" -> ") : "";
     const saveParameters = {
+      qe_point_parallelization: {
+        mpi_tasks: isHpcMode ? (hpcResources.ntasks ?? 1) : (mpiEnabled ? mpiProcs : 1),
+        kpoint_pools: isHpcMode ? (hpcResources.qe_kpoint_pools ?? 1) : (mpiEnabled ? pointPools : 1),
+        qpoint_images: isHpcMode ? (hpcResources.qe_qpoint_images ?? 1) : (mpiEnabled ? pointImages : 1),
+      },
       source_scf_id: selectedScf.id,
       q_grid: qGrid,
       tr2_ph: tr2Ph,
@@ -1315,7 +1344,6 @@ export function PhononWizard({
 
   // Step 2: ph.x + EPW configuration
   const renderQGridStep = () => {
-    const totalQPoints = qGrid[0] * qGrid[1] * qGrid[2];
     const parsedTr2Ph = Number(tr2PhInput);
     const isTr2PhValid = Number.isFinite(parsedTr2Ph) && parsedTr2Ph > 0;
     const isNmixValid = isOptionalPositiveIntValid(nmixPhInput);
@@ -1394,7 +1422,7 @@ export function PhononWizard({
                   onChange={(e) => setQGrid([qGrid[0], qGrid[1], parseInt(e.target.value) || 1])}
                 />
               </div>
-              <span className="param-hint">{totalQPoints} total q-points</span>
+              <PointEstimateSummary estimate={qPointEstimate} label="q-points" />
             </div>
 
             <div className="phonon-field">
@@ -1983,6 +2011,7 @@ export function PhononWizard({
           <HpcRunSettings
             profileId={activeHpcProfile?.id ?? null}
             profileName={activeHpcProfile?.name ?? "Andromeda"}
+            pointEstimates={pointEstimates}
             taskKind="phonon"
             commandLines={hpcCommandLines}
             resources={hpcResources}
@@ -2013,6 +2042,8 @@ export function PhononWizard({
                     </label>
                     {mpiEnabled && (
                       <div className="mpi-procs">
+                        <QePointParallelization estimates={pointEstimates} ranks={mpiProcs} pools={pointPools} images={pointImages} phonon
+                          onChange={(pools, images) => { setPointPools(pools); setPointImages(images); }} />
                         <label>
                           Number of processes:
                           <input

@@ -62,6 +62,7 @@ import {
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
 import { validateHpcTasksWithinBandCount } from "../lib/hpcBandLimits";
+import { bandPathPointCount } from "../lib/qePointEstimate";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import { qeBandDataToBandDataset } from "../lib/engines/qe";
@@ -2348,6 +2349,7 @@ export function BandStructureWizard({
           <HpcRunSettings
             profileId={activeHpcProfile?.id ?? null}
             profileName={activeHpcProfile?.name ?? "Andromeda"}
+            pointEstimates={{ k: { result: { fullPoints: bandPathPointCount(kPath), irreduciblePoints: bandPathPointCount(kPath) }, loading: false, error: null, explicit: true }, kLabel: "band-path k-points" }}
             taskKind="bands"
             commandLines={hpcCommandLines}
             resources={hpcResources}

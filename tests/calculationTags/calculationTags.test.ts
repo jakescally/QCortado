@@ -39,3 +39,19 @@ test("WIEN2k SCF calculations without DFT+U do not gain the tag", () => {
 
   assert.ok(!tags.includes("DFT+U"));
 });
+
+test("WIEN2k internal-position optimizations keep Geometry before calculation tags", () => {
+  const tags = buildCalculationTagList({
+    engine_id: "wien2k",
+    calc_type: "optimization",
+    tags: ["geometry", "structure-optimized", "wien2k-native"],
+    parameters: { optimization_mode: "internal_positions" },
+  });
+
+  assert.deepEqual(tags.slice(0, 3), ["geometry", "structure-optimized", "wien2k-native"]);
+  assert.deepEqual(
+    normalizeCalculationTagBadges(tags.slice(0, 3)).map((tag) => tag.label),
+    ["Geometry", "Optimized", "WIEN2k"],
+  );
+  assert.ok(tags.includes("Internal positions"));
+});

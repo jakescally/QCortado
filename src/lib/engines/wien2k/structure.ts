@@ -113,11 +113,20 @@ export function validateWien2kStructureControls(controls: Wien2kStructureControl
 }
 
 export function listWien2kStructureSources<T extends Wien2kStructureSourceRecord>(calculations: T[]): T[] {
-  return calculations.filter((calculation) =>
-    calculation.engine_id === "wien2k"
-      && calculation.calc_type === "engine_setup"
-      && calculation.parameters?.setup_kind === "structure",
-  );
+  return calculations.filter((calculation) => {
+    if (calculation.engine_id !== "wien2k") return false;
+    const reviewed = calculation.calc_type === "engine_setup"
+      && calculation.parameters?.setup_kind === "structure";
+    const relaxed = calculation.calc_type === "optimization"
+      && calculation.parameters?.optimization_mode === "internal_positions"
+      && calculation.parameters?.structure_source_ready === true;
+    return reviewed || relaxed;
+  }).sort((left, right) => {
+    const leftRelaxed = left.calc_type === "optimization" ? 1 : 0;
+    const rightRelaxed = right.calc_type === "optimization" ? 1 : 0;
+    if (leftRelaxed !== rightRelaxed) return rightRelaxed - leftRelaxed;
+    return String(right.completed_at ?? "").localeCompare(String(left.completed_at ?? ""));
+  });
 }
 
 export function prepareWien2kStructureDraft(

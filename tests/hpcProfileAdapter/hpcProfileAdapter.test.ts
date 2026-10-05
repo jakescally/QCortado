@@ -101,6 +101,10 @@ test("QE module mode loads its environment and invokes tools from PATH", () => {
     buildHpcQeInputCommandLine(moduleProfile, "pw.x", "pw.in", "pw.out", undefined, "cpu"),
     "srun --cpu-bind=cores pw.x -pd .true. -in pw.in > pw.out 2>&1",
   );
+  assert.equal(
+    buildHpcQeInputCommandLine(moduleProfile, "pw.x", "pw.in", "pw.out", undefined, "cpu", false),
+    "srun --cpu-bind=cores pw.x -in pw.in > pw.out 2>&1",
+  );
   const runtimeProfile = qeHpcProfileToRuntimeProfile(moduleProfile);
   assert.equal(runtimeProfile.pathMode, "module");
   assert.equal(runtimeProfile.moduleLoad, "quantum-espresso/7.5");

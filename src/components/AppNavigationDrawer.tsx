@@ -1,5 +1,6 @@
 import {
   Activity,
+  ArchiveRestore,
   Database,
   FolderOpen,
   HardDrive,
@@ -19,6 +20,7 @@ interface AppNavigationDrawerProps {
   onClose: () => void;
   onProjects: () => void;
   onStorage: () => void;
+  onBackups: () => void;
   onNodeActivity: () => void;
   onRecoverHeadless: () => void;
   onSettings: () => void;
@@ -33,6 +35,7 @@ export function AppNavigationDrawer({
   onClose,
   onProjects,
   onStorage,
+  onBackups,
   onNodeActivity,
   onRecoverHeadless,
   onSettings,
@@ -79,6 +82,7 @@ export function AppNavigationDrawer({
             <button type="button" onClick={onStorage}><HardDrive size={18} /><span>Storage Manager</span></button>
             {executionMode === "hpc" && (
               <>
+                <button type="button" onClick={onBackups}><ArchiveRestore size={18} /><span>Calculation Backups</span></button>
                 <button type="button" onClick={onNodeActivity}><Database size={18} /><span>Node Activity</span></button>
                 <button type="button" onClick={onRecoverHeadless}><RotateCcw size={18} /><span>Recover Headless Job</span></button>
               </>

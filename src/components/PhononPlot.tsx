@@ -16,6 +16,7 @@ interface PhononHighSymmetryMarker {
 
 interface PhononDispersion {
   q_points: number[];
+  path_break_indices?: number[];
   frequencies: number[][];
   high_symmetry_points: PhononHighSymmetryMarker[];
   n_modes: number;
@@ -263,6 +264,24 @@ export function PhononDispersionPlot({
     };
   }, [data, plotWidth, plotHeight, yMin, yMax, sharedYScale, freqMin, freqMax]);
 
+  const plotMarkers = useMemo(() => {
+    const markers: PhononHighSymmetryMarker[] = [];
+    for (const point of data.high_symmetry_points) {
+      const previous = markers[markers.length - 1];
+      if (previous && Math.abs(previous.q_distance - point.q_distance) < 1e-5) {
+        previous.label += `|${formatLabel(point.label)}`;
+      } else {
+        markers.push({ q_distance: point.q_distance, label: formatLabel(point.label) });
+      }
+    }
+    return markers;
+  }, [data.high_symmetry_points]);
+
+  const pathBreaks = useMemo(
+    () => new Set(data.path_break_indices ?? []),
+    [data.path_break_indices]
+  );
+
   // Generate path for a mode
   const modeToPath = useCallback(
     (mode: number[], qPoints: number[]) => {
@@ -270,11 +289,11 @@ export function PhononDispersionPlot({
 
       let path = `M ${scales.xScale(qPoints[0])},${scales.yScale(mode[0])}`;
       for (let i = 1; i < mode.length && i < qPoints.length; i++) {
-        path += ` L ${scales.xScale(qPoints[i])},${scales.yScale(mode[i])}`;
+        path += ` ${pathBreaks.has(i) ? "M" : "L"} ${scales.xScale(qPoints[i])},${scales.yScale(mode[i])}`;
       }
       return path;
     },
-    [scales]
+    [scales, pathBreaks]
   );
 
   // Handle mouse move for hover
@@ -295,25 +314,28 @@ export function PhononDispersionPlot({
       const q = (x / plotWidth) * scales.qMax;
       const freq = scales.fMin + (1 - y / plotHeight) * (scales.fMax - scales.fMin);
 
-      // Find closest q-point index
-      let closestQIdx = 0;
+      // At a break two samples share the same plot position. Use the
+      // cursor's frequency to pick the correct side of that break.
       let minDist = Infinity;
       for (let i = 0; i < data.q_points.length; i++) {
         const dist = Math.abs(data.q_points[i] - q);
         if (dist < minDist) {
           minDist = dist;
-          closestQIdx = i;
         }
       }
 
-      // Find closest mode at that q-point
+      let closestQIdx = 0;
       let closestModeIdx = 0;
-      minDist = Infinity;
-      for (let m = 0; m < data.frequencies.length; m++) {
-        const dist = Math.abs(data.frequencies[m][closestQIdx] - freq);
-        if (dist < minDist) {
-          minDist = dist;
-          closestModeIdx = m;
+      let minFrequencyDistance = Infinity;
+      for (let i = 0; i < data.q_points.length; i++) {
+        if (Math.abs(data.q_points[i] - q) > minDist + 1e-5) continue;
+        for (let m = 0; m < data.frequencies.length; m++) {
+          const dist = Math.abs(data.frequencies[m][i] - freq);
+          if (dist < minFrequencyDistance) {
+            minFrequencyDistance = dist;
+            closestQIdx = i;
+            closestModeIdx = m;
+          }
         }
       }
 
@@ -430,7 +452,7 @@ export function PhononDispersionPlot({
           </g>
 
           {/* High-symmetry point vertical lines */}
-          {data.high_symmetry_points.map((point, i) => (
+          {plotMarkers.map((point, i) => (
             <g key={i}>
               <line
                 x1={scales.xScale(point.q_distance)}

@@ -62,6 +62,9 @@ export interface Wien2kScfExecutionResult {
   summary: NormalizedScfSummary;
   calculationId: string;
   continuation: boolean;
+  finalMaxForceMryBohr?: number | null;
+  geometrySteps?: number | null;
+  structureSourceReady: boolean;
 }
 
 export function startWien2kScfSession(

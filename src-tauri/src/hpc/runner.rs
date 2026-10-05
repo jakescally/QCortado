@@ -13,7 +13,7 @@ use super::slurm::{
     is_terminal_state, normalize_scheduler_state, parse_sacct_snapshot, parse_sbatch_job_id,
     parse_squeue_snapshot, SchedulerSnapshot,
 };
-use super::ssh::{download_file, run_ssh_command, upload_directory};
+use super::ssh::{download_file, run_ssh_command, run_ssh_command_with_timeout, upload_directory};
 const LIVE_LINECOUNT_MARKER: &str = "__QCORTADO_INTERNAL_LINECOUNT__=";
 const LIVE_SIZE_MARKER: &str = "__QCORTADO_INTERNAL_SIZE__=";
 const ENABLE_EXPERIMENTAL_REMOTE_LIVE_LOGGING: bool = false;
@@ -1135,17 +1135,32 @@ async fn stream_remote_file_linecount(
     secret: Option<&str>,
     remote_workdir: &str,
     file_name: &str,
-    last_line_count: &mut usize,
+    cursor: &mut LiveFileCursor,
     already_announced: bool,
 ) -> bool {
-    let read_cmd = build_linecount_read_command(remote_workdir, file_name, *last_line_count);
-    let Ok(read_output) = run_ssh_command(profile, secret, &read_cmd).await else {
-        return already_announced;
+    let read_cmd = build_linecount_read_command(remote_workdir, file_name, cursor.line_count);
+    let read_output = match run_ssh_command_with_timeout(profile, secret, &read_cmd, 10).await {
+        Ok(output) => {
+            cursor.warned_read_error = false;
+            output
+        }
+        Err(err) => {
+            if !cursor.warned_read_error {
+                emit_task_line(app, pm, task_id, format!("HPC_WARNING|Live log read failed for {}: {}. Retrying; remote job status is checked separately.", file_name, err)).await;
+                cursor.warned_read_error = true;
+            }
+            return already_announced;
+        }
     };
 
     let Some((lines_to_emit, total_lines)) = parse_linecount_read_output(&read_output) else {
+        if !read_output.trim().is_empty() && !cursor.warned_parse_error {
+            emit_task_line(app, pm, task_id, format!("HPC_WARNING|Unexpected live log response for {}; retrying without advancing the log cursor.", file_name)).await;
+            cursor.warned_parse_error = true;
+        }
         return already_announced;
     };
+    cursor.warned_parse_error = false;
 
     let mut announced = already_announced;
     if !lines_to_emit.is_empty() {
@@ -1164,7 +1179,7 @@ async fn stream_remote_file_linecount(
         }
     }
 
-    *last_line_count = total_lines;
+    cursor.line_count = total_lines;
     announced
 }
 
@@ -1189,7 +1204,7 @@ async fn stream_remote_file_incremental(
             secret,
             remote_workdir,
             file_name,
-            &mut cursor.line_count,
+            cursor,
             already_announced,
         )
         .await;
@@ -1541,6 +1556,8 @@ pub async fn run_batch_task(
     let mut announced_live_files: HashSet<String> = HashSet::new();
     let mut emitted_live_probe = false;
 
+    let mut live_file_index = 0usize;
+    let mut warned_scheduler_unavailable = false;
     let terminal_snapshot = loop {
         if request.cancel_flag.load(Ordering::SeqCst) {
             let cancel_cmd = format!("scancel {}", shell_single_quote(&job_id));
@@ -1548,30 +1565,14 @@ pub async fn run_batch_task(
             return Err("Cancelled by user".to_string());
         }
 
-        for file_name in &live_output_files {
-            let cursor = live_cursors.entry(file_name.clone()).or_default();
-            let announced = announced_live_files.contains(file_name);
-            let updated_announced = stream_remote_file_incremental(
-                &app,
-                &pm,
-                task_id(&request),
-                &request.profile,
-                request.secret.as_deref(),
-                &remote_workdir,
-                file_name,
-                cursor,
-                announced,
-                false,
-            )
-            .await;
-            if updated_announced {
-                announced_live_files.insert(file_name.clone());
-            }
-        }
-
         let squeue_cmd = format!("squeue -h -j {} -o \"%T|%N\"", shell_single_quote(&job_id));
-        let squeue_output =
-            run_ssh_command(&request.profile, request.secret.as_deref(), &squeue_cmd).await;
+        let squeue_output = run_ssh_command_with_timeout(
+            &request.profile,
+            request.secret.as_deref(),
+            &squeue_cmd,
+            15,
+        )
+        .await;
         let scheduler_snapshot = match squeue_output {
             Ok(output) => parse_squeue_snapshot(&output),
             Err(_) => None,
@@ -1588,7 +1589,14 @@ pub async fn run_batch_task(
                 "sacct -j {} --format=State,NodeList --parsable2 --noheader",
                 shell_single_quote(&job_id)
             );
-            match run_ssh_command(&request.profile, request.secret.as_deref(), &sacct_cmd).await {
+            match run_ssh_command_with_timeout(
+                &request.profile,
+                request.secret.as_deref(),
+                &sacct_cmd,
+                15,
+            )
+            .await
+            {
                 Ok(output) => parse_sacct_snapshot(&output).map(|snapshot| SchedulerSnapshot {
                     state: normalize_scheduler_state(&snapshot.state),
                     node: snapshot.node.clone(),
@@ -1598,7 +1606,19 @@ pub async fn run_batch_task(
             }
         };
 
+        if resolved_snapshot.is_none() && !warned_scheduler_unavailable {
+            emit_task_line(
+                &app,
+                &pm,
+                task_id(&request),
+                "HPC_WARNING|Scheduler status unavailable; retaining the remote job and retrying."
+                    .to_string(),
+            )
+            .await;
+            warned_scheduler_unavailable = true;
+        }
         if let Some(snapshot) = resolved_snapshot {
+            warned_scheduler_unavailable = false;
             let changed = last_scheduler_state
                 .as_ref()
                 .map(|state| state != &snapshot.state)
@@ -1625,6 +1645,30 @@ pub async fn run_batch_task(
             }
             if is_terminal_state(&snapshot.state) {
                 break snapshot;
+            }
+        }
+
+        if let Some(file_name) =
+            live_output_files.get(live_file_index % live_output_files.len().max(1))
+        {
+            live_file_index = live_file_index.wrapping_add(1);
+            let cursor = live_cursors.entry(file_name.clone()).or_default();
+            let announced = announced_live_files.contains(file_name);
+            let updated_announced = stream_remote_file_incremental(
+                &app,
+                &pm,
+                task_id(&request),
+                &request.profile,
+                request.secret.as_deref(),
+                &remote_workdir,
+                file_name,
+                cursor,
+                announced,
+                false,
+            )
+            .await;
+            if updated_announced {
+                announced_live_files.insert(file_name.clone());
             }
         }
 
@@ -1917,6 +1961,8 @@ pub async fn run_attached_batch_task(
     let mut last_scheduler_state: Option<String> = None;
     let mut emitted_live_probe = false;
 
+    let mut live_file_index = 0usize;
+    let mut warned_scheduler_unavailable = false;
     let terminal_snapshot = loop {
         if request.cancel_flag.load(Ordering::SeqCst) {
             let cancel_cmd = format!("scancel {}", shell_single_quote(&job_id));
@@ -1924,33 +1970,16 @@ pub async fn run_attached_batch_task(
             return Err("Cancelled by user".to_string());
         }
 
-        for file_name in &live_output_files {
-            let cursor = live_cursors.entry(file_name.clone()).or_default();
-            let announced = announced_live_files.contains(file_name);
-            let updated_announced = stream_remote_file_incremental(
-                &app,
-                &pm,
-                task_id,
-                &request.profile,
-                request.secret.as_deref(),
-                &remote_workdir,
-                file_name,
-                cursor,
-                announced,
-                false,
-            )
-            .await;
-            if updated_announced {
-                announced_live_files.insert(file_name.clone());
-            }
-        }
-
         let squeue_cmd = format!("squeue -h -j {} -o \"%T|%N\"", shell_single_quote(&job_id));
-        let scheduler_snapshot =
-            run_ssh_command(&request.profile, request.secret.as_deref(), &squeue_cmd)
-                .await
-                .ok()
-                .and_then(|output| parse_squeue_snapshot(&output));
+        let scheduler_snapshot = run_ssh_command_with_timeout(
+            &request.profile,
+            request.secret.as_deref(),
+            &squeue_cmd,
+            15,
+        )
+        .await
+        .ok()
+        .and_then(|output| parse_squeue_snapshot(&output));
 
         let resolved_snapshot = if let Some(snapshot) = scheduler_snapshot {
             Some(SchedulerSnapshot {
@@ -1963,18 +1992,35 @@ pub async fn run_attached_batch_task(
                 "sacct -j {} --format=State,NodeList --parsable2 --noheader",
                 shell_single_quote(&job_id)
             );
-            run_ssh_command(&request.profile, request.secret.as_deref(), &sacct_cmd)
-                .await
-                .ok()
-                .and_then(|output| parse_sacct_snapshot(&output))
-                .map(|snapshot| SchedulerSnapshot {
-                    state: normalize_scheduler_state(&snapshot.state),
-                    node: snapshot.node.clone(),
-                    source: snapshot.source,
-                })
+            run_ssh_command_with_timeout(
+                &request.profile,
+                request.secret.as_deref(),
+                &sacct_cmd,
+                15,
+            )
+            .await
+            .ok()
+            .and_then(|output| parse_sacct_snapshot(&output))
+            .map(|snapshot| SchedulerSnapshot {
+                state: normalize_scheduler_state(&snapshot.state),
+                node: snapshot.node.clone(),
+                source: snapshot.source,
+            })
         };
 
+        if resolved_snapshot.is_none() && !warned_scheduler_unavailable {
+            emit_task_line(
+                &app,
+                &pm,
+                task_id,
+                "HPC_WARNING|Scheduler status unavailable; retaining the remote job and retrying."
+                    .to_string(),
+            )
+            .await;
+            warned_scheduler_unavailable = true;
+        }
         if let Some(snapshot) = resolved_snapshot {
+            warned_scheduler_unavailable = false;
             let changed = last_scheduler_state
                 .as_ref()
                 .map(|state| state != &snapshot.state)
@@ -2001,6 +2047,30 @@ pub async fn run_attached_batch_task(
             }
             if is_terminal_state(&snapshot.state) {
                 break snapshot;
+            }
+        }
+
+        if let Some(file_name) =
+            live_output_files.get(live_file_index % live_output_files.len().max(1))
+        {
+            live_file_index = live_file_index.wrapping_add(1);
+            let cursor = live_cursors.entry(file_name.clone()).or_default();
+            let announced = announced_live_files.contains(file_name);
+            let updated_announced = stream_remote_file_incremental(
+                &app,
+                &pm,
+                task_id,
+                &request.profile,
+                request.secret.as_deref(),
+                &remote_workdir,
+                file_name,
+                cursor,
+                announced,
+                false,
+            )
+            .await;
+            if updated_announced {
+                announced_live_files.insert(file_name.clone());
             }
         }
 

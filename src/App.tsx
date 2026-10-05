@@ -32,6 +32,7 @@ import { HpcSetupWizard } from "./components/HpcSetupWizard";
 import { HpcProfileEditor } from "./components/HpcProfileEditor";
 import { HpcNodeActivityPage } from "./components/HpcNodeActivityPage";
 import { StorageManagerPage } from "./components/StorageManagerPage";
+import { BackupManagerPage } from "./components/BackupManagerPage";
 import { BandsMultiview } from "./components/BandsMultiview";
 import { InfoTooltip } from "./components/InfoTooltip";
 import type { BandsMultiviewCalculation } from "./components/BandsMultiview";
@@ -156,7 +157,7 @@ const DEFAULT_QE_DEFAULTS: QeDefaults = {
   smearing: "marzari-vanderbilt",
 };
 
-type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "wien2k-soc-wizard" | "project-browser" | "project-dashboard" | "settings" | "node-activity" | "storage-manager";
+type AppView = "scf-wizard" | "bands-wizard" | "bands-viewer" | "bands-multiview" | "dos-wizard" | "dos-viewer" | "wannier-wizard" | "wannier-viewer" | "transport-wizard" | "transport-viewer" | "fermi-surface-wizard" | "hubbard-lrt-wizard" | "phonon-wizard" | "phonon-viewer" | "epw-wizard" | "epw-viewer" | "wien2k-structure-wizard" | "wien2k-scf-wizard" | "wien2k-relax-wizard" | "wien2k-soc-wizard" | "project-browser" | "project-dashboard" | "settings" | "node-activity" | "storage-manager" | "backup-manager";
 
 interface OpenTaskViewRequest {
   taskId: string;
@@ -1709,6 +1710,8 @@ function AppInner() {
       wien2k_structure_stage: "engine_setup",
       wien2k_scf_initialize: "scf",
       wien2k_scf: "scf",
+      wien2k_relax_initialize: "structure_optimization",
+      wien2k_relax: "structure_optimization",
       wien2k_soc: "soc",
       wien2k_bands_prepare: "bands",
       wien2k_bands: "bands",
@@ -1727,6 +1730,8 @@ function AppInner() {
       wien2k_structure_stage: "wien2k-structure-wizard",
       wien2k_scf_initialize: "wien2k-scf-wizard",
       wien2k_scf: "wien2k-scf-wizard",
+      wien2k_relax_initialize: "wien2k-relax-wizard",
+      wien2k_relax: "wien2k-relax-wizard",
       wien2k_soc: "wien2k-soc-wizard",
       wien2k_bands_prepare: "bands-wizard",
       wien2k_bands: "bands-wizard",
@@ -1750,7 +1755,7 @@ function AppInner() {
     const resumeContext = wizardResume && typeof wizardResume === "object"
       ? wizardResume.context
       : null;
-    const resumeScfContext = route.view === "wien2k-scf-wizard" && resumeContext
+    const resumeScfContext = (route.view === "wien2k-scf-wizard" || route.view === "wien2k-relax-wizard") && resumeContext
       ? resumeContext as SCFContext
       : scfContext;
     const resumeBandsContext = route.view === "bands-wizard" && taskType.startsWith("wien2k_") && resumeContext
@@ -1791,7 +1796,7 @@ function AppInner() {
     if (!canOpen) return false;
 
     if (resumeContext?.projectId) setSelectedProjectId(resumeContext.projectId);
-    if (route.view === "wien2k-scf-wizard" && resumeScfContext) {
+    if ((route.view === "wien2k-scf-wizard" || route.view === "wien2k-relax-wizard") && resumeScfContext) {
       setScfContext(resumeScfContext);
     }
     if (route.view === "bands-wizard" && taskType.startsWith("wien2k_") && resumeBandsContext) {
@@ -1842,6 +1847,7 @@ function AppInner() {
         setWien2kStructureContext(null);
         break;
       case "wien2k-scf-wizard":
+      case "wien2k-relax-wizard":
         setScfContext(null);
         break;
       case "wien2k-soc-wizard":
@@ -1912,9 +1918,17 @@ function AppInner() {
     }
   }
 
+  function navigateToBackupManager() {
+    setShowNavigationDrawer(false);
+    if (currentView !== "backup-manager") {
+      setLastNonUtilityView(currentView);
+      setCurrentView("backup-manager");
+    }
+  }
+
   function returnFromUtilityView() {
     const fallback: AppView = selectedProjectId ? "project-dashboard" : "project-browser";
-    const destination = (lastNonUtilityView === "settings" || lastNonUtilityView === "node-activity" || lastNonUtilityView === "storage-manager")
+    const destination = (lastNonUtilityView === "settings" || lastNonUtilityView === "node-activity" || lastNonUtilityView === "storage-manager" || lastNonUtilityView === "backup-manager")
       ? fallback
       : lastNonUtilityView;
     setCurrentView(destination);
@@ -2321,6 +2335,17 @@ function AppInner() {
                               }}
                             />
                           </label>
+                          <label className="hpc-checkbox-label" title="Ask Slurm to allocate a contiguous set of nodes.">
+                            <input
+                              type="checkbox"
+                              checked={hpcDefaultCpuDraft.contiguous ?? false}
+                              onChange={(event) => {
+                                setHpcDefaultCpuDraft((prev) => ({ ...prev, contiguous: event.target.checked }));
+                                clearHpcDefaultsSaveFeedback();
+                              }}
+                            />
+                            Contiguous nodes
+                          </label>
                           <label>
                             Memory (GB)
                             <input
@@ -2501,6 +2526,17 @@ function AppInner() {
                                 clearHpcDefaultsSaveFeedback();
                               }}
                             />
+                          </label>
+                          <label className="hpc-checkbox-label" title="Ask Slurm to allocate a contiguous set of nodes.">
+                            <input
+                              type="checkbox"
+                              checked={hpcDefaultGpuDraft.contiguous ?? false}
+                              onChange={(event) => {
+                                setHpcDefaultGpuDraft((prev) => ({ ...prev, contiguous: event.target.checked }));
+                                clearHpcDefaultsSaveFeedback();
+                              }}
+                            />
+                            Contiguous nodes
                           </label>
                           <label>
                             Memory (GB)
@@ -3377,6 +3413,7 @@ function AppInner() {
     "settings": "Settings",
     "node-activity": "Node Activity",
     "storage-manager": "Storage Manager",
+    "backup-manager": "Calculation Backups",
     "scf-wizard": "SCF Workflow",
     "bands-wizard": "Band Structure Workflow",
     "bands-viewer": "Band Structure",
@@ -3394,6 +3431,7 @@ function AppInner() {
     "epw-viewer": "EPW",
     "wien2k-structure-wizard": "WIEN2k Structure Workflow",
     "wien2k-scf-wizard": "WIEN2k SCF Workflow",
+    "wien2k-relax-wizard": "WIEN2k Relaxation Workflow",
     "wien2k-soc-wizard": "WIEN2k SOC Workflow",
   };
 
@@ -3417,6 +3455,7 @@ function AppInner() {
         onClose={() => setShowNavigationDrawer(false)}
         onProjects={navigateToProjects}
         onStorage={navigateToStorageManager}
+        onBackups={navigateToBackupManager}
         onNodeActivity={navigateToNodeActivity}
         onRecoverHeadless={() => {
           setShowNavigationDrawer(false);
@@ -3494,6 +3533,22 @@ function AppInner() {
           onBack={returnFromUtilityView}
           executionMode={executionMode}
           activeHpcProfile={activeHpcProfile}
+        />
+        {appChrome}
+      </>
+    );
+  }
+
+  if (currentView === "backup-manager") {
+    return (
+      <>
+        <BackupManagerPage
+          onBack={returnFromUtilityView}
+          activeHpcProfile={activeHpcProfile}
+          onRestored={(projectId) => {
+            setSelectedProjectId(projectId);
+            setCurrentView("project-dashboard");
+          }}
         />
         {appChrome}
       </>
@@ -3593,7 +3648,7 @@ function AppInner() {
           }}
           onWien2kScfSaved={() => {
             setProjectDashboardRefreshToken((previous) => previous + 1);
-            handleWorkflowBack("wien2k-scf-wizard", "project-dashboard");
+            handleWorkflowBack(activeWorkflowRoute.view === "wien2k-relax-wizard" ? "wien2k-relax-wizard" : "wien2k-scf-wizard", "project-dashboard");
           }}
           onWien2kSocSaved={() => {
             setProjectDashboardRefreshToken((previous) => previous + 1);

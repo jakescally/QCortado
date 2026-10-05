@@ -93,6 +93,12 @@ pub struct Wien2kScfExecutionResult {
     pub summary: NormalizedScfSummary,
     pub calculation_id: String,
     pub continuation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_max_force_mry_bohr: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_steps: Option<usize>,
+    #[serde(default)]
+    pub structure_source_ready: bool,
 }
 
 pub fn validate_initialization_settings(
@@ -153,6 +159,11 @@ pub fn validate_run_settings(settings: &Wien2kScfRunSettings) -> Result<(), Stri
     {
         return Err("Force convergence must be positive when set.".to_string());
     }
+    if settings.force_minimization && settings.force_convergence_mry_bohr.is_none() {
+        return Err(
+            "WIEN2k relaxation requires a positive force-convergence threshold.".to_string(),
+        );
+    }
     if settings.dft_u.enabled {
         if settings.spin_mode != Wien2kSpinMode::SpinPolarized {
             return Err("WIEN2k DFT+U requires spin-polarized SCF.".to_string());
@@ -188,6 +199,38 @@ pub fn validate_run_settings(settings: &Wien2kScfRunSettings) -> Result<(), Stri
         return Err("Mixer history must be positive.".to_string());
     }
     Ok(())
+}
+
+/// Latest maximum absolute WIEN2k force (`:FORxxx`/`:FGLxxx`), in mRy/bohr.
+pub fn parse_final_max_force_mry_bohr(scf_output: &str) -> Option<f64> {
+    let force_re =
+        Regex::new(r"(?m)^:(?:FOR|FGL)\d+:[^\n]*?([-+]?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)\s*$")
+            .ok()?;
+    let mut current = Vec::new();
+    let mut latest = None;
+    for line in scf_output.lines() {
+        if line.starts_with(":ITE") && !current.is_empty() {
+            latest = current.iter().copied().reduce(f64::max);
+            current.clear();
+        }
+        if let Some(captures) = force_re.captures(line) {
+            if let Ok(value) = captures[1].parse::<f64>() {
+                current.push(value.abs());
+            }
+        }
+    }
+    if !current.is_empty() {
+        latest = current.iter().copied().reduce(f64::max);
+    }
+    latest
+}
+
+pub fn parse_geometry_step_count(output: &str) -> Option<usize> {
+    let count = output
+        .lines()
+        .filter(|line| line.starts_with(":POS001"))
+        .count();
+    (count > 0).then_some(count)
 }
 
 pub fn build_dft_u_input_files(
@@ -744,5 +787,45 @@ ec cc fc and str_conv 1 0 1 1\n";
         assert_eq!(summary.convergence, ScfConvergenceState::NotConverged);
         assert_eq!(summary.total_magnetization, Some(2.0));
         assert_eq!(summary.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn relaxation_requires_a_positive_force_threshold() {
+        let missing = Wien2kScfRunSettings {
+            force_minimization: true,
+            force_convergence_mry_bohr: None,
+            ..Wien2kScfRunSettings::default()
+        };
+        assert!(validate_run_settings(&missing).is_err());
+
+        let invalid = Wien2kScfRunSettings {
+            force_minimization: true,
+            force_convergence_mry_bohr: Some(0.0),
+            ..Wien2kScfRunSettings::default()
+        };
+        assert!(validate_run_settings(&invalid).is_err());
+
+        let valid = Wien2kScfRunSettings {
+            force_minimization: true,
+            force_convergence_mry_bohr: Some(1.0),
+            ..Wien2kScfRunSettings::default()
+        };
+        assert!(validate_run_settings(&valid).is_ok());
+    }
+
+    #[test]
+    fn relaxation_history_uses_the_final_force_block_and_counts_geometry_steps() {
+        let scf = "\
+:ITE001: 1. ITERATION\n\
+:FOR001: 1.ATOM  0.0 0.0 3.000\n\
+:FOR002: 2.ATOM  0.0 0.0 -2.000\n\
+:POS001: POSITION CHANGED\n\
+:ITE002: 2. ITERATION\n\
+:FOR001: 1.ATOM  0.0 0.0 0.800\n\
+:FOR002: 2.ATOM  0.0 0.0 -0.400\n\
+:POS001: POSITION CHANGED\n";
+
+        assert_eq!(parse_final_max_force_mry_bohr(scf), Some(0.8));
+        assert_eq!(parse_geometry_step_count(scf), Some(2));
     }
 }

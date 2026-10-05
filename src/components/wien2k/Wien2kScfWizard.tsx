@@ -43,6 +43,7 @@ interface Wien2kScfWizardProps {
   activeHpcProfile?: HpcProfile | null;
   reconnectTaskId?: string;
   continuationCalculationId?: string | null;
+  relaxationMode?: boolean;
   onBack: () => void;
   onSaved: () => void;
 }
@@ -179,6 +180,7 @@ export function Wien2kScfWizard({
   activeHpcProfile = null,
   reconnectTaskId,
   continuationCalculationId = null,
+  relaxationMode = false,
   onBack,
   onSaved,
 }: Wien2kScfWizardProps) {
@@ -188,9 +190,11 @@ export function Wien2kScfWizard({
   const [initialization, setInitialization] = useState<Wien2kInitializationSettings>(
     DEFAULT_WIEN2K_INITIALIZATION_SETTINGS,
   );
-  const [runSettings, setRunSettings] = useState<Wien2kScfRunSettings>(
-    DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
-  );
+  const [runSettings, setRunSettings] = useState<Wien2kScfRunSettings>(() => ({
+    ...DEFAULT_WIEN2K_SCF_RUN_SETTINGS,
+    forceMinimization: relaxationMode,
+    forceConvergenceMryBohr: relaxationMode ? 1 : DEFAULT_WIEN2K_SCF_RUN_SETTINGS.forceConvergenceMryBohr,
+  }));
   const [session, setSession] = useState<Wien2kScfSession | null>(null);
   const [result, setResult] = useState<Wien2kScfExecutionResult | null>(null);
   const [outputLines, setOutputLines] = useState<string[]>([]);
@@ -224,10 +228,10 @@ export function Wien2kScfWizard({
   const hydratedInitializationTaskIdsRef = useRef<Set<string>>(new Set());
   const handledInitializationTaskIdsRef = useRef<Set<string>>(new Set());
   const reconnectTask = activeTaskId ? taskContext.getTask(activeTaskId) : undefined;
-  const activeTask = reconnectTask?.taskType === "wien2k_scf" ? reconnectTask : undefined;
+  const activeTask = reconnectTask?.taskType === (relaxationMode ? "wien2k_relax" : "wien2k_scf") ? reconnectTask : undefined;
   const candidateInitializationTask = activeInitializationTaskId
     ? taskContext.getTask(activeInitializationTaskId)
-    : reconnectTask?.taskType === "wien2k_scf_initialize"
+    : reconnectTask?.taskType === (relaxationMode ? "wien2k_relax_initialize" : "wien2k_scf_initialize")
       ? reconnectTask
       : undefined;
   const activeInitializationTask = candidateInitializationTask
@@ -237,8 +241,12 @@ export function Wien2kScfWizard({
   const selectedSource = sources.find((source) => source.id === sourceId) ?? sources[0] ?? null;
   const initError = validateWien2kInitializationSettings(initialization);
   const effectiveRunSettings = useMemo(
-    () => ({ ...runSettings, spinMode: initialization.spinMode }),
-    [runSettings, initialization.spinMode],
+    () => ({
+      ...runSettings,
+      spinMode: initialization.spinMode,
+      forceMinimization: relaxationMode,
+    }),
+    [runSettings, initialization.spinMode, relaxationMode],
   );
   const runError = validateWien2kScfRunSettings(effectiveRunSettings);
   const initializationRunning = activeInitializationTask?.status === "running" || isInitializing;
@@ -372,11 +380,11 @@ export function Wien2kScfWizard({
 
   useEffect(() => {
     if (!reconnectTask) return;
-    if (reconnectTask.taskType === "wien2k_scf_initialize") {
+    if (reconnectTask.taskType === "wien2k_scf_initialize" || reconnectTask.taskType === "wien2k_relax_initialize") {
       if (ignoredInitializationTaskIdsRef.current.has(reconnectTask.taskId)) return;
       setActiveInitializationTaskId(reconnectTask.taskId);
       setScfRunStarted(false);
-    } else if (reconnectTask.taskType === "wien2k_scf") {
+    } else if (reconnectTask.taskType === "wien2k_scf" || reconnectTask.taskType === "wien2k_relax") {
       setScfRunStarted(true);
     }
   }, [reconnectTask]);
@@ -509,7 +517,7 @@ export function Wien2kScfWizard({
         if (activeInitializationTaskId) {
           ignoredInitializationTaskIdsRef.current.add(activeInitializationTaskId);
         }
-        if (reconnectTask?.taskType === "wien2k_scf_initialize") {
+        if (reconnectTask?.taskType === "wien2k_scf_initialize" || reconnectTask?.taskType === "wien2k_relax_initialize") {
           ignoredInitializationTaskIdsRef.current.add(reconnectTask.taskId);
         }
         await discardWien2kScfSession(session.sessionId);
@@ -533,13 +541,13 @@ export function Wien2kScfWizard({
         await attachOutputListener(activeSession.sessionId);
       }
       const taskId = await taskContext.startTask(
-        "wien2k_scf_initialize",
+        relaxationMode ? "wien2k_relax_initialize" : "wien2k_scf_initialize",
         {
           sessionId: activeSession.sessionId,
           settings: initSettings,
           workflowMetadata: {
             wizardResume: {
-              view: "wien2k-scf-wizard",
+              view: relaxationMode ? "wien2k-relax-wizard" : "wien2k-scf-wizard",
               utility: "initialization",
               context: { projectId, cifId, calculations },
               sourceId: selectedSource.id,
@@ -577,7 +585,7 @@ export function Wien2kScfWizard({
     setRemoteNode(null);
     try {
       const taskId = await taskContext.startTask(
-        "wien2k_scf",
+        relaxationMode ? "wien2k_relax" : "wien2k_scf",
         {
           sessionId: session.sessionId,
           settings: effectiveRunSettings,
@@ -587,7 +595,7 @@ export function Wien2kScfWizard({
             : null,
           resources: hpcResources,
         },
-        `WIEN2k SCF - ${caseName}`,
+        `WIEN2k ${relaxationMode ? "Relaxation" : "SCF"} - ${caseName}`,
       );
       setActiveTaskId(taskId);
     } catch (reason) {
@@ -800,7 +808,7 @@ export function Wien2kScfWizard({
           <button className="back-btn" type="button" onClick={() => void leaveWizard("back")}>
             ← Exit
           </button>
-          <h2>WIEN2k SCF</h2>
+          <h2>WIEN2k {relaxationMode ? "Relaxation" : "SCF"}</h2>
           <div className="step-indicator">
             {SCF_STEPS.map((step, index) => (
               <span
@@ -886,7 +894,7 @@ export function Wien2kScfWizard({
         <button className="back-btn" type="button" disabled={isRunning} onClick={() => void leaveWizard("back")}>
           ← Exit
         </button>
-        <h2>WIEN2k SCF</h2>
+        <h2>WIEN2k {relaxationMode ? "Relaxation" : "SCF"}</h2>
         <div className="step-indicator">
           {SCF_STEPS.map((step, index) => (
             <span
@@ -914,7 +922,8 @@ export function Wien2kScfWizard({
                 <select value={sourceId} disabled={Boolean(session) || isInitializing} onChange={(event) => setSourceId(event.target.value)}>
                   {sources.map((source) => (
                     <option key={source.id} value={source.id}>
-                      {String(source.parameters?.case_name ?? "case")}.struct
+                      {source.calc_type === "optimization" ? "Relaxed " : "Reviewed "}{String(source.parameters?.case_name ?? "case")}.struct
+                      {source.calc_type === "optimization" && typeof source.parameters?.final_max_force_mry_bohr === "number" ? ` (F ${Number(source.parameters.final_max_force_mry_bohr).toFixed(3)} mRy/Bohr)` : ""}
                       {source.completed_at ? ` - ${new Date(source.completed_at).toLocaleString()}` : ""}
                     </option>
                   ))}
@@ -1159,7 +1168,7 @@ export function Wien2kScfWizard({
                   <Wien2kFieldLabel tooltip="Optionally requires Hellmann-Feynman forces to fall below a threshold in addition to electronic convergence. Typical range when used: 1 to 5 mRy/Bohr.">
                     Force convergence (mRy/Bohr)
                   </Wien2kFieldLabel>
-                  <input type="number" min="0" step="0.1" placeholder="Optional" value={runSettings.forceConvergenceMryBohr ?? ""} onChange={(event) => setRunSettings((current) => ({ ...current, forceConvergenceMryBohr: event.target.value.trim() ? numberField(event.target.value, 0) : null }))} />
+                  <input type="number" min="0" step="0.1" placeholder={relaxationMode ? "Required" : "Optional"} value={runSettings.forceConvergenceMryBohr ?? ""} onChange={(event) => setRunSettings((current) => ({ ...current, forceConvergenceMryBohr: event.target.value.trim() ? numberField(event.target.value, 0) : null }))} />
                 </label>
               </div>
               {runError && <p className="wien2k-validation">{runError}</p>}
@@ -1221,10 +1230,7 @@ export function Wien2kScfWizard({
                   <input type="checkbox" checked={runSettings.iterativeDiagonalization} onChange={(event) => setRunSettings((current) => ({ ...current, iterativeDiagonalization: event.target.checked }))} />
                   <span>Iterative diagonalization</span>
                 </label>
-                <label className="checkbox-label">
-                  <input type="checkbox" checked={runSettings.forceMinimization} onChange={(event) => setRunSettings((current) => ({ ...current, forceMinimization: event.target.checked }))} />
-                  <span>MSR1a force minimization</span>
-                </label>
+                {relaxationMode && <p>Internal atomic positions will be optimized with WIEN2k MSR1a (<code>-min</code>).</p>}
               </div>
             </>
           ), { locked: !initialized, status: initialized ? undefined : "Locked - run initialization first" })}
@@ -1310,7 +1316,7 @@ export function Wien2kScfWizard({
             disabled={Boolean(runError) || isRunning || isPreparingContinuation || pendingLstartSuggestion}
             onClick={() => void submitScf(isContinuationSession)}
           >
-            {isRunning ? (isContinuationSession ? "Continuing..." : "Running SCF...") : isContinuationSession ? "Continue SCF" : "Run SCF"}
+            {isRunning ? (isContinuationSession ? "Continuing..." : `Running ${relaxationMode ? "relaxation" : "SCF"}...`) : isContinuationSession ? "Continue SCF" : `Run ${relaxationMode ? "Relaxation" : "SCF"}`}
           </button>
         )}
         {result?.summary.convergence === "not_converged" && (

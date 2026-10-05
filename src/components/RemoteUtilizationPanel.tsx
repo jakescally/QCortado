@@ -172,8 +172,6 @@ export function RemoteUtilizationPanel({
   const schedulerNode = sample?.node || remoteNode || "pending";
   const currentRam = sample?.memory?.current_rss_bytes ?? null;
   const peakRam = sample?.memory?.peak_rss_bytes ?? null;
-  const requestedRam = sample?.memory?.requested_bytes ?? sample?.scheduler?.requested_memory_bytes ?? null;
-  const ramPercent = currentRam && requestedRam ? (currentRam / requestedRam) * 100 : null;
 
   return (
     <div className="telemetry-panel">
@@ -211,11 +209,11 @@ export function RemoteUtilizationPanel({
                   detail={formatRatio(sample.gpu?.memory_used_bytes, sample.gpu?.memory_total_bytes)}
                 />
                 <MetricCard
-                  label="RAM"
+                  label="Average task RAM"
                   value={formatTelemetryBytes(currentRam)}
-                  detail={requestedRam ? `of ${formatTelemetryBytes(requestedRam)}` : sample.memory?.source ?? null}
+                  detail="Largest step average; not total job RAM"
                 />
-                <MetricCard label="Peak RAM" value={formatTelemetryBytes(peakRam)} detail={sample.memory?.source ?? null} />
+                <MetricCard label="Peak task RAM" value={formatTelemetryBytes(peakRam)} detail="Largest task peak across steps" />
               </div>
               <div className="telemetry-device-list">
                 {(sample.gpu?.devices ?? []).map((device) => (
@@ -254,11 +252,11 @@ export function RemoteUtilizationPanel({
                   detail={sample.scheduler?.state ?? null}
                 />
                 <MetricCard
-                  label="RAM"
+                  label="Average task RAM"
                   value={formatTelemetryBytes(currentRam)}
-                  detail={requestedRam ? `of ${formatTelemetryBytes(requestedRam)}` : sample.memory?.source ?? null}
+                  detail="Largest step average; not total job RAM"
                 />
-                <MetricCard label="Peak RAM" value={formatTelemetryBytes(peakRam)} detail={sample.memory?.source ?? null} />
+                <MetricCard label="Peak task RAM" value={formatTelemetryBytes(peakRam)} detail="Largest task peak across steps" />
               </div>
               <div className="telemetry-bar-group">
                 <div>
@@ -266,13 +264,6 @@ export function RemoteUtilizationPanel({
                   <span>{formatTelemetryPercent(cpuUtilizationPercent)}</span>
                 </div>
                 <UtilizationBar value={cpuUtilizationPercent} label="CPU utilization" />
-              </div>
-              <div className="telemetry-bar-group">
-                <div>
-                  <span>RAM utilization</span>
-                  <span>{requestedRam ? formatTelemetryPercent(ramPercent) : "Request unknown"}</span>
-                </div>
-                <UtilizationBar value={ramPercent} label="RAM utilization" />
               </div>
               <div className="telemetry-step-table-wrap">
                 <table className="telemetry-step-table">

@@ -58,6 +58,7 @@ test("installed WIEN2k frontend exposure includes structure setup, SCF, SOC, ban
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "engine_setup")?.view, "wien2k-structure-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "scf"), "wien2k-scf-wizard");
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "scf")?.view, "wien2k-scf-wizard");
+  assert.equal(resolveEngineWorkflowHostRoute("wien2k", "structure_optimization")?.view, "wien2k-relax-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "soc"), "wien2k-soc-wizard");
   assert.equal(resolveEngineWorkflowHostRoute("wien2k", "soc")?.view, "wien2k-soc-wizard");
   assert.equal(getEngineWorkflowView("wien2k", "bands"), "bands-wizard");
@@ -73,7 +74,7 @@ test("installed WIEN2k frontend exposure includes structure setup, SCF, SOC, ban
   assert.deepEqual(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.descriptor.executionModes, ["remote"]);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsRemoteOnly, true);
   assert.equal(WIEN2K_RESERVED_ENGINE_PLUGIN_MANIFEST.hpc.supportsLocal, false);
-  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup", "scf", "soc", "bands", "fermi_surface"]);
+  assert.deepEqual(WIEN2K_STRUCTURE_ENGINE_PLUGIN_MANIFEST.workflows.map((workflow) => workflow.kind), ["engine_setup", "scf", "structure_optimization", "soc", "bands", "fermi_surface"]);
 });
 
 test("Wien2k reserved manifest models case state without QE pseudopotentials", () => {

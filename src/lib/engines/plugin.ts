@@ -94,6 +94,7 @@ export type EngineWorkflowView =
   | "transport-wizard"
   | "wien2k-structure-wizard"
   | "wien2k-scf-wizard"
+  | "wien2k-relax-wizard"
   | "wien2k-soc-wizard";
 
 export interface FrontendEnginePlugin {

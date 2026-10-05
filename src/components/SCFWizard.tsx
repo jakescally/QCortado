@@ -51,6 +51,8 @@ import {
   listRemotePseudopotentialMetadata,
   resolveProfileRemotePseudoDir,
 } from "../lib/engines/qe/hpc";
+import { usePointMeshEstimate, usePointStructure } from "../lib/qePointEstimate";
+import { PointEstimateSummary, QePointParallelization } from "./QePointParallelization";
 import { HpcRunSettings } from "./HpcRunSettings";
 import { RemoteUtilizationPanel } from "./RemoteUtilizationPanel";
 import {
@@ -219,6 +221,7 @@ const OPTIMIZATION_WIZARD_SETTINGS_ID = "optimization";
 const PSEUDO_CACHE_REMOTE_CHECK_TTL_MS = 5 * 60 * 1000;
 
 interface StoredScfWizardSettings {
+  pointPools?: number;
   config: SCFConfig;
   selectedPseudos: Record<string, string>;
   selectedPseudoPreset: PseudopotentialPreset;
@@ -674,6 +677,14 @@ export function SCFWizard({
   // MPI settings
   const [mpiEnabled, setMpiEnabled] = useState(false);
   const [mpiProcs, setMpiProcs] = useState(1);
+  const [pointPools, setPointPools] = useState(() => storedWizardSettings?.pointPools ?? 1);
+  const estimateSavedStructure = selectedOptimizedStructure && crystalData ? {
+    ...selectedOptimizedStructure.structure,
+    cell_parameters: selectedOptimizedStructure.structure.cell_parameters ?? buildCifConventionalStructure(crystalData).cell_parameters,
+  } : null;
+  const pointStructure = usePointStructure(crystalData, symmetryTransform, !selectedOptimizedStructure, estimateSavedStructure);
+  const kPointEstimate = usePointMeshEstimate(pointStructure, config.kgrid, config.kgrid_offset, config.noncolin || config.lspinorb || config.nspin === 4);
+
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
@@ -710,12 +721,13 @@ export function SCFWizard({
       ? config
       : { ...config, calculation: "scf" as const };
     writeProjectWizardSettings(projectContext?.projectId, wizardSettingsId, {
+      pointPools,
       config: persistedConfig,
       selectedPseudos,
       selectedPseudoPreset,
       structureSource,
     });
-  }, [config, isOptimizationWizard, projectContext?.projectId, selectedPseudos, selectedPseudoPreset, structureSource, wizardSettingsId]);
+  }, [pointPools, config, isOptimizationWizard, projectContext?.projectId, selectedPseudos, selectedPseudoPreset, structureSource, wizardSettingsId]);
 
   useEffect(() => {
     if (isOptimizationWizard || config.calculation === "scf") return;
@@ -1609,6 +1621,9 @@ export function SCFWizard({
   }
 
   async function buildScfTaskPlan(): Promise<ScfTaskPlan> {
+    if (!isHpcMode && mpiEnabled && (!Number.isInteger(pointPools) || pointPools < 1 || mpiProcs % pointPools !== 0)) {
+      throw new Error("MPI processes must be divisible by the k-point pool count.");
+    }
     if (!crystalData || !canRun()) {
       throw new Error("Missing structure or pseudopotential selections.");
     }
@@ -1828,7 +1843,7 @@ export function SCFWizard({
       taskParams: {
         calculation,
         workingDir: WORK_DIR,
-        mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs } : null,
+        mpiConfig: !isHpcMode && mpiEnabled ? { enabled: true, nprocs: mpiProcs, kpoint_pools: pointPools, qpoint_images: 1 } : null,
         executionTarget: buildExecutionTarget(
           executionMode,
           activeHpcProfile?.id ?? null,
@@ -2349,6 +2364,11 @@ export function SCFWizard({
     return {
       calc_type: isOptimization ? "optimization" : "scf",
       parameters: {
+        qe_point_parallelization: {
+          mpi_tasks: isHpcMode ? (hpcResources.ntasks ?? 1) : (mpiEnabled ? mpiProcs : 1),
+          kpoint_pools: isHpcMode ? (hpcResources.qe_kpoint_pools ?? 1) : (mpiEnabled ? pointPools : 1),
+          qpoint_images: 1,
+        },
         prefix: "qcortado_scf",
         calculation_mode: config.calculation,
         occupations: config.occupations,
@@ -2939,6 +2959,7 @@ export function SCFWizard({
                           K-point Grid
                           <InfoTooltip text="Monkhorst-Pack grid for Brillouin zone sampling. Denser = more accurate. Metals need denser grids." />
                         </label>
+                        <PointEstimateSummary estimate={kPointEstimate} label="k-points" />
                         <div className="kgrid-inputs">
                           <input type="number" value={config.kgrid[0]}
                             onChange={(e) => setConfig((prev) => ({ ...prev, kgrid: [parseInt(e.target.value), prev.kgrid[1], prev.kgrid[2]] }))} />
@@ -3515,6 +3536,7 @@ export function SCFWizard({
                   <HpcRunSettings
                     profileId={activeHpcProfile?.id ?? null}
                     profileName={activeHpcProfile?.name ?? "Andromeda"}
+                    pointEstimates={{ k: kPointEstimate }}
                     taskKind="scf"
                     commandLines={hpcCommandLines}
                     resources={hpcResources}
@@ -3569,6 +3591,8 @@ export function SCFWizard({
                           </div>
                         </div>
 
+                        <QePointParallelization estimates={{ k: kPointEstimate }} ranks={mpiProcs} pools={pointPools}
+                          onChange={(pools) => setPointPools(pools)} />
                         <div className="mpi-warning">
                           <strong>Note:</strong> MPI only works if Quantum ESPRESSO was compiled with MPI support.
                           If the calculation fails, try disabling MPI or check your QE installation.

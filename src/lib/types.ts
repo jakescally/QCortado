@@ -186,7 +186,14 @@ export interface SlurmResourceRequest {
   walltime?: string | null;
   nodes?: number | null;
   ntasks?: number | null;
+  ntasks_per_node?: number | null;
   cpus_per_task?: number | null;
+  contiguous?: boolean | null;
+  pencil_decomposition?: boolean | null;
+  qe_kpoint_pools?: number | null;
+  qe_qpoint_images?: number | null;
+  qe_parallel_mode?: "auto" | "manual" | null;
+  qe_total_cpus?: number | null;
   memory_gb?: number | null;
   gpus?: number | null;
   qos?: string | null;
@@ -223,6 +230,7 @@ export interface HpcProfile {
   remote_gpu_pseudo_dir?: string | null;
   remote_workspace_root: string;
   remote_project_root: string;
+  remote_backup_root?: string | null;
   resource_mode: HpcResourceMode;
   launcher: HpcLauncher;
   launcher_cpu_extra_args?: string | null;

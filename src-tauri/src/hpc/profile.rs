@@ -92,7 +92,21 @@ pub struct SlurmResourceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ntasks: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ntasks_per_node: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpus_per_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contiguous: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pencil_decomposition: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_kpoint_pools: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_qpoint_images: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_parallel_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_total_cpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_gb: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +170,10 @@ pub struct HpcProfile {
     pub remote_gpu_pseudo_dir: Option<String>,
     pub remote_workspace_root: String,
     pub remote_project_root: String,
+    /// Durable, write-protected calculation backups. Legacy profiles derive
+    /// this as a sibling of `remote_project_root` named `backups`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_backup_root: Option<String>,
     #[serde(default)]
     pub resource_mode: HpcResourceMode,
     #[serde(default)]
@@ -186,6 +204,22 @@ pub struct HpcProfile {
 }
 
 impl HpcProfile {
+    pub fn resolved_remote_backup_root(&self) -> String {
+        self.remote_backup_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                let project_root = self.remote_project_root.trim().trim_end_matches('/');
+                let parent = project_root
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .filter(|parent| !parent.is_empty())
+                    .unwrap_or(project_root);
+                format!("{}/backups", parent.trim_end_matches('/'))
+            })
+    }
     pub fn supports_resource_type(&self, resource_type: ResourceType) -> bool {
         self.resource_mode.supports(resource_type)
     }
@@ -271,6 +305,9 @@ impl HpcProfile {
             resources.qos = self.default_cpu_resources.qos.clone();
             resources.account = self.default_cpu_resources.account.clone();
             resources.constraint = self.default_cpu_resources.constraint.clone();
+            resources.contiguous = self.default_cpu_resources.contiguous;
+            resources.ntasks_per_node = self.default_cpu_resources.ntasks_per_node;
+            resources.pencil_decomposition = self.default_cpu_resources.pencil_decomposition;
             resources.module_preamble = self.default_cpu_resources.module_preamble.clone();
             resources.additional_sbatch = self.default_cpu_resources.additional_sbatch.clone();
             resources
@@ -482,7 +519,14 @@ pub fn default_cpu_resources() -> SlurmResourceRequest {
         walltime: Some("02:00:00".to_string()),
         nodes: Some(1),
         ntasks: Some(4),
+        ntasks_per_node: None,
         cpus_per_task: Some(1),
+        contiguous: Some(false),
+        pencil_decomposition: Some(true),
+        qe_kpoint_pools: None,
+        qe_qpoint_images: None,
+        qe_parallel_mode: None,
+        qe_total_cpus: None,
         memory_gb: Some(16),
         gpus: Some(0),
         qos: None,
@@ -500,7 +544,14 @@ pub fn default_gpu_resources() -> SlurmResourceRequest {
         walltime: Some("02:00:00".to_string()),
         nodes: Some(1),
         ntasks: Some(1),
+        ntasks_per_node: None,
         cpus_per_task: Some(8),
+        contiguous: Some(false),
+        pencil_decomposition: Some(true),
+        qe_kpoint_pools: None,
+        qe_qpoint_images: None,
+        qe_parallel_mode: None,
+        qe_total_cpus: None,
         memory_gb: Some(32),
         gpus: Some(1),
         qos: None,
@@ -518,7 +569,14 @@ pub fn default_utility_resources() -> SlurmResourceRequest {
         walltime: Some("00:10:00".to_string()),
         nodes: Some(1),
         ntasks: Some(1),
+        ntasks_per_node: None,
         cpus_per_task: Some(1),
+        contiguous: Some(false),
+        pencil_decomposition: Some(true),
+        qe_kpoint_pools: None,
+        qe_qpoint_images: None,
+        qe_parallel_mode: None,
+        qe_total_cpus: None,
         memory_gb: Some(2),
         gpus: Some(0),
         qos: None,
@@ -571,6 +629,16 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
     let mut validation = ResourceValidation::default();
     let ntasks = resources.ntasks.unwrap_or(1);
     let cpus_per_task = resources.cpus_per_task.unwrap_or(1);
+    if resources.qe_parallel_mode.as_deref() == Some("auto") {
+        if ntasks == 0 || cpus_per_task == 0 || ntasks < resources.nodes.unwrap_or(1) {
+            validation.errors.push("Auto allocation requires at least one MPI rank per node and positive CPUs per rank.".into());
+        }
+        if let Some(total) = resources.qe_total_cpus {
+            if ntasks.checked_mul(cpus_per_task) != Some(total) || total == 0 {
+                validation.errors.push("Auto CPU allocation is incomplete: MPI ranks × CPUs per rank must equal Total allocated CPUs. Adjust the allocation before submitting.".into());
+            }
+        }
+    }
 
     let partition = resources
         .partition
@@ -665,10 +733,37 @@ mod tests {
         assert_eq!(profile.qe_path_mode, EnginePathMode::Path);
         assert_eq!(profile.wien2k_path_mode, EnginePathMode::Path);
         assert_eq!(profile.resource_mode, HpcResourceMode::Both);
+        assert_eq!(profile.remote_backup_root, None);
+        assert_eq!(
+            profile.resolved_remote_backup_root(),
+            "/project/backups"
+        );
         assert!(profile.utility_resources.is_none());
         let utilities = profile.utility_resources();
         assert_eq!(utilities.ntasks, Some(1));
         assert_eq!(utilities.walltime.as_deref(), Some("00:10:00"));
+    }
+
+    #[test]
+    fn configured_backup_root_overrides_the_legacy_sibling_default() {
+        let mut profile: HpcProfile = serde_json::from_value(serde_json::json!({
+            "id": "profile-1",
+            "name": "Cluster",
+            "host": "cluster.example.edu",
+            "username": "researcher",
+            "remote_qe_bin_dir": "/opt/qe/bin",
+            "remote_pseudo_dir": "/opt/qe/pseudo",
+            "remote_workspace_root": "/scratch/qcortado/work",
+            "remote_project_root": "/scratch/qcortado/projects"
+        }))
+        .expect("profile");
+
+        assert_eq!(
+            profile.resolved_remote_backup_root(),
+            "/scratch/qcortado/backups"
+        );
+        profile.remote_backup_root = Some(" /archive/qcortado ".to_string());
+        assert_eq!(profile.resolved_remote_backup_root(), "/archive/qcortado");
     }
 
     #[test]

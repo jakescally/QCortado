@@ -27,7 +27,7 @@ import { isPhononReadyScf } from "../lib/engines/qe/phononReady";
 import { getCalculationTagBadges as getUnifiedCalculationTagBadges } from "../lib/calculationTags";
 import { parseLatestHubbardOccupations, parseWien2kHubbardOccupations } from "../lib/hubbardOccupations";
 import { extractOptimizedStructure, isSavedStructureData, summarizeCell } from "../lib/optimizedStructure";
-import { downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
+import { createHpcCalculationBackup, downloadHpcCalculationArtifacts, getActiveHpcProfileId, listHpcProfiles } from "../lib/hpcConfig";
 import {
   DEFAULT_ENGINE_ID,
   FALLBACK_ENGINE_DESCRIPTORS,
@@ -759,8 +759,9 @@ function isOptimizationCalculation(calc: CalculationRun): boolean {
   return calc.calc_type === "optimization" || calc.calc_type === "relax" || calc.calc_type === "vcrelax";
 }
 
-function getOptimizationMode(calc: CalculationRun): "relax" | "vcrelax" {
+function getOptimizationMode(calc: CalculationRun): "relax" | "vcrelax" | "internal_positions" {
   const mode = calc.parameters?.optimization_mode;
+  if (mode === "internal_positions") return "internal_positions";
   if (mode === "relax" || calc.calc_type === "relax") return "relax";
   if (mode === "vcrelax" || calc.calc_type === "vcrelax") return "vcrelax";
   return "vcrelax";
@@ -1595,6 +1596,7 @@ export function ProjectDashboard({
   const [isRefreshingProject, setIsRefreshingProject] = useState(false);
   const [launchingFermiCalcId, setLaunchingFermiCalcId] = useState<string | null>(null);
   const [downloadingCalcId, setDownloadingCalcId] = useState<string | null>(null);
+  const [backingUpCalcId, setBackingUpCalcId] = useState<string | null>(null);
   const [downloadProgressByCalcId, setDownloadProgressByCalcId] = useState<Record<string, HpcDownloadProgress>>({});
   const [calculationDetailsById, setCalculationDetailsById] = useState<Record<string, CalculationRun>>({});
   const [fileViewer, setFileViewer] = useState<{
@@ -2981,7 +2983,7 @@ export function ProjectDashboard({
   }
 
   async function getOptimizedStructureOptions(calculations: CalculationRun[]): Promise<OptimizedStructureOption[]> {
-    const optimizationCalcs = calculations.filter((calc) => isOptimizationCalculation(calc));
+    const optimizationCalcs = calculations.filter((calc) => isOptimizationCalculation(calc) && (calc.engine_id ?? "qe") === "qe");
     const resolvedCalcs = await Promise.all(optimizationCalcs.map(async (calc) => {
       if (
         isSavedStructureData(calc.parameters?.optimized_structure)
@@ -3019,12 +3021,13 @@ export function ProjectDashboard({
         const mode = getOptimizationMode(calc);
         const completedAt = calc.completed_at;
         const dateLabel = completedAt
-          ? new Date(completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+          ? formatDate(completedAt)
           : "In progress";
+        const calculationName = calc.name?.trim();
 
         return {
           calcId: calc.id,
-          label: `${mode === "vcrelax" ? "VC-Relax" : "Relax"} (${dateLabel})`,
+          label: `${mode === "vcrelax" ? "VC-Relax" : "Relax"}${calculationName ? ` — ${calculationName}` : ""} (${dateLabel})`,
           mode,
           completedAt,
           structure,
@@ -3492,17 +3495,44 @@ export function ProjectDashboard({
     if (!isHpcCalculation(calc)) return null;
     const isDownloading = downloadingCalcId === calc.id;
     const isDownloaded = isHpcArtifactsDownloaded(calc) && !isDownloading;
+    const isBackingUp = backingUpCalcId === calc.id;
+    const isBackedUp = Boolean(calc.parameters?.backup_id) && !isBackingUp;
     return (
-      <button
-        className={`download-calc-btn${isDownloaded ? " downloaded" : ""}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          void handleDownloadHpcArtifacts(calc);
-        }}
-        disabled={isDownloading || isDownloaded}
-      >
-        {isDownloading ? "Downloading..." : isDownloaded ? "Downloaded" : "Download Full"}
-      </button>
+      <div className="calc-remote-actions">
+        <button
+          className={`download-calc-btn${isDownloaded ? " downloaded" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleDownloadHpcArtifacts(calc);
+          }}
+          disabled={isDownloading || isDownloaded || isBackingUp}
+        >
+          {isDownloading ? "Downloading..." : isDownloaded ? "Downloaded" : "Download Full"}
+        </button>
+        <button
+          className={`download-calc-btn${isBackedUp ? " downloaded" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (isBackingUp) return;
+            setBackingUpCalcId(calc.id);
+            setError(null);
+            setInfoMessage(null);
+            void createHpcCalculationBackup(projectId, calc.id)
+              .then((backup) => {
+                setInfoMessage(`Created protected backup at ${backup.remote_backup_path}.`);
+                return loadProject({ showLoading: false, refreshSelectedCif: false });
+              })
+              .catch((backupError) => {
+                console.error("Failed to create calculation backup:", backupError);
+                setError(`Failed to create calculation backup: ${backupError}`);
+              })
+              .finally(() => setBackingUpCalcId((current) => current === calc.id ? null : current));
+          }}
+          disabled={isDownloading || isBackingUp}
+        >
+          {isBackingUp ? "Backing up..." : isBackedUp ? "Create Another Backup" : "Create Backup"}
+        </button>
+      </div>
     );
   }
 
@@ -3552,25 +3582,20 @@ export function ProjectDashboard({
     } catch (e) {
       console.warn("Failed to load phonon detail:", e);
     }
-    const needsDispersion = viewMode === "bands" && phononData.dispersion_data == null;
-    const needsDos = viewMode === "dos" && phononData.dos_data == null;
-
-    if (needsDispersion || needsDos) {
-      try {
-        const recovered = await invoke<{ dos_data: any | null; dispersion_data: any | null }>(
-          "get_saved_phonon_data",
-          {
-            projectId,
-            calcId: calc.id,
-          },
-        );
-        phononData = {
-          dos_data: phononData.dos_data ?? recovered?.dos_data ?? null,
-          dispersion_data: phononData.dispersion_data ?? recovered?.dispersion_data ?? null,
-        };
-      } catch (e) {
-        console.warn("Failed to recover saved phonon data:", e);
-      }
+    try {
+      const recovered = await invoke<{ dos_data: any | null; dispersion_data: any | null }>(
+        "get_saved_phonon_data",
+        {
+          projectId,
+          calcId: calc.id,
+        },
+      );
+      phononData = {
+        dos_data: recovered?.dos_data ?? phononData.dos_data ?? null,
+        dispersion_data: recovered?.dispersion_data ?? phononData.dispersion_data ?? null,
+      };
+    } catch (e) {
+      console.warn("Failed to load saved phonon data:", e);
     }
 
     onViewPhonons(phononData, viewMode);
@@ -3872,6 +3897,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
   );
   const wien2kStructureCalculations = useMemo<CalculationRun[]>(
     () => listWien2kStructureSources(filteredVariantCalculations)
+      .filter((calculation) => calculation.calc_type === "engine_setup")
       .slice()
       .sort((left, right) => new Date(right.completed_at ?? right.started_at).getTime()
         - new Date(left.completed_at ?? left.started_at).getTime()),
@@ -4472,6 +4498,17 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                     <span className="calc-action-label">WIEN2k SCF</span>
                     <span className="calc-action-hint">
                       {wien2kStructureSourceCalculations.length > 0 ? "Initialize and run LAPW" : "Requires accepted Structure"}
+                    </span>
+                  </button>
+                  <button
+                    className="calc-action-btn"
+                    onClick={() => void handleRunOptimization()}
+                    disabled={wien2kStructureSourceCalculations.length === 0}
+                  >
+                    <span className="calc-action-icon">Relax</span>
+                    <span className="calc-action-label">WIEN2k Relaxation</span>
+                    <span className="calc-action-hint">
+                      {wien2kStructureSourceCalculations.length > 0 ? "Optimize internal positions" : "Requires accepted Structure"}
                     </span>
                   </button>
                   <button
@@ -6136,8 +6173,30 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                   storedOptimizedStructure || storedSourceStructure,
                 );
                 const optimizedStructure = parsedOptimizedStructure || storedOptimizedStructure;
+                const nativeCellParameters = Array.isArray(calc.parameters?.final_structure_summary?.cellParameters)
+                  ? calc.parameters.final_structure_summary.cellParameters.map(Number)
+                  : null;
+                const nativeCellMetrics = nativeCellParameters?.length === 6
+                  && nativeCellParameters.every(Number.isFinite)
+                  ? {
+                    a: nativeCellParameters[0],
+                    b: nativeCellParameters[1],
+                    c: nativeCellParameters[2],
+                    alpha: nativeCellParameters[3],
+                    beta: nativeCellParameters[4],
+                    gamma: nativeCellParameters[5],
+                  }
+                  : null;
+                const nativeCellSummary: SavedCellSummary | null = nativeCellMetrics
+                  ? {
+                    ...nativeCellMetrics,
+                    volume: calculateVolumeFromMetrics(nativeCellMetrics),
+                    units: "angstrom",
+                  }
+                  : null;
                 const summary = (optimizedStructure ? summarizeCell(optimizedStructure) : null)
                   || (calc.parameters?.optimized_cell_summary as SavedCellSummary | null)
+                  || nativeCellSummary
                   || null;
                 const optimizedCell = asCellMatrix(optimizedStructure?.cell_parameters);
                 const units = summary?.units || optimizedStructure?.cell_units || "angstrom";
@@ -6148,7 +6207,7 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                 let displaySummary: SavedCellSummary | null = summary ? { ...summary } : null;
                 let cellBasisLabel = likelyPrimitiveCell
                   ? (displayCellContext?.centering === "R" ? "Rhombohedral primitive (QE output)" : "Primitive (QE output)")
-                  : "Stored (QE output)";
+                  : calc.engine_id === "wien2k" ? "WIEN2k case.struct" : "Stored (QE output)";
 
                 if (!displaySummary && optimizedCell) {
                   const metrics = calculateMetricsFromVectors(optimizedCell[0], optimizedCell[1], optimizedCell[2]);
@@ -6192,17 +6251,32 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                 }
 
                 const mode = getOptimizationMode(calc);
-                const modeLabel = mode === "vcrelax" ? "VC-Relax" : "Relax";
+                const modeLabel = mode === "internal_positions" ? "Internal positions" : mode === "vcrelax" ? "VC-Relax" : "Relax";
                 const sourceLabel =
-                  calc.parameters?.structure_source?.type === "optimization"
+                  calc.engine_id === "wien2k"
+                    ? `WIEN2k structure ${String(calc.parameters?.source_structure_calculation_id || "").slice(0, 8)}`
+                    : calc.parameters?.structure_source?.type === "optimization"
                     ? `Saved optimization ${String(calc.parameters?.structure_source?.calc_id || "").slice(0, 8)}`
                     : "From CIF";
                 const electronConvLabel = formatThreshold(calc.parameters?.conv_thr);
-                const forceConvLabel = formatThreshold(calc.parameters?.forc_conv_thr);
+                const forceConvLabel = formatThreshold(
+                  calc.parameters?.forc_conv_thr
+                    ?? calc.parameters?.run?.forceConvergenceMryBohr
+                    ?? calc.parameters?.run?.force_convergence_mry_bohr,
+                );
                 const energyConvLabel = formatThreshold(calc.parameters?.etot_conv_thr);
                 const pressValue = Number(calc.parameters?.press);
                 const isPinned = pinnedCalcIds.has(calc.id);
                 const runtime = getCalculationRuntime(calcData);
+                const wien2kConverged = calc.engine_id === "wien2k"
+                  ? calc.scf_summary?.convergence === "converged" && calc.parameters?.structure_source_ready === true
+                  : null;
+                const finalForce = typeof calc.parameters?.final_max_force_mry_bohr === "number"
+                  ? calc.parameters.final_max_force_mry_bohr
+                  : Number.NaN;
+                const geometrySteps = typeof calc.parameters?.geometry_steps === "number"
+                  ? calc.parameters.geometry_steps
+                  : null;
 
                 return (
                   <div key={calc.id} className="calculation-item">
@@ -6221,13 +6295,13 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                       <div className="calculation-info">
                         {renderCalculationEntryName(calc)}
                         <span className="calc-type">OPT</span>
-                        {calc.result && (
+                        {(calc.result || wien2kConverged !== null) && (
                           <span
                             className={`calc-status ${
-                              calc.result.converged ? "converged" : "failed"
+                              (calc.result?.converged ?? wien2kConverged) ? "converged" : "failed"
                             }`}
                           >
-                            {calc.result.converged ? "Converged" : "Not converged"}
+                            {(calc.result?.converged ?? wien2kConverged) ? "Converged" : "Not converged"}
                           </span>
                         )}
                         {calc.result?.total_energy && (
@@ -6293,8 +6367,20 @@ function formatScfDashboardHubbardU(calc: CalculationRun): string | null {
                           </div>
                           <div className="detail-item">
                             <label>Atoms</label>
-                            <span>{optimizedStructure?.atoms?.length || "N/A"}</span>
+                            <span>{optimizedStructure?.atoms?.length || (Array.isArray(calc.parameters?.sites) ? calc.parameters.sites.reduce((sum: number, site: any) => sum + (Array.isArray(site.positions) ? site.positions.length : 0), 0) : "N/A")}</span>
                           </div>
+                          {Number.isFinite(finalForce) && (
+                            <div className="detail-item">
+                              <label>Final max force</label>
+                              <span>{finalForce.toFixed(4)} mRy/Bohr</span>
+                            </div>
+                          )}
+                          {geometrySteps != null && (
+                            <div className="detail-item">
+                              <label>Geometry steps</label>
+                              <span>{geometrySteps}</span>
+                            </div>
+                          )}
                           {electronConvLabel && (
                             <div className="detail-item">
                               <label>Electron Conv.</label>
