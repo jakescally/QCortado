@@ -112,9 +112,12 @@ export function HpcRunSettings({
         totalCpus,
         phonon: taskKind === "phonon",
         kPoints: pointEstimates?.k.conservative ? null : pointEstimates?.k.result?.irreduciblePoints,
-        qPoints: pointEstimates?.q?.conservative ? null : pointEstimates?.q?.result?.irreduciblePoints,
+        qPoints: pointEstimates?.q?.conservative ? null : pointEstimates?.qPointsToCompute ?? pointEstimates?.q?.result?.irreduciblePoints,
         maxRanks: maxTaskCount,
         sourceLayout: pointEstimates?.sourceLayout,
+        irreps: resources.qe_phonon_irreps,
+        fftPlanes: pointEstimates?.fftPlanes,
+        bands: pointEstimates?.bands,
       }), error: null };
     } catch (error) {
       return { plan: null, error: String(error) };
@@ -122,7 +125,8 @@ export function HpcRunSettings({
   }, [autoActive, resources.nodes, totalCpus, taskKind, maxTaskCount,
     pointEstimates?.k.conservative, pointEstimates?.k.result?.irreduciblePoints,
     pointEstimates?.q?.conservative, pointEstimates?.q?.result?.irreduciblePoints,
-    pointEstimates?.sourceLayout?.ranks, pointEstimates?.sourceLayout?.pools]);
+    pointEstimates?.sourceLayout?.ranks, pointEstimates?.sourceLayout?.pools,
+    resources.qe_phonon_irreps, pointEstimates?.fftPlanes, pointEstimates?.bands, pointEstimates?.qPointsToCompute]);
 
   useEffect(() => {
     if (disabled || !autoState.plan) return;
@@ -289,6 +293,7 @@ export function HpcRunSettings({
               next.qe_total_cpus = (next.ntasks ?? 1) * (next.cpus_per_task ?? 1);
               next.qe_kpoint_pools = resources.qe_kpoint_pools;
               next.qe_qpoint_images = resources.qe_qpoint_images;
+              next.qe_phonon_irreps = resources.qe_phonon_irreps;
               next.pencil_decomposition = resources.pencil_decomposition ?? true;
               next.ntasks_per_node = resources.ntasks_per_node ?? null;
               onResourcesChange(next);
@@ -321,7 +326,7 @@ export function HpcRunSettings({
         </label>
 
         {autoAvailable && <label>
-          <span className="hpc-checkbox-text">Parallelization <InfoTooltip text="Auto chooses MPI ranks, OpenMP threads, phonon images and electronic pools together. Large allocations favor modest thread groups to reduce MPI communication; available point counts guide images and pools. It aims for roughly eight ranks per electronic pool and preserves a compatible source SCF layout where possible. This is a starting heuristic; use Manual for cluster-specific tuning." /></span>
+          <span className="hpc-checkbox-text">Parallelization <InfoTooltip text="Auto compares layouts using one, two and four OpenMP threads per MPI rank, favoring groups within a node and balanced point work. Saved SCF FFT dimensions guide group sizes when available. Known irreps can enable more phonon images than q-points. Source restart compatibility takes priority. This benchmark-informed heuristic does not measure performance or predict memory; use Manual for cluster-specific tuning." /></span>
           <select value={autoActive ? "auto" : "manual"} disabled={disabled}
             onChange={(event) => update({ qe_parallel_mode: event.target.value === "auto" ? "auto" : "manual", qe_total_cpus: taskCount * Math.max(1, resources.cpus_per_task ?? 1) })}>
             <option value="auto">Auto</option>
@@ -428,6 +433,12 @@ export function HpcRunSettings({
 
       {showAdvanced && (
         <div className="hpc-advanced-grid" id="hpc-advanced-slurm-fields">
+          {taskKind === "phonon" && autoAvailable && <label>
+            <span className="hpc-checkbox-text">Known phonon irreps <InfoTooltip text="Optional total number of irreps to compute across the selected q-points, from QE initialization for this exact task. Do not enter the number of displacement modes or the irrep count at just one q-point. Auto may use more images than q-points, but never more than this count. Leave blank when unknown; update it when changing the q-grid or representation range." /></span>
+            <input type="number" min={1} max={4294967295} step={1} value={resources.qe_phonon_irreps ?? ""}
+              placeholder="Optional" disabled={disabled}
+              onChange={(event) => update({ qe_phonon_irreps: event.target.value === "" ? null : Math.min(4294967295, normalizePositiveInt(event.target.value, 1)) })} />
+          </label>}
           <label>
             <span className="hpc-checkbox-text">
               Tasks / Node

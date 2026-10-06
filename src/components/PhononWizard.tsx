@@ -1,6 +1,6 @@
 // Phonon Calculation Wizard - Calculate phonon DOS and dispersion
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppHeaderPortal } from "./AppHeaderPortal";
 import {
@@ -47,7 +47,7 @@ import {
 } from "../lib/engines/qe/hpc";
 import type { EngineId } from "../lib/engines/types";
 import { sourceScfLayout } from "../lib/qeAutoParallelization";
-import { usePointMeshEstimate, usePointStructure } from "../lib/qePointEstimate";
+import { usePointMeshEstimate, sourceScfWorkload, usePointStructure } from "../lib/qePointEstimate";
 import { resolveSavedScfStructure } from "../lib/optimizedStructure";
 import { PointEstimateSummary, QePointParallelization } from "./QePointParallelization";
 import { HpcRunSettings } from "./HpcRunSettings";
@@ -562,13 +562,25 @@ export function PhononWizard({
   const conservativeEstimate = Boolean(estimateScfParams.noncolin || estimateScfParams.lspinorb || estimateScfParams.nspin === 4);
   const kPointEstimate = usePointMeshEstimate(pointStructure, estimateScfParams.kgrid ?? null, estimateScfParams.kgrid_offset ?? [0, 0, 0], conservativeEstimate);
   const qPointEstimate = usePointMeshEstimate(pointStructure, qGrid, [0, 0, 0], conservativeEstimate);
-  const pointEstimates = { sourceLayout: sourceScfLayout(estimateScfParams), k: kPointEstimate, q: qPointEstimate, kLabel: "source SCF k-points" };
+  const sourceWorkload = useMemo(() => sourceScfWorkload(selectedScf?.result?.raw_output), [selectedScf?.result?.raw_output]);
+  const qPointsToCompute = qPointEstimate.result ? Math.max(0,
+    Math.min(qPointEstimate.result.irreduciblePoints, Number(lastQInput) || qPointEstimate.result.irreduciblePoints)
+      - Math.max(1, Number(startQInput) || 1) + 1) : undefined;
+  const pointEstimates = { ...sourceWorkload, sourceLayout: sourceScfLayout(estimateScfParams),
+    k: kPointEstimate, q: qPointEstimate, qPointsToCompute, kLabel: "source SCF k-points" };
 
   const [cpuCount, setCpuCount] = useState(1);
   const [mpiAvailable, setMpiAvailable] = useState(false);
   const [hpcResources, setHpcResources] = useState<SlurmResourceRequest>(
     defaultResourcesForProfile(activeHpcProfile),
   );
+  const phononWorkloadKey = JSON.stringify([selectedScf?.id, qGrid, startQInput, lastQInput, startIrrInput, lastIrrInput, trans, recover, epsil, fpol, lraman, electronPhononMode]);
+  const previousWorkloadKey = useRef(phononWorkloadKey);
+  useEffect(() => {
+    if (previousWorkloadKey.current === phononWorkloadKey) return;
+    previousWorkloadKey.current = phononWorkloadKey;
+    setHpcResources((previous) => previous.qe_phonon_irreps == null ? previous : { ...previous, qe_phonon_irreps: null });
+  }, [phononWorkloadKey]);
   const visibleOutputLineCount = useMemo(() => countVisibleOutputLines(output), [output]);
   useViewportScrollLock(step === "run");
   const hpcCommandLines = useMemo(() => {

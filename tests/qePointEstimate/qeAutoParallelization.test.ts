@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyQeAutoPlan, planQeAutoAllocation, sourceScfLayout } from "../../src/lib/qeAutoParallelization";
+import { sourceScfWorkload } from "../../src/lib/qePointEstimate";
 
 test("phonon Auto favors images and one electronic pool when each image is small", () => {
   const plan = planQeAutoAllocation({ nodes: 3, totalCpus: 24, phonon: true, qPoints: 12, kPoints: 20 });
@@ -10,16 +11,17 @@ test("phonon Auto favors images and one electronic pool when each image is small
   assert.equal(plan.threads, 1);
 });
 
-test("SCF Auto uses electronic pools to keep FFT groups modest", () => {
+test("SCF Auto prefers node-local pools without imposing an eight-rank cap", () => {
   const plan = planQeAutoAllocation({ nodes: 2, totalCpus: 64, phonon: false, kPoints: 16 });
   assert.equal(plan.images, 1);
-  assert.equal(plan.pools, 8);
-  assert.equal(plan.ranksPerPool, 8);
+  assert.equal(plan.pools, 2);
+  assert.equal(plan.ranksPerPool, 32);
 });
 
 test("known compatible source SCF layout is preserved", () => {
   const plan = planQeAutoAllocation({ nodes: 2, totalCpus: 64, phonon: true, qPoints: 10, kPoints: 20, sourceLayout: { ranks: 8, pools: 2 } });
-  assert.equal(plan.images, 8);
+  assert.equal(plan.ranksPerImage, 8);
+  assert.ok(plan.images <= 10);
   assert.equal(plan.pools, 2);
   assert.equal(plan.ranksPerPool, 4);
 });
@@ -89,7 +91,7 @@ test("800 CPUs on 20 nodes use hybrid parallelism and respect point capacity", (
     assert.ok(plan.threads >= 2 && plan.threads <= 8);
     assert.equal(plan.ranks * plan.threads, 800);
     assert.equal(plan.ranks % 20, 0);
-    assert.ok(plan.ranksPerPool <= 8);
+    assert.ok(plan.ranksPerPool * plan.threads <= 40);
     assert.equal(plan.ranks % (plan.images * plan.pools), 0);
   }
 });
@@ -122,4 +124,45 @@ test("hybrid layouts preserve full budgets and rank caps across uneven node allo
     assert.ok(plan.images <= 11 && plan.pools <= 7);
     if (plan.tasksPerNode != null) assert.equal(plan.tasksPerNode * nodes, plan.ranks);
   }
+});
+
+test("known irreps permit images beyond q-points without exceeding actual work", () => {
+  const input = { nodes: 20, totalCpus: 800, phonon: true, kPoints: 20, qPoints: 1 };
+  assert.equal(planQeAutoAllocation(input).images, 1);
+  const plan = planQeAutoAllocation({ ...input, irreps: 24 });
+  assert.ok(plan.images > 1 && plan.images <= 24);
+  assert.equal(plan.ranks % (plan.images * plan.pools), 0);
+  assert.throws(() => planQeAutoAllocation({ ...input, irreps: 0 }));
+});
+
+test("FFT capacity is honored without an arbitrary eight-rank ceiling", () => {
+  const plan = planQeAutoAllocation({ nodes: 2, totalCpus: 64, phonon: false, kPoints: 1, fftPlanes: 16 });
+  assert.ok(plan.ranksPerPool > 8 && plan.ranksPerPool <= 16);
+  assert.ok([1, 2, 4].includes(plan.threads));
+  assert.equal(plan.ranks * plan.threads, 64);
+  assert.throws(() => planQeAutoAllocation({ nodes: 20, totalCpus: 800, phonon: false, kPoints: 1, fftPlanes: 16 }));
+});
+
+test("source restart pools are preserved even before k estimates arrive", () => {
+  const plan = planQeAutoAllocation({ nodes: 2, totalCpus: 64, phonon: true, qPoints: 1, irreps: 24,
+    sourceLayout: { ranks: 8, pools: 2 } });
+  assert.equal(plan.ranksPerImage, 8);
+  assert.equal(plan.pools, 2);
+  assert.ok(plan.images <= 24);
+});
+
+test("large regular allocations prefer benchmarked thread candidates and node-local groups", () => {
+  for (const totalCpus of [256, 512, 800, 1024]) {
+    const nodes = totalCpus === 800 ? 20 : 8;
+    const plan = planQeAutoAllocation({ nodes, totalCpus, phonon: false, kPoints: 64 });
+    assert.ok([1, 2, 4].includes(plan.threads));
+    assert.ok(plan.ranksPerPool * plan.threads <= totalCpus / nodes);
+    assert.equal((plan.ranks / nodes) % plan.ranksPerPool, 0);
+  }
+});
+
+test("SCF output supplies the smaller FFT plane count and actual band count", () => {
+  assert.deepEqual(sourceScfWorkload("Dense grid: FFT dimensions: (60, 60, 180)\nSmooth grid: FFT dimensions: ( 40, 40, 120 )\nnumber of Kohn-Sham states= 96"),
+    { fftPlanes: 120, bands: 96 });
+  assert.deepEqual(sourceScfWorkload(null), { fftPlanes: undefined, bands: undefined });
 });

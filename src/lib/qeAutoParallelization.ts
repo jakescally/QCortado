@@ -48,6 +48,9 @@ export function planQeAutoAllocation(input: {
   qPoints?: number | null;
   maxRanks?: number | null;
   sourceLayout?: QeSourceLayout;
+  irreps?: number | null;
+  fftPlanes?: number | null;
+  bands?: number | null;
 }): QeAutoPlan {
   const nodes = positiveInteger(input.nodes, "Nodes");
   const totalCpus = positiveInteger(input.totalCpus, "Total allocated CPUs");
@@ -64,60 +67,65 @@ export function planQeAutoAllocation(input: {
   const validSource = source && Number.isSafeInteger(source.ranks) && Number.isSafeInteger(source.pools)
     && source.ranks > 0 && source.pools > 0 && source.ranks % source.pools === 0;
   const cpusPerNode = totalCpus / nodes;
-  // Prefer modest hybrid groups on large allocations. Penalize oversized FFT
-  // groups more strongly than deviation from this preferred thread count.
-  const preferredThreads = totalCpus >= 128 ? (cpusPerNode >= 32 ? 4 : cpusPerNode >= 16 ? 2 : 1) : 1;
+  const irreps = input.irreps == null ? null : positiveInteger(input.irreps, "Known phonon irreps");
+  const fftPlanes = reliableCount(input.fftPlanes);
+  const bands = reliableCount(input.bands);
+  const imageCapacity = input.phonon ? (irreps ?? qPoints ?? 1) : 1;
+  const preferredThreads = nodes > 1 && totalCpus >= 128 ? 2 : 1;
   const imbalance = (points: number | null, count: number) => points == null ? 0 : 1 - points / (Math.ceil(points / count) * count);
-  const candidates = rankCandidates.map((ranks) => {
+  const candidates: { ranks: number; threads: number; images: number; pools: number;
+    ranksPerImage: number; ranksPerPool: number; compatible: boolean; score: number }[] = [];
+  for (const ranks of rankCandidates) {
     const threads = totalCpus / ranks;
-    let images = 1;
-    let pools = 1;
-    const compatible = Boolean(input.phonon && validSource && ranks % source!.ranks === 0
-      && ranks / source!.ranks <= (qPoints ?? 1));
-    if (compatible) {
-      images = ranks / source!.ranks;
-      pools = source!.pools;
-    } else {
-      if (input.phonon && qPoints != null) {
-        const goal = Math.min(qPoints, Math.max(1, Math.ceil(ranks / 8)));
-        const imageCounts = divisors(ranks).filter((count) => count <= qPoints);
-        const score = (count: number) => Math.abs(Math.log2(count / goal)) + imbalance(qPoints, count) * 0.5
-          + (count % nodes === 0 || nodes % count === 0 ? 0 : 0.1);
-        images = imageCounts.reduce((best, count) => score(count) < score(best) ? count : best, 1);
-      }
-      const perImage = ranks / images;
-      const target = Math.min(8, Math.ceil(ranks / nodes));
-      if (kPoints != null && perImage > target) {
-        const poolCounts = divisors(perImage).filter((count) => count <= kPoints);
-        const score = (count: number) => Math.abs(Math.log2((perImage / count) / target)) + imbalance(kPoints, count) * 0.5;
-        pools = poolCounts.reduce((best, count) => score(count) < score(best) ? count : best, 1);
+    const standardThreads = [1, 2, 4].includes(threads);
+    for (const images of divisors(ranks).filter((count) => count <= imageCapacity)) {
+      const ranksPerImage = ranks / images;
+      for (const pools of divisors(ranksPerImage).filter((count) => count <= (kPoints ?? 1) || Boolean(input.phonon && validSource && ranksPerImage === source!.ranks && count === source!.pools))) {
+        const ranksPerPool = ranksPerImage / pools;
+        // With pencil decomposition disabled, do not exceed the known FFT
+        // plane capacity. No task-group assumption is made for ph.x.
+        if (fftPlanes != null && ranksPerPool > fftPlanes) continue;
+        const poolCpus = ranksPerPool * threads;
+        const compatible = Boolean(input.phonon && validSource && ranksPerImage === source!.ranks && pools === source!.pools);
+        const local = poolCpus <= cpusPerNode;
+        const aligned = ranks % nodes === 0 && (local ? (ranks / nodes) % ranksPerPool === 0 : ranksPerPool % (ranks / nodes) === 0);
+        // Benchmarks favor exploiting independent work while keeping FFT
+        // communication local; none establishes a universal ranks/pool value.
+        const score = Math.max(0, Math.log2(poolCpus / cpusPerNode)) * 2
+          + Math.max(0, Math.log2(cpusPerNode / (2 * poolCpus))) * 0.7
+          + (aligned ? 0 : 0.5)
+          + (totalCpus % nodes === 0 && ranks % nodes !== 0 ? 2 : 0)
+          + imbalance(kPoints, pools) * 0.8 + (input.phonon ? imbalance(irreps ?? qPoints, images) * 0.8 : 0)
+          + Math.log2(pools) * 0.08 // modest replication cost; not a memory estimate
+          + Math.log2(images) * 0.03 // image initialization and collection overhead
+          + (standardThreads ? Math.abs(Math.log2(threads / preferredThreads)) * 0.12 : 4 + Math.abs(Math.log2(threads / 2)))
+          + (fftPlanes == null ? 0 : Math.max(0, Math.log2(ranksPerPool / (fftPlanes / 4))) * 0.6)
+          + (bands == null ? 0 : Math.max(0, Math.log2(ranksPerPool / bands)) * 0.3);
+        candidates.push({ ranks, threads, images, pools, ranksPerImage, ranksPerPool, compatible, score });
       }
     }
-    const ranksPerImage = ranks / images;
-    const ranksPerPool = ranksPerImage / pools;
-    const score = Math.max(0, Math.log2(ranksPerPool / 8)) * 3
-      + Math.abs(Math.log2(threads / preferredThreads)) * 0.8
-      + imbalance(kPoints, pools) * 0.5 + (input.phonon ? imbalance(qPoints, images) * 0.5 : 0)
-      + (totalCpus % nodes === 0 && ranks % nodes !== 0 ? 1 : 0)
-      + (threads > 8 ? Math.log2(threads / 8) * 0.5 : 0);
-    return { ranks, threads, images, pools, ranksPerImage, ranksPerPool, compatible, score };
-  });
-  // A saved distributed restart's MPI layout takes priority over performance
-  // guesses. Hybrid threads may change without changing that MPI layout.
+  }
+  if (!candidates.length) throw new Error("This allocation exceeds the known FFT plane capacity. Reduce CPUs or Nodes, or use Manual with a verified QE layout.");
+  // Distributed restart compatibility outranks guesses about performance.
   const compatibleCandidates = candidates.filter((candidate) => candidate.compatible);
   const eligible = compatibleCandidates.length ? compatibleCandidates : candidates;
   const best = eligible.reduce((best, candidate) => candidate.score < best.score ? candidate : best);
   const { ranks, threads, images, pools, ranksPerImage, ranksPerPool } = best;
+  notes.push("Compared MPI/OpenMP layouts using node locality, point balance and group replication. No universal ranks-per-pool optimum is assumed; benchmark representative work to tune further.");
+  if (input.phonon) {
+    notes.push(irreps == null
+      ? "Actual phonon irrep count unavailable: images are conservatively limited to estimated q-points. Supply the selected irrep count in Advanced settings to allow more images."
+      : `Images are limited to the supplied ${irreps} selected phonon irreps. Irrep costs can differ, so equal counts do not guarantee equal work.`);
+  }
   if (best.compatible) notes.push("Preserving the source SCF rank and electronic-pool layout per image.");
-  else if (input.phonon && validSource) {
-    notes.push(`Source SCF used ${source!.ranks} ranks and ${source!.pools} pools; distributed-format restart files need a matching layout. Use Manual to match the source.`);
-  }
-  if (threads > 1) notes.push(`Hybrid MPI/OpenMP: ${ranks} MPI ranks × ${threads} threads per rank; threads share each rank's allocated CPUs within a node.`);
+  else if (input.phonon && validSource) notes.push(`Source SCF used ${source!.ranks} ranks and ${source!.pools} pools; distributed-format restart files need a matching layout. Use Manual to match the source.`);
+  if (threads > 1) notes.push(`Hybrid MPI/OpenMP: ${ranks} MPI ranks × ${threads} threads per rank.`);
+  if (![1, 2, 4].includes(threads)) notes.push("An unusual thread count is required to fit the CPU budget, restart layout or rank limit; test its efficiency before a large run.");
   if (input.maxRanks != null && rankLimit < totalCpus) notes.push(`Respecting the workflow limit of ${rankLimit} MPI ranks.`);
-  if (ranksPerPool > 8) notes.push(`${ranksPerPool} ranks share each electronic pool; consider a smaller allocation if scaling is poor.`);
-  if (threads > 8 || ranksPerPool * threads > 64) {
-    notes.push("This allocation may exceed useful parallelism for the available points. Auto preserves the requested CPUs, but a smaller allocation may be faster; compare timings.");
-  }
+  if (fftPlanes != null) notes.push(`Using ${fftPlanes} FFT planes from the source SCF as guidance; the phonon FFT grid can differ.`);
+  else notes.push("FFT dimensions unavailable; node locality is the fallback. Memory requirements are not predicted.");
+  if (input.phonon && kPoints != null) notes.push("Source SCF k-point count guides pools; electronic symmetry and workload change with q.");
+  if (ranksPerPool * threads > cpusPerNode || threads > 4) notes.push("This allocation may exceed useful parallelism for the available points. Auto preserves the requested CPUs, but a smaller allocation may be more efficient.");
   return { nodes, totalCpus, ranks, threads, tasksPerNode: ranks % nodes === 0 ? ranks / nodes : null,
     images, pools, ranksPerImage, ranksPerPool, notes };
 }

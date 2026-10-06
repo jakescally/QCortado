@@ -108,6 +108,8 @@ pub struct SlurmResourceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qe_total_cpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_phonon_irreps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_gb: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpus: Option<u32>,
@@ -527,6 +529,7 @@ pub fn default_cpu_resources() -> SlurmResourceRequest {
         qe_qpoint_images: None,
         qe_parallel_mode: None,
         qe_total_cpus: None,
+        qe_phonon_irreps: None,
         memory_gb: Some(16),
         gpus: Some(0),
         qos: None,
@@ -552,6 +555,7 @@ pub fn default_gpu_resources() -> SlurmResourceRequest {
         qe_qpoint_images: None,
         qe_parallel_mode: None,
         qe_total_cpus: None,
+        qe_phonon_irreps: None,
         memory_gb: Some(32),
         gpus: Some(1),
         qos: None,
@@ -577,6 +581,7 @@ pub fn default_utility_resources() -> SlurmResourceRequest {
         qe_qpoint_images: None,
         qe_parallel_mode: None,
         qe_total_cpus: None,
+        qe_phonon_irreps: None,
         memory_gb: Some(2),
         gpus: Some(0),
         qos: None,
@@ -630,6 +635,11 @@ pub fn validate_andromeda_resources(resources: &SlurmResourceRequest) -> Resourc
     let ntasks = resources.ntasks.unwrap_or(1);
     let cpus_per_task = resources.cpus_per_task.unwrap_or(1);
     if resources.qe_parallel_mode.as_deref() == Some("auto") {
+        if let Some(irreps) = resources.qe_phonon_irreps {
+            if irreps == 0 || resources.qe_qpoint_images.unwrap_or(1) > irreps {
+                validation.errors.push("Auto phonon images cannot exceed the positive selected irrep count.".into());
+            }
+        }
         if ntasks == 0 || cpus_per_task == 0 || ntasks < resources.nodes.unwrap_or(1) {
             validation.errors.push("Auto allocation requires at least one MPI rank per node and positive CPUs per rank.".into());
         }

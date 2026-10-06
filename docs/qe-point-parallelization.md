@@ -17,31 +17,51 @@ allocations retain manual controls.
 Auto disables pencil decomposition and locks its checkbox; Manual permits
 enabling it explicitly for compatible cluster installations.
 
-Auto evaluates MPI/OpenMP splits together with image and pool layouts.
-Allocations of at least 128 CPUs prefer four threads per rank when there are
-at least 32 CPUs per node, two with at least 16 CPUs per node, and one
-otherwise. It can choose other integer thread counts to preserve the CPU
-budget, fit node placement and avoid oversized MPI groups. It favors phonon
-images using the estimated irreducible q-count, then electronic pools using
-the estimated k-count, aiming for roughly eight MPI ranks per pool. Eight is a
-starting heuristic, not a QE requirement or a guaranteed optimum. Candidate
-counts must divide the ranks, with a preference for balanced point workloads.
-When possible phonons preserve the saved source SCF ranks/pools per image;
-incompatible distributed restarts are identified in the Auto details tooltip.
-Missing or conservative point estimates use one group for that level.
-Workflow rank limits also constrain candidate layouts. Auto always preserves
-the requested total CPU budget or reports an invalid allocation. Layouts with
-more than eight threads per rank or more than 64 CPUs per electronic pool
-flag potentially excessive allocation in the Auto details tooltip. These
-thresholds are conservative heuristics, not measured scaling limits.
-For example, 20 nodes / 800 CPUs / 20 irreducible electronic points yields
-160 ranks × 5 threads, with 20 pools of 8 ranks each. Actual choices also
-depend on phonon point counts and saved source SCF MPI layouts.
-The batch script exports `OMP_NUM_THREADS` from Slurm's CPUs per task and
-defaults `OMP_PLACES=cores` / `OMP_PROC_BIND=close`, respecting preamble
-overrides of those affinity settings. The MPI launcher must allow each rank
-to use its allocated CPUs; profiles using `mpirun` should configure their
-launcher arguments for thread-aware binding on that cluster.
+Auto compares one, two and four OpenMP threads per rank, with a modest
+preference for two on large multi-node allocations. Other integer thread
+counts are fallback choices when allocation divisibility, workflow limits or
+source restart compatibility require them. It scores image/pool layouts by
+node locality, alignment with node boundaries, point balance, and modest
+replication/initialization overhead penalties. It favors pools occupying
+roughly half to one node, rather than imposing a fixed ranks-per-pool target.
+These weights are transparent heuristics informed by published benchmarks;
+they are not a fitted performance model or timings measured on the user's cluster.
+
+Known FFT dimensions and band counts from saved source SCF output provide
+additional guidance for phonons. With pencil decomposition disabled, Auto
+excludes layouts with more MPI ranks per pool than the smallest known FFT
+third dimension, and penalizes approaching that limit. The phonon FFT grid
+can differ from the source. When this constraint cannot be met, Auto asks for
+a smaller allocation or a verified Manual layout. Missing dimensions fall
+back to node locality. Auto does not predict memory requirements.
+
+Phonon images distribute both q-points and irreps. **Known phonon irreps** in
+Advanced settings optionally accepts the total selected irrep count reported
+by QE initialization for the exact task, across all selected q-points. With
+this count, Auto can choose more images than q-points, but never more than
+available irreps: QE rejects images without an assigned representation.
+Without it, Auto conservatively caps images at the estimated selected q-point
+count. This is not a displacement-mode count or a count at just one q-point.
+Changing the source, grid or selected representation ranges clears the supplied
+count. Irrep costs differ, so balancing counts cannot guarantee balanced runtimes.
+
+Pools use estimated electronic k-points; missing or conservative estimates use
+one group unless preserving a recorded source SCF layout requires otherwise.
+Compatible saved SCF ranks/pools per image take priority over performance
+heuristics. Incompatible distributed restarts are flagged in Auto details.
+Candidate counts must divide the MPI ranks. Auto preserves the requested CPU
+budget and respects workflow rank limits. Pools spanning nodes or thread
+counts above four trigger efficiency guidance in the standard tooltip.
+For example, 20 nodes / 800 CPUs / 20 estimated electronic points without a
+recorded source layout yields 400 ranks × 2 threads, with 20 pools for SCF.
+A phonon task with 12 estimated q-points chooses 4 images × 5 pools per image,
+20 MPI ranks per pool. Saved layouts and known FFT dimensions can change this.
+
+The batch script exports `OMP_NUM_THREADS` from Slurm's CPUs per task,
+propagates that setting through `SRUN_CPUS_PER_TASK`, uses block placement,
+and defaults `OMP_PLACES=cores` / `OMP_PROC_BIND=close`, respecting preamble
+overrides of those affinity settings. Profiles using `mpirun` should configure
+their launcher arguments for thread-aware binding on that cluster.
 Evenly divisible allocations set tasks per node; uneven allocations let Slurm
 place ranks rather than retaining a conflicting profile default.
 
@@ -87,3 +107,12 @@ decomposition with saved SCF and phonon calculation parameters.
 References: [QE parallelization levels](https://www.quantum-espresso.org/Doc/user_guide/node20.html),
 [phonon parallelism and collection](https://www.quantum-espresso.org/Doc/ph_user_guide/node17.html),
 [parallel I/O](https://www.quantum-espresso.org/Doc/user_guide/node21.html).
+
+Benchmark rationale: the [2023 QE developer study](https://pmc.ncbi.nlm.nih.gov/articles/PMC10601483/)
+includes phonon MPI/OpenMP and pool scaling, including a two-thread CPU layout;
+the [ARCHER2 QE study](https://cug.org/proceedings/cug2022_proceedings/includes/files/pap104s2-file1.pdf)
+shows that benefits from one, two and four threads depend strongly on the system.
+[QE FFT scaling guidance](https://www.quantum-espresso.org/Doc/pw_user_guide/node18.html)
+and [ARCHER2 launch guidance](https://docs.archer2.ac.uk/research-software/qe/)
+inform FFT capacity and Slurm thread placement. None establishes a universally
+optimal decomposition; compare representative timings on the target cluster.

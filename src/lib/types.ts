@@ -194,6 +194,7 @@ export interface SlurmResourceRequest {
   qe_qpoint_images?: number | null;
   qe_parallel_mode?: "auto" | "manual" | null;
   qe_total_cpus?: number | null;
+  qe_phonon_irreps?: number | null;
   memory_gb?: number | null;
   gpus?: number | null;
   qos?: string | null;

@@ -8,7 +8,17 @@ import { inferQeBravaisCellFromCif } from "./engines/qe/bravaisInference";
 
 export interface PointEstimate { fullPoints: number; irreduciblePoints: number; }
 export interface PointEstimateState { result: PointEstimate | null; loading: boolean; error: string | null; conservative?: boolean; explicit?: boolean; }
-export interface QePointEstimates { sourceLayout?: QeSourceLayout; k: PointEstimateState; q?: PointEstimateState; kLabel?: string; }
+export interface QePointEstimates { sourceLayout?: QeSourceLayout; k: PointEstimateState; q?: PointEstimateState; qPointsToCompute?: number; kLabel?: string; fftPlanes?: number; bands?: number; }
+
+/** Read observed dimensions, not a guessed FFT grid from a kinetic cutoff. */
+export function sourceScfWorkload(rawOutput: string | null | undefined): { fftPlanes?: number; bands?: number } {
+  const output = rawOutput ?? "";
+  const planes = [...output.matchAll(/FFT dimensions:\s*\(\s*\d+\s*,\s*\d+\s*,\s*(\d+)\s*\)/gi)]
+    .map((match) => Number(match[1])).filter((n) => Number.isSafeInteger(n) && n > 0);
+  const bands = Number(output.match(/number of Kohn-Sham states\s*=\s*(\d+)/i)?.[1]);
+  return { fftPlanes: planes.length ? Math.min(...planes) : undefined,
+    bands: Number.isSafeInteger(bands) && bands > 0 ? bands : undefined };
+}
 
 export function savedPointStructure(saved: SavedStructureData | null): SymmetryAnalyzeRequest | null {
   if (!saved?.cell_parameters || !saved.atoms.length) return null;

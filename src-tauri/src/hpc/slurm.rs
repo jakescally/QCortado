@@ -45,6 +45,7 @@ pub fn merge_resources(
         }
         base.qe_parallel_mode = request.qe_parallel_mode;
         base.qe_total_cpus = request.qe_total_cpus;
+        base.qe_phonon_irreps = request.qe_phonon_irreps;
         base.resource_type = request.resource_type;
         if request.partition.is_some() {
             base.partition = request.partition;
@@ -231,6 +232,8 @@ pub fn build_slurm_script(
     script_lines.push("# Calculation commands".to_string());
     if resources.qe_parallel_mode.as_deref() == Some("auto") {
         script_lines.push(format!("export OMP_NUM_THREADS=\"${{SLURM_CPUS_PER_TASK:-{}}}\"", resources.cpus_per_task.unwrap_or(1)));
+        script_lines.push("export SRUN_CPUS_PER_TASK=\"${SLURM_CPUS_PER_TASK:-1}\"".into());
+        script_lines.push("export SLURM_DISTRIBUTION=block:block".into());
         script_lines.push("export OMP_PLACES=\"${OMP_PLACES:-cores}\"".into());
         script_lines.push("export OMP_PROC_BIND=\"${OMP_PROC_BIND:-close}\"".into());
     }
@@ -353,6 +356,8 @@ mod tests {
         assert!(script.script.contains("export OMP_NUM_THREADS=\"${SLURM_CPUS_PER_TASK:-2}\""));
         assert!(script.script.contains("export OMP_PLACES=\"${OMP_PLACES:-cores}\""));
         assert!(script.script.contains("export OMP_PROC_BIND=\"${OMP_PROC_BIND:-close}\""));
+        assert!(script.script.contains("export SRUN_CPUS_PER_TASK=\"${SLURM_CPUS_PER_TASK:-1}\""));
+        assert!(script.script.contains("export SLURM_DISTRIBUTION=block:block"));
         assert_eq!(script.effective_resources.qe_total_cpus, Some(50));
     }
 
@@ -367,6 +372,23 @@ mod tests {
         };
         let script = build_slurm_script(&test_profile(), "test", &["echo ready".into()], Some(requested));
         assert!(script.validation.errors.iter().any(|error| error.contains("Auto CPU allocation is incomplete")));
+    }
+
+    #[test]
+    fn auto_images_respect_selected_irrep_capacity() {
+        for (images, irreps, valid) in [(4, 12, true), (16, 12, false), (1, 0, false)] {
+            let requested = SlurmResourceRequest {
+                ntasks: Some(16),
+                qe_parallel_mode: Some("auto".into()),
+                qe_total_cpus: Some(16),
+                qe_qpoint_images: Some(images),
+                qe_phonon_irreps: Some(irreps),
+                ..super::super::profile::default_cpu_resources()
+            };
+            let script = build_slurm_script(&test_profile(), "qcortado-phonon", &["srun ph.x -in ph.in > ph.out".into()], Some(requested));
+            assert_eq!(script.effective_resources.qe_phonon_irreps, Some(irreps));
+            assert_eq!(script.validation.errors.is_empty(), valid, "{:?}", script.validation.errors);
+        }
     }
 }
 
