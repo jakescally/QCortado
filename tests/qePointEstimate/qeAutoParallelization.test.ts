@@ -75,7 +75,9 @@ test("concrete Auto resources preserve unrelated cluster settings", () => {
   assert.equal(request.qe_qpoint_images, 3);
   assert.equal(request.account, "project");
   assert.equal(request.memory_gb, 64);
-  assert.equal(request.pencil_decomposition, false);
+  assert.equal(request.pencil_decomposition, true);
+  assert.equal(applyQeAutoPlan({ resource_type: "cpu" }, plan).pencil_decomposition, false);
+  assert.equal(applyQeAutoPlan({ resource_type: "cpu", pencil_decomposition: false }, plan).pencil_decomposition, false);
 });
 
 test("legacy calculations without layout metadata remain supported", () => {
@@ -165,4 +167,27 @@ test("SCF output supplies the smaller FFT plane count and actual band count", ()
   assert.deepEqual(sourceScfWorkload("Dense grid: FFT dimensions: (60, 60, 180)\nSmooth grid: FFT dimensions: ( 40, 40, 120 )\nnumber of Kohn-Sham states= 96"),
     { fftPlanes: 120, bands: 96 });
   assert.deepEqual(sourceScfWorkload(null), { fftPlanes: undefined, bands: undefined });
+});
+
+
+test("unspecified nodes delegate placement to Slurm without losing the CPU budget", () => {
+  for (const nodes of [undefined, null]) {
+    const plan = planQeAutoAllocation({ nodes, totalCpus: 100, phonon: true, kPoints: 20, qPoints: 12 });
+    assert.equal(plan.nodes, null);
+    assert.equal(plan.tasksPerNode, null);
+    assert.equal(plan.ranks * plan.threads, 100);
+    assert.equal(plan.ranks % (plan.images * plan.pools), 0);
+    const resources = applyQeAutoPlan({ resource_type: "cpu", nodes: 10, ntasks_per_node: 4 }, plan);
+    assert.equal(resources.nodes, null);
+    assert.equal(resources.ntasks_per_node, null);
+  }
+  assert.throws(() => planQeAutoAllocation({ nodes: 0, totalCpus: 100, phonon: false }));
+});
+
+
+test("explicit pencil decomposition removes the slab-only FFT rank constraint", () => {
+  const plan = planQeAutoAllocation({ nodes: 20, totalCpus: 800, phonon: false,
+    kPoints: 1, fftPlanes: 16, pencilDecomposition: true });
+  assert.ok(plan.ranksPerPool > 16);
+  assert.equal(plan.ranks * plan.threads, 800);
 });

@@ -1349,12 +1349,15 @@ mod hpc_headless_recovery_tests {
     }
 
     #[test]
-    fn auto_overrides_enabled_pencil_decomposition() {
+    fn auto_honors_explicit_pencil_decomposition() {
         let mut resources = hpc::profile::default_cpu_resources();
         resources.qe_parallel_mode = Some("auto".into());
         resources.pencil_decomposition = Some(true);
         let commands = vec!["srun ph.x -pd .true. -in ph.in".to_string()];
+        assert_eq!(apply_pencil_decomposition_setting(commands.clone(), Some(&resources)), commands);
+        resources.pencil_decomposition = Some(false);
         assert_eq!(apply_pencil_decomposition_setting(commands.clone(), Some(&resources)), vec!["srun ph.x -in ph.in"]);
+        resources.pencil_decomposition = Some(true);
         resources.qe_parallel_mode = Some("manual".into());
         assert_eq!(apply_pencil_decomposition_setting(commands.clone(), Some(&resources)), commands);
     }
@@ -9178,11 +9181,9 @@ fn apply_pencil_decomposition_setting(
     command_lines: Vec<String>,
     resources: Option<&hpc::profile::SlurmResourceRequest>,
 ) -> Vec<String> {
-    let auto_parallel = resources
-        .and_then(|request| request.qe_parallel_mode.as_deref()) == Some("auto");
-    if !auto_parallel && resources
+    if resources
         .and_then(|request| request.pencil_decomposition)
-        .unwrap_or(true)
+        .unwrap_or(false)
     {
         return command_lines;
     }

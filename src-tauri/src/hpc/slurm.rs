@@ -53,9 +53,8 @@ pub fn merge_resources(
         if request.walltime.is_some() {
             base.walltime = request.walltime;
         }
-        if request.nodes.is_some() {
-            base.nodes = request.nodes;
-        }
+        // An empty node field explicitly delegates allocation to Slurm.
+        base.nodes = request.nodes;
         if request.ntasks.is_some() {
             base.ntasks = request.ntasks;
         }
@@ -98,14 +97,8 @@ pub fn merge_resources(
         if base.gpus.unwrap_or(0) == 0 {
             base.gpus = Some(1);
         }
-        if base.nodes.is_none() {
-            base.nodes = Some(1);
-        }
     }
 
-    if base.nodes.is_none() {
-        base.nodes = Some(1);
-    }
     if base.ntasks.is_none() {
         base.ntasks = Some(1);
     }
@@ -245,10 +238,10 @@ pub fn build_slurm_script(
     script_lines.push("echo \"[QCortado] Job finished on $(date -u)\"".to_string());
 
     let preview = format!(
-        "sbatch --partition={} --time={} --nodes={} --ntasks={}{} --cpus-per-task={}{}{} run.sbatch",
+        "sbatch --partition={} --time={}{} --ntasks={}{} --cpus-per-task={}{}{} run.sbatch",
         resources.partition.as_deref().unwrap_or("short"),
         resources.walltime.as_deref().unwrap_or("02:00:00"),
-        resources.nodes.unwrap_or(1),
+        resources.nodes.map(|value| format!(" --nodes={}", value)).unwrap_or_default(),
         resources.ntasks.unwrap_or(1),
         resources
             .ntasks_per_node
@@ -388,6 +381,29 @@ mod tests {
             let script = build_slurm_script(&test_profile(), "qcortado-phonon", &["srun ph.x -in ph.in > ph.out".into()], Some(requested));
             assert_eq!(script.effective_resources.qe_phonon_irreps, Some(irreps));
             assert_eq!(script.validation.errors.is_empty(), valid, "{:?}", script.validation.errors);
+        }
+    }
+
+    #[test]
+    fn blank_nodes_remove_profile_node_request_from_script_and_preview() {
+        for mode in ["auto", "manual"] {
+            let mut profile = test_profile();
+            profile.default_cpu_resources.nodes = Some(20);
+            let requested = SlurmResourceRequest {
+                nodes: None,
+                ntasks: Some(50),
+                cpus_per_task: Some(2),
+                qe_parallel_mode: Some(mode.into()),
+                qe_total_cpus: Some(100),
+                ..super::super::profile::default_cpu_resources()
+            };
+            let script = build_slurm_script(&profile, "test", &["echo ready".into()], Some(requested));
+            assert!(script.validation.errors.is_empty(), "{:?}", script.validation.errors);
+            assert_eq!(script.effective_resources.nodes, None);
+            assert!(!script.script.contains("--nodes="));
+            assert!(!script.sbatch_preview.contains("--nodes="));
+            assert!(script.script.contains("#SBATCH --ntasks=50"));
+            assert!(script.script.contains("#SBATCH --cpus-per-task=2"));
         }
     }
 }

@@ -2,7 +2,7 @@ import type { SlurmResourceRequest } from "./types";
 
 export interface QeSourceLayout { ranks: number; pools: number; }
 export interface QeAutoPlan {
-  nodes: number;
+  nodes: number | null;
   totalCpus: number;
   ranks: number;
   threads: number;
@@ -41,7 +41,7 @@ export function sourceScfLayout(parameters: Record<string, unknown>): QeSourceLa
 
 /** A transparent starting heuristic, not a machine-specific performance model. */
 export function planQeAutoAllocation(input: {
-  nodes: number;
+  nodes?: number | null;
   totalCpus: number;
   phonon: boolean;
   kPoints?: number | null;
@@ -51,8 +51,10 @@ export function planQeAutoAllocation(input: {
   irreps?: number | null;
   fftPlanes?: number | null;
   bands?: number | null;
+  pencilDecomposition?: boolean;
 }): QeAutoPlan {
-  const nodes = positiveInteger(input.nodes, "Nodes");
+  const requestedNodes = input.nodes == null ? null : positiveInteger(input.nodes, "Nodes");
+  const nodes = requestedNodes ?? 1;
   const totalCpus = positiveInteger(input.totalCpus, "Total allocated CPUs");
   const rankLimit = input.maxRanks == null ? totalCpus : Math.min(totalCpus, positiveInteger(input.maxRanks, "MPI rank limit"));
   if (nodes > rankLimit) throw new Error("Use at least one MPI rank per requested node; reduce Nodes or increase the MPI rank limit.");
@@ -66,12 +68,15 @@ export function planQeAutoAllocation(input: {
   const source = input.sourceLayout;
   const validSource = source && Number.isSafeInteger(source.ranks) && Number.isSafeInteger(source.pools)
     && source.ranks > 0 && source.pools > 0 && source.ranks % source.pools === 0;
-  const cpusPerNode = totalCpus / nodes;
+  // Without a node request, topology is unknown. Use a conservative group
+  // CPU target, without requesting or claiming a particular node count.
+  const cpusPerNode = requestedNodes == null ? 32 : totalCpus / nodes;
+  if (requestedNodes == null) notes.push("Slurm chooses nodes. Node topology is unknown; Auto uses a 32-CPU group target and leaves tasks per node unspecified. Specify Nodes to optimize placement.");
   const irreps = input.irreps == null ? null : positiveInteger(input.irreps, "Known phonon irreps");
   const fftPlanes = reliableCount(input.fftPlanes);
   const bands = reliableCount(input.bands);
   const imageCapacity = input.phonon ? (irreps ?? qPoints ?? 1) : 1;
-  const preferredThreads = nodes > 1 && totalCpus >= 128 ? 2 : 1;
+  const preferredThreads = (requestedNodes == null || nodes > 1) && totalCpus >= 128 ? 2 : 1;
   const imbalance = (points: number | null, count: number) => points == null ? 0 : 1 - points / (Math.ceil(points / count) * count);
   const candidates: { ranks: number; threads: number; images: number; pools: number;
     ranksPerImage: number; ranksPerPool: number; compatible: boolean; score: number }[] = [];
@@ -84,17 +89,17 @@ export function planQeAutoAllocation(input: {
         const ranksPerPool = ranksPerImage / pools;
         // With pencil decomposition disabled, do not exceed the known FFT
         // plane capacity. No task-group assumption is made for ph.x.
-        if (fftPlanes != null && ranksPerPool > fftPlanes) continue;
+        if (!input.pencilDecomposition && fftPlanes != null && ranksPerPool > fftPlanes) continue;
         const poolCpus = ranksPerPool * threads;
         const compatible = Boolean(input.phonon && validSource && ranksPerImage === source!.ranks && pools === source!.pools);
         const local = poolCpus <= cpusPerNode;
-        const aligned = ranks % nodes === 0 && (local ? (ranks / nodes) % ranksPerPool === 0 : ranksPerPool % (ranks / nodes) === 0);
+        const aligned = requestedNodes == null || ranks % nodes === 0 && (local ? (ranks / nodes) % ranksPerPool === 0 : ranksPerPool % (ranks / nodes) === 0);
         // Benchmarks favor exploiting independent work while keeping FFT
         // communication local; none establishes a universal ranks/pool value.
         const score = Math.max(0, Math.log2(poolCpus / cpusPerNode)) * 2
           + Math.max(0, Math.log2(cpusPerNode / (2 * poolCpus))) * 0.7
           + (aligned ? 0 : 0.5)
-          + (totalCpus % nodes === 0 && ranks % nodes !== 0 ? 2 : 0)
+          + (requestedNodes != null && totalCpus % nodes === 0 && ranks % nodes !== 0 ? 2 : 0)
           + imbalance(kPoints, pools) * 0.8 + (input.phonon ? imbalance(irreps ?? qPoints, images) * 0.8 : 0)
           + Math.log2(pools) * 0.08 // modest replication cost; not a memory estimate
           + Math.log2(images) * 0.03 // image initialization and collection overhead
@@ -123,16 +128,18 @@ export function planQeAutoAllocation(input: {
   if (![1, 2, 4].includes(threads)) notes.push("An unusual thread count is required to fit the CPU budget, restart layout or rank limit; test its efficiency before a large run.");
   if (input.maxRanks != null && rankLimit < totalCpus) notes.push(`Respecting the workflow limit of ${rankLimit} MPI ranks.`);
   if (fftPlanes != null) notes.push(`Using ${fftPlanes} FFT planes from the source SCF as guidance; the phonon FFT grid can differ.`);
-  else notes.push("FFT dimensions unavailable; node locality is the fallback. Memory requirements are not predicted.");
+  else notes.push(requestedNodes == null
+    ? "FFT dimensions unavailable; using the fallback CPU group target. Memory requirements are not predicted."
+    : "FFT dimensions unavailable; node locality is the fallback. Memory requirements are not predicted.");
   if (input.phonon && kPoints != null) notes.push("Source SCF k-point count guides pools; electronic symmetry and workload change with q.");
   if (ranksPerPool * threads > cpusPerNode || threads > 4) notes.push("This allocation may exceed useful parallelism for the available points. Auto preserves the requested CPUs, but a smaller allocation may be more efficient.");
-  return { nodes, totalCpus, ranks, threads, tasksPerNode: ranks % nodes === 0 ? ranks / nodes : null,
+  return { nodes: requestedNodes, totalCpus, ranks, threads, tasksPerNode: requestedNodes != null && ranks % nodes === 0 ? ranks / nodes : null,
     images, pools, ranksPerImage, ranksPerPool, notes };
 }
 
 export function applyQeAutoPlan(resources: SlurmResourceRequest, plan: QeAutoPlan): SlurmResourceRequest {
   return { ...resources, qe_parallel_mode: "auto", qe_total_cpus: plan.totalCpus,
-    pencil_decomposition: false,
+    pencil_decomposition: resources.pencil_decomposition ?? false,
     nodes: plan.nodes, ntasks: plan.ranks, cpus_per_task: plan.threads, ntasks_per_node: plan.tasksPerNode,
     qe_qpoint_images: plan.images, qe_kpoint_pools: plan.pools };
 }

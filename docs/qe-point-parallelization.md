@@ -8,14 +8,20 @@ In Manual mode both counts default to 1; explicitly configured point layouts
 retain their manual settings.
 
 CPU cluster runs offer **Auto** within the existing HPC allocation controls.
-Enter **Nodes** and **Total allocated CPUs** (the total across all nodes).
+Enter **Total allocated CPUs** (required, the total across all nodes).
+**Nodes** is optional: blank shows a gray Auto placeholder and omits `--nodes`
+from both the script and submission preview, letting Slurm choose the node count.
+Numeric allocation fields accept intermediate typing and commit validated values
+on blur or Enter, like the other wizard numeric fields. Required counts cannot
+remain blank; optional counts can.
 Auto fills MPI tasks, CPUs per task, placement, phonon images and electronic
 pools, and shows the resulting breakdown beneath the allocation fields.
 Partition, walltime, memory and advanced cluster settings remain in the same
 settings block. Switch to Manual to edit the decomposition directly; GPU
 allocations retain manual controls.
-Auto disables pencil decomposition and locks its checkbox; Manual permits
-enabling it explicitly for compatible cluster installations.
+Pencil decomposition is off by default. Its checkbox remains available in
+both Auto and Manual, and an explicit selection is preserved in the preview
+and submitted batch script for compatible cluster installations.
 
 Auto compares one, two and four OpenMP threads per rank, with a modest
 preference for two on large multi-node allocations. Other integer thread
@@ -24,6 +30,9 @@ source restart compatibility require them. It scores image/pool layouts by
 node locality, alignment with node boundaries, point balance, and modest
 replication/initialization overhead penalties. It favors pools occupying
 roughly half to one node, rather than imposing a fixed ranks-per-pool target.
+When Nodes is unspecified, node topology is unknown: Auto uses a fallback
+32-CPU group target, leaves tasks per node unspecified, and explains this
+assumption in Auto details. It never turns this fallback into a node request.
 These weights are transparent heuristics informed by published benchmarks;
 they are not a fitted performance model or timings measured on the user's cluster.
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { applyQeAutoPlan, planQeAutoAllocation } from "../lib/qeAutoParallelization";
 import { normalizeCliDashText, previewSlurmScript } from "../lib/hpcConfig";
 import { HpcResourceMode, SlurmResourceRequest } from "../lib/types";
@@ -35,12 +35,31 @@ interface ScriptPreviewState {
   errors: string[];
 }
 
-function normalizePositiveInt(input: string, fallback: number): number {
-  const parsed = Number.parseInt(input, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  return parsed;
+/** Keep intermediate keystrokes separate from the validated resource request. */
+function HpcIntegerInput({ value, onCommit, min = 1, max = 4294967295, optional = false,
+  placeholder, disabled = false }: {
+  value: number | null; onCommit: (value: number | null) => void; min?: number; max?: number;
+  optional?: boolean; placeholder?: string; disabled?: boolean;
+}) {
+  const [draft, setDraft] = useState(value == null ? "" : String(value));
+  const editing = useRef(false);
+  useEffect(() => {
+    if (!editing.current) setDraft(value == null ? "" : String(value));
+  }, [value]);
+  const commit = () => {
+    const parsed = Number(draft);
+    const next = optional && draft.trim() === "" ? null
+      : Math.min(max, Math.max(min, draft.trim() !== "" && Number.isFinite(parsed)
+        ? Math.trunc(parsed) : value ?? min));
+    setDraft(next == null ? "" : String(next));
+    onCommit(next);
+  };
+  return <input type="number" min={min} max={max} step={1} required={!optional}
+    value={draft} placeholder={placeholder} disabled={disabled}
+    onFocus={() => { editing.current = true; }}
+    onChange={(event) => setDraft(event.target.value)}
+    onBlur={() => { editing.current = false; commit(); }}
+    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }} />;
 }
 
 function cloneResourceRequest(source: SlurmResourceRequest, resourceType: "cpu" | "gpu"): SlurmResourceRequest {
@@ -108,7 +127,7 @@ export function HpcRunSettings({
     if (!autoActive) return { plan: null, error: null };
     try {
       return { plan: planQeAutoAllocation({
-        nodes: resources.nodes ?? 1,
+        nodes: resources.nodes,
         totalCpus,
         phonon: taskKind === "phonon",
         kPoints: pointEstimates?.k.conservative ? null : pointEstimates?.k.result?.irreduciblePoints,
@@ -118,6 +137,7 @@ export function HpcRunSettings({
         irreps: resources.qe_phonon_irreps,
         fftPlanes: pointEstimates?.fftPlanes,
         bands: pointEstimates?.bands,
+        pencilDecomposition: resources.pencil_decomposition === true,
       }), error: null };
     } catch (error) {
       return { plan: null, error: String(error) };
@@ -126,7 +146,7 @@ export function HpcRunSettings({
     pointEstimates?.k.conservative, pointEstimates?.k.result?.irreduciblePoints,
     pointEstimates?.q?.conservative, pointEstimates?.q?.result?.irreduciblePoints,
     pointEstimates?.sourceLayout?.ranks, pointEstimates?.sourceLayout?.pools,
-    resources.qe_phonon_irreps, pointEstimates?.fftPlanes, pointEstimates?.bands, pointEstimates?.qPointsToCompute]);
+    resources.qe_phonon_irreps, pointEstimates?.fftPlanes, pointEstimates?.bands, pointEstimates?.qPointsToCompute, resources.pencil_decomposition]);
 
   useEffect(() => {
     if (disabled || !autoState.plan) return;
@@ -141,7 +161,7 @@ export function HpcRunSettings({
 
   const pencilDecompositionAvailable = /(^|\s)-pd\s+\.true\.(?=\s|$)/im.test(commandLinesKey);
   const previewCommandLines = useMemo(
-    () => autoActive || resources.pencil_decomposition === false
+    () => resources.pencil_decomposition !== true
       ? commandLines.map((line) => line.replace(/\s+-pd\s+\.true\./gi, ""))
       : commandLines,
     [commandLines, commandLinesKey, resources.pencil_decomposition, autoActive],
@@ -232,11 +252,6 @@ export function HpcRunSettings({
       ...patch,
     });
   };
-  const normalizeTaskCount = (input: string): number => {
-    const normalized = normalizePositiveInt(input, 1);
-    return maxTaskCount == null ? normalized : Math.min(normalized, maxTaskCount);
-  };
-
   const additionalSbatchText = (resources.additional_sbatch || []).join("\n");
 
   return (
@@ -294,7 +309,7 @@ export function HpcRunSettings({
               next.qe_kpoint_pools = resources.qe_kpoint_pools;
               next.qe_qpoint_images = resources.qe_qpoint_images;
               next.qe_phonon_irreps = resources.qe_phonon_irreps;
-              next.pencil_decomposition = resources.pencil_decomposition ?? true;
+              next.pencil_decomposition = resources.pencil_decomposition ?? false;
               next.ntasks_per_node = resources.ntasks_per_node ?? null;
               onResourcesChange(next);
             }}
@@ -335,77 +350,41 @@ export function HpcRunSettings({
         </label>}
 
         <label>
-          Nodes
-          <input
-            type="number"
-            min={1}
-            value={resources.nodes ?? 1}
-            max={autoActive ? (maxTaskCount ?? 4294967295) : undefined}
-            onChange={(event) => {
-              const nodes = normalizePositiveInt(event.target.value, 1);
-              if (autoActive) {
-                const allocationNodes = Math.min(nodes, maxTaskCount ?? 4294967295);
-                update({ nodes: allocationNodes, qe_total_cpus: Math.max(totalCpus, allocationNodes) });
-              } else {
-                update({ nodes });
-              }
-            }}
-            disabled={disabled || nodesDisabled}
-          />
+          <span className="hpc-checkbox-text">Nodes <InfoTooltip text="Optional Slurm node count. Leave blank to let Slurm choose enough nodes for the requested CPUs. Auto cannot optimize for node boundaries without an explicit count." /></span>
+          <HpcIntegerInput value={resources.nodes ?? null} optional placeholder="Auto"
+            max={autoActive ? (maxTaskCount ?? 4294967295) : 4294967295}
+            onCommit={(nodes) => update({ nodes })} disabled={disabled || nodesDisabled} />
         </label>
 
         {autoActive ? <label>
           <span className="hpc-checkbox-text">Total allocated CPUs <InfoTooltip text="Total CPU cores across all requested nodes, not CPUs per node. Auto balances MPI ranks with OpenMP threads based on allocation size and available point parallelism. Slurm receives the displayed ranks × CPUs per rank, preserving your full CPU allocation." /></span>
-          <input type="number" min={resources.nodes ?? 1} max={4294967295} step={1} value={totalCpus}
-            disabled={disabled} onChange={(event) => update({ qe_total_cpus: Math.max(resources.nodes ?? 1, Math.min(4294967295, normalizePositiveInt(event.target.value, 1))) })} />
+          <HpcIntegerInput value={totalCpus} min={resources.nodes ?? 1}
+            disabled={disabled} onCommit={(value) => update({ qe_total_cpus: value! })} />
         </label> : <>
         <label>
           Tasks
-          <input
-            type="number"
-            min={1}
-            max={maxTaskCount ?? undefined}
-            value={resources.ntasks ?? 1}
-            onChange={(event) => update({ ntasks: normalizeTaskCount(event.target.value) })}
-            disabled={disabled || tasksDisabled}
-          />
+          <HpcIntegerInput value={resources.ntasks ?? 1} max={maxTaskCount ?? 4294967295}
+            onCommit={(value) => update({ ntasks: value! })} disabled={disabled || tasksDisabled} />
         </label>
 
         <label>
           CPUs / Task
-          <input
-            type="number"
-            min={1}
-            value={resources.cpus_per_task ?? 1}
-            onChange={(event) =>
-              update({ cpus_per_task: normalizePositiveInt(event.target.value, 1) })
-            }
-            disabled={disabled}
-          />
+          <HpcIntegerInput value={resources.cpus_per_task ?? 1}
+            onCommit={(value) => update({ cpus_per_task: value! })} disabled={disabled} />
         </label>
         </>}
 
         <label>
           Memory per node (GiB)
-          <input
-            type="number"
-            min={1}
-            value={resources.memory_gb ?? 16}
-            onChange={(event) => update({ memory_gb: normalizePositiveInt(event.target.value, 16) })}
-            disabled={disabled}
-          />
+          <HpcIntegerInput value={resources.memory_gb ?? 16}
+            onCommit={(value) => update({ memory_gb: value! })} disabled={disabled} />
         </label>
 
         {resources.resource_type === "gpu" && (
           <label>
             GPUs
-            <input
-              type="number"
-              min={1}
-              value={resources.gpus ?? 1}
-              onChange={(event) => update({ gpus: normalizePositiveInt(event.target.value, 1) })}
-              disabled={disabled}
-            />
+            <HpcIntegerInput value={resources.gpus ?? 1}
+            onCommit={(value) => update({ gpus: value! })} disabled={disabled} />
           </label>
         )}
       </div>
@@ -435,27 +414,16 @@ export function HpcRunSettings({
         <div className="hpc-advanced-grid" id="hpc-advanced-slurm-fields">
           {taskKind === "phonon" && autoAvailable && <label>
             <span className="hpc-checkbox-text">Known phonon irreps <InfoTooltip text="Optional total number of irreps to compute across the selected q-points, from QE initialization for this exact task. Do not enter the number of displacement modes or the irrep count at just one q-point. Auto may use more images than q-points, but never more than this count. Leave blank when unknown; update it when changing the q-grid or representation range." /></span>
-            <input type="number" min={1} max={4294967295} step={1} value={resources.qe_phonon_irreps ?? ""}
-              placeholder="Optional" disabled={disabled}
-              onChange={(event) => update({ qe_phonon_irreps: event.target.value === "" ? null : Math.min(4294967295, normalizePositiveInt(event.target.value, 1)) })} />
+            <HpcIntegerInput value={resources.qe_phonon_irreps ?? null} optional placeholder="Optional"
+              disabled={disabled} onCommit={(value) => update({ qe_phonon_irreps: value })} />
           </label>}
           <label>
             <span className="hpc-checkbox-text">
               Tasks / Node
               <InfoTooltip text="Slurm `--ntasks-per-node`. Limits how many MPI tasks are placed on each node; leave blank to let Slurm distribute the total task count." />
             </span>
-            <input
-              type="number"
-              min={1}
-              value={resources.ntasks_per_node ?? ""}
-              onChange={(event) => update({
-                ntasks_per_node: event.target.value === ""
-                  ? null
-                  : normalizePositiveInt(event.target.value, 1),
-              })}
-              placeholder="Optional"
-              disabled={disabled || autoActive}
-            />
+            <HpcIntegerInput value={resources.ntasks_per_node ?? null} optional placeholder="Auto"
+              disabled={disabled || autoActive} onCommit={(value) => update({ ntasks_per_node: value })} />
           </label>
           <label className="hpc-checkbox-label">
             <input
@@ -473,13 +441,13 @@ export function HpcRunSettings({
             <label className="hpc-checkbox-label">
               <input
                 type="checkbox"
-                checked={!autoActive && (resources.pencil_decomposition ?? true)}
+                checked={resources.pencil_decomposition ?? false}
                 onChange={(event) => update({ pencil_decomposition: event.target.checked })}
-                disabled={disabled || autoActive}
+                disabled={disabled}
               />
               <span className="hpc-checkbox-text">
                 Pencil decomposition
-                <InfoTooltip text="Adds Quantum ESPRESSO's `-pd .true.` option to supported MPI commands. Disabled in Auto mode for reliability across multiple nodes. Switch to Manual to enable it if your QE build and cluster MPI setup support it reliably." />
+                <InfoTooltip text="Adds Quantum ESPRESSO's `-pd .true.` option to supported MPI commands. Off by default for reliability across multiple nodes. You can enable it in Auto or Manual when your QE build and cluster MPI setup support it reliably." />
               </span>
             </label>
           )}
