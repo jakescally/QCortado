@@ -100,6 +100,8 @@ pub struct SlurmResourceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pencil_decomposition: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub qe_subspace_diagonalization: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub qe_kpoint_pools: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qe_qpoint_images: Option<u32>,
@@ -525,6 +527,7 @@ pub fn default_cpu_resources() -> SlurmResourceRequest {
         cpus_per_task: Some(1),
         contiguous: Some(false),
         pencil_decomposition: Some(false),
+        qe_subspace_diagonalization: None,
         qe_kpoint_pools: None,
         qe_qpoint_images: None,
         qe_parallel_mode: None,
@@ -551,6 +554,7 @@ pub fn default_gpu_resources() -> SlurmResourceRequest {
         cpus_per_task: Some(8),
         contiguous: Some(false),
         pencil_decomposition: Some(false),
+        qe_subspace_diagonalization: None,
         qe_kpoint_pools: None,
         qe_qpoint_images: None,
         qe_parallel_mode: None,
@@ -577,6 +581,7 @@ pub fn default_utility_resources() -> SlurmResourceRequest {
         cpus_per_task: Some(1),
         contiguous: Some(false),
         pencil_decomposition: Some(false),
+        qe_subspace_diagonalization: None,
         qe_kpoint_pools: None,
         qe_qpoint_images: None,
         qe_parallel_mode: None,

@@ -3,6 +3,32 @@
 use super::profile::{ResourceValidation, SlurmResourceRequest};
 use regex::Regex;
 
+/// Configure pw.x subspace linear algebra separately from the electronic solver.
+/// Shared by batch preview and submission, including relax and vc-relax inputs.
+pub fn subspace_commands(
+    lines: &[String],
+    resources: &SlurmResourceRequest,
+    validation: &mut ResourceValidation,
+) -> Vec<String> {
+    match resources.qe_subspace_diagonalization.as_deref() {
+        None | Some("auto") => return lines.to_vec(),
+        Some("serial") => {},
+        Some(_) => {
+            validation.errors.push("Subspace diagonalization must be QE default or Serial.".into());
+            return lines.to_vec();
+        }
+    }
+    let executable = Regex::new(
+        r#"(?P<exe>(?:"[^"\n]*/pw\.x"|'[^'\n]*/pw\.x'|(?:[^\s"']*/)?pw\.x))(?P<space>\s)"#,
+    ).unwrap();
+    let existing = Regex::new(r"\s+-(?:ndiag|nd|northo)(?:\s+|=)\d+\b").unwrap();
+    lines.iter().map(|line| {
+        if !executable.is_match(line) { return line.clone(); }
+        let clean = existing.replace_all(line, "");
+        executable.replace_all(&clean, "${exe} -ndiag 1${space}").into_owned()
+    }).collect()
+}
+
 pub fn validate(ranks: u32, pools: u32, images: u32) -> Result<(), String> {
     let groups = pools
         .checked_mul(images)
@@ -144,6 +170,30 @@ pub fn commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subspace_default_is_unchanged_and_serial_replaces_aliases_idempotently() {
+        let lines = vec![
+            "srun pw.x -nd 4 -in pw.in".into(),
+            "srun '/opt/qe/pw.x' -northo=9 -in relax.in".into(),
+            "srun ph.x -in ph.in".into(),
+            "srun hp.x -ndiag 1 -in hp.in".into(),
+        ];
+        let mut validation = ResourceValidation::default();
+        let mut resources = SlurmResourceRequest::default();
+        assert_eq!(subspace_commands(&lines, &resources, &mut validation), lines);
+        resources.qe_subspace_diagonalization = Some("auto".into());
+        assert_eq!(subspace_commands(&lines, &resources, &mut validation), lines);
+        resources.qe_subspace_diagonalization = Some("serial".into());
+        let serial = subspace_commands(&lines, &resources, &mut validation);
+        assert_eq!(serial[0], "srun pw.x -ndiag 1 -in pw.in");
+        assert_eq!(serial[1], "srun '/opt/qe/pw.x' -ndiag 1 -in relax.in");
+        assert_eq!(serial[2..], lines[2..]);
+        assert_eq!(subspace_commands(&serial, &resources, &mut validation), serial);
+        resources.qe_subspace_diagonalization = Some("invalid".into());
+        subspace_commands(&lines, &resources, &mut validation);
+        assert!(!validation.errors.is_empty());
+    }
     #[test]
     fn decomposition_rejects_invalid_and_overflowing_groups() {
         assert!(validate(64, 2, 8).is_ok());

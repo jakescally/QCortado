@@ -190,6 +190,7 @@ export interface SlurmResourceRequest {
   cpus_per_task?: number | null;
   contiguous?: boolean | null;
   pencil_decomposition?: boolean | null;
+  qe_subspace_diagonalization?: "auto" | "serial" | null;
   qe_kpoint_pools?: number | null;
   qe_qpoint_images?: number | null;
   qe_parallel_mode?: "auto" | "manual" | null;

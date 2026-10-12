@@ -23,6 +23,15 @@ Pencil decomposition is off by default. Its checkbox remains available in
 both Auto and Manual, and an explicit selection is preserved in the preview
 and submitted batch script for compatible cluster installations.
 
+For SCF, relax, vc-relax, bands and DOS `pw.x` runs, Advanced Slurm Fields
+includes **Subspace diagonalization**. **QE default** leaves the executable's
+linear-algebra decomposition unchanged. **Serial** adds `-ndiag 1`, replacing
+any existing numeric diagonalization-group flag. MPI tasks, pools and threads
+remain as configured. This differs from the electronic solver dropdown in the
+wizard's convergence controls. It is a useful diagnostic for distributed
+Cholesky failures, not a guaranteed cure, and can slow runs with many bands.
+The preview and submitted script use the same setting in Auto and Manual.
+
 Auto compares one, two and four OpenMP threads per rank, with a modest
 preference for two on large multi-node allocations. Other integer thread
 counts are fallback choices when allocation divisibility, workflow limits or

@@ -309,6 +309,7 @@ export function HpcRunSettings({
               next.qe_kpoint_pools = resources.qe_kpoint_pools;
               next.qe_qpoint_images = resources.qe_qpoint_images;
               next.qe_phonon_irreps = resources.qe_phonon_irreps;
+              next.qe_subspace_diagonalization = resources.qe_subspace_diagonalization;
               next.pencil_decomposition = resources.pencil_decomposition ?? false;
               next.ntasks_per_node = resources.ntasks_per_node ?? null;
               onResourcesChange(next);
@@ -437,6 +438,14 @@ export function HpcRunSettings({
               <InfoTooltip text="Adds Slurm `--contiguous` to request a contiguous set of compute nodes." />
             </span>
           </label>
+          {/(?:^|[\s/])pw\.x(?:["']?\s)/m.test(commandLinesKey) && <label>
+            <span className="hpc-checkbox-text">Subspace diagonalization <InfoTooltip text="Separate from the electronic solver (Davidson, Conjugate Gradient, etc.). QE default lets QE select its linear-algebra decomposition. Serial adds -ndiag 1 to pw.x, retaining MPI ranks, electronic pools and OpenMP elsewhere. This can help diagnose Cholesky failures in distributed diagonalization, but may be slower for many bands and does not fix invalid input." /></span>
+            <select value={resources.qe_subspace_diagonalization ?? "auto"} disabled={disabled}
+              onChange={(event) => update({ qe_subspace_diagonalization: event.target.value as "auto" | "serial" })}>
+              <option value="auto">QE default</option>
+              <option value="serial">Serial</option>
+            </select>
+          </label>}
           {pencilDecompositionAvailable && (
             <label className="hpc-checkbox-label">
               <input

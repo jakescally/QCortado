@@ -46,6 +46,7 @@ pub fn merge_resources(
         base.qe_parallel_mode = request.qe_parallel_mode;
         base.qe_total_cpus = request.qe_total_cpus;
         base.qe_phonon_irreps = request.qe_phonon_irreps;
+        base.qe_subspace_diagonalization = request.qe_subspace_diagonalization;
         base.resource_type = request.resource_type;
         if request.partition.is_some() {
             base.partition = request.partition;
@@ -123,7 +124,8 @@ pub fn build_slurm_script(
 ) -> SlurmScript {
     let resources = merge_resources(profile, override_resources);
     let mut validation = validate_andromeda_resources(&resources);
-    let point_commands = super::qe_parallel::commands(job_name, script_body_commands, &resources, &mut validation);
+    let diagonalization_commands = super::qe_parallel::subspace_commands(script_body_commands, &resources, &mut validation);
+    let point_commands = super::qe_parallel::commands(job_name, &diagonalization_commands, &resources, &mut validation);
     if !profile.supports_resource_type(resources.resource_type) {
         let requested = match resources.resource_type {
             ResourceType::Cpu => "CPU",
@@ -404,6 +406,30 @@ mod tests {
             assert!(!script.sbatch_preview.contains("--nodes="));
             assert!(script.script.contains("#SBATCH --ntasks=50"));
             assert!(script.script.contains("#SBATCH --cpus-per-task=2"));
+        }
+    }
+
+    #[test]
+    fn serial_subspace_setting_reaches_batch_commands_with_pools_in_both_modes() {
+        for mode in ["auto", "manual"] {
+            for launcher in ["srun", "mpirun -np \"${SLURM_NTASKS:-1}\""] {
+                let requested = SlurmResourceRequest {
+                    ntasks: Some(8),
+                    qe_parallel_mode: Some(mode.into()),
+                    qe_total_cpus: Some(8),
+                    qe_kpoint_pools: Some(2),
+                    qe_subspace_diagonalization: Some("serial".into()),
+                    ..super::super::profile::default_cpu_resources()
+                };
+                let commands = vec![format!("{launcher} \"/opt/QE bin/pw.x\" -ndiag 4 -in pw.in > pw.out"), "srun dos.x -in dos.in".into()];
+                let script = build_slurm_script(&test_profile(), "qcortado-scf", &commands, Some(requested));
+                assert!(script.validation.errors.is_empty(), "{:?}", script.validation.errors);
+                assert_eq!(script.effective_resources.qe_subspace_diagonalization.as_deref(), Some("serial"));
+                assert!(script.script.contains("\"/opt/QE bin/pw.x\" -nk 2 -ndiag 1 -in pw.in > pw.out"));
+                assert!(!script.script.contains("-ndiag 4"));
+                assert_eq!(script.script.matches("-ndiag 1").count(), 1);
+                assert!(script.script.contains("srun dos.x -in dos.in"));
+            }
         }
     }
 }
